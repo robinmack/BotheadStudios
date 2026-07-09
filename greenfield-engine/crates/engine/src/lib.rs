@@ -190,7 +190,7 @@ mod app {
             let world = world::generate(&mats);
             let field = gravity::MassField::build(&world, &mats, GRAVITY_BLOCK);
 
-            let world_mesh = mesher::build(&world, &mats);
+            let world_mesh = mesher::build_surface_nets(&world, &mats);
             let iron_idx = materials::index_of(&mats, "iron");
             let sphere_mesh = mesher::build_uv_sphere(
                 SPHERE_RADIUS,
@@ -479,7 +479,7 @@ mod app {
         }
 
         fn remesh_world(&mut self) {
-            let mesh = mesher::build(&self.world, &self.mats);
+            let mesh = mesher::build_surface_nets(&self.world, &self.mats);
             self.world_gpu = upload_mesh(&self.device, "world", &mesh);
         }
 
@@ -1031,5 +1031,35 @@ mod tests {
         let (_x, _y, _z, p) = hit.unwrap();
         let surf = w.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
         assert!((p.y - surf).abs() < 2.0, "hit near the surface height");
+    }
+
+    #[test]
+    fn surface_nets_is_smooth_and_valid() {
+        let mats = materials::load();
+        let w = world::generate(&mats);
+        let mesh = mesher::build_surface_nets(&w, &mats);
+        assert!(
+            !mesh.vertices.is_empty(),
+            "surface nets should produce geometry"
+        );
+        assert_eq!(mesh.indices.len() % 3, 0);
+        let vmax = mesh.vertices.len() as u32;
+        assert!(mesh.indices.iter().all(|&i| i < vmax), "indices in range");
+        assert!(
+            mesh.vertices
+                .iter()
+                .all(|v| v.pos.iter().chain(v.nrm.iter()).all(|c| c.is_finite())),
+            "no NaN/inf in positions or normals"
+        );
+        // Smooth: unlike the cube mesher, many normals are NOT axis-aligned.
+        let non_axis = mesh
+            .vertices
+            .iter()
+            .filter(|v| {
+                let n = v.nrm;
+                !(n[0].abs() > 0.99 || n[1].abs() > 0.99 || n[2].abs() > 0.99)
+            })
+            .count();
+        assert!(non_axis > 0, "surface nets should yield smooth normals");
     }
 }

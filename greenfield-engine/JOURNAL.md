@@ -5,6 +5,29 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-08 — Phase 6: smooth surface meshing (v0.7.0)
+
+**What.** Terrain and craters now render smooth instead of blocky cubes. `mesher::build_surface_nets`
+runs Surface Nets (`fast-surface-nets` crate) over the voxel occupancy field, recomputes smooth
+normals from the geometry (oriented outward), and tags each vertex with its nearest material so
+triplanar texturing + shine still apply. The renderer uses it for the initial terrain and every dig
+re-mesh; the blocky mesher is kept as a fallback.
+
+**Why.** The user flagged the Minecraft-blocky look. The key insight: the voxel grid is the *physics
+substrate*, not the *visual* — so we smooth the rendering (marching-cubes/surface-nets style) while
+mass, gravity, fracture, and collapse stay identical. Prototype clunkiness → smooth surface, no
+physics change.
+
+**Verified (TDD).** `cargo test`: 19/19 (new: surface-nets mesh is valid, finite, and genuinely
+smooth — has non-axis-aligned normals). fmt + clippy (`-D warnings`) clean; wasm + web build green.
+Live LAN wasm rebuilt. **Pending human check:** reload → rounded terrain and craters, still textured
+and lit; dig/blast/collapse all still work.
+
+**Next realism levers (noted):** smoothed/SDF field for rounder geometry, normal maps from the grain
+field, finer/smoother debris (or MPM).
+
+---
+
 ## 2026-07-08 — Phase 5: structural collapse (v0.6.0)
 
 **What.** Undercut or isolated matter no longer floats. `world.find_unsupported()` flood-fills from

@@ -9,6 +9,26 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-07-08
+
+**Phase 6 — smooth surface meshing.** Terrain and craters render as smooth surfaces instead of
+Minecraft-style cubes. The voxel grid stays the physics substrate; only the *visual* changes.
+
+### Added
+- `mesher::build_surface_nets` — Surface Nets (via the `fast-surface-nets` crate) over the voxel
+  occupancy field, with **smooth normals recomputed from the geometry** (the binary field's own
+  gradient is blocky) and oriented outward. Each vertex is tagged with the nearest solid voxel's
+  material, so triplanar texturing (Phase 4) and specular shine still apply. Native-tested (valid,
+  finite, and genuinely smooth — non-axis-aligned normals).
+- The renderer uses it for the initial terrain and every dig re-mesh. The blocky `build` mesher is
+  kept as a reference/fallback.
+
+### Notes
+- Sim/visual decoupling: physics (mass, gravity, fracture, collapse) is unchanged — the world is
+  still "voxels all the way down"; the renderer just presents it smoothly.
+- Binary field ⇒ mildly-rounded geometry + smooth shading. Further realism (a smoothed/SDF field for
+  rounder geometry, normal maps, finer debris) is future work.
+
 ## [0.6.0] — 2026-07-08
 
 **Phase 5 — structural collapse.** Matter that a dig undercuts or isolates no longer floats: anything
@@ -138,7 +158,8 @@ pipeline is live, driven by a thin Vite/TypeScript host.
 - Pinned to `wgpu` 24.0.5. WebGPU-only backend to keep the WASM small.
 - **Public API is unstable** while we're pre-1.0 (see versioning policy).
 
-[Unreleased]: https://example.invalid/compare/v0.6.0...HEAD
+[Unreleased]: https://example.invalid/compare/v0.7.0...HEAD
+[0.7.0]: https://example.invalid/releases/tag/v0.7.0
 [0.6.0]: https://example.invalid/releases/tag/v0.6.0
 [0.5.0]: https://example.invalid/releases/tag/v0.5.0
 [0.4.0]: https://example.invalid/releases/tag/v0.4.0
