@@ -157,4 +157,73 @@ mod tests {
             "angular momentum conserved to <1%"
         );
     }
+
+    #[test]
+    fn sun_earth_moon_system_is_bound() {
+        // The honest three-body system: a real Sun lights and holds the Earth, which in turn holds the
+        // Moon. Proves (a) a Sun at the true mass/distance, and (b) the Earth given its *appropriate*
+        // heliocentric velocity, produce a Moon that stays bound to the Earth while the Earth orbits
+        // the Sun — the beautiful, correct nesting, not a hand-placed tableau.
+        let m_sun = 1.989e30; // kg
+        let m_earth = 5.972e24;
+        let m_moon = 7.342e22;
+        let au = 1.496e11; // m (Earth–Sun distance)
+        let d = 3.844e8; // m (Earth–Moon distance)
+        let v_earth = 29_780.0; // m/s (Earth's mean heliocentric speed = sqrt(G·M_sun/AU))
+        let v_moon = 1022.0; // m/s (Moon's speed relative to Earth)
+
+        // Heliocentric frame, Sun at rest at the origin. Earth carries its orbital velocity; the Moon
+        // carries the Earth's velocity PLUS its own orbital velocity about the Earth (so it co-moves).
+        let mut bodies = vec![
+            Body {
+                pos: DVec3::ZERO,
+                vel: DVec3::ZERO,
+                mass: m_sun,
+            },
+            Body {
+                pos: DVec3::new(au, 0.0, 0.0),
+                vel: DVec3::new(0.0, v_earth, 0.0),
+                mass: m_earth,
+            },
+            Body {
+                pos: DVec3::new(au + d, 0.0, 0.0),
+                vel: DVec3::new(0.0, v_earth + v_moon, 0.0),
+                mass: m_moon,
+            },
+        ];
+
+        let e0 = total_energy(&bodies);
+        let dt = 600.0; // 10-minute steps resolve the ~27.3-day lunar orbit finely
+        let steps = (60.0 * 86_400.0 / dt) as usize; // 60 days
+
+        let mut acc = accelerations(&bodies);
+        let (mut min_es, mut max_es) = (f64::MAX, 0.0f64); // Earth–Sun distance range
+        let (mut min_me, mut max_me) = (f64::MAX, 0.0f64); // Moon–Earth distance range
+
+        for _ in 0..steps {
+            verlet_step(&mut bodies, &mut acc, dt);
+            let es = (bodies[1].pos - bodies[0].pos).length();
+            let me = (bodies[2].pos - bodies[1].pos).length();
+            min_es = min_es.min(es);
+            max_es = max_es.max(es);
+            min_me = min_me.min(me);
+            max_me = max_me.max(me);
+        }
+
+        // Earth stays on its ~1 AU heliocentric orbit (near-circular).
+        assert!(
+            min_es > 0.95 * au && max_es < 1.05 * au,
+            "Earth should hold a ~1 AU orbit (min {min_es:.3e}, max {max_es:.3e})"
+        );
+        // The Moon stays bound to the *moving* Earth — neither flung off nor dragged into the Sun.
+        assert!(
+            min_me > 0.80 * d && max_me < 1.20 * d,
+            "Moon should stay bound to Earth near {d:.3e} m (min {min_me:.3e}, max {max_me:.3e})"
+        );
+        // The whole system conserves energy (symplectic integrator).
+        assert!(
+            (total_energy(&bodies) - e0).abs() / e0.abs() < 0.01,
+            "3-body energy conserved to <1%"
+        );
+    }
 }

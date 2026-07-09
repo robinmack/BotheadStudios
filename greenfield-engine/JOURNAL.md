@@ -5,6 +5,103 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-09 — Honest appearance: no painted tints, brightness from light, a real Sun
+
+**What.** A user play-test of the space band exposed fudging: the Earth was a hardcoded ocean-blue
+tint and the Moon a hardcoded grey — cosmetic colours touching no material data, even though the
+terrain already colours voxels from real `materials.json` albedos. Replaced with honesty (`docs/17`):
+(1) body colour = **aggregate albedo of a real composition** via the new `materials::aggregate_albedo`
+operator (Earth = ocean water + continental granite + polar ice; Moon = basalt) — a computed summary,
+not a paint job; (2) the space shader now does **illumination × reflectance** (bright sun × real, often
+dark, albedo) + Reinhard tone-map, so a dark-but-lit body reads bright — the honest reason the Moon
+looks bright; (3) added a validated **Sun–Earth–Moon** physics test: a real Sun (1.989e30 kg, 1 AU) and
+the Earth given its **appropriate heliocentric velocity** (~29.78 km/s), with the Moon staying bound to
+the moving Earth.
+
+**Why.** The user pushed the honesty invariant (`docs/15`) all the way down: *don't fudge*. Key
+insights captured: brightness is illumination × reflectance (not a bright material); even albedo is a
+summary placeholder for real optics (ray tracing is the goal); zoom-out summaries are fine only if
+*computed from everything we know* by one operator for all objects/scales; the illuminant should be a
+real Sun; the viewport is a **physical frame of reference** with a **selectable focus** (planet →
+Moon → …); and the core research question is whether the system can tell **what matters at a given
+scale**. Working principle / candidate name: **"Integrity."**
+
+**Honesty flags (not hidden).** Earth composition excludes the atmosphere → deliberately no Rayleigh
+blue (the blue-marble blue is atmospheric, unmodelled); Moon lacks highland anorthosite in the DB → it
+renders darker than reality until added; the shader's sun *direction* is still a placeholder until the
+real Sun is wired into the live view.
+
+**Verified.** `cargo test` 29/29 (new `aggregate_albedo_summarizes_real_constituents`,
+`sun_earth_moon_system_is_bound`); clippy `-D warnings` clean; fmt clean; wasm compiles. The *visual*
+result of the new lighting is for on-device confirmation (headless WebGPU can't render it here).
+
+**Staged (larger, honest work):** real Sun as the live illuminant + heliocentric re-centering + focus
+switching; ray tracing; specular/BRDF from roughness/metallic; stellar & anorthosite materials;
+atmosphere for the earned blue; and the still-owed orbital-decay control.
+
+---
+
+## 2026-07-09 — Unified dynamics: everything not at rest reacts
+
+**What.** Fixed the "probe quits falling / doesn't really react to debris" behaviour by unifying the
+probe and the debris into **one awake-set dynamics loop** (`docs/16`). Previously `body::Sphere` (the
+probe) and `matter::MatterSim` (debris) were separate systems coupled only through the voxel grid —
+`matter.rs` never referenced the probe — so particles couldn't push it and settling debris deposited
+voxels *inside/under* it, making it appear to rest on nothing. Now, per substep, every awake body
+integrates under the same gravity field, resolves body↔world contacts, debris steps under that field
+and **won't deposit inside a body** (piles on it, conserving matter), and **body↔debris contacts
+exchange momentum both ways** (`MatterSim::couple_body`). Sleep/wake is structural: a body sleeps only
+while in contact and slow, and wakes the instant support is removed or something hits it.
+
+**Why this shape.** The user's principle: a physics loop looks at every object *not at rest* and makes
+it react as a natural property of the world and the object, never a per-object script — the honesty
+invariant (`docs/15`) applied to dynamics. Also captured the deeper motive: an honest, inferable
+physical world is a place to *learn to act* (VR, and plausibly embodied-AI training), a payoff that
+exists only to the degree the sim refuses to fake.
+
+**Also (honesty corrections from the user).** (1) No atmosphere is modelled — matter falls through
+*vacuum*, so the per-step `DRAG` constant is flagged as a numerical-stabilizer debt, not real air drag.
+(2) Compute-budget policy written down: favour larger/more massive objects (massive bodies are
+budget-exempt today; debris coarsening must *merge into mass-carrying clumps*, conserving mass on both
+spawn and settle — so it's deferred, not half-done, to avoid a mass leak). (3) Noted the
+server-authoritative-world / client-sees-a-slice threshold to watch (`docs/11`, `docs/13`).
+
+**Verified.** New native tests: `particle_transfers_momentum_to_a_body` (momentum conserved through the
+impact), `debris_does_not_settle_inside_a_body`, `body::wakes_and_falls_when_support_is_removed`.
+`cargo test` 27/27; clippy `-D warnings` clean; `cargo fmt` clean; `cargo check --target
+wasm32-unknown-unknown` green (the awake-set loop lives in the wasm-only host).
+
+---
+
+## 2026-07-09 — Representation invariant: the cube is a lattice, not a unit of matter
+
+**What.** Answered a foundational design question — "are we baking a core mistake into the engine by
+building on cubes, when the universe is made of spheres?" — and locked the answer in as canonical.
+Wrote `docs/15`: **a voxel is a sampling cell, never a unit of matter.** The cubic grid is the
+coordinate lattice we sample continuous fields on (density, material, momentum), like pixels sample an
+image; it is not an ontology of blocks. All physical state lives on matter with continuous coordinates
+(`Particle.pos`, `MassPoint`), and bulk voxels dissolve into particles the instant physics touches
+them (`docs/08` tiers). Added a **grid-isotropy regression suite** (`isotropy.rs`) to enforce it.
+
+**Why.** The honest answer is that cubes are *not* a foundational mistake — roundness is emergent, not
+primitive. Real solids sit on lattices (many cubic — rock salt, BCC iron), yet planets are round
+because isotropic self-gravity averages over the lattice; the engine already mirrors this (aggregate
+mass → spherical far field in `gravity.rs`/`orbit.rs`; surface nets smooth the render). The *real*
+risk is subtler: a regular lattice has preferred directions (axes, 45° diagonals) and a solver could
+silently bake that bias into the physics. Also captured the user's north star: the world should **feel
+right in VR because it is right, not via per-object fakery** — leave something unsupported and it
+falls as a natural property of the world and the object (`find_unsupported` → `collapse`), never a
+script.
+
+**Verified.** New suite asserts (a) gravity on a symmetric ball is radial + equal-magnitude across
+face axes and edge/corner diagonals (spread < 1%, tangential < 1%), and (b) `dig` carves a true
+Euclidean sphere (volume within a few %, equal axis reach, no lateral ejection bias). Proven
+**non-vacuous** via mutation testing: an injected axis bias in the gravity sum and a Chebyshev (box)
+dig criterion both drove the guards red (gravity spread 9.7%; box removed 8000 vs a sphere's 4189),
+then reverted. `cargo test` 24/24; clippy `-D warnings` clean; `cargo fmt` clean.
+
+---
+
 ## 2026-07-09 — Space band: watch the Moon orbit (v0.9.0)
 
 **What.** Step A of the scale-relative "orbit-to-ground" (`docs/13`): a spectator view of the real

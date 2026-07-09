@@ -28,7 +28,19 @@ fn vs_main(@location(0) pos : vec3<f32>, @location(1) nrm : vec3<f32>) -> VOut {
 fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     let n = normalize(i.normal);
     let l = normalize(u.light_dir.xyz);
-    let diffuse = max(dot(n, l), 0.0);
-    let ambient = 0.05; // faint fill so the dark side isn't pure black
-    return vec4<f32>(u.tint.rgb * (ambient + diffuse), 1.0);
+    let ndl = max(dot(n, l), 0.0);
+
+    // Apparent brightness = ILLUMINATION x REFLECTANCE, not a bright material. u.tint.rgb is the body's
+    // real diffuse reflectance (albedo) — often low, e.g. basalt ~0.05. It looks bright because a very
+    // bright sun reflects off it. SUN_GAIN folds the sun's radiance and a display exposure into one
+    // uniform scalar (a lighting/camera property, identical for every body: it moves brightness, never
+    // hue or relative reflectance). The result is a radiance that can exceed 1, so we Reinhard
+    // tone-map it back into [0,1] — a dark, strongly-lit body ends up correctly bright.
+    // NOTE (honesty): the sun DIRECTION here is still a placeholder; the real Sun body (proper
+    // mass/distance) becomes the illuminant when the heliocentric view lands (docs/17).
+    let SUN_GAIN = 22.0;
+    let AMBIENT = 0.02; // faint starlight fill so the night side isn't pure black
+    let radiance = u.tint.rgb * (AMBIENT + ndl * SUN_GAIN);
+    let mapped = radiance / (vec3<f32>(1.0) + radiance); // Reinhard tone-map
+    return vec4<f32>(mapped, 1.0);
 }

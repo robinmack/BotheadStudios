@@ -22,6 +22,8 @@
 
 mod body;
 mod gravity;
+#[cfg(test)]
+mod isotropy;
 mod materials;
 mod matter;
 mod mesher;
@@ -594,12 +596,26 @@ mod app {
             let sim_dt = self.time_scale / 60.0;
             let dt = sim_dt / PHYS_SUBSTEPS as f32;
             for _ in 0..PHYS_SUBSTEPS {
+                // Unified awake-set dynamics: every not-at-rest solid — the probe today, arbitrarily
+                // many bodies tomorrow — feels the *same* gravity field, then contacts are resolved
+                // against the world and against each other. One coherent loop, no per-object scripting
+                // (see docs/16; honesty invariant docs/15).
                 let accel = self
                     .field
                     .acceleration_at(self.sphere.pos, GRAVITY_SOFTENING);
                 self.sphere.integrate(accel, dt);
                 self.sphere.collide(&self.world, accel, dt);
-                self.matter.step(&mut self.world, &self.field, dt);
+                // Debris steps under the same field and must not deposit inside the body...
+                self.matter.step(
+                    &mut self.world,
+                    &self.field,
+                    std::slice::from_ref(&self.sphere),
+                    dt,
+                );
+                // ...and debris↔body contacts exchange momentum both ways (then re-settle the body
+                // against the world so an impact can't shove it into terrain).
+                self.matter.couple_body(&mut self.sphere, dt);
+                self.sphere.collide(&self.world, accel, dt);
             }
         }
 
@@ -955,6 +971,11 @@ mod app {
         acc: Vec<glam::DVec3>,
         time_scale: f64,
         camera: Camera,
+        // Body colours are the *aggregate albedo of a real composition* (materials.json), not painted
+        // tints — see `materials::aggregate_albedo` / docs/17. Reflectance only; the shader supplies
+        // brightness (illumination × reflectance), so a dark-but-lit body still reads bright.
+        earth_tint: [f32; 4],
+        moon_tint: [f32; 4],
     }
 
     #[wasm_bindgen]
@@ -1051,6 +1072,26 @@ mod app {
             ];
             let acc = crate::orbit::accelerations(&bodies);
 
+            // Body colours derived from a real composition, aggregated (docs/17) — NOT hand-picked.
+            // Earth: ~71% ocean water, ~24% continental (granitic) rock, ~5% polar ice. This EXCLUDES
+            // the atmosphere, so there is no Rayleigh-scattered "blue marble" blue — that blue is an
+            // atmospheric effect we don't yet model, and faking it here would be a fudge. Moon: maria
+            // basalt; the brighter highland anorthosite isn't in the DB yet, so the Moon renders darker
+            // than reality until it's added (a flagged data gap, not a paint job).
+            let mats = materials::load();
+            let earth_comp = [
+                (materials::index_of(&mats, "water"), 0.71),
+                (materials::index_of(&mats, "granite"), 0.24),
+                (materials::index_of(&mats, "ice"), 0.05),
+            ];
+            let moon_comp = [(materials::index_of(&mats, "basalt"), 1.0)];
+            let rgba = |c: &materials::Composition| {
+                let a = materials::aggregate_albedo(c, &mats);
+                [a[0], a[1], a[2], 1.0]
+            };
+            let earth_tint = rgba(&earth_comp);
+            let moon_tint = rgba(&moon_comp);
+
             let camera = Camera {
                 yaw: 0.6,
                 pitch: 0.5,
@@ -1073,6 +1114,8 @@ mod app {
                 acc,
                 time_scale: ORBIT_TIME_SCALE,
                 camera,
+                earth_tint,
+                moon_tint,
             })
         }
 
@@ -1123,7 +1166,7 @@ mod app {
                 view_proj,
                 Mat4::from_translation(earth_pos) * Mat4::from_scale(Vec3::splat(earth_r)),
                 light,
-                [0.20, 0.45, 0.85, 1.0], // ocean blue
+                self.earth_tint, // aggregate albedo of ocean+rock+ice (docs/17), not a painted tint
             );
             write_space_uniform(
                 &self.queue,
@@ -1131,7 +1174,7 @@ mod app {
                 view_proj,
                 Mat4::from_translation(moon_pos) * Mat4::from_scale(Vec3::splat(moon_r)),
                 light,
-                [0.58, 0.58, 0.60, 1.0], // lunar grey
+                self.moon_tint, // aggregate albedo of basalt (docs/17); dark, lit bright by the sun
             );
 
             let output = self

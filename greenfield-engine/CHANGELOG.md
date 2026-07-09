@@ -9,6 +9,52 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+### Changed
+- **Honest space-band appearance** (`docs/17`) — removed the hardcoded ocean-blue/grey body tints
+  (fudge) in favour of colour derived from a **real material composition**, aggregated by the new
+  `materials::aggregate_albedo` operator (Earth = ocean water + continental rock + polar ice; Moon =
+  basalt). The space shader now computes **illumination × reflectance** + Reinhard tone-map, so a
+  physically dark body (basalt albedo ~0.05) reads correctly bright under a bright sun, instead of
+  being faked bright. Deliberately no atmospheric "blue-marble" blue (unmodelled → not faked).
+
+### Added
+- `materials::aggregate_albedo` — the scale-relative summary operator (fraction-weighted mean albedo of
+  a composition); the same reduction for any object at any zoom. Tested.
+- `orbit::sun_earth_moon_system_is_bound` — a real Sun (proper mass/distance) plus the Earth's
+  **appropriate heliocentric velocity**, verifying the Moon stays bound to the Earth while the Earth
+  orbits the Sun (3-body, energy-conserving).
+- Operating principle / candidate engine name: **"Integrity"** — every rendered value traces to
+  something real or is openly flagged as a placeholder (`docs/17`).
+
+### Changed (prior)
+- **Unified awake-set dynamics** (`docs/16`) — the probe and the debris are now one system: every
+  not-at-rest body feels the same gravity field and resolves contacts against the world *and each
+  other*. Debris↔body impulses are momentum-conserving (a thrown clod shoves the probe; the probe
+  scatters debris), settling debris never deposits inside a body (piles on it, matter conserved), and
+  sleep/wake is structural (a body wakes the instant its support is removed or it's touched). Fixes the
+  probe appearing to "rest on nothing" and not truly reacting to debris. New native tests cover
+  momentum transfer, no-deposit-inside-body, and wake-on-unsupport.
+
+### Notes
+- **Physical-honesty debt flagged:** no atmosphere is modelled, so the per-step `DRAG` in `matter.rs`
+  is a numerical stabilizer, not real air drag (documented as debt in `docs/16`).
+- **Compute-budget policy** (`docs/16`): favour larger/more massive objects; massive bodies are
+  budget-exempt, and debris coarsening will merge into mass-carrying clumps (conserving mass on spawn
+  *and* settle) rather than dropping particles — deferred to the `docs/08` clumping work.
+
+### Added
+- **Representation invariant** (`docs/15`) — written down as canonical: *a voxel is a sampling cell,
+  never a unit of matter.* The cubic grid is a coordinate lattice we sample continuous fields on (like
+  pixels), not an ontology of blocks; all physical state lives on matter with continuous coordinates,
+  and the grid dissolves into particles the moment physics touches it. Roundness (planets, spheres) is
+  emergent from isotropic gravity, exactly as in nature — so building on a cubic lattice is not a
+  foundational mistake. Also captures the "feels right in VR" corollary: behaviour is a natural
+  property of the world and the object (leave it unsupported, it falls), never per-object fakery.
+- **Grid-isotropy regression suite** (`crates/engine/src/isotropy.rs`) enforcing that invariant:
+  gravity on a symmetric ball is radial and equal-magnitude in every direction (axes + diagonals), and
+  `dig` carves a true Euclidean sphere (right volume, equal reach per axis, no lateral ejection bias).
+  Each guard was verified non-vacuous by confirming it goes red under a deliberately anisotropic mutant.
+
 ## [0.9.0] — 2026-07-09
 
 **Space band — you can now *watch* the Moon orbit.** The first rung of the scale-relative ladder

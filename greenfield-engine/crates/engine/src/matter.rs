@@ -14,13 +14,19 @@
 //! cm/s. Ejection speeds are kept sub-escape so debris stays bound and re-settles; that is correct
 //! micro-gravity physics, viewed via the time-scale.
 
+use crate::body::Sphere;
 use crate::gravity::MassField;
 use crate::materials::Material;
 use crate::world::World;
 use glam::Vec3;
 
 const PARTICLE_HALF: f32 = 0.45; // rendered/collision half-extent (voxel-ish)
-const DRAG: f32 = 0.9995; // mild air drag per step
+
+// DEBT (physical honesty): `DRAG` is a mild per-step velocity damping. There is **no atmosphere**
+// modelled, so in vacuum this is not real drag — it's a numerical stabilizer standing in for one.
+// Keep it only until proper contact damping / an actual fluid (pressure + drag) exists; don't let it
+// masquerade as physics. See docs/16 (no-fakery) and docs/15 (honesty invariant).
+const DRAG: f32 = 0.9995;
 const CONTACT_DAMP: f32 = 0.35; // energy kept after touching ground
 const SETTLE_SPEED: f32 = 0.02; // below this, a grounded particle deposits into the grid
 const SETTLE_FRAMES: u32 = 10; // ...or after this many consecutive grounded steps
@@ -154,7 +160,9 @@ impl MatterSim {
 
     /// Advance all particles by `dt`: gravity from the field, terrain collision, and — when a
     /// particle comes to rest — deposit it back into the voxel grid (piling; matter-conserving).
-    pub fn step(&mut self, world: &mut World, field: &MassField, dt: f32) {
+    /// `bodies` are dynamic solids (the probe) the settling matter must not deposit *inside* — debris
+    /// piles on a body, never through it.
+    pub fn step(&mut self, world: &mut World, field: &MassField, bodies: &[Sphere], dt: f32) {
         let center = world.center();
         let bound = world.w.max(world.h).max(world.d) as f32;
 
@@ -191,15 +199,30 @@ impl MatterSim {
                 p.vel *= CONTACT_DAMP;
                 p.resting_frames += 1;
                 if p.vel.length() < SETTLE_SPEED || p.resting_frames > SETTLE_FRAMES {
-                    // Deposit into the column's air-start voxel (stacks / refills the crater).
+                    // Deposit into the column's air-start voxel (stacks / refills the crater) — unless
+                    // a dynamic body occupies that cell, in which case the debris stays a particle and
+                    // rests on the body (coupling resolves the contact); we never inject matter inside
+                    // a solid object. (If the column is full it also stays, rather than being deleted —
+                    // matter is conserved.)
+                    let mut settled = false;
                     if let Some(ty) = world.surface_top_voxel(xi, zi) {
                         if (ty as usize) < world.h {
-                            world.set_voxel(xi, ty, zi, Some(p.material));
-                            self.dirty = true;
+                            let cell = Vec3::new(xi as f32 + 0.5, ty as f32 + 0.5, zi as f32 + 0.5)
+                                - center;
+                            let inside_body = bodies
+                                .iter()
+                                .any(|b| (cell - b.pos).length() < b.radius + PARTICLE_HALF);
+                            if !inside_body {
+                                world.set_voxel(xi, ty, zi, Some(p.material));
+                                self.dirty = true;
+                                settled = true;
+                            }
                         }
                     }
-                    self.particles.swap_remove(i);
-                    continue;
+                    if settled {
+                        self.particles.swap_remove(i);
+                        continue;
+                    }
                 }
             } else {
                 p.resting_frames = 0;
@@ -207,6 +230,46 @@ impl MatterSim {
 
             self.particles[i] = p;
             i += 1;
+        }
+    }
+
+    /// Body↔particle contacts — the other half of the unified awake-set dynamics. Any debris particle
+    /// overlapping `body` exchanges momentum with it (mass-weighted impulse, lightly inelastic) and
+    /// both wake. So a thrown clod actually shoves the probe, and the probe scatters debris it plows
+    /// into — the interaction is *real*, read from mass and velocity, not a per-object script (see
+    /// `docs/16`; honesty invariant in `docs/15`). O(particles) for the handful of bodies we have; a
+    /// spatial index takes over when bodies/particles grow (`docs/08`). Momentum is conserved: the
+    /// impulse on the body and the particle are equal and opposite.
+    pub fn couple_body(&mut self, body: &mut Sphere, _dt: f32) {
+        let sum_r = body.radius + PARTICLE_HALF;
+        let inv_b = 1.0 / body.mass;
+        for p in &mut self.particles {
+            let d = p.pos - body.pos;
+            let dist = d.length();
+            if dist >= sum_r {
+                continue;
+            }
+            let n = if dist > 1e-5 { d / dist } else { Vec3::Y }; // contact normal, body → particle
+            let inv_p = 1.0 / p.mass;
+            let inv_sum = inv_b + inv_p;
+
+            // Separate the overlap, split by inverse mass — the heavy body barely moves, the light
+            // particle does most of the moving.
+            let pen = sum_r - dist;
+            body.pos -= n * (pen * inv_b / inv_sum);
+            p.pos += n * (pen * inv_p / inv_sum);
+
+            // Exchange momentum only if they are approaching along the contact normal.
+            let rel = (p.vel - body.vel).dot(n);
+            if rel < 0.0 {
+                let e = body.restitution.min(0.3);
+                let j = -(1.0 + e) * rel / inv_sum;
+                body.vel -= n * (j * inv_b);
+                p.vel += n * (j * inv_p);
+            }
+
+            body.resting = false; // contact wakes the body
+            p.resting_frames = 0;
         }
     }
 }
@@ -265,7 +328,7 @@ mod tests {
         // Settle. The invariant (voxels + airborne particles == original) must hold every step.
         let mut settled = false;
         for _ in 0..40_000 {
-            sim.step(&mut w, &field, 5.0);
+            sim.step(&mut w, &field, &[], 5.0);
             assert_eq!(
                 w.solid_count() + sim.particle_count(),
                 before,
@@ -315,12 +378,90 @@ mod tests {
 
         // It falls and re-settles into the grid.
         for _ in 0..40_000 {
-            sim.step(&mut w, &field, 5.0);
+            sim.step(&mut w, &field, &[], 5.0);
             if sim.particle_count() == 0 {
                 break;
             }
         }
         assert_eq!(sim.particle_count(), 0, "collapsed matter settles");
         assert_eq!(w.solid_count(), before + 1, "matter conserved");
+    }
+
+    #[test]
+    fn particle_transfers_momentum_to_a_body() {
+        // Unified dynamics: a flung clod of debris actually shoves the probe (they are the same kind
+        // of matter), and total linear momentum is conserved through the contact.
+        let mut sim = MatterSim::new(10);
+        let mut probe = Sphere::new(Vec3::ZERO, 100.0, 2.0);
+        // Light, fast particle already overlapping the probe, moving straight at it (−x).
+        sim.particles.push(Particle {
+            pos: Vec3::new(2.4, 0.0, 0.0),
+            vel: Vec3::new(-1.0, 0.0, 0.0),
+            material: 0,
+            mass: 5.0,
+            resting_frames: 0,
+        });
+        let momentum_before = probe.mass * probe.vel + sim.particles[0].mass * sim.particles[0].vel;
+
+        sim.couple_body(&mut probe, 0.016);
+
+        assert!(probe.vel.x < 0.0, "the impact shoves the probe along −x");
+        assert!(!probe.resting, "contact wakes the body");
+        let momentum_after = probe.mass * probe.vel + sim.particles[0].mass * sim.particles[0].vel;
+        assert!(
+            (momentum_after - momentum_before).length() < 1e-3,
+            "linear momentum conserved (before {momentum_before:?}, after {momentum_after:?})"
+        );
+    }
+
+    #[test]
+    fn debris_does_not_settle_inside_a_body() {
+        // A particle settling in a column occupied by the probe must NOT deposit a voxel inside the
+        // probe's volume — matter piles on the body, never through it. (This is the specific fakery
+        // that made the probe appear to "rest on nothing": debris re-materialising under it.)
+        let n = 16usize;
+        let mut voxels = vec![0u16; n * n * n];
+        for y in 0..2 {
+            for z in 0..n {
+                for x in 0..n {
+                    voxels[(y * n + z) * n + x] = 1; // two solid ground layers
+                }
+            }
+        }
+        let mut w = World {
+            w: n,
+            h: n,
+            d: n,
+            voxels,
+            max_top: 2,
+        };
+        let mats = materials::load();
+        let field = gravity::MassField::build(&w, &mats, 4);
+
+        // Probe hovering just above the ground, centred on the origin column.
+        let probe = Sphere::new(Vec3::new(0.0, 1.0, 0.0), 100.0, 1.5);
+        // Debris at rest in that same column, exactly where a deposit would land.
+        let mut sim = MatterSim::new(10);
+        sim.particles.push(Particle {
+            pos: Vec3::new(0.5, 1.0, 0.5),
+            vel: Vec3::ZERO,
+            material: 0,
+            mass: 1.0,
+            resting_frames: 0,
+        });
+        let solids_before = w.solid_count();
+
+        sim.step(&mut w, &field, std::slice::from_ref(&probe), 0.5);
+
+        assert_eq!(
+            w.solid_count(),
+            solids_before,
+            "no voxel deposited inside the body"
+        );
+        assert_eq!(
+            sim.particle_count(),
+            1,
+            "the blocked debris survives (rests on the body), it is not deleted"
+        );
     }
 }
