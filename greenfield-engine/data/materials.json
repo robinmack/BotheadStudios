@@ -1,0 +1,193 @@
+{
+  "schema_version": "0.1.0",
+  "generated": "2026-07-08",
+  "description": "Seed physical-properties database for greenfield-engine. Representative real-world values with cited sources. This flat file is the v0 seed; it will migrate to the Postgres source of truth (docs/05) and grow a material taxonomy + modules (docs/06, docs/07). See docs/04-materials-model.md for the schema.",
+  "units": {
+    "density": "kg/m^3",
+    "youngs_modulus": "Pa",
+    "bulk_modulus": "Pa",
+    "compressive_strength": "Pa",
+    "tensile_strength": "Pa",
+    "cohesion": "Pa",
+    "shear_strength": "Pa",
+    "friction_angle": "deg",
+    "dynamic_viscosity": "Pa*s",
+    "hardness_mohs": "Mohs 1-10",
+    "ductility": "0 brittle .. 1 ductile",
+    "restitution": "0 .. 1",
+    "friction_coefficient": "dimensionless (dry, self unless noted)",
+    "albedo": "linear RGB, each 0..1",
+    "roughness": "0 mirror .. 1 matte",
+    "metallic": "0 dielectric .. 1 metal",
+    "translucency": "0 opaque .. 1 transparent",
+    "color_variance": "0 uniform .. 1 high per-grain spread"
+  },
+  "provenance_note": "Each material lists key source URLs. Best-constrained fields: density, moduli, Poisson, strengths, hardness. Weakest/estimated (labeled in notes): restitution, friction-vs-other-materials, ductility scalar, and optical fields except albedo. Optical values are tunable art parameters derived from cited reflectance/albedo. Full per-value citations will live in the Postgres DB.",
+  "materials": [
+    {
+      "id": "granite", "display_name": "Granite", "category": "rock", "phase": "solid", "parent": null,
+      "mechanical": { "density": 2700, "youngs_modulus": 6.0e10, "poisson_ratio": 0.25, "compressive_strength": 2.0e8, "tensile_strength": 1.2e7, "cohesion": 2.8e7, "friction_angle": 45, "hardness_mohs": 6.5, "ductility": 0.05, "restitution": 0.80, "friction_coefficient": 0.6 },
+      "optical": { "albedo": [0.34, 0.32, 0.30], "roughness": 0.6, "metallic": 0.0, "translucency": 0.02, "color_variance": 0.40, "grain": "isotropic to weakly anisotropic; coarse phaneritic 1-10mm; high-contrast quartz/feldspar/mica speckle" },
+      "ranges": { "density": [2600, 2800], "youngs_modulus": [3.0e10, 7.5e10], "compressive_strength": [1.0e8, 2.5e8], "cohesion": [1.5e7, 5.0e7], "friction_angle": [40, 55] },
+      "notes": "Cohesion is intact rock; for fractured/granular state use cohesion~0 and friction_angle~40. Rejected bad MatWeb UCS (2200 MPa). Polished roughness ~0.05-0.15.",
+      "sources": ["https://www.makeitfrom.com/material-properties/Granite", "https://geothermal-energy-journal.springeropen.com/articles/10.1186/s40517-018-0096-1", "https://static.rocscience.cloud/assets/resources/learning/hoek/3.-Intact-rock-strength_2023-06-30-120556_xiuv.pdf", "https://landslides.usgs.gov/static/lfs/research/rockphysics/Byerlee-1967.pdf"]
+    },
+    {
+      "id": "basalt", "display_name": "Basalt", "category": "rock", "phase": "solid", "parent": null,
+      "mechanical": { "density": 2900, "youngs_modulus": 7.8e10, "poisson_ratio": 0.25, "compressive_strength": 2.66e8, "tensile_strength": 1.45e7, "cohesion": 6.6e7, "friction_angle": 45, "hardness_mohs": 6.0, "ductility": 0.02, "restitution": 0.4, "friction_coefficient": 0.7 },
+      "optical": { "albedo": [0.05, 0.05, 0.055], "roughness": 0.85, "metallic": 0.0, "translucency": 0.0, "color_variance": 0.2, "grain": "fine aphanitic, near-isotropic, sub-mm crystals, low-moderate contrast, optional vesicles" },
+      "ranges": { "density": [2700, 3300], "youngs_modulus": [5.9e10, 9.7e10], "compressive_strength": [1.68e8, 3.64e8], "cohesion": [2.5e7, 6.6e7] },
+      "notes": "Vesicular scoria much lighter (500-2200). Rock-mass strength far below intact. Polished slab roughness ~0.3.",
+      "sources": ["https://link.springer.com/article/10.1007/BF01024770", "https://hal.science/hal-03547484/file/Villeneuve-Heap_2021_Volcanica.pdf.pdf", "https://gpg.geosci.xyz/content/physical_properties/tables/density_igneous_rocks.html", "https://www.dedalostone.com/en/basalt/"]
+    },
+    {
+      "id": "sandstone", "display_name": "Sandstone", "category": "rock", "phase": "solid", "parent": null,
+      "mechanical": { "density": 2300, "youngs_modulus": 2.0e10, "poisson_ratio": 0.20, "compressive_strength": 7.0e7, "tensile_strength": 5.0e6, "cohesion": 2.0e7, "friction_angle": 40, "hardness_mohs": 6.0, "ductility": 0.05, "restitution": 0.3, "friction_coefficient": 0.6 },
+      "optical": { "albedo": [0.45, 0.36, 0.26], "roughness": 0.85, "metallic": 0.0, "translucency": 0.03, "color_variance": 0.4, "grain": "anisotropic along bedding; 0.06-2mm sand grains; medium-high contrast; cross-bedding streaks, iron-oxide banding" },
+      "ranges": { "density": [2000, 2650], "youngs_modulus": [1.0e10, 6.0e10], "compressive_strength": [2.0e7, 1.7e8], "friction_angle": [20, 55] },
+      "notes": "Weakly cemented bulk hardness ~3-4 (grains Mohs 6-7). Disaggregated sand friction_angle ~30-35. Wet lowers strength and roughness (~0.4).",
+      "sources": ["https://baltica.gamtc.lt/administravimas/uploads/202235-102_lakirouhani_et_al_6267bd2080852.pdf", "https://www.sciencedirect.com/science/article/abs/pii/S0926985122000283", "https://iopscience.iop.org/article/10.1088/1755-1315/1175/1/012008/pdf", "https://www.mindat.org/article.php/1925/"]
+    },
+    {
+      "id": "limestone", "display_name": "Limestone", "category": "rock", "phase": "solid", "parent": null,
+      "mechanical": { "density": 2700, "youngs_modulus": 5.0e10, "poisson_ratio": 0.25, "compressive_strength": 1.0e8, "tensile_strength": 1.0e7, "cohesion": 2.0e7, "friction_angle": 37, "hardness_mohs": 3.0, "ductility": 0.10, "restitution": 0.40, "friction_coefficient": 0.60 },
+      "optical": { "albedo": [0.60, 0.57, 0.50], "roughness": 0.80, "metallic": 0.0, "translucency": 0.10, "color_variance": 0.30, "grain": "weak bedding anisotropy; fine-medium 0.1-2mm; low-moderate contrast; fossils/stylolites" },
+      "ranges": { "density": [1700, 2750], "youngs_modulus": [1.5e10, 8.0e10], "compressive_strength": [3.0e7, 2.5e8], "cohesion": [1.0e7, 5.0e7] },
+      "notes": "Soft calcite (Mohs 3). Jointed cohesion 2-6 MPa. Rejected bad MatWeb UCS (700 MPa). Alabaster/onyx-marble translucency up to ~0.5.",
+      "sources": ["https://cpb-us-e1.wpmucdn.com/sites.psu.edu/dist/1/57960/files/2016/10/Some-Useful-Numbers-1g1rkuu.pdf", "https://www.mdpi.com/2075-5309/15/11/1924", "https://en.wikipedia.org/wiki/Limestone", "https://www.researchgate.net/figure/Range-of-restitution-coefficients-R-n-and-R-t-for-limestone_fig6_258685828"]
+    },
+    {
+      "id": "concrete", "display_name": "Concrete (structural, plain)", "category": "ceramic", "phase": "solid", "parent": null,
+      "assumed_condition": "normal-weight unreinforced Portland concrete, ~C25/30-C40",
+      "mechanical": { "density": 2400, "youngs_modulus": 3.1e10, "poisson_ratio": 0.18, "compressive_strength": 3.0e7, "tensile_strength": 2.9e6, "cohesion": 5.0e6, "friction_angle": 37, "hardness_mohs": 6.0, "ductility": 0.05, "restitution": 0.4, "friction_coefficient": 0.6 },
+      "optical": { "albedo": [0.32, 0.32, 0.31], "roughness": 0.9, "metallic": 0.0, "translucency": 0.0, "color_variance": 0.25, "grain": "isotropic two-scale: coarse aggregate 2-20mm over fine paste; medium-high contrast on fractured faces" },
+      "ranges": { "density": [2240, 2400], "youngs_modulus": [2.5e10, 3.6e10], "compressive_strength": [2.5e7, 4.0e7], "cohesion": [2.9e6, 1.2e7] },
+      "notes": "Plain concrete near-brittle (failure strain ~0.0035); ductility comes from rebar, not concrete. Paste hardness ~2-3, aggregate 6-7 (composite). Rubble friction_angle 26-42.",
+      "sources": ["https://eurocodeapplied.com/design/en1992/concrete-design-properties", "https://www.engineeringtoolbox.com/concrete-properties-d_1223.html", "https://www.concrete.org/publications/internationalconcreteabstractsportal.aspx?m=details&i=51689676", "https://www.researchgate.net/publication/331304648_The_Friction_and_Dilatancy_Angle_of_Recycled_Concrete_Aggregate"]
+    },
+    {
+      "id": "iron", "display_name": "Iron (mild steel, AISI 1018)", "category": "metal", "phase": "solid", "parent": null,
+      "assumed_condition": "low-carbon mild steel (AISI 1018 / ~ASTM A36); pure iron rarely used structurally",
+      "mechanical": { "density": 7870, "youngs_modulus": 2.05e11, "poisson_ratio": 0.29, "compressive_strength": 3.70e8, "tensile_strength": 4.40e8, "shear_strength": 2.90e8, "cohesion": null, "friction_angle": null, "hardness_mohs": 4.25, "ductility": 0.85, "restitution": 0.60, "friction_coefficient": 0.74 },
+      "optical": { "albedo": [0.56, 0.57, 0.58], "roughness": 0.4, "metallic": 1.0, "translucency": 0.0, "color_variance": 0.1, "grain": "weak directional along rolling/machining axis; fine; low contrast" },
+      "ranges": { "density": [7850, 7870], "youngs_modulus": [1.90e11, 2.10e11], "tensile_strength": [4.30e8, 4.80e8], "hardness_mohs": [4.0, 4.5] },
+      "notes": "compressive_strength = compressive yield (ductile metals flow, not crush). friction_angle N/A (not granular). Brinell 126 HB, Vickers 131 HV. friction_coefficient is steel-on-steel dry. Optical albedo is measured metal F0; roughness/grain are art params. color_variance rises with rust.",
+      "sources": ["https://www.azom.com/article.aspx?ArticleID=6115", "https://www.makeitfrom.com/material-properties/SAE-AISI-1018-G10180-Carbon-Steel", "https://www.roymech.co.uk/Useful_Tables/Tribology/co_of_frict.htm", "https://ntrs.nasa.gov/archive/nasa/casi.ntrs.nasa.gov/19950004401.pdf"]
+    },
+    {
+      "id": "copper", "display_name": "Copper (C11000, annealed)", "category": "metal", "phase": "solid", "parent": null,
+      "mechanical": { "density": 8940, "youngs_modulus": 1.20e11, "poisson_ratio": 0.34, "compressive_strength": 6.9e7, "tensile_strength": 2.20e8, "shear_strength": 1.50e8, "cohesion": null, "friction_angle": null, "hardness_mohs": 3.0, "ductility": 0.95, "restitution": 0.45, "friction_coefficient": 1.0 },
+      "optical": { "albedo": [0.95, 0.64, 0.54], "roughness": 0.35, "metallic": 1.0, "translucency": 0.0, "color_variance": 0.15, "grain": "weak directional along drawing/rolling axis; fine; low contrast when clean" },
+      "ranges": { "density": [8930, 8960], "tensile_strength": [2.10e8, 3.90e8], "compressive_strength": [4.5e7, 3.3e8] },
+      "notes": "Annealed (soft) temper; strength rises sharply when work-hardened. compressive_strength = yield. Brinell ~40 HB, Vickers ~50 HV. friction_coefficient is Cu-on-Cu (galls); Cu-on-steel ~0.53. color_variance rises with patina.",
+      "sources": ["https://www.makeitfrom.com/material-properties/Annealed-OS050-C11000-Copper", "https://www.roymech.co.uk/Useful_Tables/Tribology/co_of_frict.htm", "https://helpx.adobe.com/substance-3d-designer/substance-compositing-graphs/nodes-reference-for-substance-compositing-graphs/node-library/material-filters/pbr-utilities/pbr-metal-reflectance.html"]
+    },
+    {
+      "id": "aluminium", "display_name": "Aluminium (6061-T6)", "category": "metal", "phase": "solid", "parent": null,
+      "mechanical": { "density": 2700, "youngs_modulus": 6.9e10, "poisson_ratio": 0.33, "compressive_strength": 2.76e8, "tensile_strength": 3.10e8, "shear_strength": 2.07e8, "cohesion": null, "friction_angle": null, "hardness_mohs": 2.75, "ductility": 0.85, "restitution": 0.7, "friction_coefficient": 0.61 },
+      "optical": { "albedo": [0.91, 0.92, 0.92], "roughness": 0.35, "metallic": 1.0, "translucency": 0.0, "color_variance": 0.1, "grain": "anisotropic along roll/extrusion axis; sub-mm to mm; low-moderate contrast (brushed higher)" },
+      "ranges": { "density": [2660, 2810], "youngs_modulus": [6.85e10, 7.3e10], "tensile_strength": [2.9e8, 3.2e8] },
+      "notes": "6061-T6 temper. Soft 1100-O far weaker (tensile ~8.8e7, Brinell 23). compressive_strength = yield. Brinell 93-95 HB. friction_coefficient Al-on-mild-steel static (kinetic ~0.47); Al-on-Al galls 1.05-1.4. Albedo ~92% neutral silver.",
+      "sources": ["https://www.makeitfrom.com/material-properties/6061-T6-Aluminum", "https://en.wikipedia.org/wiki/6061_aluminium_alloy", "https://laserbeamproducts.wordpress.com/2014/06/19/reflectivity-of-aluminium-uv-visible-and-infrared/", "https://engineeringlibrary.org/reference/coefficient-of-friction"]
+    },
+    {
+      "id": "oak", "display_name": "Oak (white oak)", "category": "organic", "phase": "solid", "parent": null,
+      "assumed_condition": "White Oak (Quercus alba) at 12% moisture content; strongly anisotropic",
+      "mechanical": { "density": 755, "youngs_modulus": 1.23e10, "youngs_modulus_perp": 2.0e9, "poisson_ratio": 0.369, "compressive_strength": 5.13e7, "compressive_strength_perp": 7.4e6, "tensile_strength": 9.0e7, "tensile_strength_perp": 5.5e6, "shear_strength": 1.38e7, "modulus_of_rupture": 1.05e8, "cohesion": null, "friction_angle": null, "hardness_janka_n": 6000, "hardness_mohs": 3.0, "ductility": 0.30, "restitution": 0.55, "friction_coefficient": 0.62 },
+      "optical": { "albedo": [0.28, 0.17, 0.08], "roughness": 0.65, "metallic": 0.0, "translucency": 0.02, "color_variance": 0.35, "grain": "STRONG directional; coarse open-pore ring-porous; longitudinal streaks + prominent quartersawn ray fleck; high contrast" },
+      "ranges": { "density": [700, 770], "youngs_modulus": [1.15e10, 1.35e10], "compressive_strength": [4.2e7, 6.1e7] },
+      "notes": "Anisotropic: along-grain (_perp suffix = across-grain) modulus ~14x cross; tensile ∥ ~15x ⊥ (dominant failure). Values at 12% MC; wet wood weaker. Hardness: Janka 6000 N. Finished-surface roughness ~0.35. Albedo linear (sRGB ~0.57,0.45,0.30).",
+      "sources": ["https://www.wood-database.com/white-oak/", "https://www.fpl.fs.usda.gov/documnts/fplgtr/fplgtr190/chapter_05.pdf", "https://hypertextbook.com/facts/2005/wood.shtml"]
+    },
+    {
+      "id": "pine", "display_name": "Pine (eastern white pine)", "category": "organic", "phase": "solid", "parent": null,
+      "assumed_condition": "Eastern White Pine (Pinus strobus) at 12% MC; anisotropic. Structural southern yellow pine is much stronger.",
+      "mechanical": { "density": 400, "youngs_modulus": 8.5e9, "youngs_modulus_perp": 6.6e8, "poisson_ratio": 0.329, "compressive_strength": 3.31e7, "compressive_strength_perp": 3.0e6, "tensile_strength": 7.0e7, "tensile_strength_perp": 2.1e6, "shear_strength": 6.2e6, "modulus_of_rupture": 5.9e7, "cohesion": null, "friction_angle": null, "hardness_janka_n": 1700, "hardness_mohs": 2.5, "ductility": 0.25, "restitution": 0.50, "friction_coefficient": 0.29 },
+      "optical": { "albedo": [0.68, 0.48, 0.21], "roughness": 0.60, "metallic": 0.0, "translucency": 0.03, "color_variance": 0.40, "grain": "subtle straight grain (diffuse, low contrast) punctuated by dark high-contrast knots; fine even texture" },
+      "ranges": { "density": [350, 420], "tensile_strength": [5.5e7, 7.5e7], "compressive_strength": [3.0e7, 3.5e7] },
+      "notes": "Anisotropic (_perp = across grain). Soft but brittle in tension/across grain; low toughness. Southern yellow pine analog: density ~570, MOE ~12.3e9, MOR ~88e6, Janka ~3100 N. Albedo linear (sRGB ~0.85,0.73,0.50).",
+      "sources": ["https://www.wood-database.com/eastern-white-pine/", "https://www.fpl.fs.usda.gov/documnts/fplgtr/fplgtr190/chapter_05.pdf", "https://hypertextbook.com/facts/2005/wood.shtml"]
+    },
+    {
+      "id": "grass", "display_name": "Grass / turf", "category": "organic", "phase": "granular", "parent": null,
+      "assumed_condition": "living ground cover over root-reinforced moist topsoil; modeled as vegetated soil, not a solid",
+      "mechanical": { "density": 1400, "youngs_modulus": 5.0e6, "poisson_ratio": 0.35, "compressive_strength": 5.0e4, "tensile_strength": 1.5e4, "tensile_strength_blade": 1.5e8, "cohesion": 1.2e4, "friction_angle": 30, "hardness_mohs": null, "ductility": 0.8, "restitution": 0.1, "friction_coefficient": 0.7 },
+      "optical": { "albedo": [0.10, 0.22, 0.08], "roughness": 0.9, "metallic": 0.0, "translucency": 0.15, "color_variance": 0.4, "grain": "directional blade-scale streaks (mm wide, cm long), anisotropic sheen when mown; ~isotropic at distance" },
+      "ranges": { "density": [1100, 1600], "youngs_modulus": [5.0e5, 1.5e7], "cohesion": [1.0e3, 2.0e4], "friction_angle": [25, 35] },
+      "notes": "Two stiffnesses coexist: soft soil mat (~MPa) vs stiff strong blades (blade tensile ~108-294 MPa, GPa modulus). Signature property is added ROOT cohesion ~1-20 kPa over few-kPa base soil. Restitution near zero. Fragile, shreds easily. Highly variable.",
+      "sources": ["https://onlinelibrary.wiley.com/doi/10.1155/2020/8825828", "https://www.geotechdata.info/parameter/soil-young-s-modulus", "https://www.researchgate.net/publication/275513020_Tensile_Strength_and_Shear_Strength_of_Switchgrass_Before_and_After_Frost", "https://www.sciencedirect.com/science/article/abs/pii/S0168192321001623"]
+    },
+    {
+      "id": "dirt", "display_name": "Topsoil / dirt", "category": "soil", "phase": "granular", "parent": null,
+      "assumed_condition": "moist, loosely compacted loamy topsoil (silt/clay/sand + organics)",
+      "mechanical": { "density": 1400, "youngs_modulus": 1.0e7, "poisson_ratio": 0.30, "compressive_strength": 5.0e4, "tensile_strength": 5.0e3, "cohesion": 1.0e4, "friction_angle": 30, "hardness_mohs": null, "ductility": 0.3, "restitution": 0.10, "friction_coefficient": 0.55 },
+      "optical": { "albedo": [0.09, 0.06, 0.035], "roughness": 0.90, "metallic": 0.0, "translucency": 0.0, "color_variance": 0.4, "grain": "fine-to-medium granular, clumpy; aggregates, roots, organic flecks, irregular mottling" },
+      "ranges": { "density": [1100, 2000], "youngs_modulus": [1.5e6, 6.0e7], "compressive_strength": [2.5e4, 2.0e5], "cohesion": [0, 3.0e4], "friction_angle": [25, 35] },
+      "notes": "Varies 2-3x+ with moisture/organics/compaction. Dry sandy dirt -> ~0 cohesion, brittle; compacted clayey -> stronger, plastic. Hardness N/A (loose aggregate). Wet friction ~0.40, wet albedo ~40-50% darker. Angle of repose ~35 moist.",
+      "sources": ["https://extension.okstate.edu/fact-sheets/basics-of-soil-bulk-density", "https://www.geotechdata.info/parameter/cohesion", "https://www.geotechdata.info/parameter/angle-of-friction", "https://acsess.onlinelibrary.wiley.com/doi/abs/10.2136/sssaj2000.6431027x"]
+    },
+    {
+      "id": "clay", "display_name": "Clay", "category": "soil", "phase": "granular", "parent": null,
+      "assumed_condition": "moist, medium-stiff (firm) inorganic clay near plastic limit",
+      "mechanical": { "density": 1800, "youngs_modulus": 1.5e7, "poisson_ratio": 0.40, "compressive_strength": 1.0e5, "tensile_strength": 3.0e4, "cohesion": 5.0e4, "friction_angle": 20, "hardness_mohs": null, "ductility": 0.8, "restitution": 0.08, "friction_coefficient": 0.36 },
+      "optical": { "albedo": [0.16, 0.11, 0.08], "roughness": 0.60, "metallic": 0.0, "translucency": 0.0, "color_variance": 0.3, "grain": "very fine, smooth/plastic and smeary when wet; polygonal shrinkage cracks when dry" },
+      "ranges": { "density": [1600, 2200], "youngs_modulus": [2.0e6, 1.0e8], "compressive_strength": [2.5e4, 4.0e5], "cohesion": [1.2e4, 1.9e5], "friction_angle": [15, 30] },
+      "notes": "Most moisture-sensitive common soil. Undrained cohesion c_u ~= UCS/2. Effective drained friction ~20 (undrained ~0). Desiccated clay becomes brittle (ductility ~0.2, cracks). Wet clay slippery (friction ~0.25). Dry hardness ~Mohs 1-2.",
+      "sources": ["https://www.geotechdata.info/parameter/cohesion", "https://redfame.com/journal/index.php/set/article/download/5149/5347", "https://ascelibrary.org/doi/10.1061/(ASCE)GT.1943-5606.0001267", "https://mathalino.com/reviewer/geotechnical-engineering/unit-weights-and-densities-soil"]
+    },
+    {
+      "id": "sand", "display_name": "Sand (dry)", "category": "granular", "phase": "granular", "parent": null,
+      "assumed_condition": "quartz sand, dry, loose-to-medium packed (0.1-1mm grains), cohesionless",
+      "mechanical": { "density": 1600, "youngs_modulus": 3.0e7, "poisson_ratio": 0.30, "compressive_strength": null, "tensile_strength": 0.0, "cohesion": 0.0, "friction_angle": 34, "hardness_mohs": 7.0, "ductility": 0.0, "restitution": 0.2, "friction_coefficient": 0.67 },
+      "optical": { "albedo": [0.52, 0.44, 0.30], "roughness": 0.85, "metallic": 0.0, "translucency": 0.0, "color_variance": 0.25, "grain": "fine matte granular with faint quartz-facet glints; uniform fine speckle" },
+      "ranges": { "density": [1442, 1900], "youngs_modulus": [1.0e7, 8.0e7], "friction_angle": [28, 46] },
+      "notes": "Cohesionless: no unconfined compressive strength; strength lives in friction_angle (loose 28-34, dense 40-46). Moist sand gains temporary apparent cohesion ~1-5 kPa (vanishes dry/saturated). Hardness 7 = quartz grains (bulk flows, N/A). Bulk restitution 0.2 (single grains 0.4-0.9). Wet albedo <0.20.",
+      "sources": ["https://www.aqua-calc.com/page/density-table/substance/sand-coma-and-blank-dry", "https://structville.com/angle-of-internal-friction", "https://en.wikipedia.org/wiki/Angle_of_repose", "https://biologyinsights.com/does-sand-reflect-sunlight-the-science-of-albedo/"]
+    },
+    {
+      "id": "gravel", "display_name": "Gravel (dry)", "category": "granular", "phase": "granular", "parent": null,
+      "assumed_condition": "dry, loose natural/crushed aggregate (4-75mm), cohesionless",
+      "mechanical": { "density": 1600, "youngs_modulus": 7.5e7, "poisson_ratio": 0.30, "compressive_strength": null, "tensile_strength": 0.0, "cohesion": 0.0, "friction_angle": 40, "hardness_mohs": 6.5, "ductility": 0.0, "restitution": 0.2, "friction_coefficient": 0.84 },
+      "optical": { "albedo": [0.26, 0.25, 0.23], "roughness": 0.90, "metallic": 0.0, "translucency": 0.0, "color_variance": 0.5, "grain": "coarse chunky faceted pebbles; visible size/color variation; occasional mineral glint" },
+      "ranges": { "density": [1520, 2000], "youngs_modulus": [5.0e7, 1.5e8], "friction_angle": [36, 50] },
+      "notes": "Cohesionless; strength in friction_angle (angular interlock -> higher than sand). Hardness/color depend entirely on parent rock (limestone ~3, quartzite/granite 6-7); bulk N/A. Stiffer than sand.",
+      "sources": ["https://www.aqua-calc.com/page/density-table/substance/gravel-coma-and-blank-loose-blank-dry", "https://structville.com/angle-of-internal-friction", "https://en.wikipedia.org/wiki/Angle_of_repose", "https://civilsir.com/density-of-cement-sand-and-aggregate-in-kg-m3-list-of-material-density/"]
+    },
+    {
+      "id": "water", "display_name": "Water (fresh)", "category": "liquid", "phase": "liquid", "parent": null,
+      "assumed_condition": "freshwater at 20 C, 1 atm",
+      "mechanical": { "density": 998.2, "bulk_modulus": 2.15e9, "dynamic_viscosity": 1.00e-3, "surface_tension": 0.0728, "youngs_modulus": null, "poisson_ratio": null, "compressive_strength": null, "tensile_strength": null, "cohesion": null, "friction_angle": null, "hardness_mohs": null, "ductility": null, "restitution": 0.0, "friction_coefficient": null },
+      "optical": { "albedo": [0.02, 0.03, 0.04], "roughness": 0.03, "metallic": 0.0, "translucency": 0.95, "color_variance": 0.05, "grain": "none - smooth, uniform, specular" },
+      "ranges": { "density": [992, 1000], "bulk_modulus": [2.0e9, 2.3e9], "dynamic_viscosity": [0.65e-3, 1.79e-3] },
+      "notes": "Liquid: bulk_modulus + dynamic_viscosity replace solid mechanics; strengths/friction/hardness/ductility N/A. Peak density 1000 at 4 C. Viscosity halves 0->40 C. Specular F0 ~0.02 (n~1.33). Restitution ~0 (splashes).",
+      "sources": ["https://www.engineeringtoolbox.com/water-density-specific-weight-d_595.html", "https://www.engineeringtoolbox.com/bulk-modulus-elasticity-d_585.html", "https://www.engineeringtoolbox.com/water-dynamic-kinematic-viscosity-d_596.html", "https://www.khronos.org/gltf/pbr/"]
+    },
+    {
+      "id": "crude_oil", "display_name": "Crude oil (light, ~35 API)", "category": "liquid", "phase": "liquid", "parent": null,
+      "assumed_condition": "generic light sweet crude, ~35 API (SG ~0.85); density at 15.6 C, viscosity/optics ~20 C",
+      "mechanical": { "density": 850, "bulk_modulus": 1.3e9, "dynamic_viscosity": 8.0e-3, "surface_tension": 0.027, "youngs_modulus": null, "poisson_ratio": null, "compressive_strength": null, "tensile_strength": null, "cohesion": null, "friction_angle": null, "hardness_mohs": null, "ductility": null, "restitution": 0.0, "friction_coefficient": null },
+      "optical": { "albedo": [0.025, 0.018, 0.012], "roughness": 0.06, "metallic": 0.0, "translucency": 0.15, "color_variance": 0.15, "grain": "none - oily specular sheen; thin-film iridescence possible" },
+      "ranges": { "density": [800, 890], "bulk_modulus": [1.1e9, 1.7e9], "dynamic_viscosity": [3.0e-3, 5.0e-2] },
+      "notes": "Liquid. Game-relevant contrast with water: less dense (~850) yet ~6-10x more viscous, optically much darker/less translucent. Viscosity falls sharply as it warms. F0 ~0.02-0.025 (n~1.45-1.5).",
+      "sources": ["https://www.engineeringtoolbox.com/api-gravity-d_1212.html", "https://en.wikipedia.org/wiki/API_gravity", "https://www.sciencedirect.com/topics/engineering/oil-viscosity", "https://www.khronos.org/gltf/pbr/"]
+    },
+    {
+      "id": "ice", "display_name": "Ice (freshwater)", "category": "frozen", "phase": "solid", "parent": null,
+      "assumed_condition": "solid dense polycrystalline freshwater ice, 0 to -10 C",
+      "mechanical": { "density": 917, "youngs_modulus": 9.3e9, "poisson_ratio": 0.32, "compressive_strength": 6.0e6, "tensile_strength": 1.43e6, "cohesion": 1.5e6, "friction_angle": null, "hardness_mohs": 1.5, "ductility": 0.15, "restitution": 0.4, "friction_coefficient": 0.05 },
+      "optical": { "albedo": [0.40, 0.45, 0.55], "roughness": 0.15, "metallic": 0.0, "translucency": 0.8, "color_variance": 0.2, "grain": "polycrystalline, coarse, glassy clear-to-bluish; columnar (lake) to granular (snow-ice)" },
+      "ranges": { "density": [916, 920], "youngs_modulus": [6.0e9, 12.0e9], "compressive_strength": [5.0e6, 2.5e7], "hardness_mohs": [1.5, 6.0] },
+      "notes": "Strengths vary ~4x with temperature and strain rate. Hardness rises sharply when colder (1.5 at 0C -> 6 at -78.5C). Brittle at high strain rate, ductile creep near melt (glacier flow). Friction is the most condition-sensitive field: kinetic min ~0.02-0.05 near -7C, rises near 0C and with speed; static ice-on-ice 0.1-0.5.",
+      "sources": ["https://en.wikipedia.org/wiki/Ice", "https://pubs.aip.org/aip/adv/article/8/12/125108/127679/Mechanical-properties-of-bi-and-poly-crystalline", "https://www.epj-conferences.org/articles/epjconf/pdf/2015/13/epjconf-dymat2015_01070.pdf", "https://link.aps.org/doi/10.1103/PhysRevX.11.011025"]
+    },
+    {
+      "id": "snow", "display_name": "Snow (settled)", "category": "frozen", "phase": "granular", "parent": null,
+      "assumed_condition": "settled/compacted natural snowpack ~300 kg/m^3, 0 to -10 C. MOST variable material here.",
+      "mechanical": { "density": 300, "youngs_modulus": 5.0e6, "poisson_ratio": 0.25, "compressive_strength": 1.0e5, "tensile_strength": 2.0e4, "cohesion": 1.0e3, "friction_angle": 25, "hardness_mohs": null, "ductility": 0.6, "restitution": 0.1, "friction_coefficient": 0.05 },
+      "optical": { "albedo": [0.85, 0.85, 0.85], "roughness": 0.9, "metallic": 0.0, "translucency": 0.35, "color_variance": 0.1, "grain": "rounded well-bonded fine-medium grains (settled); powder = loose dendrites; firn = coarse rounded" },
+      "ranges": { "density": [50, 550], "youngs_modulus": [2.0e5, 2.0e7], "compressive_strength": [1.0e3, 1.0e6], "cohesion": [250, 1.0e4] },
+      "notes": "Nearly every mechanical property scales with density and changes 2-4 orders of magnitude between fresh powder (~50, negligible strength) and firn (>550). Youngs modulus and compressive strength roughly follow (rho_snow/rho_ice)^2 - ALWAYS state assumed density. Ductile creep (slow) vs brittle slab fracture (fast). Albedo 0.8-0.9 fresh, 0.5-0.7 aged, spectrally flat.",
+      "sources": ["https://nsidc.org/learn/parts-cryosphere/snow/science-snow", "https://agupubs.onlinelibrary.wiley.com/doi/full/10.1002/2017GL075110", "https://arc.lib.montana.edu/snow-science/objects/ISSW-2006-008.pdf", "https://serc.carleton.edu/integrate/teaching_materials/climate_change/student_materials/unit4_article.html"]
+    }
+  ]
+}

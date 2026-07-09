@@ -5,6 +5,30 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-08 — Materials seed database + object/interaction design
+
+**What.** Compiled the first **cited physical-properties database** — 19 materials (rock, ceramic,
+metal, organic/wood, soil, granular, liquid, frozen) with mechanical + optical properties and source
+URLs — into `data/materials.json` (schema in `docs/04`). Added design docs for the architecture the
+user articulated: material **taxonomy + finishes + object composition** (`07`), **adaptive resolution
+& clumping** so the sim scales instead of moving billions of particles (`08`), and **agentic object
+authoring + physically-grounded tool/terrain interaction** — the "make a shovel" / shovel-in-dirt
+vision (`09`).
+
+**Why.** Physical properties are the single source of truth for both simulation and rendering; the
+whole object/agentic vision ("make a shovel" that falls, sounds, and digs like one) reduces to
+material data + physics + composition, with no bespoke per-object code.
+
+**Verified.** `data/materials.json` parses (node `JSON.parse`), 19 materials each with mechanical +
+optical blocks; categories: rock 4, ceramic 1, metal 3, organic 3, soil 2, granular 2, liquid 2,
+frozen 2. Research quality-checked: rejected known-bad MatWeb figures (granite/limestone UCS),
+flagged cited-vs-estimate, and captured state-dependence (soils/snow) and anisotropy (wood).
+
+**Note.** JSON is the v0 seed; it migrates to the Postgres source of truth (`docs/05`) and grows into
+the module/taxonomy system (`docs/06`, `07`) over time.
+
+---
+
 ## 2026-07-08 — Published to GitHub as a monorepo
 
 **What.** Restructured the engine into the `robinmack/BotheadStudios` monorepo as its first
