@@ -5,6 +5,36 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-08 — Phase 1: layered voxel world on screen (v0.2.0)
+
+**What.** Turned the material data into a rendered world. Added to the engine crate:
+- `materials.rs` — loads the cited `data/materials.json` (density + albedo) at compile time.
+- `world.rs` — chunk-style voxel store + a layered generator: rock bulk, ~10 m dirt, grass skin,
+  with a deterministic value-noise heightfield so the surface undulates (layers follow terrain).
+- `mesher.rs` — face-culling mesher (only air-facing faces), per-material albedo vertex colors, so
+  the rock/dirt/grass bands are visible on the exposed side walls.
+- `lib.rs` + `shaders/world.wgsl` — a real 3D renderer: vertex/index/uniform buffers, depth buffer,
+  perspective orbit camera, and a directional light + ambient/hemispheric fill.
+- `web/` host: drag-to-orbit / scroll-to-zoom controls, gentle idle auto-rotation.
+Also added `docs/10` (robustness — how the matter-first model designs out tunneling / fall-through /
+"weird physics", plus the mitigations and an adversarial test plan).
+
+**Why.** First milestone that makes "density as source of truth" *visible* and validates the core
+Rust→WASM→wgpu render path end to end, on the real seed data.
+
+**Verified.**
+- `wasm-pack build` clean (no warnings). `tsc` clean. `vite build` succeeds (wasm ~1.32 MB dev).
+- Dev server serves `engine_bg.wasm` as `application/wasm`.
+- `cargo test` (native): material DB loads 19 materials with granite denser than dirt; the central
+  column is grass→dirt→rock top-to-bottom and solid to y=0; mesher output is well-formed (quad-aligned
+  vertices, 6 indices/quad, all indices in range).
+- **Pending human check:** `cd web && npm run dev` in a WebGPU browser — a layered rock/dirt/grass
+  plateau you can orbit and zoom.
+
+**Version.** Milestone **0.2.0** (Phase 1) per the pre-1.0 policy (each phase bumps the minor).
+
+---
+
 ## 2026-07-08 — Materials seed database + object/interaction design
 
 **What.** Compiled the first **cited physical-properties database** — 19 materials (rock, ceramic,
