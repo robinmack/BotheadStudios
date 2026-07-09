@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/engine"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/robinmack/BotheadStudios"
+rust-version = "1.80"
+
+# Release profile tuned for small, fast WASM. `opt-level = "s"` favors size,
+# which matters for browser download; bump to 3 if compute-bound later.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

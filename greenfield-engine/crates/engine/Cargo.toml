@@ -1,0 +1,28 @@
+[package]
+name = "engine"
+# Source of truth for the engine version. See docs/03-versioning.md.
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "greenfield-engine core: matter simulation + wgpu renderer, compiled to WASM"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+log = "0.4"
+console_log = "1"
+console_error_panic_hook = "0.1"
+
+[dependencies.web-sys]
+version = "0.3"
+features = ["HtmlCanvasElement", "Window", "Document"]
+
+# WebGPU-only backend keeps the WASM small; we target modern browsers.
+[dependencies.wgpu]
+version = "24"
+default-features = false
+features = ["webgpu", "wgsl"]

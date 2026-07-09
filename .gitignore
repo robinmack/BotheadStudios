@@ -1,0 +1,6 @@
+# Monorepo root ignores (OS / editor). Project-specific ignores live in each project's .gitignore.
+.DS_Store
+*.swp
+.idea/
+.vscode/
+*.log

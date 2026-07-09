@@ -1,0 +1,35 @@
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: #05060a;
+  overflow: hidden;
+}
+
+#gpu-canvas {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+}
+
+#hud {
+  position: fixed;
+  top: 10px;
+  left: 12px;
+  font: 12px/1.4 ui-monospace, "SF Mono", Menlo, monospace;
+  color: #9fb4d6;
+  pointer-events: none;
+  user-select: none;
+}
+
+#error {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+  font: 14px/1.6 system-ui, sans-serif;
+  color: #ffd7d7;
+  background: #1a0d10;
+  text-align: center;
+}
