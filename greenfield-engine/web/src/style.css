@@ -22,6 +22,31 @@ body {
   user-select: none;
 }
 
+#stats {
+  position: fixed;
+  left: 12px;
+  bottom: 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: rgba(6, 10, 18, 0.72);
+  border: 1px solid rgba(120, 150, 200, 0.25);
+  font: 12px/1.6 ui-monospace, "SF Mono", Menlo, monospace;
+  color: #c7d6ef;
+  pointer-events: none;
+  user-select: none;
+}
+
+#stats b {
+  color: #eaf2ff;
+}
+
+#stats kbd {
+  padding: 0 4px;
+  border: 1px solid rgba(160, 180, 220, 0.4);
+  border-radius: 3px;
+  color: #aebfdc;
+}
+
 #error {
   position: fixed;
   inset: 0;

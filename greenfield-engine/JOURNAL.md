@@ -5,6 +5,29 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-08 — Phase 2: self-gravity + falling probe (v0.3.0)
+
+**What.** Made density physically active. `gravity.rs` computes a real Newtonian field from the
+world's aggregate voxel mass (voxels lumped into blocks; direct-sum with f64 accumulation).
+`body.rs` integrates a rigid sphere under that field (`F = ma`, semi-implicit Euler) with ground
+contact and a scale-relative rest threshold. The renderer draws the probe via a per-object model
+matrix; a live HUD shows world mass, local gravity, altitude, speed, rest state, and time-scale
+(`Space` re-drops, `[`/`]` change time-scale).
+
+**Why.** Proves pillar 4 — the world's own summed mass produces gravity; a probe obeys `F = ma` and
+rests on the surface. No Rapier yet: one hand-integrated body is exact and far simpler; Rapier is
+deferred until many bodies/contacts justify it.
+
+**Honest scale note.** Real `G` is used, so the ~96 m world has asteroid-scale micro-g (~1e-5 m/s²).
+That's correct physics; a time-scale fast-forwards the sim for viewing (time-lapse, not fake gravity).
+
+**Verified (TDD).** `cargo test`: 9/9 — point-mass `G·M/r²`, far-field within 1%, mass conservation,
+free-fall kinematics (`v=-g·t`, `½g·t²`), fall-and-rest, and an end-to-end drop onto the generated
+world. fmt + clippy (`-D warnings`) clean; wasm build clean; `tsc` + `vite build` succeed.
+**Pending human check:** `npm run dev` → watch the iron probe fall and settle; HUD reads out g and rest.
+
+---
+
 ## 2026-07-08 — Phase 1: layered voxel world on screen (v0.2.0)
 
 **What.** Turned the material data into a rendered world. Added to the engine crate:

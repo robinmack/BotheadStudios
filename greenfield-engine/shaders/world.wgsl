@@ -4,6 +4,7 @@
 
 struct Uniforms {
     view_proj : mat4x4<f32>,
+    model     : mat4x4<f32>, // per-object model transform (identity for the static world)
     light_dir : vec4<f32>,   // xyz = direction TO the light (world space), normalized
     camera_pos: vec4<f32>,
 };
@@ -23,8 +24,9 @@ fn vs_main(
     @location(2) color  : vec3<f32>,
 ) -> VOut {
     var o : VOut;
-    o.clip = u.view_proj * vec4<f32>(pos, 1.0);
-    o.normal = normal;
+    let world_pos = u.model * vec4<f32>(pos, 1.0);
+    o.clip = u.view_proj * world_pos;
+    o.normal = (u.model * vec4<f32>(normal, 0.0)).xyz;
     o.color = color;
     return o;
 }

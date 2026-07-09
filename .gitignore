@@ -1,3 +1,8 @@
+# TEMPORARY: the gh token lacks the `workflow` scope, so pushing .github/workflows/* is rejected.
+# The CI config lives on disk at .github/workflows/ci.yml; once the scope is granted, force-add it
+# (`git add -f .github/workflows/ci.yml`), remove this line, and push.
+.github/
+
 # Monorepo root ignores (OS / editor). Project-specific ignores live in each project's .gitignore.
 .DS_Store
 *.swp

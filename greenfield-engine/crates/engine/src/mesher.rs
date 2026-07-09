@@ -97,9 +97,8 @@ const FACES: [Face; 6] = [
 
 pub fn build(world: &World, materials: &[Material]) -> Mesh {
     // Center the mesh on the origin so the orbit camera looks at the terrain's middle.
-    let cx = world.w as f32 * 0.5;
-    let cy = world.max_top as f32 * 0.5;
-    let cz = world.d as f32 * 0.5;
+    let c = world.center();
+    let (cx, cy, cz) = (c.x, c.y, c.z);
 
     let mut vertices: Vec<Vertex> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
@@ -145,6 +144,35 @@ pub fn build(world: &World, materials: &[Material]) -> Mesh {
         }
     }
 
+    Mesh { vertices, indices }
+}
+
+/// Build a unit-normal UV sphere mesh of the given radius and color, centered at its local origin.
+/// Placed in the world via a model matrix at draw time. Used for the dropped probe (Phase 2).
+pub fn build_uv_sphere(radius: f32, color: [f32; 3], rings: usize, sectors: usize) -> Mesh {
+    use std::f32::consts::{PI, TAU};
+    let mut vertices: Vec<Vertex> = Vec::new();
+    for i in 0..=rings {
+        let phi = (i as f32 / rings as f32) * PI; // 0..PI (pole to pole)
+        for j in 0..=sectors {
+            let theta = (j as f32 / sectors as f32) * TAU; // 0..2PI (around)
+            let n = [phi.sin() * theta.cos(), phi.cos(), phi.sin() * theta.sin()];
+            vertices.push(Vertex {
+                pos: [n[0] * radius, n[1] * radius, n[2] * radius],
+                nrm: n,
+                col: color,
+            });
+        }
+    }
+    let mut indices: Vec<u32> = Vec::new();
+    let stride = (sectors + 1) as u32;
+    for i in 0..rings as u32 {
+        for j in 0..sectors as u32 {
+            let a = i * stride + j;
+            let b = a + stride;
+            indices.extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
+        }
+    }
     Mesh { vertices, indices }
 }
 

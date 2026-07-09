@@ -6,6 +6,7 @@
 //! generate a layered plateau — rock, ~10 m of dirt, a skin of grass — and render it.
 
 use crate::materials::{index_of, Material};
+use glam::Vec3;
 
 /// Width (X), height (Y, up), depth (Z) of the world in voxels. 1 voxel = 1 metre.
 pub const W: usize = 96;
@@ -54,6 +55,30 @@ impl World {
     #[inline]
     pub fn is_solid(&self, x: i32, y: i32, z: i32) -> bool {
         self.material_at(x, y, z).is_some()
+    }
+
+    /// The offset used to center the world on the origin (shared by the mesher, gravity, and
+    /// physics so geometry and forces live in the same coordinate frame).
+    pub fn center(&self) -> Vec3 {
+        Vec3::new(
+            self.w as f32 * 0.5,
+            self.max_top as f32 * 0.5,
+            self.d as f32 * 0.5,
+        )
+    }
+
+    /// The Y (in voxel units) where air begins above column `(x, z)` — i.e. the surface top.
+    /// `None` if the column is empty or out of bounds.
+    pub fn surface_top_voxel(&self, x: i32, z: i32) -> Option<i32> {
+        if x < 0 || z < 0 || x as usize >= self.w || z as usize >= self.d {
+            return None;
+        }
+        for y in (0..self.h as i32).rev() {
+            if self.is_solid(x, y, z) {
+                return Some(y + 1);
+            }
+        }
+        None
     }
 }
 

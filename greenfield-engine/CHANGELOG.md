@@ -9,6 +9,31 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-08
+
+**Phase 2 — self-gravity & the falling probe.** Density stops being decorative and starts doing
+physics: the world's summed voxel mass produces a real Newtonian gravitational field, and a sphere
+falls under it (`F = ma`) and rests on the surface.
+
+### Added
+- `gravity.rs` — aggregate voxel-mass gravity field (voxels lumped into blocks; direct-sum
+  `g(p) = ΣG·mᵢ·(cᵢ−p)/|cᵢ−p|³`, f64 accumulation). Native tests: point-mass `G·M/r²`, far-field,
+  mass conservation.
+- `body.rs` — rigid sphere integrated with semi-implicit Euler under the field, with ground contact,
+  restitution/friction, and a scale-relative rest threshold (works from Earth-g to micro-g). Native
+  tests: free-fall kinematics, fall-and-rest.
+- Renderer draws the probe (a second mesh with a per-object model matrix); live HUD shows world mass,
+  local gravity, probe altitude/speed, rest state, and time-scale. Controls: `Space`/`R` re-drop,
+  `[`/`]` time-scale.
+- End-to-end native test: the probe falls toward the generated world and rests on it.
+
+### Notes
+- Real `G` is used, so the ~96 m test world has asteroid-scale micro-g (~1e-5 m/s²) — correct
+  physics. A **time-scale** (default 250×) fast-forwards the sim for viewing; it is time-lapse, not
+  amplified gravity.
+- The probe is hand-integrated (one body); Rapier is deferred until many bodies / arbitrary contacts
+  justify it. The rendered sphere is enlarged for visibility (free-fall is size/mass-independent).
+
 ## [0.2.0] — 2026-07-08
 
 **Phase 1 — layered voxel world.** The cited material data becomes a rendered, orbitable world.
@@ -49,6 +74,7 @@ pipeline is live, driven by a thin Vite/TypeScript host.
 - Pinned to `wgpu` 24.0.5. WebGPU-only backend to keep the WASM small.
 - **Public API is unstable** while we're pre-1.0 (see versioning policy).
 
-[Unreleased]: https://example.invalid/compare/v0.2.0...HEAD
+[Unreleased]: https://example.invalid/compare/v0.3.0...HEAD
+[0.3.0]: https://example.invalid/releases/tag/v0.3.0
 [0.2.0]: https://example.invalid/releases/tag/v0.2.0
 [0.1.0]: https://example.invalid/releases/tag/v0.1.0

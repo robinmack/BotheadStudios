@@ -90,6 +90,35 @@ async function main(): Promise<void> {
     canvas.addEventListener("pointerdown", markInteract, { once: true });
     canvas.addEventListener("wheel", markInteract, { once: true });
 
+    // --- Keyboard: re-drop the probe (Space/R), change time-scale ([ ]) ---
+    window.addEventListener("keydown", (e) => {
+      if (e.code === "Space" || e.code === "KeyR") {
+        e.preventDefault();
+        engine.reset_drop();
+      } else if (e.code === "BracketLeft") {
+        engine.set_time_scale(engine.time_scale() / 1.5);
+      } else if (e.code === "BracketRight") {
+        engine.set_time_scale(engine.time_scale() * 1.5);
+      }
+    });
+
+    // --- Live physics HUD ---
+    const stats = document.getElementById("stats");
+    const fmt = (x: number) => x.toExponential(2);
+    const updateStats = () => {
+      if (!stats) return;
+      const g = engine.surface_gravity();
+      const resting = engine.is_resting();
+      stats.innerHTML =
+        `world mass: <b>${fmt(engine.total_mass())}</b> kg &nbsp;·&nbsp; ` +
+        `gravity here: <b>${fmt(g)}</b> m/s² &nbsp;(asteroid-scale micro-g — real physics)<br>` +
+        `probe (5&nbsp;kg): altitude <b>${engine.sphere_altitude().toFixed(2)}</b> m &nbsp;·&nbsp; ` +
+        `speed <b>${fmt(engine.sphere_speed())}</b> m/s &nbsp;·&nbsp; ` +
+        (resting ? "<b>at rest ✔</b>" : "falling…") +
+        `<br>time-scale: <b>${engine.time_scale().toFixed(0)}×</b> ` +
+        `(fast-forward — <kbd>[</kbd>/<kbd>]</kbd>) &nbsp;·&nbsp; <kbd>Space</kbd> re-drop`;
+    };
+
     const frame = () => {
       if (!userInteracted) cam.yaw += 0.0025;
       engine.set_orbit(cam.yaw, cam.pitch, cam.zoom);
@@ -99,6 +128,7 @@ async function main(): Promise<void> {
         fail(`render error: ${String(e)}`);
         return; // stop the loop on a hard error
       }
+      updateStats();
       requestAnimationFrame(frame);
     };
     requestAnimationFrame(frame);
