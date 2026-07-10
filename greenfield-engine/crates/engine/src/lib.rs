@@ -598,21 +598,49 @@ mod app {
                 // rather than surviving as a body. This is the meteor *being matter*, not a fireball mock.
                 self.spawn_vaporized_meteor(hit, dir);
 
-                // The SAME impact reaches the probe — no special case. Energy delivered falls off with
-                // distance from ground zero; `deposit_impact` heats + kicks the ball's particles, and
-                // whether it merely dents or SHATTERS is decided by iron's own thresholds + its bonds
-                // (docs/23). A ball at ground zero absorbs ~all of it and comes apart on its own.
-                let com = self.probe.com();
-                let site = glam::DVec3::new(hit.x as f64, hit.y as f64, hit.z as f64);
-                let sigma =
-                    self.mats[materials::index_of(&self.mats, "granite")].fracture_strength as f64;
-                let reach = crate::damage::crater_radius(crate::damage::crater_volume(
-                    energy as f64,
-                    sigma,
-                ))
-                .max(1.0);
-                let energy_at_probe = energy as f64 * (-(com - site).length() / reach).exp();
-                let dir_d = glam::DVec3::new(dir.x as f64, dir.y as f64, dir.z as f64);
+                // The meteor hits whatever is FIRST in its path — the probe too, not only the terrain
+                // (everything is matter, docs/23). If the ray passes through the ball before reaching
+                // the ground, the ball takes a DIRECT hit: full impact energy at the entry point, so it
+                // is destroyed head-on (a real meteor is not stopped by a small ball, but the ball does
+                // not survive being where it strikes). Otherwise only the blast wave reaches it, falling
+                // off with distance from the crater — `deposit_impact` + iron's own thresholds then
+                // decide dent vs shatter, emergently.
+                let eye_d = glam::DVec3::new(eye.x as f64, eye.y as f64, eye.z as f64);
+                let dir_d =
+                    glam::DVec3::new(dir.x as f64, dir.y as f64, dir.z as f64).normalize_or_zero();
+                let hit_d = glam::DVec3::new(hit.x as f64, hit.y as f64, hit.z as f64);
+                let terrain_t = (hit_d - eye_d).dot(dir_d); // along-ray distance to the ground
+                const RAY_CAPTURE: f64 = 0.6; // ~ the probe's particle spacing
+                let mut probe_hit: Option<glam::DVec3> = None;
+                let mut best_t = terrain_t;
+                for p in &self.probe.particles {
+                    let rel = p.pos - eye_d;
+                    let t = rel.dot(dir_d);
+                    if t <= 0.0 || t >= best_t {
+                        continue;
+                    }
+                    if (rel - dir_d * t).length() < RAY_CAPTURE {
+                        best_t = t;
+                        probe_hit = Some(p.pos);
+                    }
+                }
+                let (site, energy_at_probe) = match probe_hit {
+                    Some(pos) => (pos, energy as f64), // direct hit — full energy at the entry point
+                    None => {
+                        let com = self.probe.com();
+                        let sigma = self.mats[materials::index_of(&self.mats, "granite")]
+                            .fracture_strength as f64;
+                        let reach = crate::damage::crater_radius(crate::damage::crater_volume(
+                            energy as f64,
+                            sigma,
+                        ))
+                        .max(1.0);
+                        (
+                            hit_d,
+                            energy as f64 * (-(com - hit_d).length() / reach).exp(),
+                        )
+                    }
+                };
                 self.probe
                     .deposit_impact(&self.mats, site, dir_d, energy_at_probe);
             }
