@@ -20,15 +20,15 @@ use crate::materials::Material;
 use crate::world::World;
 use glam::Vec3;
 
-const PARTICLE_HALF: f32 = 0.45; // rendered/collision half-extent (voxel-ish)
+pub const PARTICLE_HALF: f32 = 0.45; // rendered/collision half-extent (voxel-ish)
 
 // DEBT (physical honesty): `DRAG` is a mild per-step velocity damping. There is **no atmosphere**
 // modelled, so in vacuum this is not real drag — it's a numerical stabilizer standing in for one.
 // Keep it only until proper contact damping / an actual fluid (pressure + drag) exists; don't let it
 // masquerade as physics. See docs/16 (no-fakery) and docs/15 (honesty invariant).
-const DRAG: f32 = 0.9995;
-const CONTACT_DAMP: f32 = 0.35; // energy kept after touching ground
-const SETTLE_SPEED: f32 = 0.02; // below this, a grounded particle deposits into the grid
+pub const DRAG: f32 = 0.9995;
+pub const CONTACT_DAMP: f32 = 0.35; // energy kept after touching ground
+pub const SETTLE_SPEED: f32 = 0.02; // below this, a grounded particle deposits into the grid
 const SETTLE_FRAMES: u32 = 10; // ...or after this many consecutive grounded steps
 const MAX_EJECT: f32 = 0.045; // cap ejection speed below the world's ~7 cm/s escape velocity
 const VAPOR_EXPANSION: f32 = 3.0; // vaporized ejecta expand away faster (gas/plasma) — docs/20

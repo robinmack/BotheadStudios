@@ -506,6 +506,7 @@ mod app {
                     .dig(&mut self.world, &self.mats, hit, DIG_RADIUS, power);
                 // Anything the dig undercut or isolated now collapses and falls.
                 self.matter.collapse(&mut self.world, &self.mats);
+                self.flush_debris_to_gpu();
             }
         }
 
@@ -522,6 +523,7 @@ mod app {
                 self.matter
                     .impact(&mut self.world, &self.mats, hit, dir, METEOR_ENERGY);
                 self.matter.collapse(&mut self.world, &self.mats);
+                self.flush_debris_to_gpu();
             }
         }
 
@@ -530,25 +532,69 @@ mod app {
             self.world_gpu = upload_mesh(&self.device, "world", &mesh);
         }
 
-        fn upload_particles(&self) -> u32 {
-            let instances: Vec<InstanceRaw> = self
+        /// Move newly-fractured CPU particles into the GPU debris buffer, then clear them from the CPU:
+        /// the GPU owns debris now and steps them on the compute shader (docs/22). Called after a
+        /// dig/meteor fractures voxels.
+        fn flush_debris_to_gpu(&mut self) {
+            if self.matter.particles.is_empty() {
+                return;
+            }
+            let gpu: Vec<GpuParticle> = self
                 .matter
                 .particles
                 .iter()
-                .map(|p| InstanceRaw {
+                .map(|p| GpuParticle {
                     offset: [p.pos.x, p.pos.y, p.pos.z],
+                    temp: p.temp_k,
+                    vel: [p.vel.x, p.vel.y, p.vel.z],
+                    resting: 0.0,
                     color: self.mats[p.material].albedo,
-                    emission: emission::incandescence(p.temp_k), // molten debris glows (docs/20)
+                    material: p.material as f32,
+                    emission: emission::incandescence(p.temp_k),
+                    _pad: 0.0,
                 })
                 .collect();
-            if !instances.is_empty() {
-                self.queue.write_buffer(
-                    &self.particle_instances,
-                    0,
-                    bytemuck::cast_slice(&instances),
-                );
+            self.gpu_particles.append(&self.queue, &gpu);
+            self.matter.particles.clear();
+        }
+
+        /// Re-upload the terrain heightfield (the GPU step collides debris against it) after the world
+        /// changes (a dig/impact alters column tops).
+        fn upload_heightfield_to_gpu(&self) {
+            let (w, d) = (self.world.w, self.world.d);
+            let mut tops = Vec::with_capacity(w * d);
+            for z in 0..d {
+                for x in 0..w {
+                    tops.push(
+                        self.world
+                            .surface_top_voxel(x as i32, z as i32)
+                            .unwrap_or(-1),
+                    );
+                }
             }
-            instances.len() as u32
+            self.gpu_particles.upload_heightfield(&self.queue, &tops);
+        }
+
+        /// Uniforms for one GPU debris substep of `dt` seconds (keeps the constants in sync with
+        /// `matter.rs`, the single source of truth).
+        fn gpu_step_params(&self, dt: f32) -> GpuStepParams {
+            let c = self.world.center();
+            GpuStepParams {
+                com: [self.field.com.x, self.field.com.y, self.field.com.z],
+                total_mass: self.field.total_mass,
+                center: [c.x, c.y, c.z],
+                dt,
+                g: gravity::G,
+                softening: 6.0,
+                drag: matter::DRAG,
+                contact_damp: matter::CONTACT_DAMP,
+                settle_speed: matter::SETTLE_SPEED,
+                part_half: matter::PARTICLE_HALF,
+                count: self.gpu_particles.count,
+                world_w: self.world.w as u32,
+                world_d: self.world.d as u32,
+                _p: [0, 0, 0],
+            }
         }
 
         /// Render one frame (advances the simulation first).
@@ -556,8 +602,8 @@ mod app {
             self.step_physics();
             if self.matter.take_dirty() {
                 self.remesh_world();
+                self.upload_heightfield_to_gpu(); // the crater changed the column tops
             }
-            let particle_count = self.upload_particles();
 
             let (view_proj, eye) = self.view_proj();
             let light = Vec3::new(0.45, 0.9, 0.4).normalize();
@@ -582,6 +628,21 @@ mod app {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("frame-encoder"),
                 });
+
+            // GPU debris step (docs/22): advance all particles on the compute shader, PHYS_SUBSTEPS
+            // times (each dispatch is its own pass, so they chain). One thread per particle — the fix
+            // for single-digit FPS after a big impact. Runs before the render pass; the render then
+            // reads the same buffer it just wrote (zero-copy sim↔render).
+            let particle_count = self.gpu_particles.count;
+            if particle_count > 0 {
+                let dt = (self.time_scale / 60.0) / PHYS_SUBSTEPS as f32;
+                self.gpu_particles
+                    .set_params(&self.queue, &self.gpu_step_params(dt));
+                for _ in 0..PHYS_SUBSTEPS {
+                    self.gpu_particles.dispatch(&mut encoder);
+                }
+            }
+
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("world-pass"),
@@ -614,10 +675,11 @@ mod app {
                 draw(&mut pass, &self.sphere_uni, &self.sphere_gpu);
 
                 if particle_count > 0 {
+                    // Draw instances straight from the GPU-computed particle buffer (docs/22).
                     pass.set_pipeline(&self.particle_pipeline);
                     pass.set_bind_group(0, &self.particle_bind, &[]);
                     pass.set_vertex_buffer(0, self.cube_gpu.vertex_buf.slice(..));
-                    pass.set_vertex_buffer(1, self.particle_instances.slice(..));
+                    pass.set_vertex_buffer(1, self.gpu_particles.buf.slice(..));
                     pass.set_index_buffer(
                         self.cube_gpu.index_buf.slice(..),
                         wgpu::IndexFormat::Uint32,
@@ -636,25 +698,14 @@ mod app {
             let sim_dt = self.time_scale / 60.0;
             let dt = sim_dt / PHYS_SUBSTEPS as f32;
             for _ in 0..PHYS_SUBSTEPS {
-                // Unified awake-set dynamics: every not-at-rest solid — the probe today, arbitrarily
-                // many bodies tomorrow — feels the *same* gravity field, then contacts are resolved
-                // against the world and against each other. One coherent loop, no per-object scripting
-                // (see docs/16; honesty invariant docs/15).
+                // The probe falls under the gravity field and rests on the terrain. Debris is now
+                // stepped on the GPU (docs/22), so it no longer runs here. TRADE-OFF (iteration 2): the
+                // probe↔debris momentum exchange (`couple_body`) and debris re-deposition into voxels
+                // are temporarily off for GPU debris — they return once the buffer is readable/hybrid.
                 let accel = self
                     .field
                     .acceleration_at(self.sphere.pos, GRAVITY_SOFTENING);
                 self.sphere.integrate(accel, dt);
-                self.sphere.collide(&self.world, accel, dt);
-                // Debris steps under the same field and must not deposit inside the body...
-                self.matter.step(
-                    &mut self.world,
-                    &self.field,
-                    std::slice::from_ref(&self.sphere),
-                    dt,
-                );
-                // ...and debris↔body contacts exchange momentum both ways (then re-settle the body
-                // against the world so an impact can't shove it into terrain).
-                self.matter.couple_body(&mut self.sphere, dt);
                 self.sphere.collide(&self.world, accel, dt);
             }
         }
@@ -849,8 +900,25 @@ mod app {
         });
         const CUBE_ATTRS: [wgpu::VertexAttribute; 4] =
             wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Uint32];
-        const INST_ATTRS: [wgpu::VertexAttribute; 3] =
-            wgpu::vertex_attr_array![4 => Float32x3, 5 => Float32x3, 6 => Float32x3];
+        // Instance attributes point straight into a `GpuParticle` (64 bytes): offset @0, color @32,
+        // emission @48 — so the GPU-computed particle buffer is drawn directly (zero-copy, docs/22).
+        const INST_ATTRS: [wgpu::VertexAttribute; 3] = [
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 0,
+                shader_location: 4,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 32,
+                shader_location: 5,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 48,
+                shader_location: 6,
+            },
+        ];
         let buffers = [
             wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<Vertex>() as u64,
@@ -858,7 +926,7 @@ mod app {
                 attributes: &CUBE_ATTRS,
             },
             wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<InstanceRaw>() as u64,
+                array_stride: std::mem::size_of::<GpuParticle>() as u64,
                 step_mode: wgpu::VertexStepMode::Instance,
                 attributes: &INST_ATTRS,
             },
