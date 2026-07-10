@@ -589,13 +589,54 @@ fn main() {
         // nothing is left flung skyward. Full settling of an extreme dense pile is slow and gated on the
         // separate density-reduction work (the 8× render subdivision over-densifies the sim) — tracked
         // separately; here we assert the invariant that matters: no energy is CREATED.
-        let ok = finite(&late)
-            && spd_m < spd_e * 0.95     // clearly decaying, not sustained
-            && spd_l < spd_m            // still decaying (no plateau ⇒ no sustained injection)
-            && high_l < 8.0; // nothing left launched far above the fill
+        // With the honest min-translation terrain collision the pile now settles fast, so the decisive
+        // conservation check is simply: it REACHES REST (a fountain would hold a high speed forever)
+        // and nothing is left launched.
+        let _ = (spd_e, spd_m);
+        let ok = finite(&late) && spd_l < 0.1 && high_l < 8.0;
         println!(
             "\nF deep-dense (fountain test): speed {:.3}→{:.3}→{:.3} m/s (must keep decaying), highest {:.1} m  {}",
             spd_e, spd_m, spd_l, high_l, pass(ok)
+        );
+        failures += !ok as i32;
+    }
+
+    // Scene G: WALL-CLIMB / convection. A cliff in the heightfield (low floor beside a tall wall).
+    // Grains at the base of the wall, nudged INTO it, must NOT be teleported up the wall (the height
+    // map's naive up-snap) — that injects potential energy and drives the crater-rim convection ring.
+    // With the landing-vs-wall fix they are blocked and stay low.
+    {
+        let (w, d) = (30u32, 30u32);
+        let low = 2i32;
+        let high = 14i32; // a 12 m cliff
+        let mut hf = vec![low; (w * d) as usize];
+        for z in 0..d as i32 {
+            for x in 0..w as i32 {
+                if x >= 15 {
+                    hf[(z * w as i32 + x) as usize] = high; // right half is a tall wall
+                }
+            }
+        }
+        // center_y = low ⇒ low floor at y=0, wall top at y=12.
+        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: low as f32, friction: 0.6 };
+        // Grains sitting on the low floor just left of the cliff (cliff at centered x=0, i.e. voxel 15),
+        // shoved toward it at a healthy speed.
+        // A single LOW layer of grains on the floor (y≈part_half), so ANY height gain = wall-climbing.
+        let mut ps = Vec::new();
+        for kx in 0..6 {
+            for kz in -3..=3 {
+                let mut p = Particle::at(-1.0 - kx as f32 * 0.5, PART_HALF, kz as f32 * 0.5);
+                p.vel = [6.0, 0.0, 0.0]; // ramming the wall
+                ps.push(p);
+            }
+        }
+        let out = simulate(&gpu, ps, 400, &scene);
+        let climbed = max_height(&out);
+        let ok = finite(&out) && climbed < 1.0; // must NOT climb the 12 m wall (start y≈0.21)
+        println!(
+            "\nG wall-climb (rim convection): highest grain {:.1} m (wall is 12 m; must stay <2)  {}",
+            climbed,
+            pass(ok)
         );
         failures += !ok as i32;
     }

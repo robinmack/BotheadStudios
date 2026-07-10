@@ -159,16 +159,67 @@ fn cs_integrate(@builtin(global_invocation_id) gid : vec3<u32>) {
     var vel = (pt.vel + a * P.dt) * P.drag;
     var pos = pt.offset + vel * P.dt;
 
-    // Terrain heightfield collision (the column's solid top). Grains stack on each OTHER via contact;
-    // this just stops them sinking into bedrock.
-    let cx = i32(floor(pos.x + P.center.x));
-    let cz = i32(floor(pos.z + P.center.z));
+    // Terrain collision by MINIMUM-TRANSLATION contact resolution: if the grain penetrates a solid
+    // column, push it out the SHORTEST way. This is real contact physics, one rule for every case — a
+    // flat floor pushes up (up is nearest), a vertical crater WALL pushes sideways (the side face is
+    // nearest), no landing-vs-wall heuristic and no potential-energy injection (which was the crater-rim
+    // "convection ring" — grains teleported up the wall and rained back in). A sideways exit is only
+    // valid into a neighbour column low enough to admit the grain (docs/23).
     var resting = 0.0;
+    let vx = pos.x + P.center.x;
+    let vz = pos.z + P.center.z;
+    let cx = i32(floor(vx));
+    let cz = i32(floor(vz));
     if (cx >= 0 && cz >= 0 && cx < i32(P.world_w) && cz < i32(P.world_d)) {
-        let top = heightfield[u32(cz) * P.world_w + u32(cx)];
-        let ground_y = f32(top) - P.center.y;
-        if (pos.y - P.part_half <= ground_y) {
-            pos.y = ground_y + P.part_half;
+        let top = f32(heightfield[u32(cz) * P.world_w + u32(cx)]) - P.center.y;
+        let bottom = pos.y - P.part_half; // grain's underside
+        if (bottom < top) {
+            // The grain is inside the solid. Find the least-penetration exit among up + the four sides.
+            // A sideways exit is only REAL if that neighbour's floor is at or below the grain's underside
+            // — otherwise the grain would still be penetrating over there (that false "zero-depth" exit
+            // into a same-height neighbour is what let a boundary-straddling grain sink through a flat
+            // floor). `up` is always valid.
+            let room = bottom + 1.0e-4;
+            var depth = top - bottom; // +y exit depth
+            var axis = 0;             // 0:+y  1:-x  2:+x  3:-z  4:+z
+            if (cx > 0) {
+                let tn = f32(heightfield[u32(cz) * P.world_w + u32(cx - 1)]) - P.center.y;
+                let d = vx - f32(cx);
+                if (tn <= room && d < depth) { depth = d; axis = 1; }
+            }
+            if (cx + 1 < i32(P.world_w)) {
+                let tn = f32(heightfield[u32(cz) * P.world_w + u32(cx + 1)]) - P.center.y;
+                let d = f32(cx + 1) - vx;
+                if (tn <= room && d < depth) { depth = d; axis = 2; }
+            }
+            if (cz > 0) {
+                let tn = f32(heightfield[u32(cz - 1) * P.world_w + u32(cx)]) - P.center.y;
+                let d = vz - f32(cz);
+                if (tn <= room && d < depth) { depth = d; axis = 3; }
+            }
+            if (cz + 1 < i32(P.world_d)) {
+                let tn = f32(heightfield[u32(cz + 1) * P.world_w + u32(cx)]) - P.center.y;
+                let d = f32(cz + 1) - vz;
+                if (tn <= room && d < depth) { depth = d; axis = 4; }
+            }
+            // Push out along the least-penetration axis; zero only the velocity component driving into
+            // the solid, then damp (inelastic contact).
+            if (axis == 0) {
+                pos.y = top + P.part_half;
+                if (vel.y < 0.0) { vel.y = 0.0; }
+            } else if (axis == 1) {
+                pos.x = f32(cx) - P.center.x - 1.0e-4;
+                if (vel.x > 0.0) { vel.x = 0.0; }
+            } else if (axis == 2) {
+                pos.x = f32(cx + 1) - P.center.x + 1.0e-4;
+                if (vel.x < 0.0) { vel.x = 0.0; }
+            } else if (axis == 3) {
+                pos.z = f32(cz) - P.center.z - 1.0e-4;
+                if (vel.z > 0.0) { vel.z = 0.0; }
+            } else {
+                pos.z = f32(cz + 1) - P.center.z + 1.0e-4;
+                if (vel.z < 0.0) { vel.z = 0.0; }
+            }
             vel = vel * P.contact_damp;
             if (length(vel) < P.settle_speed) { resting = 1.0; }
         }
