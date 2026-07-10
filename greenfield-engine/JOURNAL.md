@@ -5,6 +5,31 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-09 — North star + a reverted fudge; the engine's name: "Integrity"
+
+**What.** While bringing GPU debris up (docs/22), a play-test exposed that a meteor doesn't destroy the
+probe, and I reached for a special case — `if probe within crater { obliterate }`. Robin: "if
+everything is real, the probe should have just been destroyed on impact on its own; the fact we have to
+correct that concerns me." She's right — that's a **fudge**. **Reverted it.** The real problem: the
+probe is the **last bespoke object** (a rigid `body::Sphere`), not matter, so `matter::impact` can't
+see it. Wrote `docs/23`: the north-star demo — **a metal ball at ground zero, de-orbit the Moon into
+it, zoom in and observe the ball was destroyed** — with NO code that says "destroy the ball." It's
+destroyed because the impact energy really reaches it and exceeds iron's thresholds (`damage`). The fix
+is to make the probe **real matter** (a cohesive aggregate / voxel body), so gravity, contact, impact,
+`damage::classify`, and emission all act on it emergently — no special cases.
+
+**Name.** Robin is naming the engine **"Integrity"** — fitting: it's the operating invariant (every
+value traces to real physics or is flagged; no fudge), and reverting the special case is exactly it.
+
+**Also (shipped this session, verified/native):** terrain now uses planetary **surface gravity**
+(uniform down, not the slab's micro-g self-gravity — fixes debris concentrating at the world centre;
+real-time, no time-scale). The GPU debris path works on-device (FPS fixed, debris glow + cool).
+
+**Open (honest):** probe-as-matter unification (`docs/23`); GPU resting-debris re-deposition
+(iteration 3, kills the moiré pile-up); the celestial→local materialization for the zoom-in.
+
+---
+
 ## 2026-07-09 — Bodies as particle aggregates (emergent binding + disruption)
 
 **What.** Started making celestial destruction a *simulation, not a mock* (`docs/21`). A body becomes a
