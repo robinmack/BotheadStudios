@@ -630,4 +630,33 @@ mod tests {
             "a gentle impact still displaces water (a splash)"
         );
     }
+
+    #[test]
+    fn voxel_crater_matches_the_coarse_damage_summary() {
+        // The LOD bridge (docs/19): the number of voxels the impact operator excavates equals the
+        // crater VOLUME the coarse-scale summary predicts from the same energy + material. So a
+        // celestial summary and a zoomed-in voxel crater describe the same event — damage is conserved
+        // across level of detail.
+        let mats = materials::load();
+        let gi = materials::index_of(&mats, "granite");
+        let sigma = mats[gi].fracture_strength; // Pa
+        let n = 40usize;
+        // Uniform granite, so the energy budget (not geometry) sets the crater — a clean bridge test.
+        let mut w = World {
+            w: n,
+            h: n,
+            d: n,
+            voxels: vec![gi as u16 + 1; n * n * n],
+            max_top: n,
+        };
+        let energy = 200.0 * sigma; // enough to excavate ~200 voxels
+        let mut sim = MatterSim::new(200_000);
+        let carved = sim.impact(&mut w, &mats, Vec3::ZERO, Vec3::NEG_Y, energy);
+
+        let predicted = crate::damage::crater_volume(energy as f64, sigma as f64); // = 200 m³
+        assert!(
+            (carved as f64 - predicted).abs() <= 2.0,
+            "voxel crater {carved} ≈ summary volume {predicted} (same σ·V accounting)"
+        );
+    }
 }

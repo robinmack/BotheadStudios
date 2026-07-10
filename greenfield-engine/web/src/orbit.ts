@@ -226,10 +226,12 @@ async function main(): Promise<void> {
       if (demo.has_impacted()) {
         const e = demo.impact_energy_j();
         const shatter = Math.round(e / demo.moon_binding_energy_j());
+        const earthPct = (100 * e) / demo.earth_binding_energy_j();
         line2 =
-          `<b style="color:#ff8a8a">💥 IMPACT — ${e.toExponential(2)} J</b> ` +
-          `(~${shatter.toLocaleString()}× the Moon's binding energy → both bodies would be ` +
-          `destroyed) <span style="opacity:.7">· fragmentation not yet modelled</span>`;
+          `<b style="color:#ff8a8a">💥 IMPACT — ${e.toExponential(2)} J</b> · ` +
+          `~${shatter.toLocaleString()}× the Moon's binding energy (Moon shatters) · ` +
+          `${earthPct.toFixed(1)}% of Earth's (survives → planet-scale crater) ` +
+          `<span style="opacity:.7">· fragmentation/crater not yet materialised</span>`;
       } else if (peri < 0) {
         line2 = `perigee <b>unbound</b> (would escape)`;
       } else {

@@ -21,6 +21,7 @@
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 
 mod body;
+mod damage;
 mod gravity;
 #[cfg(test)]
 mod isotropy;
@@ -1195,6 +1196,12 @@ mod app {
         /// The Moon's gravitational binding energy (J), for comparison: impact ≫ binding ⇒ it shatters.
         pub fn moon_binding_energy_j(&self) -> f64 {
             crate::orbit::binding_energy(MOON_MASS, MOON_RADIUS_M)
+        }
+
+        /// The Earth's gravitational binding energy (J). The Moon impact is a small fraction of this,
+        /// so the Earth is not destroyed — it takes a planet-scale crater (docs/19 LOD bridge).
+        pub fn earth_binding_energy_j(&self) -> f64 {
+            crate::orbit::binding_energy(EARTH_MASS, EARTH_RADIUS_M)
         }
 
         /// Current time multiplier (sim-seconds per real-second), for the HUD.

@@ -5,6 +5,36 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-09 — LOD-adaptive damage: the crater bridge (celestial ↔ voxel)
+
+**What.** Connected the Moon-crash to a real crater across scales (`docs/19`). The bridge: a damage
+event is the *same event* at every LOD, so the coarse **summary** and the fine **voxel materialisation**
+must agree. Both use the same `σ·V` accounting — `damage::crater_volume(E, σ) = E/σ` (celestial
+summary) equals the voxels `matter::impact` excavates (proven:
+`matter::voxel_crater_matches_the_coarse_damage_summary`). Added honest **regimes**: strength crater
+(`V=E/σ`), gravity regime (flagged, unmodelled), and **disruption** past the body's binding energy.
+
+**Honesty — the Moon is not a tidy crater.** ~4.5e30 J is ~36× the *Moon's* binding energy (the Moon
+**shatters**) but only ~2% of the *Earth's* (~2.2e32 J), so the Earth **survives with a planet-scale
+crater** — the giant-impact regime, not a neat bowl. The space-band HUD now says exactly this on impact
+(`damage::moon_shatters_but_earth_only_craters` pins the numbers). We report the regime honestly instead
+of promising a crater the physics forbids.
+
+**Why.** Robin: connect the Moon-crash to a real crater. The honest connection is the σ·V bridge — the
+same relation drives the celestial summary and the zoomed-in voxel crater, so promoting/coarsening
+across LOD conserves the event (`docs/13`). The *visual* zoom-in (fly the camera down and materialise
+the voxel crater) is a real renderer effort, designed in `docs/19`, staged for on-device work.
+
+**Verified.** New: `damage::crater_scales_with_energy_and_inversely_with_strength`,
+`damage::moon_shatters_but_earth_only_craters`, `matter::voxel_crater_matches_the_coarse_damage_summary`.
+`cargo test` 37/37; clippy `-D warnings` clean; fmt clean; wasm + `tsc` green.
+
+**Roadmap (Robin's order):** LOD (this — bridge done; visual zoom-in next) → MLS-MPM → fluid. Planned
+playground: a **two-moon** scene (opposite sides, same orbit, de-orbit both at once) as a stress test —
+the N-body core is already generic, so it's nearly free.
+
+---
+
 ## 2026-07-09 — Unified deformation & damage: the design + first honesty slice
 
 **What.** Started the deformation/damage subsystem (`docs/18`) from Robin's requirement that a **bullet,

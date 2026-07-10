@@ -10,6 +10,14 @@ because **we are our own first customers** and pin exact engine versions in our 
 ## [Unreleased]
 
 ### Added
+- **LOD-adaptive damage — the crater bridge** (`docs/19`). A damage event is the same event at every
+  scale: the coarse **summary** (`damage::crater_volume` = `E/σ`) and the fine **voxel crater**
+  (`matter::impact`) use the same `σ·V` accounting and agree — proven by
+  `matter::voxel_crater_matches_the_coarse_damage_summary`. Honest regimes: strength crater, gravity
+  (flagged), and **disruption** past a body's binding energy. The Moon impact (~4.5e30 J) is ~36× the
+  Moon's binding energy (Moon shatters) but ~2% of Earth's (Earth survives → planet-scale crater); the
+  space-band HUD now reports this. The *visual* zoom-in to materialise the crater is designed and
+  staged (`docs/19`).
 - **Unified deformation & damage — design + first slice** (`docs/18`). One operator for a bullet, a
   pebble in a pond, and a Moon-into-Earth impact: response governed by material data (material
   invariance) at the resolution the observer's frame can perceive (scale/frame invariance). Concrete
