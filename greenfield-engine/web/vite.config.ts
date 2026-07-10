@@ -27,7 +27,8 @@ function shotSink(): Plugin {
             const body = Buffer.concat(chunks).toString("utf8");
             const b64 = body.replace(/^data:image\/\w+;base64,/, "");
             const buf = Buffer.from(b64, "base64");
-            const dir = resolve(root, "shots");
+            // OUTSIDE web/ (the Vite-watched root) so saving a screenshot can never trigger a reload.
+            const dir = resolve(root, "..", "shots");
             mkdirSync(dir, { recursive: true });
             const file = resolve(dir, `shot-${Date.now()}.png`);
             writeFileSync(file, buf);
