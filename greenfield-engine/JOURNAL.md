@@ -5,6 +5,34 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-09 — Impact thermodynamics: fracture → melt → vaporize (one rule)
+
+**What.** Modelled fragmentation, melting, and vaporization as **one data-driven response** (`docs/20`),
+Robin's planetary-scale test of the engine (and of scale-of-detail). An impact deposits **energy
+density** (J/m³ = Pa); each parcel's fate comes from comparing it to that material's own thresholds:
+fracture strength → melt energy `ρ(cΔT+L_f)` → vaporization energy. `damage::classify` returns
+`Intact | Fractured | Melted | Vaporized` — the *same* "density vs threshold" logic as fracture, just
+higher thresholds. Because the deposited density falls with distance, **one event produces all four at
+different radii** (near-field vaporizes, then melts, then fractures, then intact). Added optional
+`Material.thermal` (specific heat, melt/boil points, latent heats) with **cited data** for basalt,
+granite, iron, water; materials without it can only fracture (we don't claim unknown melt behaviour).
+
+**Why.** Robin: "model fragmentation, melting, vaporization — a test of our simulator's abilities on a
+planetary scale (and of our scaling of detail)." A giant impact honestly vaporizes rock near contact,
+leaves a magma ocean of melt, fractures/ejects a shell, and — since E ≪ Earth's binding energy — leaves
+the planet intact but resurfaced. Every one is the same `classify` at a different radius.
+
+**Verified.** `damage::impact_fractures_then_melts_then_vaporizes_by_energy_density` (thresholds order
+σ<melt<vapor; each band classifies right; a giant-impact density vaporizes rock; no-thermal-data →
+fracture-only). `cargo test` 38/38; clippy `-D warnings` clean; fmt clean; wasm + `tsc` green.
+
+**Staged (docs/20):** integrate into `matter::impact` (voxels become gas/melt/ejecta by class,
+conserving mass + energy through the transition); the **visual** display — incandescent melt (black-body
+emission from temperature, not a painted colour), a vapor plume, and the materialised crater to fly
+into (`docs/19`); cooling/solidification (magma → rock).
+
+---
+
 ## 2026-07-09 — Two-moon stress test scene
 
 **What.** A new scene (`/twomoons.html`): two moons on the same orbit, **opposite sides** of the Earth,

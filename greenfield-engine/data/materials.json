@@ -28,6 +28,7 @@
       "id": "granite", "display_name": "Granite", "category": "rock", "phase": "solid", "parent": null,
       "mechanical": { "density": 2700, "youngs_modulus": 6.0e10, "poisson_ratio": 0.25, "compressive_strength": 2.0e8, "tensile_strength": 1.2e7, "cohesion": 2.8e7, "friction_angle": 45, "hardness_mohs": 6.5, "ductility": 0.05, "restitution": 0.80, "friction_coefficient": 0.6 },
       "optical": { "albedo": [0.34, 0.32, 0.30], "roughness": 0.6, "metallic": 0.0, "translucency": 0.02, "color_variance": 0.40, "grain": "isotropic to weakly anisotropic; coarse phaneritic 1-10mm; high-contrast quartz/feldspar/mica speckle" },
+      "thermal": { "specific_heat": 790, "melt_point": 1500, "latent_fusion": 4.0e5, "boil_point": 3000, "latent_vaporization": 6.0e6 },
       "ranges": { "density": [2600, 2800], "youngs_modulus": [3.0e10, 7.5e10], "compressive_strength": [1.0e8, 2.5e8], "cohesion": [1.5e7, 5.0e7], "friction_angle": [40, 55] },
       "notes": "Cohesion is intact rock; for fractured/granular state use cohesion~0 and friction_angle~40. Rejected bad MatWeb UCS (2200 MPa). Polished roughness ~0.05-0.15.",
       "sources": ["https://www.makeitfrom.com/material-properties/Granite", "https://geothermal-energy-journal.springeropen.com/articles/10.1186/s40517-018-0096-1", "https://static.rocscience.cloud/assets/resources/learning/hoek/3.-Intact-rock-strength_2023-06-30-120556_xiuv.pdf", "https://landslides.usgs.gov/static/lfs/research/rockphysics/Byerlee-1967.pdf"]
@@ -36,6 +37,7 @@
       "id": "basalt", "display_name": "Basalt", "category": "rock", "phase": "solid", "parent": null,
       "mechanical": { "density": 2900, "youngs_modulus": 7.8e10, "poisson_ratio": 0.25, "compressive_strength": 2.66e8, "tensile_strength": 1.45e7, "cohesion": 6.6e7, "friction_angle": 45, "hardness_mohs": 6.0, "ductility": 0.02, "restitution": 0.4, "friction_coefficient": 0.7 },
       "optical": { "albedo": [0.05, 0.05, 0.055], "roughness": 0.85, "metallic": 0.0, "translucency": 0.0, "color_variance": 0.2, "grain": "fine aphanitic, near-isotropic, sub-mm crystals, low-moderate contrast, optional vesicles" },
+      "thermal": { "specific_heat": 840, "melt_point": 1450, "latent_fusion": 4.0e5, "boil_point": 2900, "latent_vaporization": 6.0e6 },
       "ranges": { "density": [2700, 3300], "youngs_modulus": [5.9e10, 9.7e10], "compressive_strength": [1.68e8, 3.64e8], "cohesion": [2.5e7, 6.6e7] },
       "notes": "Vesicular scoria much lighter (500-2200). Rock-mass strength far below intact. Polished slab roughness ~0.3.",
       "sources": ["https://link.springer.com/article/10.1007/BF01024770", "https://hal.science/hal-03547484/file/Villeneuve-Heap_2021_Volcanica.pdf.pdf", "https://gpg.geosci.xyz/content/physical_properties/tables/density_igneous_rocks.html", "https://www.dedalostone.com/en/basalt/"]
@@ -70,6 +72,7 @@
       "assumed_condition": "low-carbon mild steel (AISI 1018 / ~ASTM A36); pure iron rarely used structurally",
       "mechanical": { "density": 7870, "youngs_modulus": 2.05e11, "poisson_ratio": 0.29, "compressive_strength": 3.70e8, "tensile_strength": 4.40e8, "shear_strength": 2.90e8, "cohesion": null, "friction_angle": null, "hardness_mohs": 4.25, "ductility": 0.85, "restitution": 0.60, "friction_coefficient": 0.74 },
       "optical": { "albedo": [0.56, 0.57, 0.58], "roughness": 0.4, "metallic": 1.0, "translucency": 0.0, "color_variance": 0.1, "grain": "weak directional along rolling/machining axis; fine; low contrast" },
+      "thermal": { "specific_heat": 449, "melt_point": 1811, "latent_fusion": 2.47e5, "boil_point": 3134, "latent_vaporization": 6.09e6 },
       "ranges": { "density": [7850, 7870], "youngs_modulus": [1.90e11, 2.10e11], "tensile_strength": [4.30e8, 4.80e8], "hardness_mohs": [4.0, 4.5] },
       "notes": "compressive_strength = compressive yield (ductile metals flow, not crush). friction_angle N/A (not granular). Brinell 126 HB, Vickers 131 HV. friction_coefficient is steel-on-steel dry. Optical albedo is measured metal F0; roughness/grain are art params. color_variance rises with rust.",
       "sources": ["https://www.azom.com/article.aspx?ArticleID=6115", "https://www.makeitfrom.com/material-properties/SAE-AISI-1018-G10180-Carbon-Steel", "https://www.roymech.co.uk/Useful_Tables/Tribology/co_of_frict.htm", "https://ntrs.nasa.gov/archive/nasa/casi.ntrs.nasa.gov/19950004401.pdf"]
@@ -158,6 +161,7 @@
       "assumed_condition": "freshwater at 20 C, 1 atm",
       "mechanical": { "density": 998.2, "bulk_modulus": 2.15e9, "dynamic_viscosity": 1.00e-3, "surface_tension": 0.0728, "youngs_modulus": null, "poisson_ratio": null, "compressive_strength": null, "tensile_strength": null, "cohesion": null, "friction_angle": null, "hardness_mohs": null, "ductility": null, "restitution": 0.0, "friction_coefficient": null },
       "optical": { "albedo": [0.02, 0.03, 0.04], "roughness": 0.03, "metallic": 0.0, "translucency": 0.95, "color_variance": 0.05, "grain": "none - smooth, uniform, specular" },
+      "thermal": { "specific_heat": 4186, "melt_point": 273, "latent_fusion": 3.34e5, "boil_point": 373, "latent_vaporization": 2.26e6 },
       "ranges": { "density": [992, 1000], "bulk_modulus": [2.0e9, 2.3e9], "dynamic_viscosity": [0.65e-3, 1.79e-3] },
       "notes": "Liquid: bulk_modulus + dynamic_viscosity replace solid mechanics; strengths/friction/hardness/ductility N/A. Peak density 1000 at 4 C. Viscosity halves 0->40 C. Specular F0 ~0.02 (n~1.33). Restitution ~0 (splashes).",
       "sources": ["https://www.engineeringtoolbox.com/water-density-specific-weight-d_595.html", "https://www.engineeringtoolbox.com/bulk-modulus-elasticity-d_585.html", "https://www.engineeringtoolbox.com/water-dynamic-kinematic-viscosity-d_596.html", "https://www.khronos.org/gltf/pbr/"]

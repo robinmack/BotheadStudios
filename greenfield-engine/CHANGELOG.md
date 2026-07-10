@@ -10,6 +10,15 @@ because **we are our own first customers** and pin exact engine versions in our 
 ## [Unreleased]
 
 ### Added
+- **Impact thermodynamics — fracture/melt/vaporize** (`docs/20`). One data-driven response: an impact
+  deposits energy density (J/m³), and `damage::classify` compares it to a material's own thresholds —
+  fracture strength → melt energy `ρ(cΔT+L_f)` → vaporization energy — returning
+  `Intact/Fractured/Melted/Vaporized`. Because the density falls with distance, one event yields all
+  four at different radii (a scale-of-detail test too). Added optional `Material.thermal` (specific
+  heat, melt/boil points, latent heats) with cited data for basalt, granite, iron, water; materials
+  without it can only fracture. Test: `damage::impact_fractures_then_melts_then_vaporizes_by_energy_density`.
+  Integration into the impact operator and the visual (incandescent melt, vapor plume, fly-in crater)
+  are staged.
 - **Two-moon stress-test scene** (`/twomoons.html`). Two moons on the same orbit, opposite sides of the
   Earth, de-orbited both at once. `OrbitDemo` generalized from one moon to N (per-moon uniforms,
   lighting, framing; Earth-vs-each-moon collision with both impact energies summed); `brake_moon` /

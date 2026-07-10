@@ -21,6 +21,17 @@ struct RawMaterial {
     phase: String, // "solid" | "granular" | "liquid" | …
     mechanical: RawMechanical,
     optical: RawOptical,
+    #[serde(default)]
+    thermal: Option<RawThermal>,
+}
+
+#[derive(Deserialize)]
+struct RawThermal {
+    specific_heat: f32,       // J/(kg·K)
+    melt_point: f32,          // K
+    latent_fusion: f32,       // J/kg
+    boil_point: f32,          // K
+    latent_vaporization: f32, // J/kg
 }
 
 #[derive(Deserialize)]
@@ -45,6 +56,18 @@ struct RawOptical {
     metallic: f32,
     #[serde(default)]
     color_variance: f32,
+}
+
+/// Thermal properties — enough to compute the energy to melt or vaporize the material (`docs/20`).
+/// Optional: only materials we've cited thermal data for carry it; without it, an impact can fracture
+/// the material but we don't claim to know its melt/boil behaviour (honesty).
+#[derive(Clone, Debug)]
+pub struct Thermal {
+    pub specific_heat: f32,       // J/(kg·K)
+    pub melt_point: f32,          // K
+    pub latent_fusion: f32,       // J/kg (solid → liquid)
+    pub boil_point: f32,          // K
+    pub latent_vaporization: f32, // J/kg (liquid → gas)
 }
 
 /// A material as the engine consumes it.
@@ -75,6 +98,8 @@ pub struct Material {
     pub metallic: f32,
     /// 0 (uniform) .. 1 (high per-grain spread). Drives procedural texture contrast (Phase 4).
     pub color_variance: f32,
+    /// Thermal properties for melt/vaporization (`docs/20`), when we have cited data for the material.
+    pub thermal: Option<Thermal>,
 }
 
 /// Parse the embedded database. Panics with a clear message if the bundled JSON is malformed
@@ -105,6 +130,13 @@ pub fn load() -> Vec<Material> {
                 roughness: m.optical.roughness,
                 metallic: m.optical.metallic,
                 color_variance: m.optical.color_variance,
+                thermal: m.thermal.map(|t| Thermal {
+                    specific_heat: t.specific_heat,
+                    melt_point: t.melt_point,
+                    latent_fusion: t.latent_fusion,
+                    boil_point: t.boil_point,
+                    latent_vaporization: t.latent_vaporization,
+                }),
             }
         })
         .collect()
