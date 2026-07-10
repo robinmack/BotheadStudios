@@ -96,11 +96,13 @@ pub fn perigee(rel_pos: DVec3, rel_vel: DVec3, mu: f64) -> Option<f64> {
 }
 
 /// Perfectly-inelastic **contact resolution** for two solid bodies that have interpenetrated: separate
-/// them until their surfaces just touch (`r_sum` apart) and remove the approaching relative velocity
-/// along the contact normal, so they can't pass through one another. Momentum-conserving. Returns
-/// `true` if they were in contact. This is the celestial-scale echo of the voxel body/particle
-/// contacts (`docs/16`): solid things collide at their surfaces — a point mass tunnelling through
-/// another into a 1/r² singularity would be a fudge (and a numerical explosion), not a collision.
+/// them until their surfaces just touch (`r_sum` apart) and, when they are approaching, **coalesce them
+/// to their common (centre-of-mass) velocity** — removing *all* relative motion, not just the inward
+/// normal component. So a crashing body **splats and merges** rather than sliding frictionlessly around
+/// the surface (which looked like it "orbited at the planet's radius"). Momentum-conserving. Returns
+/// `true` if they were in contact. The celestial-scale echo of the voxel contacts (`docs/16`): solid
+/// things collide at their surfaces — a point mass tunnelling into a 1/r² singularity would be a fudge
+/// (and a numerical explosion), not a collision. (Grazing shear / partial merge is a future refinement.)
 pub fn resolve_contact(a: &mut Body, b: &mut Body, r_sum: f64) -> bool {
     let d = b.pos - a.pos;
     let dist = d.length();
@@ -117,12 +119,13 @@ pub fn resolve_contact(a: &mut Body, b: &mut Body, r_sum: f64) -> bool {
     a.pos -= n * (pen * inv_a / inv_sum);
     b.pos += n * (pen * inv_b / inv_sum);
 
-    // Kill the approaching normal velocity (perfectly inelastic along the normal).
-    let rel = (b.vel - a.vel).dot(n);
-    if rel < 0.0 {
-        let j = -rel / inv_sum;
-        a.vel -= n * (j * inv_a);
-        b.vel += n * (j * inv_b);
+    // Perfectly inelastic *stick*: when approaching, bring BOTH bodies to the shared centre-of-mass
+    // velocity (all relative motion removed — normal AND tangential). `inv_a/inv_sum == m_b/(m_a+m_b)`,
+    // so this is exactly `v → v_com` for each. Momentum is conserved (equal, opposite impulses).
+    let rel_v = b.vel - a.vel;
+    if rel_v.dot(n) < 0.0 {
+        a.vel += rel_v * (inv_a / inv_sum);
+        b.vel -= rel_v * (inv_b / inv_sum);
     }
     true
 }
@@ -361,6 +364,40 @@ mod tests {
         assert!(
             sep >= r_sum - 1.0 && sep < r_sum + 5.0e5,
             "it rests at the surface, not inside the planet (sep {sep:.3e}, r_sum {r_sum:.3e})"
+        );
+    }
+
+    #[test]
+    fn a_crashing_body_sticks_it_does_not_slide_around_the_surface() {
+        // A body arriving with BOTH inward and sideways (tangential) velocity must end up moving *with*
+        // the planet — all relative motion gone — not skating frictionlessly around the surface (the
+        // "the moon just orbits super fast at the planet's radius" bug).
+        let m_earth = 5.972e24;
+        let m_moon = 7.342e22;
+        let r_sum = 6.371e6 + 1.737e6;
+        let mut earth = Body {
+            pos: DVec3::ZERO,
+            vel: DVec3::ZERO,
+            mass: m_earth,
+        };
+        let mut moon = Body {
+            pos: DVec3::new(r_sum * 0.99, 0.0, 0.0), // just overlapping
+            vel: DVec3::new(-8000.0, 5000.0, 0.0),   // inward (−x) AND sideways (+y)
+            mass: m_moon,
+        };
+        let p_before = earth.mass * earth.vel + moon.mass * moon.vel;
+
+        assert!(resolve_contact(&mut earth, &mut moon, r_sum));
+
+        let rel = (moon.vel - earth.vel).length();
+        assert!(
+            rel < 1.0,
+            "the crashing body sticks (relative speed {rel:.3} m/s ≈ 0), it doesn't orbit the surface"
+        );
+        let p_after = earth.mass * earth.vel + moon.mass * moon.vel;
+        assert!(
+            (p_after - p_before).length() / p_before.length() < 1e-9,
+            "momentum conserved through the perfectly-inelastic stick"
         );
     }
 
