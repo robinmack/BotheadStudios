@@ -718,13 +718,27 @@ fn main() {
     // test fails. This is the invariant, enforced, not trusted. Grains spawn on the exact lattice (no
     // pre-overlap), symmetry broken by a tiny random velocity — nothing pre-compressed to release.
     {
-        let scene = Scene::flat(24, 24, 6, 0.6);
+        // A STEPPED crater (concentric voxel steps = real crater-rim geometry) — this is where the
+        // terrain min-translation normal can FLIP between axes and pump energy. Drop grains into it.
+        let (w, d) = (28u32, 28u32);
+        let plain = 12i32;
+        let (cx, cz) = (14i32, 14i32);
+        let mut hf = vec![plain; (w * d) as usize];
+        for z in 0..d as i32 {
+            for x in 0..w as i32 {
+                let r = (((x - cx).pow(2) + (z - cz).pow(2)) as f32).sqrt();
+                // deeper toward the centre, in 1 m steps → a stepped bowl
+                let top = plain - (7.0 - r * 1.2).max(0.0) as i32;
+                hf[(z * w as i32 + x) as usize] = top;
+            }
+        }
+        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: plain as f32, friction: 0.6 };
         let mut ps = Vec::new();
-        for ix in -4..=4 {
-            for iz in -4..=4 {
-                for iy in 0..6 {
+        for ix in -3..=3 {
+            for iz in -3..=3 {
+                for iy in 0..8 {
                     let i = ps.len() as u32;
-                    let mut p = Particle::at(ix as f32, PART_HALF + 3.0 + iy as f32, iz as f32);
+                    let mut p = Particle::at(ix as f32, PART_HALF + 2.0 + iy as f32, iz as f32);
                     // symmetry-breaking is a tiny VELOCITY, not a position overlap — adds no potential
                     // energy and pre-compresses nothing.
                     p.vel = [0.05 * jitter(i, 1), 0.0, 0.05 * jitter(i, 2)];
