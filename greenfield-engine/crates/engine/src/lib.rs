@@ -61,7 +61,10 @@ mod app {
                                         // planetary scale in the space band; here it is negligible vs the planet below.
     const SURFACE_GRAVITY: f32 = 9.81; // m/s² (Earth-like)
     const GRAVITY_BLOCK: usize = 8; // voxel aggregation for the mass field (coarser = cheaper queries)
-    const PHYS_SUBSTEPS: u32 = 8;
+    /// Debris substeps per frame. Higher = densely-packed grains settle cleanly (less residual energy
+    /// leak from the explicit integrator) at a proportional GPU cost (docs/23). The probe substeps
+    /// itself, sized to its bond stiffness (`Aggregate::stable_substeps`).
+    const DEBRIS_SUBSTEPS: u32 = 16;
     const DEFAULT_TIME_SCALE: f32 = 1.0; // real-time: Earth-like surface gravity needs no fast-forward
 
     /// Cohesive-bond geometry + stability for the steel probe (`docs/23`). The bond stiffness is the
@@ -792,16 +795,18 @@ mod app {
                     label: Some("frame-encoder"),
                 });
 
-            // GPU debris step (docs/22): advance all particles on the compute shader, PHYS_SUBSTEPS
-            // times (each dispatch is its own pass, so they chain). One thread per particle — the fix
-            // for single-digit FPS after a big impact. Runs before the render pass; the render then
-            // reads the same buffer it just wrote (zero-copy sim↔render).
+            // GPU debris step (docs/22, docs/23): advance all particles on the compute shader,
+            // DEBRIS_SUBSTEPS times (each stage is its own pass, so they chain). Densely-packed grains
+            // oscillate fast, so too few substeps leaks a trickle of energy (the residual crater
+            // "convection" that settles far too slowly — verified in tools/gpu-verify: 8→16 substeps
+            // cut the settled speed ~5×). FPS cost is real; the proper offset is decoupling the 8×
+            // render subdivision from the physics particle (a later refinement).
             let particle_count = self.gpu_particles.count;
             if particle_count > 0 {
-                let dt = (self.time_scale / 60.0) / PHYS_SUBSTEPS as f32;
+                let dt = (self.time_scale / 60.0) / DEBRIS_SUBSTEPS as f32;
                 self.gpu_particles
                     .set_params(&self.queue, &self.gpu_step_params(dt));
-                for _ in 0..PHYS_SUBSTEPS {
+                for _ in 0..DEBRIS_SUBSTEPS {
                     self.gpu_particles.dispatch(&mut encoder);
                 }
             }

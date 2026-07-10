@@ -113,6 +113,34 @@ async function main(): Promise<void> {
     });
     meteorBtn.addEventListener("click", () => engine.meteor(0, 0));
     document.body.appendChild(meteorBtn);
+
+    // Screenshot: capture the canvas and upload it to the dev server (web/shots/), so on-device visual
+    // bugs (e.g. levitating particles) can be shown. The actual grab happens in the frame loop right
+    // after render() presents, so the WebGPU drawing buffer is still current.
+    let wantShot = false;
+    const shotBtn = document.createElement("button");
+    shotBtn.textContent = "📷 Shot";
+    Object.assign(shotBtn.style, {
+      position: "fixed",
+      right: "12px",
+      bottom: "58px",
+      zIndex: "10",
+      padding: "10px 14px",
+      font: "600 15px/1 system-ui, sans-serif",
+      color: "#fff",
+      background: "rgba(16,28,40,0.78)",
+      border: "1px solid rgba(120,180,255,0.4)",
+      borderRadius: "10px",
+      backdropFilter: "blur(6px)",
+      cursor: "pointer",
+      touchAction: "manipulation",
+    });
+    shotBtn.addEventListener("click", () => {
+      wantShot = true;
+      setStatus("capturing screenshot…");
+      window.setTimeout(hideStatus, 1200);
+    });
+    document.body.appendChild(shotBtn);
     report(
       "info",
       `canvas ${canvas.width}x${canvas.height} client ${canvas.clientWidth}x${canvas.clientHeight} dpr ${window.devicePixelRatio}`,
@@ -258,6 +286,23 @@ async function main(): Promise<void> {
       } catch (err) {
         setStatus(`render error: ${String(err)}`, true);
         return;
+      }
+      // Grab the screenshot HERE — immediately after render() presented, while the WebGPU drawing
+      // buffer is current — then upload it to the dev server.
+      if (wantShot) {
+        wantShot = false;
+        try {
+          const url = canvas.toDataURL("image/png");
+          void fetch("/__shot", {
+            method: "POST",
+            headers: { "content-type": "text/plain" },
+            body: url,
+          })
+            .then(() => report("info", `screenshot posted (${url.length} chars)`))
+            .catch((e) => report("error", `screenshot upload failed: ${String(e)}`));
+        } catch (e) {
+          report("error", `screenshot capture failed: ${String(e)} (WebGPU canvas may need readback)`);
+        }
       }
       if (firstFrame) {
         report("info", "first frame rendered OK");

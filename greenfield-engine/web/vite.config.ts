@@ -1,9 +1,47 @@
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { defineConfig, type Plugin } from "vite";
 import basicSsl from "@vitejs/plugin-basic-ssl";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
+
+// Save a screenshot the client POSTs (a PNG data URL) to web/shots/, so on-device visual bugs (e.g.
+// levitating particles) can be captured and inspected. The button in main.ts POSTs to /__shot.
+function shotSink(): Plugin {
+  return {
+    name: "screenshot-sink",
+    apply: "serve",
+    configureServer(server) {
+      server.middlewares.use("/__shot", (req, res) => {
+        if (req.method !== "POST") {
+          res.statusCode = 405;
+          res.end();
+          return;
+        }
+        let body = "";
+        req.on("data", (c) => (body += c));
+        req.on("end", () => {
+          try {
+            const b64 = body.replace(/^data:image\/\w+;base64,/, "");
+            const buf = Buffer.from(b64, "base64");
+            const dir = resolve(root, "shots");
+            mkdirSync(dir, { recursive: true });
+            const file = resolve(dir, `shot-${Date.now()}.png`);
+            writeFileSync(file, buf);
+            server.config.logger.info(`[client] 📷 screenshot saved: ${file} (${buf.length} bytes)`);
+            res.statusCode = 204;
+            res.end();
+          } catch (e) {
+            server.config.logger.error(`[client] screenshot save failed: ${String(e)}`);
+            res.statusCode = 500;
+            res.end();
+          }
+        });
+      });
+    },
+  };
+}
 
 // Relay the client's console output + errors to the dev-server stdout, so console-less devices
 // (iPad Safari, etc.) can be debugged. The page POSTs JSON {level, msg} to /__log.
@@ -49,7 +87,7 @@ const lan = process.env.LAN === "1";
 
 export default defineConfig({
   assetsInclude: ["**/*.wasm"],
-  plugins: [logRelay(), ...(lan ? [basicSsl()] : [])],
+  plugins: [logRelay(), shotSink(), ...(lan ? [basicSsl()] : [])],
   server: {
     host: lan ? true : "127.0.0.1",
     port: 5173,
