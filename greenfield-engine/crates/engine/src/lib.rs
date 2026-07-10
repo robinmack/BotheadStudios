@@ -926,7 +926,18 @@ mod app {
                     .unwrap_or(-1.0e9);
                 let floor = ground + half;
                 if p.pos.y < floor {
-                    p.pos.y = floor;
+                    // Correct only the penetration BEYOND a small dead zone, and gently. Hard-snapping
+                    // the tiny per-substep penetration of a RESTING probe pumps potential energy into
+                    // its stiff bonds every substep — that was the probe's "free energy" (it vibrated
+                    // apart and its scattered particles fell forever). The dead zone lets it rest with a
+                    // hair of sink and injects nothing; a deep penetration (a hard landing) is eased out,
+                    // not snapped. Velocity clamp + friction only ever REMOVE energy. (The clean fix is
+                    // implicit integration of the stiff bonds — flagged, docs/23.)
+                    const DEAD: f64 = 0.15;
+                    let pen = floor - p.pos.y;
+                    if pen > DEAD {
+                        p.pos.y += 0.5 * (pen - DEAD);
+                    }
                     if p.vel.y < 0.0 {
                         p.vel.y = 0.0;
                     }
