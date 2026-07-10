@@ -970,13 +970,13 @@ mod app {
         pipeline: wgpu::RenderPipeline,
         sphere_gpu: GpuMesh,
         planet_uni: UniformSlot,
-        moon_uni: UniformSlot,
-        bodies: Vec<crate::orbit::Body>, // [Sun, Earth, Moon]
+        moon_unis: Vec<UniformSlot>, // one per moon (the two-moon scene has two)
+        bodies: Vec<crate::orbit::Body>, // [Sun, Earth, Moon, (Moon2)…]
         acc: Vec<glam::DVec3>,
         time_scale: f64,
         camera: Camera,
         /// The body the view is centred on — the viewport's physical frame of reference (docs/17).
-        /// 1 = Earth (default), 2 = Moon.
+        /// 1 = Earth (default), 2.. = moons.
         focus: usize,
         // Body colours are the *aggregate albedo of a real composition* (materials.json), not painted
         // tints — see `materials::aggregate_albedo` / docs/17. Reflectance only; the shader supplies
@@ -985,17 +985,25 @@ mod app {
         moon_tint: [f32; 4],
         /// Snapshot of the initial [Sun, Earth, Moon] state, for the "reset" control.
         initial_bodies: Vec<crate::orbit::Body>,
-        /// True once the Moon has struck the Earth (contact resolution fired) — for the HUD.
+        /// True once any moon has struck the Earth (contact resolution fired) — for the HUD.
         impacted: bool,
-        /// Kinetic energy (J) the impact dissipated — the energy that would become damage. Reported,
+        /// Per-moon "has already hit" flags, so each moon's impact energy is counted exactly once
+        /// (the two-moon scene sums both).
+        moon_hit: Vec<bool>,
+        /// Kinetic energy (J) the impact(s) dissipated — the energy that would become damage. Reported,
         /// not yet turned into actual fragmentation (docs/17 honesty: measure it, don't hide it).
         impact_energy_j: f64,
     }
 
     #[wasm_bindgen]
     impl OrbitDemo {
-        /// Initialize the space band: acquire the GPU, build a unit sphere, seed the Earth + Moon.
-        pub async fn create(canvas: HtmlCanvasElement) -> Result<OrbitDemo, JsValue> {
+        /// Initialize the space band: acquire the GPU, build a unit sphere, seed the Earth + `num_moons`
+        /// moons. `num_moons == 1` is the standard scene; `2` places moons on opposite sides of the same
+        /// orbit (the de-orbit-both stress test).
+        pub async fn create(
+            canvas: HtmlCanvasElement,
+            num_moons: u32,
+        ) -> Result<OrbitDemo, JsValue> {
             console_error_panic_hook::set_once();
             let _ = console_log::init_with_level(log::Level::Info);
 
@@ -1065,8 +1073,11 @@ mod app {
                     wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                 )],
             });
+            let num_moons = num_moons.clamp(1, 2) as usize;
             let planet_uni = make_space_uniform(&device, &bind_layout);
-            let moon_uni = make_space_uniform(&device, &bind_layout);
+            let moon_unis: Vec<UniformSlot> = (0..num_moons)
+                .map(|_| make_space_uniform(&device, &bind_layout))
+                .collect();
             let pipeline = build_space_pipeline(&device, &bind_layout, config.format);
 
             // The real three-body system in SI units: [Sun, Earth, Moon] (orbit.rs). The Earth carries
@@ -1076,7 +1087,7 @@ mod app {
             // The Sun both holds the system (gravity) and lights it. At this zoom it sits ~23,000
             // display units off-frame, so it is the *light source*, not a drawn disk — the scale-
             // adaptive choice (docs/17): render what matters at this scale.
-            let bodies = vec![
+            let mut bodies = vec![
                 crate::orbit::Body {
                     pos: glam::DVec3::ZERO,
                     vel: glam::DVec3::ZERO,
@@ -1087,12 +1098,18 @@ mod app {
                     vel: glam::DVec3::new(0.0, EARTH_HELIO_SPEED, 0.0),
                     mass: EARTH_MASS,
                 },
-                crate::orbit::Body {
-                    pos: glam::DVec3::new(AU_M + MOON_DIST_M, 0.0, 0.0),
-                    vel: glam::DVec3::new(0.0, EARTH_HELIO_SPEED + MOON_SPEED, 0.0),
-                    mass: MOON_MASS,
-                },
             ];
+            // Moons on the same circular orbit. For two, place them on OPPOSITE sides and give the
+            // second the opposite tangential velocity, so both orbit the Earth the same way and stay
+            // diametrically opposed — the symmetric "de-orbit both at once" stress test.
+            for i in 0..num_moons {
+                let side = if i == 0 { 1.0 } else { -1.0 };
+                bodies.push(crate::orbit::Body {
+                    pos: glam::DVec3::new(AU_M + side * MOON_DIST_M, 0.0, 0.0),
+                    vel: glam::DVec3::new(0.0, EARTH_HELIO_SPEED + side * MOON_SPEED, 0.0),
+                    mass: MOON_MASS,
+                });
+            }
             let acc = crate::orbit::accelerations(&bodies);
             let initial_bodies = bodies.clone();
 
@@ -1124,7 +1141,7 @@ mod app {
             };
 
             log::info!(
-                "orbit demo ready: Sun+Earth+Moon at real scale, sun-lit, {ORBIT_TIME_SCALE:.0}x time"
+                "orbit demo ready: Sun+Earth+{num_moons} moon(s), sun-lit, {ORBIT_TIME_SCALE:.0}x time"
             );
             Ok(OrbitDemo {
                 surface,
@@ -1135,7 +1152,7 @@ mod app {
                 pipeline,
                 sphere_gpu,
                 planet_uni,
-                moon_uni,
+                moon_unis,
                 bodies,
                 acc,
                 time_scale: ORBIT_TIME_SCALE,
@@ -1145,33 +1162,42 @@ mod app {
                 moon_tint,
                 initial_bodies,
                 impacted: false,
+                moon_hit: vec![false; num_moons],
                 impact_energy_j: 0.0,
             })
         }
 
         // --- Orbital-decay controls: brake the Moon and watch its orbit tighten into a crash. ---
 
-        /// Halve the Moon's velocity *relative to the Earth* — the orbital-decay control. Each tap
-        /// tightens the orbit (watch `moon_perigee_km` fall); a few taps drop the perigee below the
-        /// planet's surface and the Moon crashes. (A single halving still misses — real orbital
-        /// mechanics, not a trick.)
+        /// Halve **every** moon's velocity relative to the Earth — the orbital-decay control (all moons
+        /// at once, so the two-moon scene de-orbits symmetrically). Each tap tightens the orbit (watch
+        /// `moon_perigee_km` fall); a few taps drop the perigee below the surface and they crash. (A
+        /// single halving still misses — real orbital mechanics, not a trick.)
         pub fn brake_moon(&mut self) {
             let earth_vel = self.bodies[1].vel;
-            self.bodies[2].vel = earth_vel + (self.bodies[2].vel - earth_vel) * 0.5;
+            for i in 2..self.bodies.len() {
+                self.bodies[i].vel = earth_vel + (self.bodies[i].vel - earth_vel) * 0.5;
+            }
         }
 
-        /// Cancel the Moon's velocity relative to the Earth entirely — it drops straight in and
-        /// crashes. The dramatic version.
+        /// Cancel every moon's velocity relative to the Earth — they drop straight in and crash. The
+        /// dramatic version (both moons at once).
         pub fn drop_moon(&mut self) {
-            self.bodies[2].vel = self.bodies[1].vel;
+            let earth_vel = self.bodies[1].vel;
+            for i in 2..self.bodies.len() {
+                self.bodies[i].vel = earth_vel;
+            }
         }
 
-        /// Restore the original Sun–Earth–Moon state (undo braking / the crash).
+        /// Restore the original Sun–Earth–Moon(s) state (undo braking / the crash).
         pub fn reset_moon(&mut self) {
             self.bodies = self.initial_bodies.clone();
             self.acc = crate::orbit::accelerations(&self.bodies);
             self.impacted = false;
             self.impact_energy_j = 0.0;
+            for hit in &mut self.moon_hit {
+                *hit = false;
+            }
         }
 
         /// Predicted perigee (closest approach) of the Moon's orbit about the Earth, in km — or a
@@ -1209,17 +1235,27 @@ mod app {
             self.time_scale
         }
 
-        /// Cycle the view's frame of reference between the bodies we can stand on (Earth ⇄ Moon). The
-        /// focused body becomes the origin; everything else moves honestly around it (docs/17).
+        /// Cycle the view's frame of reference through the Earth and each moon. The focused body becomes
+        /// the origin; everything else moves honestly around it (docs/17).
         pub fn cycle_focus(&mut self) {
-            self.focus = if self.focus == 1 { 2 } else { 1 };
+            let last = self.bodies.len() - 1; // last moon
+            self.focus = if self.focus >= last {
+                1
+            } else {
+                self.focus + 1
+            };
         }
 
         /// Name of the currently-focused body (for the HUD / focus button).
         pub fn focus_label(&self) -> String {
-            match self.focus {
-                2 => "Moon".to_string(),
-                _ => "Earth".to_string(),
+            if self.focus == 1 {
+                return "Earth".to_string();
+            }
+            // Two-moon scene → "Moon A" / "Moon B"; single moon → just "Moon".
+            if self.bodies.len() > 3 {
+                format!("Moon {}", (b'A' + (self.focus - 2) as u8) as char)
+            } else {
+                "Moon".to_string()
             }
         }
 
@@ -1255,19 +1291,22 @@ mod app {
             let contact = EARTH_RADIUS_M + MOON_RADIUS_M; // Earth + Moon radii: surfaces touch here
             for _ in 0..ORBIT_SUBSTEPS {
                 crate::orbit::verlet_step(&mut self.bodies, &mut self.acc, dt);
-                // Earth (index 1) vs Moon (index 2): solid bodies collide at their surfaces — they
-                // don't tunnel through each other as point masses into a 1/r² singularity.
+                // Earth (index 1) vs each moon (index 2..): solid bodies collide at their surfaces —
+                // they don't tunnel through each other as point masses into a 1/r² singularity. Each
+                // moon's impact energy is counted once (the two-moon scene sums both).
                 let (head, tail) = self.bodies.split_at_mut(2);
-                let (earth, moon) = (&mut head[1], &mut tail[0]);
-                // Measure the impact energy BEFORE the (energy-removing) contact resolution, so we can
-                // honestly report the damage this collision would do (docs/17) even though the
-                // fragmentation itself isn't modelled yet.
-                let dissipated = crate::orbit::inelastic_dissipation(earth, moon);
-                if crate::orbit::resolve_contact(earth, moon, contact) {
-                    if !self.impacted {
-                        self.impact_energy_j = dissipated;
+                let earth = &mut head[1];
+                for (k, moon) in tail.iter_mut().enumerate() {
+                    // Measure the impact energy BEFORE the (energy-removing) contact resolution — honest
+                    // damage reporting (docs/17), even though fragmentation isn't modelled yet.
+                    let dissipated = crate::orbit::inelastic_dissipation(earth, moon);
+                    if crate::orbit::resolve_contact(earth, moon, contact) {
+                        if !self.moon_hit[k] {
+                            self.moon_hit[k] = true;
+                            self.impact_energy_j += dissipated;
+                        }
+                        self.impacted = true;
                     }
-                    self.impacted = true;
                 }
             }
 
@@ -1277,17 +1316,13 @@ mod app {
             // everything else is drawn relative to it. Switching focus re-centres the whole view.
             let focus = self.bodies[self.focus].pos;
             let sun = self.bodies[0].pos;
-            let earth_pos = ((self.bodies[1].pos - focus) * DISPLAY_SCALE).as_vec3();
-            let moon_pos = ((self.bodies[2].pos - focus) * DISPLAY_SCALE).as_vec3();
             let earth_r = (EARTH_RADIUS_M * DISPLAY_SCALE) as f32;
             let moon_r = (MOON_RADIUS_M * DISPLAY_SCALE) as f32;
 
             // Light direction = TO the real Sun from each body (per-body; the Sun is the illuminant,
-            // not a hardcoded direction). So the lit hemisphere and the Moon's phases come from the
-            // actual geometry.
+            // not a hardcoded direction). So the lit hemisphere and the phases come from the geometry.
+            let earth_pos = ((self.bodies[1].pos - focus) * DISPLAY_SCALE).as_vec3();
             let earth_light = (sun - self.bodies[1].pos).as_vec3().normalize();
-            let moon_light = (sun - self.bodies[2].pos).as_vec3().normalize();
-
             write_space_uniform(
                 &self.queue,
                 &self.planet_uni,
@@ -1296,14 +1331,19 @@ mod app {
                 earth_light,
                 self.earth_tint, // aggregate albedo of ocean+rock+ice (docs/17), not a painted tint
             );
-            write_space_uniform(
-                &self.queue,
-                &self.moon_uni,
-                view_proj,
-                Mat4::from_translation(moon_pos) * Mat4::from_scale(Vec3::splat(moon_r)),
-                moon_light,
-                self.moon_tint, // aggregate albedo of basalt (docs/17); dark, lit bright by the sun
-            );
+            for (k, uni) in self.moon_unis.iter().enumerate() {
+                let bi = 2 + k; // body index of this moon
+                let mpos = ((self.bodies[bi].pos - focus) * DISPLAY_SCALE).as_vec3();
+                let mlight = (sun - self.bodies[bi].pos).as_vec3().normalize();
+                write_space_uniform(
+                    &self.queue,
+                    uni,
+                    view_proj,
+                    Mat4::from_translation(mpos) * Mat4::from_scale(Vec3::splat(moon_r)),
+                    mlight,
+                    self.moon_tint, // aggregate albedo of basalt (docs/17); dark, lit bright by the sun
+                );
+            }
 
             let output = self
                 .surface
@@ -1346,7 +1386,9 @@ mod app {
                 });
                 pass.set_pipeline(&self.pipeline);
                 draw(&mut pass, &self.planet_uni, &self.sphere_gpu);
-                draw(&mut pass, &self.moon_uni, &self.sphere_gpu);
+                for uni in &self.moon_unis {
+                    draw(&mut pass, uni, &self.sphere_gpu);
+                }
             }
             self.queue.submit(std::iter::once(encoder.finish()));
             output.present();

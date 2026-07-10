@@ -5,6 +5,26 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-09 — Two-moon stress test scene
+
+**What.** A new scene (`/twomoons.html`): two moons on the same orbit, **opposite sides** of the Earth,
+that you **de-orbit both at once**. Generalized `OrbitDemo` from one moon to N — `[Sun, Earth, Moon,
+Moon2]`, a moon uniform per body, per-moon lighting/framing, and collision resolved Earth-vs-each-moon
+with each moon's impact energy counted once (the two hits **sum** in the HUD). `brake_moon`/`drop_moon`
+now act on *all* moons; focus cycles Earth → Moon A → Moon B; the second moon is placed at −d with the
+opposite tangential velocity so both orbit the same way and stay diametrically opposed. The two HTML
+pages share one script — the moon count comes from `<body data-moons>`.
+
+**Why.** Robin: "It's our universe, we might as well play in it." The N-body core (`orbit.rs`) is
+already generic, so two moons is nearly free physically; its value is **stressing the collision path** —
+two simultaneous surface contacts, symmetric resolution, and (later) two craters materialising at once.
+
+**Verified.** `cargo test` 37/37; clippy `-D warnings` clean; fmt clean; wasm + `tsc` green;
+`/twomoons.html` serves. Visuals (two moons, symmetric de-orbit, double impact) pending Robin's
+on-device check.
+
+---
+
 ## 2026-07-09 — LOD-adaptive damage: the crater bridge (celestial ↔ voxel)
 
 **What.** Connected the Moon-crash to a real crater across scales (`docs/19`). The bridge: a damage

@@ -64,10 +64,11 @@ export default defineConfig({
   },
   build: {
     rollupOptions: {
-      // Multi-page: the terrain vertical slice (index) and the space band (orbit).
+      // Multi-page: the terrain slice (index), the space band (orbit), the two-moon stress test.
       input: {
         main: resolve(root, "index.html"),
         orbit: resolve(root, "orbit.html"),
+        twomoons: resolve(root, "twomoons.html"),
       },
     },
   },

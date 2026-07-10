@@ -83,7 +83,10 @@ async function main(): Promise<void> {
     setStatus("Loading engine… (compiling WASM)");
     await init();
     setStatus("Requesting GPU device…");
-    const demo = await OrbitDemo.create(canvas);
+    // Moon count comes from the page (<body data-moons="2">) so orbit.html and twomoons.html share
+    // this one script. Default 1.
+    const numMoons = Number(document.body.getAttribute("data-moons")) || 1;
+    const demo = await OrbitDemo.create(canvas, numMoons);
     hideStatus();
     const stats = document.getElementById("stats");
     if (stats) stats.hidden = false;

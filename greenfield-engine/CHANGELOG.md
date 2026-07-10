@@ -10,6 +10,11 @@ because **we are our own first customers** and pin exact engine versions in our 
 ## [Unreleased]
 
 ### Added
+- **Two-moon stress-test scene** (`/twomoons.html`). Two moons on the same orbit, opposite sides of the
+  Earth, de-orbited both at once. `OrbitDemo` generalized from one moon to N (per-moon uniforms,
+  lighting, framing; Earth-vs-each-moon collision with both impact energies summed); `brake_moon` /
+  `drop_moon` act on all moons; focus cycles Earth → Moon A → Moon B. Added to the scene picker; the
+  moon count comes from `<body data-moons>` so both space pages share one script.
 - **LOD-adaptive damage — the crater bridge** (`docs/19`). A damage event is the same event at every
   scale: the coarse **summary** (`damage::crater_volume` = `E/σ`) and the fine **voxel crater**
   (`matter::impact`) use the same `σ·V` accounting and agree — proven by

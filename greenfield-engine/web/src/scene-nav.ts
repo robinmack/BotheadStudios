@@ -8,6 +8,7 @@ type Scene = { path: string; label: string };
 const SCENES: Scene[] = [
   { path: "/", label: "Terrain" },
   { path: "/orbit.html", label: "Space" },
+  { path: "/twomoons.html", label: "Two Moons" },
 ];
 
 function install(): void {
