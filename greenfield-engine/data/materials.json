@@ -78,6 +78,16 @@
       "sources": ["https://www.azom.com/article.aspx?ArticleID=6115", "https://www.makeitfrom.com/material-properties/SAE-AISI-1018-G10180-Carbon-Steel", "https://www.roymech.co.uk/Useful_Tables/Tribology/co_of_frict.htm", "https://ntrs.nasa.gov/archive/nasa/casi.ntrs.nasa.gov/19950004401.pdf"]
     },
     {
+      "id": "nickel", "display_name": "Nickel (Ni 200, commercially pure)", "category": "metal", "phase": "solid", "parent": null,
+      "assumed_condition": "annealed commercially-pure nickel (Ni 200); meteoritic iron is a Fe-Ni alloy, ~5-20% Ni",
+      "mechanical": { "density": 8908, "youngs_modulus": 2.00e11, "poisson_ratio": 0.31, "compressive_strength": 1.48e8, "tensile_strength": 4.62e8, "shear_strength": 2.60e8, "cohesion": null, "friction_angle": null, "hardness_mohs": 4.0, "ductility": 0.40, "restitution": 0.60, "friction_coefficient": 0.7 },
+      "optical": { "albedo": [0.62, 0.62, 0.63], "roughness": 0.35, "metallic": 1.0, "translucency": 0.0, "color_variance": 0.08, "grain": "fine, low contrast; takes a bright polish" },
+      "thermal": { "specific_heat": 444, "melt_point": 1728, "latent_fusion": 2.91e5, "boil_point": 3186, "latent_vaporization": 6.48e6 },
+      "ranges": { "density": [8900, 8912], "youngs_modulus": [1.90e11, 2.20e11], "tensile_strength": [3.45e8, 5.50e8], "hardness_mohs": [3.8, 4.2] },
+      "notes": "Commercially-pure Ni 200 (annealed). Iron meteorites are Fe-Ni (kamacite ~5-7% Ni, taenite up to ~50%). specific_heat/latent heats are elemental nickel.",
+      "sources": ["https://www.azom.com/article.aspx?ArticleID=2193", "https://www.engineeringtoolbox.com/specific-heat-metals-d_152.html", "https://en.wikipedia.org/wiki/Nickel"]
+    },
+    {
       "id": "copper", "display_name": "Copper (C11000, annealed)", "category": "metal", "phase": "solid", "parent": null,
       "mechanical": { "density": 8940, "youngs_modulus": 1.20e11, "poisson_ratio": 0.34, "compressive_strength": 6.9e7, "tensile_strength": 2.20e8, "shear_strength": 1.50e8, "cohesion": null, "friction_angle": null, "hardness_mohs": 3.0, "ductility": 0.95, "restitution": 0.45, "friction_coefficient": 1.0 },
       "optical": { "albedo": [0.95, 0.64, 0.54], "roughness": 0.35, "metallic": 1.0, "translucency": 0.0, "color_variance": 0.15, "grain": "weak directional along drawing/rolling axis; fine; low contrast when clean" },

@@ -38,6 +38,10 @@ struct RawThermal {
 struct RawMechanical {
     /// kg/m^3. Present for every material in the seed database.
     density: f32,
+    /// Pa. Elastic (Young's) modulus — resistance to stretch/compress. Drives cohesive-bond stiffness
+    /// (a solid is rigid because its bonds are stiff, docs/23). null where not characterized.
+    #[serde(default)]
+    youngs_modulus: Option<f32>,
     /// Pa. Resistance to being pulled apart; null for liquids. Drives fracture (Phase 3).
     #[serde(default)]
     tensile_strength: Option<f32>,
@@ -92,6 +96,10 @@ pub struct Material {
     /// Pa. How hard it is to fracture/detach a chunk (Phase 3): rock is high (barely chips), soil and
     /// grass are ~1000× lower (detach easily). Falls back to cohesion, then to "effectively unbreakable".
     pub fracture_strength: f32,
+    /// Pa. Young's (elastic) modulus — how stiffly the material resists deformation. A solid is rigid
+    /// because its bonds are stiff; the cohesive-aggregate bond stiffness derives from this (`docs/23`).
+    /// 0 where not characterized (falls back to a soft default at the call site).
+    pub youngs_modulus: f32,
     /// 0 (mirror) .. 1 (matte). Drives specular highlight width (Phase 4).
     pub roughness: f32,
     /// 0 (dielectric) .. 1 (metal). Metals get a tinted, tighter highlight (sparkle).
@@ -127,6 +135,7 @@ pub fn load() -> Vec<Material> {
                 density: m.mechanical.density,
                 albedo: m.optical.albedo,
                 fracture_strength,
+                youngs_modulus: m.mechanical.youngs_modulus.unwrap_or(0.0),
                 roughness: m.optical.roughness,
                 metallic: m.optical.metallic,
                 color_variance: m.optical.color_variance,

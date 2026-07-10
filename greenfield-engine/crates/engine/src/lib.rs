@@ -63,13 +63,40 @@ mod app {
     const PHYS_SUBSTEPS: u32 = 8;
     const DEFAULT_TIME_SCALE: f32 = 1.0; // real-time: Earth-like surface gravity needs no fast-forward
 
+    /// Cohesive-bond geometry + stability for the steel probe (`docs/23`). The bond stiffness is the
+    /// material's REAL elastic modulus (k = E·L for a lattice of spacing L) — rigidity is cohesive
+    /// force, not a fudge. But true iron (E ≈ 2.05e11 → k ≈ 2e11 N/m) would need thousands of explicit
+    /// substeps/frame to stay stable; we cap k here and reach true steel only with implicit integration
+    /// (flagged). The cap is still ~1000× the old hand-tuned 5e6, so the ball reads as rigid.
+    const PROBE_LATTICE: f64 = 1.0; // particle spacing (m)
+    const PROBE_STIFFNESS_CAP: f64 = 5.0e9; // N/m — real-time explicit-stability ceiling (flagged)
+
     // Phase 3 dig/fracture.
     const MAX_PARTICLES: usize = 60_000;
-    const PARTICLE_CUBE_HALF: f32 = 0.42;
+    const PARTICLE_CUBE_HALF: f32 = 0.21; // half of the old 0.42 — finer debris, now GPU can afford it
+
+    /// Each physics particle (one per 1 m³ voxel) is DRAWN as 8 half-size sub-cubes at the octant
+    /// centres of its cell — 8× the cubes at ½ the size (2³, cubed in volume). Purely a rendering
+    /// subdivision: the physics model stays one particle per voxel (mass/conservation unchanged); this
+    /// just resolves the debris more finely now that the sim runs on the GPU.
+    const SUB_Q: f32 = 0.25;
+    const SUB8: [[f32; 3]; 8] = [
+        [-SUB_Q, -SUB_Q, -SUB_Q],
+        [SUB_Q, -SUB_Q, -SUB_Q],
+        [-SUB_Q, SUB_Q, -SUB_Q],
+        [SUB_Q, SUB_Q, -SUB_Q],
+        [-SUB_Q, -SUB_Q, SUB_Q],
+        [SUB_Q, -SUB_Q, SUB_Q],
+        [-SUB_Q, SUB_Q, SUB_Q],
+        [SUB_Q, SUB_Q, SUB_Q],
+    ];
     const DIG_RADIUS: f32 = 3.0;
     const DIG_POWER: f32 = 1.5e6; // breaks soil/grass, not granite
     const BLAST_POWER: f32 = 3.0e7; // breaks granite too
-    const METEOR_ENERGY: f32 = 1.5e11; // J — a high-energy impact whose core melts + glows (docs/20)
+                                    // A meteor is a real nickel-iron body, not an abstract energy: its impact energy is ½·m·v²
+                                    // (docs/23). ~91% iron / ~8% nickel; it vaporizes on impact into its own matter.
+    const METEOR_MASS: f32 = 1_000.0; // kg (~0.3 m Fe-Ni body)
+    const METEOR_SPEED: f32 = 17_000.0; // m/s (typical hypervelocity impact speed)
 
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -224,7 +251,7 @@ mod app {
             let probe_acc = probe.accelerations();
             let probe_instances = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("probe-instances"),
-                size: (probe.particles.len() * std::mem::size_of::<GpuParticle>()) as u64,
+                size: (probe.particles.len() * 8 * std::mem::size_of::<GpuParticle>()) as u64,
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
@@ -363,8 +390,11 @@ mod app {
             // GPU-compute debris (docs/22): construct the storage buffer + compute pipeline (this
             // validates `particle_step.wgsl` on the device) and upload the terrain heightfield the step
             // collides against.
-            let mut gpu_particles =
-                GpuParticles::new(&device, MAX_PARTICLES as u32, (world.w * world.d) as u32);
+            let mut gpu_particles = GpuParticles::new(
+                &device,
+                (MAX_PARTICLES * 8) as u32,
+                (world.w * world.d) as u32,
+            );
             let mut tops: Vec<i32> = Vec::with_capacity(world.w * world.d);
             for z in 0..world.d {
                 for x in 0..world.w {
@@ -533,10 +563,18 @@ mod app {
             let far = inv.project_point3(Vec3::new(ndc_x, ndc_y, 1.0));
             let dir = (far - near).normalize_or_zero();
             if let Some((_x, _y, _z, hit)) = self.world.raycast(eye, dir, 6000.0) {
+                // The meteor is a real Fe-Ni body: its impact energy is its kinetic energy, ½·m·v².
+                let energy = 0.5 * METEOR_MASS * METEOR_SPEED * METEOR_SPEED;
+
                 self.matter
-                    .impact(&mut self.world, &self.mats, hit, dir, METEOR_ENERGY);
+                    .impact(&mut self.world, &self.mats, hit, dir, energy);
                 self.matter.collapse(&mut self.world, &self.mats);
                 self.flush_debris_to_gpu();
+
+                // The meteor's own matter vaporizes on impact (docs/23) — its ~1000 kg of Fe-Ni is far
+                // hotter than iron's boil point, so it becomes an expanding cloud of incandescent vapor
+                // rather than surviving as a body. This is the meteor *being matter*, not a fireball mock.
+                self.spawn_vaporized_meteor(hit, dir);
 
                 // The SAME impact reaches the probe — no special case. Energy delivered falls off with
                 // distance from ground zero; `deposit_impact` heats + kicks the ball's particles, and
@@ -547,14 +585,51 @@ mod app {
                 let sigma =
                     self.mats[materials::index_of(&self.mats, "granite")].fracture_strength as f64;
                 let reach = crate::damage::crater_radius(crate::damage::crater_volume(
-                    METEOR_ENERGY as f64,
+                    energy as f64,
                     sigma,
                 ))
                 .max(1.0);
-                let energy = METEOR_ENERGY as f64 * (-(com - site).length() / reach).exp();
+                let energy_at_probe = energy as f64 * (-(com - site).length() / reach).exp();
                 let dir_d = glam::DVec3::new(dir.x as f64, dir.y as f64, dir.z as f64);
-                self.probe.deposit_impact(&self.mats, site, dir_d, energy);
+                self.probe
+                    .deposit_impact(&self.mats, site, dir_d, energy_at_probe);
             }
+        }
+
+        /// The vaporized meteor: ~1 tonne of Fe-Ni turned to incandescent vapor, spawned as a burst of
+        /// white-hot particles at ground zero that expand outward and carry the meteor's downward
+        /// momentum. Composition is ~91% iron / ~8% nickel — the real make-up of an iron meteorite.
+        fn spawn_vaporized_meteor(&mut self, hit: Vec3, dir: Vec3) {
+            let iron = materials::index_of(&self.mats, "iron");
+            let nickel = materials::index_of(&self.mats, "nickel");
+            const N: usize = 64;
+            // Vapor temperature: well above iron's boil point (3134 K) — a hot impact plume.
+            const VAPOR_TEMP: f32 = 6000.0;
+            let mut burst = Vec::with_capacity(N);
+            for i in 0..N {
+                // Fibonacci hemisphere: even outward directions, biased downward along the impactor.
+                let t = (i as f32 + 0.5) / N as f32;
+                let phi = t * std::f32::consts::TAU * 12.0;
+                let y = 1.0 - 2.0 * t; // −1..1
+                let r = (1.0 - y * y).max(0.0).sqrt();
+                let out = Vec3::new(r * phi.cos(), y.abs(), r * phi.sin()).normalize_or_zero();
+                // Expansion outward + a share of the meteor's incoming momentum.
+                let vel = out * 22.0 + dir * 8.0;
+                let pos = hit + out * 1.5 + Vec3::Y * 0.5;
+                // ~1 in 12 parcels is nickel (≈8%), the rest iron — an Fe-Ni alloy by count.
+                let mat = if i % 12 == 0 { nickel } else { iron };
+                burst.push(GpuParticle {
+                    offset: [pos.x, pos.y, pos.z],
+                    temp: VAPOR_TEMP,
+                    vel: [vel.x, vel.y, vel.z],
+                    resting: 0.0,
+                    color: self.mats[mat].albedo,
+                    material: mat as f32,
+                    emission: emission::incandescence(VAPOR_TEMP),
+                    _pad: 0.0,
+                });
+            }
+            self.gpu_particles.append(&self.queue, &burst);
         }
 
         fn remesh_world(&mut self) {
@@ -573,15 +648,19 @@ mod app {
                 .matter
                 .particles
                 .iter()
-                .map(|p| GpuParticle {
-                    offset: [p.pos.x, p.pos.y, p.pos.z],
-                    temp: p.temp_k,
-                    vel: [p.vel.x, p.vel.y, p.vel.z],
-                    resting: 0.0,
-                    color: self.mats[p.material].albedo,
-                    material: p.material as f32,
-                    emission: emission::incandescence(p.temp_k),
-                    _pad: 0.0,
+                .flat_map(|p| {
+                    let albedo = self.mats[p.material].albedo;
+                    let emission = emission::incandescence(p.temp_k);
+                    SUB8.map(|o| GpuParticle {
+                        offset: [p.pos.x + o[0], p.pos.y + o[1], p.pos.z + o[2]],
+                        temp: p.temp_k,
+                        vel: [p.vel.x, p.vel.y, p.vel.z],
+                        resting: 0.0,
+                        color: albedo,
+                        material: p.material as f32,
+                        emission,
+                        _pad: 0.0,
+                    })
                 })
                 .collect();
             self.gpu_particles.append(&self.queue, &gpu);
@@ -599,15 +678,19 @@ mod app {
                 .particles
                 .iter()
                 .zip(self.probe.temps.iter())
-                .map(|(p, &t)| GpuParticle {
-                    offset: [p.pos.x as f32, p.pos.y as f32, p.pos.z as f32],
-                    temp: t,
-                    vel: [0.0, 0.0, 0.0],
-                    resting: 0.0,
-                    color: albedo,
-                    material: mat,
-                    emission: emission::incandescence(t),
-                    _pad: 0.0,
+                .flat_map(|(p, &t)| {
+                    let (px, py, pz) = (p.pos.x as f32, p.pos.y as f32, p.pos.z as f32);
+                    let emission = emission::incandescence(t);
+                    SUB8.map(|o| GpuParticle {
+                        offset: [px + o[0], py + o[1], pz + o[2]],
+                        temp: t,
+                        vel: [0.0, 0.0, 0.0],
+                        resting: 0.0,
+                        color: albedo,
+                        material: mat,
+                        emission,
+                        _pad: 0.0,
+                    })
                 })
                 .collect();
             if !inst.is_empty() {
@@ -643,7 +726,7 @@ mod app {
                 drag: matter::DRAG,
                 contact_damp: matter::CONTACT_DAMP,
                 settle_speed: matter::SETTLE_SPEED,
-                part_half: matter::PARTICLE_HALF,
+                part_half: PARTICLE_CUBE_HALF, // sub-cubes rest at the terrain top + their (half) size
                 cool_rate: 0.4, // 1/s — molten debris fades over a few seconds (docs/20)
                 count: self.gpu_particles.count,
                 world_w: self.world.w as u32,
@@ -727,7 +810,7 @@ mod app {
                 pass.set_vertex_buffer(0, self.cube_gpu.vertex_buf.slice(..));
                 pass.set_index_buffer(self.cube_gpu.index_buf.slice(..), wgpu::IndexFormat::Uint32);
 
-                let probe_count = self.probe.particles.len() as u32;
+                let probe_count = (self.probe.particles.len() * 8) as u32; // 8 sub-cubes each
                 if probe_count > 0 {
                     pass.set_vertex_buffer(1, self.probe_instances.slice(..));
                     pass.draw_indexed(0..self.cube_gpu.index_count, 0, 0..probe_count);
@@ -746,13 +829,15 @@ mod app {
         // --- internals ---
 
         fn step_physics(&mut self) {
-            let sim_dt = self.time_scale / 60.0;
-            let dt = (sim_dt / PHYS_SUBSTEPS as f32) as f64;
-            for _ in 0..PHYS_SUBSTEPS {
-                // The probe is a cohesive iron ball of real matter (docs/23): step its bonds + gravity
-                // (settling to a ground state), then rest its particles on the terrain. Debris runs on
-                // the GPU (docs/22).
-                self.probe.step(&mut self.probe_acc, dt);
+            let sim_dt = (self.time_scale / 60.0) as f64;
+            // The probe is a cohesive iron ball of real matter (docs/23): step its bonds + gravity
+            // (settling to a ground state), then rest its particles on the terrain. Its bonds are stiff
+            // (real steel), so explicit integration needs a fine timestep to stay stable — size the
+            // substep count to the bond stiffness rather than faking rigidity. Debris runs on the GPU.
+            let sub = self.probe.stable_substeps(sim_dt).clamp(1, 256);
+            let pdt = sim_dt / sub as f64;
+            for _ in 0..sub {
+                self.probe.step(&mut self.probe_acc, pdt);
                 self.collide_probe_with_terrain();
             }
         }
@@ -1262,8 +1347,19 @@ mod app {
                 }
             }
         }
-        // cutoff 1.75 → bond to face/edge/corner neighbours; stiffness/damping/break tuned stable.
-        aggregate::Aggregate::cohesive(particles, iron, 0.5, 1.75, 5.0e6, 1.0e5, 0.15)
+        // Rigidity comes from the material's OWN elastic force (docs/23): a lattice bond of spacing L
+        // has spring constant k = E·A/L = E·L (A = L² tributary area). We use iron's real Young's
+        // modulus, capped for real-time explicit stability (true k needs implicit integration — flagged).
+        let e = mats[iron].youngs_modulus as f64; // 2.05e11 Pa (real, from the material DB)
+        let stiffness = (e * PROBE_LATTICE).min(PROBE_STIFFNESS_CAP);
+        // Damping ≈ the bond's critical damping (c ≈ √(k·m)) so the ball settles rigidly, without the
+        // rubbery ringing the old soft stiffness produced.
+        let damping = (stiffness * density).sqrt();
+        // Steel is nearly inextensible: it fractures at a small strain rather than stretching like
+        // rubber. Small enough to shatter under a meteor, large enough to survive its own landing.
+        let break_strain = 0.06;
+        // cutoff 1.75 → bond to face/edge/corner neighbours.
+        aggregate::Aggregate::cohesive(particles, iron, 0.5, 1.75, stiffness, damping, break_strain)
             .with_gravity(glam::DVec3::new(0.0, -SURFACE_GRAVITY as f64, 0.0))
     }
 
@@ -1926,11 +2022,18 @@ mod tests {
     #[test]
     fn material_database_loads() {
         let mats = materials::load();
-        assert_eq!(mats.len(), 19, "seed database should have 19 materials");
-        for id in ["granite", "dirt", "grass", "iron"] {
+        assert_eq!(mats.len(), 20, "seed database should have 20 materials");
+        for id in ["granite", "dirt", "grass", "iron", "nickel"] {
             let i = materials::index_of(&mats, id);
             assert!(mats[i].density > 0.0, "{id} must have positive density");
         }
+        // Metals carry a real elastic modulus — the probe's cohesive-bond stiffness derives from it.
+        let iron = materials::index_of(&mats, "iron");
+        assert!(
+            mats[iron].youngs_modulus > 1.0e11,
+            "iron's Young's modulus must be ~200 GPa (got {})",
+            mats[iron].youngs_modulus
+        );
         let g = mats[materials::index_of(&mats, "granite")].density;
         let d = mats[materials::index_of(&mats, "dirt")].density;
         assert!(g > d, "granite ({g}) should be denser than dirt ({d})");

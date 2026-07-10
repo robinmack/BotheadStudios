@@ -242,6 +242,24 @@ impl Aggregate {
 
     /// One velocity-Verlet step (symplectic; conserves energy over many dynamical times). Pass the
     /// same `acc` buffer each step, seeded with `accelerations()`.
+    /// How many explicit substeps a step of `dt` needs to integrate the bonds **stably**. A stiff
+    /// spring oscillates at ω = √(k_eff/m); velocity-Verlet is stable only for dt·ω ≲ 2, so a stiffer
+    /// solid needs a finer timestep (`docs/23`). k_eff per particle ≈ (mean bonds/particle)·stiffness.
+    /// Returns 1 for a bondless (purely gravitational) aggregate — gravity is soft and needs no
+    /// subdivision. This is why rigidity is honest: we pay for real stiffness with real substeps rather
+    /// than faking it.
+    pub fn stable_substeps(&self, dt: f64) -> usize {
+        if self.stiffness <= 0.0 || self.bonds.is_empty() || self.particles.is_empty() {
+            return 1;
+        }
+        let mean_mass =
+            self.particles.iter().map(|b| b.mass).sum::<f64>() / self.particles.len() as f64;
+        let coordination = (2 * self.bonds.len()) as f64 / self.particles.len() as f64;
+        let omega = (coordination.max(1.0) * self.stiffness / mean_mass.max(1e-9)).sqrt();
+        // Target dt·ω ≤ 1 (a factor of 2 inside the stability limit for margin against the damper).
+        ((dt * omega).ceil() as usize).max(1)
+    }
+
     pub fn step(&mut self, acc: &mut Vec<DVec3>, dt: f64) {
         for (b, a) in self.particles.iter_mut().zip(acc.iter()) {
             b.vel += *a * (0.5 * dt);
@@ -342,6 +360,27 @@ mod tests {
             }
         }
         v
+    }
+
+    #[test]
+    fn a_stiffer_solid_needs_more_substeps_to_stay_stable() {
+        // Rigidity is paid for honestly: a stiffer bond oscillates faster, so it needs a finer
+        // timestep. The substep count rises with √stiffness, and a bondless (gravitational) pile
+        // needs none.
+        let soft = Aggregate::cohesive(cloud(3, 1.0, 7870.0), 0, 0.5, 1.75, 5.0e6, 1.0e4, 0.2);
+        let stiff = Aggregate::cohesive(cloud(3, 1.0, 7870.0), 0, 0.5, 1.75, 5.0e9, 1.0e5, 0.2);
+        let dt = 1.0 / 60.0;
+        assert!(
+            stiff.stable_substeps(dt) > soft.stable_substeps(dt),
+            "1000× stiffness needs more substeps (stiff {} vs soft {})",
+            stiff.stable_substeps(dt),
+            soft.stable_substeps(dt)
+        );
+        // √1000 ≈ 32× the substeps.
+        assert!(stiff.stable_substeps(dt) >= 20 * soft.stable_substeps(dt).max(1) / 10);
+        // A purely gravitational pile has no bonds ⇒ no stiff subdivision needed.
+        let pile = Aggregate::new(cloud(3, 100.0, 1.0e13), 50.0);
+        assert_eq!(pile.stable_substeps(dt), 1);
     }
 
     #[test]
