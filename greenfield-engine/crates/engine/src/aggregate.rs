@@ -61,6 +61,12 @@ pub struct Aggregate {
     /// Uniform external gravity (m/s²) applied to every particle — e.g. a planet's surface field for a
     /// ball resting on the ground. Zero for a free rubble pile (which makes its own gravity).
     pub gravity: DVec3,
+    /// Whether to compute the O(n²) N-body self-gravity. TRUE for a self-gravitating body (a rubble
+    /// pile that holds itself together by gravity, `docs/21`). FALSE for a cohesive SOLID resting in an
+    /// external field (the probe): its own gravity is utterly negligible at a few metres, and the O(n²)
+    /// `powf(-1.5)` per substep dominates the frame — skipping it is honest (a real but ~0 effect) and
+    /// turns the per-substep cost O(n²)→O(bonds).
+    pub self_gravity: bool,
 }
 
 impl Aggregate {
@@ -76,6 +82,7 @@ impl Aggregate {
             damping: 0.0,
             break_strain: f64::INFINITY,
             gravity: DVec3::ZERO,
+            self_gravity: true, // a bare aggregate is a self-gravitating pile
         }
     }
 
@@ -123,6 +130,9 @@ impl Aggregate {
             damping,
             break_strain,
             gravity: DVec3::ZERO,
+            // A cohesive solid is held by its BONDS; its self-gravity is negligible. Skip the O(n²)
+            // N-body loop — it would otherwise dominate the frame (the probe's ~135 substeps × n²).
+            self_gravity: false,
         }
     }
 
@@ -208,14 +218,18 @@ impl Aggregate {
         let s2 = self.softening * self.softening;
         let p = &self.particles;
         let mut acc = vec![self.gravity; p.len()]; // uniform external gravity (0 for a rubble pile)
-        for i in 0..p.len() {
-            for j in 0..p.len() {
-                if i == j {
-                    continue;
+                                                   // O(n²) N-body self-gravity — only for a self-gravitating pile. A cohesive solid skips it (its
+                                                   // own gravity is ~0 and this `powf(-1.5)` loop would dominate the frame; see `self_gravity`).
+        if self.self_gravity {
+            for i in 0..p.len() {
+                for j in 0..p.len() {
+                    if i == j {
+                        continue;
+                    }
+                    let d = p[j].pos - p[i].pos;
+                    let r2 = d.length_squared() + s2;
+                    acc[i] += d * (G * p[j].mass * r2.powf(-1.5));
                 }
-                let d = p[j].pos - p[i].pos;
-                let r2 = d.length_squared() + s2;
-                acc[i] += d * (G * p[j].mass * r2.powf(-1.5));
             }
         }
         // Material cohesion: each intact bond is a Hookean spring toward its rest length, plus a damper
