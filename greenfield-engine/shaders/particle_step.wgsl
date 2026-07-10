@@ -235,12 +235,11 @@ fn cs_integrate(@builtin(global_invocation_id) gid : vec3<u32>) {
     // grain is not skipped, so it keeps cooling AND re-checks its support / neighbours.
     pt.temp = 300.0 + (pt.temp - 300.0) * exp(-P.cool_rate * P.dt);
 
-    // IMPLICIT (linearly-implicit / backward-Euler) velocity update. forces[i].xyz is the total contact
-    // force (grains + terrain, both real penalty forces — no teleport); forces[i].w is the summed
-    // contact STIFFNESS K. Dividing the velocity by (1 + dt²·K) is backward-Euler on the contact spring:
-    // it is UNCONDITIONALLY STABLE for any stiffness, so a stiff (real) contact resolves an overlap
-    // smoothly instead of overshooting and flinging the grain (the "pop"). No cap, no freeze, no
-    // teleport — stability comes from the integrator, as physics demands.
+    // Implicit contact stabilization. The 2070 shows removing it entirely makes explicit EXPLODE (energy
+    // rises) — so it earns its keep. BUT it is ISOTROPIC (damps ALL directions), which also kills a
+    // grain's FREE flight (its ejection velocity) → impacts fracture but nothing flies. The right fix is
+    // a DIRECTIONAL implicit (damp only along contact normals) — a per-grain stiffness tensor — so
+    // packed grains are stabilized while free flight is untouched (docs/23). Isotropic for now (flagged).
     let f = forces[i];
     let a = P.gravity + f.xyz;
     let vel = ((pt.vel + a * P.dt) / (1.0 + P.dt * P.dt * f.w)) * P.drag;
