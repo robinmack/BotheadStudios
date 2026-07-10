@@ -1229,6 +1229,14 @@ mod app {
             crate::orbit::perigee(rel_pos, rel_vel, mu).map_or(-1.0, |p| p / 1000.0)
         }
 
+        /// The Moon's speed relative to the Earth, km/s (HUD). On a true drop this *climbs* all the way
+        /// to impact (~11 km/s) — there is no drag or terminal velocity in vacuum. An eccentric orbit
+        /// (a partial brake) instead slows at apogee and speeds at perigee (Kepler), which can look
+        /// like "flattening" but is the opposite of drag.
+        pub fn moon_speed_kms(&self) -> f64 {
+            (self.bodies[2].vel - self.bodies[1].vel).length() / 1000.0
+        }
+
         /// Whether the Moon has struck the planet (HUD).
         pub fn has_impacted(&self) -> bool {
             self.impacted

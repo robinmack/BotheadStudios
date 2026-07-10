@@ -246,7 +246,8 @@ async function main(): Promise<void> {
       }
       stats.innerHTML =
         `<b>Sun · Earth · Moon</b> · frame <b>${demo.focus_label()}</b> · ` +
-        `Earth–Moon <b>${demo.moon_distance_km().toFixed(0)}</b> km<br>` +
+        `Earth–Moon <b>${demo.moon_distance_km().toFixed(0)}</b> km · ` +
+        `v <b>${demo.moon_speed_kms().toFixed(2)}</b> km/s<br>` +
         `${line2}<br>` +
         `time <b>${Math.round(demo.time_scale_value()).toLocaleString()}×</b> · ` +
         `<b>${fps}</b> fps · drag / pinch`;

@@ -31,6 +31,7 @@ const CONTACT_DAMP: f32 = 0.35; // energy kept after touching ground
 const SETTLE_SPEED: f32 = 0.02; // below this, a grounded particle deposits into the grid
 const SETTLE_FRAMES: u32 = 10; // ...or after this many consecutive grounded steps
 const MAX_EJECT: f32 = 0.045; // cap ejection speed below the world's ~7 cm/s escape velocity
+const VAPOR_EXPANSION: f32 = 3.0; // vaporized ejecta expand away faster (gas/plasma) — docs/20
 
 /// Ambient/reference temperature (K) — cold matter; impact ejecta heat above this (`docs/20`).
 pub const REF_TEMP_K: f32 = 300.0;
@@ -216,23 +217,32 @@ impl MatterSim {
         if !ejecta.is_empty() {
             // Kinetic: share ~30% of the impact energy among the ejecta; v = √(2·KE/m).
             let ke_each = 0.3 * energy / ejecta.len() as f32;
-            // Thermal: deposited energy density peaks at the contact and falls to zero at the crater
+            // Shock heat: deposited energy density peaks at the contact and falls to zero at the crater
             // rim, so the centre melts/vaporizes (glows) while the rim stays cold rubble — the honest
-            // radial gradient (docs/20). e_peak concentrates ~30% of the energy into a small core
-            // volume; temperature rise = e_local / (ρ·c). NOTE: a first visual model — the energy is
-            // NOT yet conserved through the phase change (docs/20 caveat).
+            // radial gradient (docs/20). e_peak concentrates ~30% of the energy into a small core.
             const V_CORE: f32 = 8.0; // m³, central concentration volume
             let r_max = ejecta.iter().map(|&(_, d)| d).fold(1.0f32, f32::max);
             let e_peak = 0.3 * energy / V_CORE; // J/m³ at the centre
             for &(i, d) in &ejecta {
                 let m = self.particles[i].mass.max(1.0e-6);
-                self.particles[i].vel *= (2.0 * ke_each / m).sqrt();
+                let mut speed = (2.0 * ke_each / m).sqrt();
 
                 let falloff = (1.0 - d / r_max).clamp(0.0, 1.0).powi(2);
-                let e_local = e_peak * falloff; // J/m³ deposited here
+                let e_shock = e_peak * falloff; // J/m³ deposited here
                 let mat = &materials[self.particles[i].material];
                 let c = mat.thermal.as_ref().map_or(1000.0, |t| t.specific_heat);
-                self.particles[i].temp_k = REF_TEMP_K + e_local / (mat.density.max(1.0) * c);
+                self.particles[i].temp_k = REF_TEMP_K + e_shock / (mat.density.max(1.0) * c);
+
+                // Phase class (docs/20) from the thermodynamic thresholds: a carved voxel is at least
+                // Fractured, and the hot core Melts / Vaporizes. The class drives behaviour — vaporized
+                // matter is gas/plasma, so it expands away fast (a vapour flash).
+                let e_class = e_shock.max(mat.fracture_strength);
+                if crate::damage::classify(e_class as f64, mat)
+                    == crate::damage::PhaseChange::Vaporized
+                {
+                    speed *= VAPOR_EXPANSION;
+                }
+                self.particles[i].vel *= speed;
             }
             self.dirty = true;
         }
@@ -719,6 +729,34 @@ mod tests {
         assert!(
             (coldest - REF_TEMP_K).abs() < 1.0,
             "the rim stays cold (coldest {coldest} K ≈ {REF_TEMP_K} K)"
+        );
+    }
+
+    #[test]
+    fn a_colossal_impact_vaporizes_the_core() {
+        // Enough energy that the concentrated core passes basalt's boiling point → the phase class is
+        // Vaporized (docs/20), which the impact operator turns into fast, incandescent gas/plasma.
+        let mats = materials::load();
+        let bi = materials::index_of(&mats, "basalt");
+        let boil = mats[bi].thermal.as_ref().unwrap().boil_point;
+        let n = 40usize;
+        let mut w = World {
+            w: n,
+            h: n,
+            d: n,
+            voxels: vec![bi as u16 + 1; n * n * n],
+            max_top: n,
+        };
+        let mut sim = MatterSim::new(500_000);
+        sim.impact(&mut w, &mats, Vec3::ZERO, Vec3::NEG_Y, 1.0e12);
+        let hottest = sim
+            .particles
+            .iter()
+            .map(|p| p.temp_k)
+            .fold(0.0f32, f32::max);
+        assert!(
+            hottest > boil,
+            "the core vaporizes (hottest {hottest} K > boil {boil} K)"
         );
     }
 }

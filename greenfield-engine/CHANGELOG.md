@@ -10,6 +10,13 @@ because **we are our own first customers** and pin exact engine versions in our 
 ## [Unreleased]
 
 ### Added
+- **Phase classes integrated into `matter::impact`** (`docs/20`) — each ejecta is classified via
+  `damage::classify` (Fractured / Melted / Vaporized) from the thermodynamic thresholds; vaporized
+  matter expands away fast (gas/plasma). Crater extent unchanged (LOD bridge intact). Test:
+  `matter::a_colossal_impact_vaporizes_the_core`.
+- **Moon-speed HUD readout** (km/s relative to Earth) in the space band — confirms there's no drag /
+  terminal velocity in vacuum (a true Drop climbs to ~11 km/s at impact; a partial brake slows at
+  apogee by Kepler's 2nd law).
 - **Glowing molten ejecta + a Meteor control** (`docs/20`) — the first visual of impact damage. Impact
   ejecta carry `temp_k`; heat peaks at the contact and falls to cold at the crater rim (centre melts,
   rim is cold rubble). `emission::incandescence` maps temperature → a black-body glow (red→white) that

@@ -5,6 +5,31 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-09 — Phase classes integrated into matter::impact; Moon-speed readout
+
+**What.** `matter::impact` now classifies each ejecta via `damage::classify` (the thermodynamic
+thresholds): a carved voxel is at least Fractured, the hot core Melts, the hottest Vaporizes. The class
+drives behaviour — **vaporized** ejecta expand away fast (gas/plasma, `VAPOR_EXPANSION`), all glow by
+temperature. The crater extent stays the budget model (LOD bridge `docs/19` intact). Also added a live
+**Moon-speed readout** (km/s relative to Earth) to the space-band HUD.
+
+**Why (speed readout).** Robin saw the Moon's velocity seem to "flatten as if terminal velocity in a
+vacuum." Checked the orbit path: there is **no drag, clamp, or damping** anywhere — the only velocity
+changes are the verlet kicks and surface contact. So there is no terminal velocity; the physics is
+honest. The apparent flattening is either Kepler's 2nd law (a *partial* brake makes an eccentric orbit
+that slows at apogee — the opposite of drag) or the compressed time-scale hiding the final fast plunge.
+The speed readout makes it observable: on a true **Drop** it climbs toward ~11 km/s at impact; use ⏪
+slower to watch it accelerate.
+
+**Verified.** New `matter::a_colossal_impact_vaporizes_the_core` (core passes basalt's boiling point →
+Vaporized class). `cargo test` 41/41; clippy `-D warnings` clean; fmt clean; wasm + `tsc` green;
+deployed.
+
+**Honest caveat (`docs/20`).** Crater excavation and shock heating still use separate energy
+accountings (a flagged simplification — full coupled conservation is the MLS-MPM/shock-EOS future).
+
+---
+
 ## 2026-07-09 — Visual: glowing molten ejecta + a Meteor you can fire
 
 **What.** The first visible slice of impact damage beyond text (`docs/20`): impact ejecta carry a
