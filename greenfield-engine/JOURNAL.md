@@ -5,6 +5,39 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-11 — Moon-shot Stage A: the dropped Moon SHATTERS (emergent), instead of merging
+
+**What.** In the space band (`OrbitDemo`), the de-orbited Moon now **shatters into a debris cloud** on
+impact rather than the point-mass sphere silently merging into Earth. The frame the Moon first strikes,
+its point mass becomes a **self-gravitating aggregate** of 64 basalt fragments filling the Moon's volume
+at the impact site (`build_moon_debris`), and the impact energy — captured honestly at contact (~4.5e30 J)
+— is deposited via the same `aggregate::deposit_impact` pipeline (momentum + shock heat + vapor). Because
+that energy is ≫ the Moon's binding energy, the aggregate DISPERSES — no scripted destroy, just kick vs.
+binding (docs/21). The fragments then arc under Earth's gravity (uniform toward its centre), some flying
+out, some falling back — the ejecta curtain at planetary scale. They render as small basalt spheres at
+their real positions; the intact Moon sphere stops drawing. The debris steps at a FIXED observable rate
+(`DEBRIS_DT`, a time-LOD) so the fine event plays out at human speed, not the celestial fast-forward that
+would disperse it in one frame.
+
+**Why.** The moon-shot (docs/23): "de-orbit the Moon into [a spot], then zoom … and observe it was
+destroyed" — with NO code that says destroy. The drop, the fall, the surface contact, and the honest
+impact-energy accounting all already existed and were native-tested; the collision just rendered as two
+spheres merging + a HUD number tagged "not yet materialised." This wires the tested aggregate-disruption
+physics into the render so the shatter is finally *seen*, emergently. It's the celestial half; Stage B is
+the zoom-in that materialises the local crater/ejecta from the same conserved energy (docs/19).
+
+**Verified.** `cargo test -p engine` 64/64; wasm builds. The disruption physics itself is native-tested
+(`aggregate::energy_above_binding_disrupts_it`, `an_impact_heats_the_core_and_shatters_the_aggregate`);
+`build_moon_debris` feeds it the real impact energy. **The VISUAL is NOT yet verified** — a rendering
+change can't be checked headlessly (docs/19: "needs on-device eyes"). Needs Robin's eyes + tuning of
+`DEBRIS_DT`, `DEBRIS_N`, fragment size, and the fall-back/escape balance.
+
+**Open.** Earth-side damage is still only the HUD verdict (no crater visual on the Earth sphere yet); the
+debris external gravity is a uniform approximation (fine near the impact, coarse as it spreads); and the
+whole thing is the CELESTIAL band only — the scale-relative zoom-in (Stage B/C) is still unbuilt.
+
+---
+
 ## 2026-07-11 — Cohesive grain contact (the frictionless-graze fix, one property doing three jobs)
 
 **What.** Added an ATTRACTIVE adhesion term to the grain contact law (GPU shader + native `granular.rs`

@@ -879,7 +879,7 @@ mod app {
                 let dt = (self.time_scale / 60.0) / DEBRIS_SUBSTEPS as f32;
                 self.gpu_particles
                     .set_params(&self.queue, &self.gpu_step_params(dt));
-                for _ in 0..DEBRIS_SUBSTEPS {
+                for _ in 0..MOON_DEBRIS_SUBSTEPS {
                     self.gpu_particles.dispatch(&mut encoder);
                 }
                 // Expand the settled physics grains into the 8× render sub-cubes (once, after stepping).
@@ -1733,7 +1733,23 @@ mod app {
         /// Kinetic energy (J) the impact(s) dissipated — the energy that would become damage. Reported,
         /// not yet turned into actual fragmentation (docs/17 honesty: measure it, don't hide it).
         impact_energy_j: f64,
+        // --- Moon-shot Stage A (docs/23): the dropped Moon SHATTERS emergently instead of merging. ---
+        mats: Vec<materials::Material>,
+        /// The disrupted Moon: on impact the point-mass Moon becomes a self-gravitating aggregate of
+        /// fragments (docs/21), and the impact energy — which is ≫ the Moon's binding energy — disperses
+        /// it (emergent, no scripted destroy). `None` until the first impact. The fragments then fly out,
+        /// arc under Earth's gravity, and some fall back — the ejecta curtain at planetary scale.
+        moon_debris: Option<crate::aggregate::Aggregate>,
+        debris_acc: Vec<glam::DVec3>,
+        /// A pool of sphere-render slots for the fragments (one draw each, like `moon_unis`).
+        debris_unis: Vec<UniformSlot>,
     }
+
+    // Moon-shot Stage A constants.
+    const DEBRIS_N: usize = 64; // Moon fragments rendered (a coarse rubble cloud)
+    const DEBRIS_DT: f64 = 3.0; // s per frame for the shatter — a FIXED observable rate (time-LOD: the
+                                // fine impact event plays out at human speed, not the celestial fast-forward)
+    const MOON_DEBRIS_SUBSTEPS: u32 = 4;
 
     #[wasm_bindgen]
     impl OrbitDemo {
@@ -1815,6 +1831,9 @@ mod app {
             });
             let num_moons = num_moons.clamp(1, 2) as usize;
             let planet_uni = make_space_uniform(&device, &bind_layout);
+            let debris_unis: Vec<UniformSlot> = (0..DEBRIS_N)
+                .map(|_| make_space_uniform(&device, &bind_layout))
+                .collect();
             let moon_unis: Vec<UniformSlot> = (0..num_moons)
                 .map(|_| make_space_uniform(&device, &bind_layout))
                 .collect();
@@ -1904,6 +1923,10 @@ mod app {
                 impacted: false,
                 moon_hit: vec![false; num_moons],
                 impact_energy_j: 0.0,
+                mats,
+                moon_debris: None,
+                debris_acc: Vec::new(),
+                debris_unis,
             })
         }
 
@@ -2037,6 +2060,7 @@ mod app {
             let sim_dt = self.time_scale / 60.0;
             let dt = sim_dt / ORBIT_SUBSTEPS as f64;
             let contact = EARTH_RADIUS_M + MOON_RADIUS_M; // Earth + Moon radii: surfaces touch here
+            let mut shatter: Option<(glam::DVec3, glam::DVec3, f64)> = None; // (site, momentum, energy)
             for _ in 0..ORBIT_SUBSTEPS {
                 crate::orbit::verlet_step(&mut self.bodies, &mut self.acc, dt);
                 // Earth (index 1) vs each moon (index 2..): solid bodies collide at their surfaces —
@@ -2046,15 +2070,44 @@ mod app {
                 let earth = &mut head[1];
                 for (k, moon) in tail.iter_mut().enumerate() {
                     // Measure the impact energy BEFORE the (energy-removing) contact resolution — honest
-                    // damage reporting (docs/17), even though fragmentation isn't modelled yet.
+                    // damage reporting (docs/17).
                     let dissipated = crate::orbit::inelastic_dissipation(earth, moon);
+                    let rel_vel = moon.vel - earth.vel; // incoming velocity, before contact resolution
                     if crate::orbit::resolve_contact(earth, moon, contact) {
                         if !self.moon_hit[k] {
                             self.moon_hit[k] = true;
                             self.impact_energy_j += dissipated;
+                            // Stage A (docs/23): shatter the first moon to strike — capture its impact
+                            // site, incoming momentum, and energy to disperse it as real matter.
+                            if k == 0 && shatter.is_none() {
+                                shatter = Some((moon.pos, rel_vel * moon.mass, dissipated));
+                            }
                         }
                         self.impacted = true;
                     }
+                }
+            }
+
+            // Stage A: the frame the Moon first strikes, turn the point-mass Moon into a self-gravitating
+            // aggregate of fragments and let the impact energy — which is ≫ its binding energy — DISPERSE
+            // it (emergent, no scripted destroy: kick vs. binding, docs/21). It then arcs under Earth's
+            // gravity, some falling back.
+            if let Some((site, momentum, energy)) = shatter {
+                if self.moon_debris.is_none() {
+                    let moon_mass = self.initial_bodies[2].mass;
+                    let earth_pos = self.bodies[1].pos;
+                    let (agg, acc0) =
+                        build_moon_debris(&self.mats, site, earth_pos, moon_mass, momentum, energy);
+                    self.debris_acc = acc0;
+                    self.moon_debris = Some(agg);
+                }
+            }
+            // Step the debris at a FIXED observable rate (time-LOD): the fine impact event plays out at
+            // human speed, not the celestial fast-forward that would disperse it in a single frame.
+            if let Some(agg) = self.moon_debris.as_mut() {
+                let ddt = DEBRIS_DT / MOON_DEBRIS_SUBSTEPS as f64;
+                for _ in 0..MOON_DEBRIS_SUBSTEPS {
+                    agg.step(&mut self.debris_acc, ddt);
                 }
             }
 
@@ -2080,6 +2133,9 @@ mod app {
                 self.earth_tint, // aggregate albedo of ocean+rock+ice (docs/17), not a painted tint
             );
             for (k, uni) in self.moon_unis.iter().enumerate() {
+                if k == 0 && self.moon_debris.is_some() {
+                    continue; // moon 0 has SHATTERED — it's drawn as its debris fragments below
+                }
                 let bi = 2 + k; // body index of this moon
                 let mpos = ((self.bodies[bi].pos - focus) * DISPLAY_SCALE).as_vec3();
                 let mlight = (sun - self.bodies[bi].pos).as_vec3().normalize();
@@ -2091,6 +2147,29 @@ mod app {
                     mlight,
                     self.moon_tint, // aggregate albedo of basalt (docs/17); dark, lit bright by the sun
                 );
+            }
+            // The shattered Moon: each surviving fragment is drawn as a small basalt sphere at its real
+            // position — the debris cloud (some flying out, some falling back) IS the crater ejecta at
+            // planetary scale, emergent from the aggregate physics, not a scripted animation.
+            let mut debris_count = 0usize;
+            if let Some(agg) = self.moon_debris.as_ref() {
+                let frag_r = moon_r / (DEBRIS_N as f32).cbrt(); // N fragments ≈ the Moon's volume
+                for (i, p) in agg.particles.iter().enumerate() {
+                    if i >= self.debris_unis.len() {
+                        break;
+                    }
+                    let fpos = ((p.pos - focus) * DISPLAY_SCALE).as_vec3();
+                    let flight = (sun - p.pos).as_vec3().normalize();
+                    write_space_uniform(
+                        &self.queue,
+                        &self.debris_unis[i],
+                        view_proj,
+                        Mat4::from_translation(fpos) * Mat4::from_scale(Vec3::splat(frag_r)),
+                        flight,
+                        self.moon_tint,
+                    );
+                    debris_count += 1;
+                }
             }
 
             let output = self
@@ -2134,7 +2213,13 @@ mod app {
                 });
                 pass.set_pipeline(&self.pipeline);
                 draw(&mut pass, &self.planet_uni, &self.sphere_gpu);
-                for uni in &self.moon_unis {
+                for (k, uni) in self.moon_unis.iter().enumerate() {
+                    if k == 0 && self.moon_debris.is_some() {
+                        continue; // shattered — drawn as debris
+                    }
+                    draw(&mut pass, uni, &self.sphere_gpu);
+                }
+                for uni in self.debris_unis.iter().take(debris_count) {
                     draw(&mut pass, uni, &self.sphere_gpu);
                 }
             }
@@ -2156,6 +2241,48 @@ mod app {
             let view = Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y);
             proj * view
         }
+    }
+
+    /// Stage A (docs/23): build the disrupted Moon — a self-gravitating aggregate of basalt fragments
+    /// filling the Moon's volume at the impact `site`, then DISPERSE it with the impact `momentum` +
+    /// `energy` (which is ≫ its binding energy → it shatters, emergent: kick vs. binding, docs/21).
+    /// Earth's gravity (uniform toward its centre) pulls the debris back. Returns the aggregate and its
+    /// initial accelerations.
+    fn build_moon_debris(
+        mats: &[materials::Material],
+        site: glam::DVec3,
+        earth_pos: glam::DVec3,
+        moon_mass: f64,
+        momentum: glam::DVec3,
+        energy: f64,
+    ) -> (crate::aggregate::Aggregate, Vec<glam::DVec3>) {
+        let basalt = materials::index_of(mats, "basalt");
+        let moon_r = MOON_RADIUS_M;
+        let frag_mass = moon_mass / DEBRIS_N as f64;
+        let mut particles = Vec::with_capacity(DEBRIS_N);
+        for i in 0..DEBRIS_N {
+            // Fibonacci-sphere direction × a volume-filling radius — a coarse rubble Moon at the impact
+            // site, momentarily at rest (its bulk momentum went to Earth in the inelastic contact).
+            let kk = i as f64 + 0.5;
+            let y = 1.0 - 2.0 * kk / DEBRIS_N as f64;
+            let rxy = (1.0 - y * y).max(0.0).sqrt();
+            let phi = kk * std::f64::consts::PI * (3.0 - 5.0f64.sqrt());
+            let dir = glam::DVec3::new(rxy * phi.cos(), y, rxy * phi.sin());
+            let rr = moon_r * (kk / DEBRIS_N as f64).cbrt();
+            particles.push(crate::orbit::Body {
+                pos: site + dir * rr,
+                vel: glam::DVec3::ZERO,
+                mass: frag_mass,
+            });
+        }
+        let g_dir = (earth_pos - site).normalize_or_zero();
+        let mut agg = crate::aggregate::Aggregate::new(particles, moon_r * 0.5)
+            .with_material(basalt)
+            .with_gravity(g_dir * SURFACE_GRAVITY as f64);
+        // The impact energy disperses it — emergent shatter (momentum + shock heat + vapor, docs/24).
+        agg.deposit_impact(mats, site, momentum, energy);
+        let acc0 = agg.accelerations();
+        (agg, acc0)
     }
 
     fn make_space_uniform(device: &wgpu::Device, layout: &wgpu::BindGroupLayout) -> UniformSlot {
