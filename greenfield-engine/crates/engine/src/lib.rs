@@ -27,6 +27,7 @@ mod emission;
 mod granular;
 mod gravity;
 mod impact;
+mod planet;
 #[cfg(test)]
 mod isotropy;
 mod materials;
@@ -2242,14 +2243,20 @@ mod app {
                 let hidden = crater_site.map_or(false, |s| (pos_w - s).length() < crater_r);
                 let scale = if hidden { 0.0 } else { shell_grain_r }; // zero-scale ⇒ not drawn
                 let spos = ((pos_w - focus) * DISPLAY_SCALE).as_vec3();
+                // Continents & oceans (docs/25): each grain samples the landmask for its direction and
+                // wears the REAL surface material's reflectance — granite land, water ocean. "Average
+                // area particles": the grain is the mean of its ~10°×10° patch, nothing painted.
+                let surf = crate::planet::earth_surface_material(dir);
+                let m = &self.mats[materials::index_of(&self.mats, surf)];
+                let tint = [m.albedo[0], m.albedo[1], m.albedo[2], 1.0];
                 write_space_uniform(
                     &self.queue,
                     uni,
                     view_proj,
                     Mat4::from_translation(spos) * Mat4::from_scale(Vec3::splat(scale)),
                     earth_light,
-                    self.earth_tint, // aggregate albedo of ocean+rock+ice (docs/17), not a painted tint
-                    [0.0; 4],        // Earth doesn't self-glow
+                    tint,
+                    [0.0; 4], // the surface doesn't self-glow (the exposed deep matter does)
                 );
             }
             for (k, uni) in self.moon_unis.iter().enumerate() {
@@ -2281,15 +2288,20 @@ mod app {
                     }
                     let fpos = ((p.pos - focus) * DISPLAY_SCALE).as_vec3();
                     let flight = (sun - p.pos).as_vec3().normalize();
-                    // Incandescence comes free from the fragment's real temperature (shock heat → glow).
+                    // Incandescence comes free from the fragment's real temperature — its layer's
+                    // internal heat plus whatever contact dissipation added (docs/20, docs/25).
                     let glow = incandescence(agg.temps.get(i).copied().unwrap_or(0.0));
+                    // Each fragment wears ITS material's reflectance: basalt crust, peridotite mantle,
+                    // iron core — the excavated composition is visible, not a uniform gray.
+                    let m = &self.mats[agg.mat_ids.get(i).copied().unwrap_or(0)];
+                    let tint = [m.albedo[0], m.albedo[1], m.albedo[2], 1.0];
                     write_space_uniform(
                         &self.queue,
                         &self.debris_unis[i],
                         view_proj,
                         Mat4::from_translation(fpos) * Mat4::from_scale(Vec3::splat(frag_r)),
                         flight,
-                        self.moon_tint,
+                        tint,
                         glow,
                     );
                     debris_count += 1;
@@ -2500,7 +2512,7 @@ mod tests {
     #[test]
     fn material_database_loads() {
         let mats = materials::load();
-        assert_eq!(mats.len(), 20, "seed database should have 20 materials");
+        assert_eq!(mats.len(), 21, "seed database should have 21 materials");
         for id in ["granite", "dirt", "grass", "iron", "nickel"] {
             let i = materials::index_of(&mats, id);
             assert!(mats[i].density > 0.0, "{id} must have positive density");

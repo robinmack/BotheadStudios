@@ -57,6 +57,16 @@ pub fn build_impact_debris(
     let surface = earth_pos + n * earth_radius; // where the impactor meets the ground
 
     let mut particles = Vec::with_capacity(IMPACT_N);
+    let mut mat_ids = Vec::with_capacity(IMPACT_N);
+    let mut temps = Vec::with_capacity(IMPACT_N);
+
+    // Both bodies are LAYERED (docs/25): each materialized particle samples the real construction —
+    // material AND internal temperature — at its own radius. Nothing is uniform "rock": the Moon brings
+    // its crust, mantle, and hot core; Earth's cap is crust over mantle (and, this deep, the top of the
+    // molten outer core). The phases/temps came from pressure + material melting laws (planet.rs), so
+    // when the impact exposes deep matter it GLOWS because it genuinely is that hot — not painted.
+    let earth_body = crate::planet::earth();
+    let moon_body = crate::planet::moon();
 
     // IMPACTOR — a rubble ball touching the surface, moving at the TRUE contact velocity (relative to
     // the target). Its momentum and kinetic energy are carried mechanically, exactly once.
@@ -68,6 +78,9 @@ pub fn build_impact_debris(
             vel: earth_vel + v_contact,
             mass: frag_mass,
         });
+        let layer = moon_body.layer_at(rr);
+        mat_ids.push(materials::index_of(mats, layer.material));
+        temps.push(moon_body.temperature_at(rr) as f32);
     }
 
     // TARGET impact region — a cap of crust in a half-ball BELOW the surface point (reflect any outward
@@ -77,11 +90,16 @@ pub fn build_impact_debris(
         let d = fib_dir(i, CAP_N);
         let d_in = if d.dot(n) > 0.0 { d - n * (2.0 * d.dot(n)) } else { d }; // into the planet
         let rr = cap_extent * ((i as f64 + 0.5) / CAP_N as f64).cbrt();
+        let pos = surface + d_in * rr;
         particles.push(Body {
-            pos: surface + d_in * rr,
+            pos,
             vel: earth_vel,
             mass: frag_mass,
         });
+        let r_earth = (pos - earth_pos).length();
+        let layer = earth_body.layer_at(r_earth);
+        mat_ids.push(materials::index_of(mats, layer.material));
+        temps.push(earth_body.temperature_at(r_earth) as f32);
     }
 
     // One canonical contact law from the real material. Grain radius is DENSITY-CONSISTENT — the radius a
@@ -95,12 +113,15 @@ pub fn build_impact_debris(
     let boundary_r = earth_radius - cap_extent;
     let specific_heat = mat.thermal.as_ref().map_or(840.0, |t| t.specific_heat as f64);
     let mut agg = Aggregate::new(particles, moon_r * 0.5)
-        .with_material(basalt)
+        .with_material(basalt) // bulk contact-law material (per-pair material contact: flagged refinement)
         // 1/r² outside the planet, Gauss's-law linear interior inside — no singular core attractor.
         .with_gravity_source(earth_pos, earth_mass, earth_radius)
         .with_contact(contact)
         .with_specific_heat(specific_heat)
         .with_boundary(earth_pos, boundary_r, contact.stiffness);
+    // Per-particle composition + REAL internal temperatures from the layered bodies (docs/25).
+    agg.mat_ids = mat_ids;
+    agg.temps = temps;
     let acc0 = agg.accelerations();
     (agg, acc0)
 }

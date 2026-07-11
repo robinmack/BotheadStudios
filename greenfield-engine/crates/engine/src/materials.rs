@@ -32,6 +32,12 @@ struct RawThermal {
     latent_fusion: f32,       // J/kg
     boil_point: f32,          // K
     latent_vaporization: f32, // J/kg
+    #[serde(default)]
+    simon_a: f32, // Pa — Simon–Glatzel melting-curve pressure scale (0 = curve not characterized)
+    #[serde(default)]
+    simon_c: f32, // dimensionless Simon–Glatzel exponent
+    #[serde(default)]
+    molar_mass: f32, // kg/mol — for the Clausius–Clapeyron boiling curve (0 = not characterized)
 }
 
 #[derive(Deserialize)]
@@ -76,10 +82,58 @@ struct RawOptical {
 #[derive(Clone, Debug)]
 pub struct Thermal {
     pub specific_heat: f32,       // J/(kg·K)
-    pub melt_point: f32,          // K
+    pub melt_point: f32,          // K (at 1 atm)
     pub latent_fusion: f32,       // J/kg (solid → liquid)
     pub boil_point: f32,          // K
     pub latent_vaporization: f32, // J/kg (liquid → gas)
+    /// Simon–Glatzel melting-curve coefficients: T_m(P) = melt_point·(1 + P/simon_a)^(1/simon_c).
+    /// Pressure RAISES most materials' melting points — this is why Earth's inner core is SOLID even
+    /// though it is hotter than the molten outer core (the emergence test in `planet.rs`). simon_a in
+    /// Pa; 0 ⇒ curve not characterized ⇒ melt_point is used flat (honest fallback, flagged).
+    pub simon_a: f32,
+    pub simon_c: f32,
+    /// kg/mol — the vapor's molar mass, for the Clausius–Clapeyron boiling curve. 0 ⇒ not characterized
+    /// ⇒ boil_point is used flat (honest fallback, flagged).
+    pub molar_mass: f32,
+}
+
+impl Thermal {
+    /// Melting point (K) at pressure `p` (Pa) — Simon–Glatzel, or the flat 1-atm value when the curve
+    /// isn't characterized.
+    pub fn melt_point_at(&self, p: f64) -> f64 {
+        let t0 = self.melt_point as f64;
+        if self.simon_a > 0.0 && self.simon_c > 0.0 {
+            t0 * (1.0 + p / self.simon_a as f64).powf(1.0 / self.simon_c as f64)
+        } else {
+            t0
+        }
+    }
+
+    /// Boiling point (K) at ambient pressure `p` (Pa) — Clausius–Clapeyron from the 1-atm boil point,
+    /// the latent heat of vaporization, and the vapor's molar mass:
+    /// 1/T_b(P) = 1/T_b0 − (R_u/(M·L))·ln(P/P_atm). Lower pressure ⇒ lower boiling point; as P → 0
+    /// (vacuum) the boiling point → 0 K, i.e. a liquid exposed to space boils at ANY temperature — the
+    /// physical reason open water cannot exist without an atmosphere (planet.rs surface-phase test).
+    /// Flat 1-atm fallback when the molar mass isn't characterized (flagged). Approximation: constant L
+    /// (real L varies ~10% with T — e.g. water's triple point comes out ~268.5 K vs the real 273.16).
+    pub fn boil_point_at(&self, p: f64) -> f64 {
+        const R_U: f64 = 8.314; // J/(mol·K)
+        const P_ATM: f64 = 101_325.0;
+        let t0 = self.boil_point as f64;
+        if self.molar_mass <= 0.0 || self.latent_vaporization <= 0.0 {
+            return t0;
+        }
+        if p <= 0.0 {
+            return 0.0; // vacuum: boils at any temperature
+        }
+        let k = R_U / (self.molar_mass as f64 * self.latent_vaporization as f64);
+        let inv_t = 1.0 / t0 - k * (p / P_ATM).ln();
+        if inv_t <= 0.0 {
+            f64::INFINITY // enormous pressure: boiling suppressed entirely (supercritical caveats flagged)
+        } else {
+            1.0 / inv_t
+        }
+    }
 }
 
 /// A material as the engine consumes it.
@@ -176,6 +230,9 @@ pub fn load() -> Vec<Material> {
                     latent_fusion: t.latent_fusion,
                     boil_point: t.boil_point,
                     latent_vaporization: t.latent_vaporization,
+                    simon_a: t.simon_a,
+                    simon_c: t.simon_c,
+                    molar_mass: t.molar_mass,
                 }),
             }
         })

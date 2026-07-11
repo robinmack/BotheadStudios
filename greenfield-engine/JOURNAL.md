@@ -5,6 +5,72 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-11 — The atmosphere's weight keeps the oceans liquid (docs/25)
+
+**What.** Earth now declares only the MEASURED MASS of its atmosphere (5.15e18 kg); the surface pressure
+emerges as that column's weight — ≈1 atm, never assigned. Materials gained Clausius–Clapeyron BOILING
+curves (latent heat + molar mass, `thermal.molar_mass`) beside their Simon melting curves, and the phase
+decision (`planet::surface_phase`) now covers solid/liquid/vapor. The consequences, all as passing tests:
+288 K water under the emergent 1 atm is LIQUID; the same water in vacuum flashes to VAPOR at any
+temperature (below the ~611 Pa triple point liquid has no regime — Robin: "water exposed to vacuum would
+be wild", and the model now says exactly that); cold water freezes; water boils at ~366 K at 0.7 atm
+(mountain physics for free). The airless Moon ⇒ no lunar seas, as observed. A failing test caught real
+physics along the way: Earth's inner core briefly classified as "Vapor" because iron's boiling point was
+a flat 1-atm fallback — pressure suppresses boiling even harder than melting, and with iron's real molar
+mass boiling is COMPLETELY suppressed at 360 GPa (the fallback was the dishonesty).
+
+**Why.** Same pattern as the molten core: declare real composition (now including the air), compute the
+consequences. Also fixes the record on ocean colour: water renders with its measured near-black
+reflectance — the "blue marble" is atmospheric Rayleigh scattering, which we refuse to paint. The
+atmosphere today is a static boundary condition (pressure/phase); making it MATTER — drag, entry plasma,
+Rayleigh blue, blast waves, evaporation cycling — is now the flagged next major milestone (docs/25
+roadmap).
+
+**Verified.** `the_declared_atmosphere_mass_weighs_in_at_one_atmosphere`,
+`liquid_oceans_exist_under_an_atmosphere_and_boil_off_in_vacuum`; 79/79 native, wasm builds.
+
+---
+
+## 2026-07-11 — Layered planets: the molten core EMERGES from pressure (docs/25)
+
+**What.** Planets are now DECLARED as their real construction and nothing else: concentric layers of real
+materials (Earth: iron inner/outer core, peridotite mantle, basalt crust — PREM densities; Moon: small
+iron core, peridotite mantle, basalt crust) with the observed geotherm as declared data. Everything else
+is COMPUTED:
+- **Gravity g(r)** — Gauss's law over the enclosed layer mass (peaks at the core boundary, zero at centre).
+- **Pressure P(r)** — hydrostatic equilibrium integrated from the surface. Earth's centre comes out
+  **≈360 GPa** (real: 364) and the core–mantle boundary ≈135 GPa from the declared densities alone.
+- **PHASE** — each material got a pressure-dependent melting curve (Simon–Glatzel, published fits, new
+  `thermal.simon_a/simon_c` in the materials DB). Phase = local temperature vs T_m(P). **Never assigned.**
+
+**The emergence result (Robin's challenge: "that should be a natural artefact of gravity/mass/material
+if we didn't fudge the composition"):** Earth's inner core comes out **SOLID** even though it is HOTTER
+than the molten outer core — because the computed pressure pushes iron's melting curve above the
+geotherm exactly there — while the outer core comes out **MOLTEN** and the mantle solid. The melt curve
+crosses the temperature profile at the real inner-core boundary. Also: the declared layer densities
+integrate to Earth's real mass and 9.8 m/s² surface gravity; the Moon's outer core comes out molten at
+lunar pressures (flagged: the real lunar core is Fe–S, which melts lower than our pure-iron entry — we
+use the upper published selenotherm; an Fe–S material is the refinement).
+
+**Wired into the impact:** the materialized clouds now sample the layered bodies — each particle knows
+its material (basalt crust / peridotite mantle / iron core) and its REAL internal temperature, so
+excavating deep matter exposes rock and iron that glows because it genuinely is that hot. Earth's cap
+reaches the top of the molten outer core (a Moon-scale impact digs that deep). Each fragment renders in
+its own material's reflectance — the excavated composition is visible.
+
+**Continents & oceans:** the render shell samples a 10°×10° land/ocean mask matched to the ~9° grain
+spacing ("average area particles") — granite continents, water oceans, real reflectances. Honesty flags:
+the hand-digitized mask over-represents land (~37% vs the real 29% — a cited dataset is the refinement);
+ocean depth (~3.7 km) is far below one grain, so at this LOD water is the material of a grain's surface,
+not a resolved layer; no planetary rotation yet, so the mask's orientation is arbitrary but consistent.
+
+**Verified.** New `planet.rs` tests: declared composition → real mass + surface gravity; hydrostatics →
+real central/CMB pressures; **molten-outer/solid-inner core emergence**; lunar molten outer core + solid
+mantle; landmask places the major continents/oceans with a plausible area-weighted land fraction.
+77/77 native, wasm builds.
+
+---
+
 ## 2026-07-11 — Gauss interior gravity, emergent incandescence, and Earth rendered as matter
 
 **What.** Three fixes, each traced from an on-device observation to missing physics (never a visual patch):

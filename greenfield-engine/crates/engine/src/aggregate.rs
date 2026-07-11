@@ -43,8 +43,12 @@ pub struct Aggregate {
     /// Kelvin, per particle — heated by impacts (`deposit_impact`); drives the incandescent glow of
     /// molten/vaporized debris ([`crate::emission::incandescence`]).
     pub temps: Vec<f32>,
-    /// Material index (uniform for now — a basalt Moon; per-particle composition is a later slice).
+    /// Bulk material index (drives the contact law parameters; per-pair material contact is a flagged
+    /// later refinement).
     pub material: usize,
+    /// Per-particle material index — real COMPOSITION (docs/25): a layered planet's excavated cloud is
+    /// crust rock + mantle rock + core iron, each particle knowing what matter it is (tint, thermal).
+    pub mat_ids: Vec<usize>,
     /// Softening length (m): removes the 1/r² singularity between close particles. ~half the mean
     /// spacing keeps the cloud stable without erasing its self-gravity.
     pub softening: f64,
@@ -95,6 +99,7 @@ impl Aggregate {
             particles,
             temps: vec![REF_TEMP_K; n],
             material: 0,
+            mat_ids: vec![0; n],
             softening,
             bonds: Vec::new(),
             stiffness: 0.0,
@@ -189,6 +194,7 @@ impl Aggregate {
             particles,
             temps: vec![REF_TEMP_K; n],
             material,
+            mat_ids: vec![material; n],
             softening,
             bonds,
             stiffness,
@@ -227,6 +233,7 @@ impl Aggregate {
     /// Set the aggregate's material (its constituent stuff — e.g. basalt for the Moon).
     pub fn with_material(mut self, material: usize) -> Self {
         self.material = material;
+        self.mat_ids = vec![material; self.particles.len()];
         self
     }
 
