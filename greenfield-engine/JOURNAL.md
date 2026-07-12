@@ -5,6 +5,24 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-11 — The exponential atmosphere EMERGES (docs/26 tests 1+2)
+
+**What.** Air is now dynamic matter (`atmosphere.rs`): gas parcels whose resistance to compression is
+their EQUATION OF STATE (ideal gas — the 1D column force is exactly F = A·ρ·R_s·T per slab), never an
+elastic modulus. THE emergence result: a column of 200 equal-mass air slabs under gravity, started from
+a deliberately WRONG exponential (2× the real scale height), relaxes to the real isothermal atmosphere —
+**measured H = 8,446 m vs the analytic R_s·T/g = 8,427 m (0.2%)** — proving the profile is an attractor
+of the physics, not an initial condition. And the settled column's basal pressure equals its weight
+(100,266 vs 101,357 Pa — one real atmosphere from one real declared column mass): the docs/25 static
+boundary condition is provably this dynamic model's limit. Also: `gas_contact_from_material` (K = γ·P
+stiffness for the canonical contact law), R_s = 287 J/(kg·K) from the declared molar mass, and
+free-expansion-in-vacuum (gas never clumps). Flagged next: the 3D SPH kernel density (the column is the
+honest first resolvable case), then drag + entry glow (docs/26 tests 4–5).
+
+**Verified.** `a_settling_air_column_finds_the_real_exponential_atmosphere` + 2 more; 83/83 native.
+
+---
+
 ## 2026-07-11 — Every solid object is matter: the Moon gets the same treatment
 
 **What.** Two representation asymmetries closed (Robin: "Every solid object in the universe is composed
