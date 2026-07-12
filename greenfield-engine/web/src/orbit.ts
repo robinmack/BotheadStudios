@@ -109,18 +109,20 @@ async function main(): Promise<void> {
     report("info", "orbit demo created OK");
 
     // --- Control bar: frame of reference + the orbital-decay experiment + time control ---
+    // Controls live on the LEFT, stacked vertically — the bottom bar overlapped the simulation
+    // readout (Robin).
     const bar = document.createElement("div");
     Object.assign(bar.style, {
       position: "fixed",
-      left: "50%",
-      bottom: "12px",
-      transform: "translateX(-50%)",
+      left: "12px",
+      top: "50%",
+      transform: "translateY(-50%)",
       zIndex: "10",
       display: "flex",
+      flexDirection: "column",
       gap: "6px",
-      flexWrap: "wrap",
-      justifyContent: "center",
-      maxWidth: "96vw",
+      alignItems: "stretch",
+      maxHeight: "90vh",
     });
     const mkBtn = (label: string, onClick: () => void): HTMLButtonElement => {
       const b = document.createElement("button");
