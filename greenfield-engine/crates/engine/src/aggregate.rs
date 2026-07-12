@@ -90,6 +90,12 @@ pub struct Aggregate {
     /// penalty spring `stiffness·(radius−dist)` (a FORCE, −∇U — never a velocity reset). The far-field
     /// summary of matter we don't resolve, contacted honestly (docs/24).
     pub boundary: Option<(DVec3, f64, f64)>,
+    /// A spherical HOLE carved out of the boundary (centre, radius) — the excavated crater bowl. The
+    /// solid region is (inside boundary sphere) MINUS (inside hole ball): a particle in the bowl is in
+    /// free space; a particle in the remaining solid is pushed out through the NEAREST free surface
+    /// (radially to the planet surface, or into the bowl through its wall). Without this the boundary
+    /// was dishonestly a whole-planet excavation: debris landing far from the crater sank to cap depth.
+    pub boundary_hole: Option<(DVec3, f64)>,
 }
 
 impl Aggregate {
@@ -111,6 +117,7 @@ impl Aggregate {
             contact: None,
             specific_heat: 1000.0, // generic rock-ish default; set from the material via with_specific_heat
             boundary: None,
+            boundary_hole: None,
         }
     }
 
@@ -137,6 +144,19 @@ impl Aggregate {
     pub fn set_boundary_center(&mut self, center: DVec3) {
         if let Some(b) = self.boundary.as_mut() {
             b.0 = center;
+        }
+    }
+
+    /// Carve a spherical hole (the crater bowl) out of the boundary solid.
+    pub fn with_boundary_hole(mut self, center: DVec3, radius: f64) -> Self {
+        self.boundary_hole = Some((center, radius));
+        self
+    }
+
+    /// Move the hole with its planet (the impact site orbits too).
+    pub fn set_boundary_hole_center(&mut self, center: DVec3) {
+        if let Some(h) = self.boundary_hole.as_mut() {
+            h.0 = center;
         }
     }
 
@@ -208,6 +228,7 @@ impl Aggregate {
             contact: None,
             specific_heat: 1000.0, // generic rock-ish default; set from the material via with_specific_heat
             boundary: None,
+            boundary_hole: None,
         }
     }
 
@@ -392,9 +413,27 @@ impl Aggregate {
             for (i, body) in p.iter().enumerate() {
                 let d = body.pos - center;
                 let dist = d.length();
-                if dist < radius && dist > 1.0e-9 {
-                    acc[i] += (d / dist) * (stiffness * (radius - dist));
+                if dist >= radius || dist <= 1.0e-9 {
+                    continue; // outside the planet (or degenerate)
                 }
+                // Inside the boundary sphere. If a crater bowl is carved and the particle is IN it,
+                // it's in free space — no force. Otherwise it's in solid: push it out through the
+                // NEAREST free surface — radially to the planet surface, or through the bowl wall.
+                let pen_sphere = radius - dist; // depth below the planet surface
+                if let Some((hc, hr)) = self.boundary_hole {
+                    let dh = body.pos - hc;
+                    let dist_h = dh.length();
+                    if dist_h < hr {
+                        continue; // in the excavated bowl: free space
+                    }
+                    let pen_hole = dist_h - hr; // depth into solid beyond the bowl wall
+                    if pen_hole < pen_sphere && dist_h > 1.0e-9 {
+                        // The bowl wall is closer: push toward the hole (into the carved space).
+                        acc[i] -= (dh / dist_h) * (stiffness * pen_hole);
+                        continue;
+                    }
+                }
+                acc[i] += (d / dist) * (stiffness * pen_sphere);
             }
         }
 
@@ -885,6 +924,36 @@ mod tests {
         assert!((g_at(0.5 * r0) - 0.5 * g_surface).abs() / g_surface < 1e-6, "half depth: HALF g, not 4×");
         assert!(g_at(1.0e3) < 1.0e-2, "the centre pulls ~nothing — no singular attractor");
         assert!((g_at(2.0 * r0) - 0.25 * g_surface).abs() / g_surface < 1e-6, "exterior unchanged: 1/r²");
+    }
+
+    #[test]
+    fn the_boundary_is_the_planet_minus_the_crater_bowl_not_a_global_excavation() {
+        // Robin saw matter exit the far side of the planet: the old boundary sat at cap depth GLOBALLY,
+        // as if the whole planet were excavated. The solid is (sphere R) minus (crater ball): debris far
+        // from the crater rests at the SURFACE; inside the bowl is free space; nothing crosses the planet.
+        let r0 = 6.371e6_f64;
+        let hole_r = 3.474e6_f64;
+        let site = DVec3::new(0.0, r0, 0.0); // crater at the north pole
+        let probe = |pos: DVec3| -> DVec3 {
+            let mut agg = Aggregate::new(
+                vec![Body { pos, vel: DVec3::ZERO, mass: 1.0 }],
+                1.0,
+            )
+            .with_boundary(DVec3::ZERO, r0, 1.0)
+            .with_boundary_hole(site, hole_r);
+            agg.self_gravity = false;
+            agg.accelerations()[0]
+        };
+        // Far side, just under the surface: pushed OUT radially (the planet is solid there).
+        let a = probe(DVec3::new(0.0, -(r0 - 1.0e5), 0.0));
+        assert!(a.y < -1.0e4, "buried on the far side ⇒ pushed back out through the surface");
+        // Inside the crater bowl: free space, no boundary force.
+        let a = probe(site - DVec3::new(0.0, 0.5 * hole_r, 0.0));
+        assert!(a.length() < 1.0e-9, "inside the excavated bowl ⇒ no force");
+        // In solid just beyond the bowl wall: pushed INTO the bowl (the nearest free surface).
+        let below_wall = site - DVec3::new(0.0, hole_r + 2.0e5, 0.0);
+        let a = probe(below_wall);
+        assert!(a.y > 1.0e4, "just under the bowl floor ⇒ pushed up into the bowl");
     }
 
     #[test]

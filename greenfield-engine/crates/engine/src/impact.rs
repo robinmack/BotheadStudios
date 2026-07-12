@@ -108,9 +108,9 @@ pub fn build_impact_debris(
     let frag_r = (3.0 * frag_mass / (4.0 * std::f64::consts::PI * (mat.density as f64).max(1.0)))
         .cbrt();
     let contact = granular::contact_from_material(mat, frag_r, frag_mass);
-    // The bulk planet beneath the materialized cap: a conservative penalty boundary the cap rests on and
-    // ejecta rains back onto. Set just below the deepest cap particle.
-    let boundary_r = earth_radius - cap_extent;
+    // The bulk planet: a conservative penalty boundary at the REAL surface, with the crater bowl
+    // (the materialized half-ball) carved out at the site — debris landing far from the crater rests on
+    // the surface; only in the bowl does free space reach cap depth. Matter cannot cross the planet.
     let specific_heat = mat.thermal.as_ref().map_or(840.0, |t| t.specific_heat as f64);
     let mut agg = Aggregate::new(particles, moon_r * 0.5)
         .with_material(basalt) // bulk contact-law material (per-pair material contact: flagged refinement)
@@ -118,7 +118,8 @@ pub fn build_impact_debris(
         .with_gravity_source(earth_pos, earth_mass, earth_radius)
         .with_contact(contact)
         .with_specific_heat(specific_heat)
-        .with_boundary(earth_pos, boundary_r, contact.stiffness);
+        .with_boundary(earth_pos, earth_radius, contact.stiffness)
+        .with_boundary_hole(surface, cap_extent);
     // Per-particle composition + REAL internal temperatures from the layered bodies (docs/25).
     agg.mat_ids = mat_ids;
     agg.temps = temps;

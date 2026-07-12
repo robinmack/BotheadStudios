@@ -286,6 +286,7 @@ async function main(): Promise<void> {
     };
 
     let firstFrame = true;
+    let lastFrameT = performance.now();
     const frame = () => {
       framesSinceFps++;
       const nowT = performance.now();
@@ -294,6 +295,12 @@ async function main(): Promise<void> {
         framesSinceFps = 0;
         lastFpsTime = nowT;
       }
+      // Physics/render decoupling: advance the PHYSICS by real wall-clock time (frame-rate independent
+      // — a 30 fps client simulates the same world as a 120 fps one); the render then samples the state
+      // ~100 ms behind, so every collision it draws is already resolved.
+      const dtS = (nowT - lastFrameT) / 1000;
+      lastFrameT = nowT;
+      demo.advance(dtS);
       if (!userInteracted) cam.yaw += 0.0015; // gentle idle drift
       if (followMoon) {
         // Ease toward the follow target so re-engaging (Drop/Reset) glides instead of jump-cutting.

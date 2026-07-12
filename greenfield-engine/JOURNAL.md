@@ -5,6 +5,34 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-11 — Physics/render decoupling: the simulation runs the world; the render just looks at it
+
+**What.** The space band's physics no longer lives inside `render()`. The new architecture (docs/13 made
+real):
+- **`advance(real_dt)`** drives the PHYSICS from wall-clock time in fixed sim-timestep substeps whose
+  COUNT (never size) varies with the elapsed real time. The physics rate is now independent of the
+  display frame rate — a 30 fps client simulates the same world as a 120 fps one (previously the sim
+  assumed 60 fps and ran half-speed at 30). Under overload the observable clock dilates (backlog is
+  dropped) rather than corrupting the physics with an oversized step: time slows before truth breaks.
+- **The renderer samples snapshots ~100 ms BEHIND the physics** (Robin: humans can't catch detail under
+  1/10 s, so use that budget). Every event the render draws is already fully resolved — a collision can
+  never be caught mid-lie by a frame boundary, structurally: the fly-past class of bugs is now
+  impossible rather than patched. Snapshot interpolation gives smooth motion at any frame rate; the
+  crater/shatter appear exactly when the RENDERED clock crosses the shatter instant.
+- Physics is never triggered by, or dependent on, the visualization — it drives it (Robin's
+  architectural invariant, verbatim).
+
+Also fixed from Robin's render read: **"hollow earth"** — through the crater you could see the far side
+of the crust from inside. The planet isn't hollow: the un-materialized bulk (physically the boundary +
+gravity source) now renders as an opaque interior sphere at the depth the crater exposes — the top of
+the outer core, self-lit at its REAL temperature from the layer profile. Through the hole you now see
+glowing molten interior, honestly.
+
+**Verified.** 79/79 native; wasm builds. Frame-rate independence and the lag are structural (wall-clock
+in, snapshots out); on-device read pending.
+
+---
+
 ## 2026-07-11 — The atmosphere's weight keeps the oceans liquid (docs/25)
 
 **What.** Earth now declares only the MEASURED MASS of its atmosphere (5.15e18 kg); the surface pressure
