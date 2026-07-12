@@ -510,6 +510,40 @@ impl Aggregate {
         zeta * 2.0 * (self.stiffness * mean_mass).sqrt() / z.max(1.0).sqrt()
     }
 
+    /// DEMOTION (docs/27, docs/13): matter that has landed on the boundary body and come to REST is
+    /// that body again — remove it from the particle set and return its total mass so the caller can
+    /// add it to the planet (mass conserved; its heat is dropped — flagged). The inverse of
+    /// materialization: we stop simulating what has stopped happening. Criteria: within `r_tol` of the
+    /// boundary surface AND slower than `speed_tol` relative to `v_ref` — an orbiting body is far away,
+    /// a falling one is fast; only the settled pile qualifies.
+    pub fn drain_settled(
+        &mut self,
+        center: DVec3,
+        surface_r: f64,
+        v_ref: DVec3,
+        speed_tol: f64,
+        r_tol: f64,
+    ) -> (usize, f64) {
+        let mut drained_mass = 0.0;
+        let mut i = 0;
+        let mut n = 0;
+        while i < self.particles.len() {
+            let p = self.particles[i];
+            let settled = (p.pos - center).length() < surface_r + r_tol
+                && (p.vel - v_ref).length() < speed_tol;
+            if settled {
+                drained_mass += p.mass;
+                self.particles.swap_remove(i);
+                self.temps.swap_remove(i);
+                self.mat_ids.swap_remove(i);
+                n += 1;
+            } else {
+                i += 1;
+            }
+        }
+        (n, drained_mass)
+    }
+
     pub fn step(&mut self, acc: &mut Vec<DVec3>, dt: f64) {
         for (b, a) in self.particles.iter_mut().zip(acc.iter()) {
             b.vel += *a * (0.5 * dt);
@@ -918,6 +952,27 @@ mod tests {
             bound < 2.0 * r0,
             "below escape velocity it arcs back — apoapsis stays near the surface, got {bound:.3e} m"
         );
+    }
+
+    #[test]
+    fn settled_matter_demotes_to_the_planet_but_orbiting_matter_does_not() {
+        let r0 = 6.371e6;
+        let mut agg = Aggregate::new(
+            vec![
+                // resting on the surface, co-moving: settled ⇒ drained
+                Body { pos: DVec3::new(0.0, r0 + 1.0e3, 0.0), vel: DVec3::ZERO, mass: 5.0 },
+                // aloft: stays
+                Body { pos: DVec3::new(0.0, 3.0 * r0, 0.0), vel: DVec3::new(4.0e3, 0.0, 0.0), mass: 7.0 },
+                // near the surface but FAST (falling through): stays
+                Body { pos: DVec3::new(r0 + 1.0e3, 0.0, 0.0), vel: DVec3::new(-2.0e3, 0.0, 0.0), mass: 3.0 },
+            ],
+            1.0,
+        );
+        agg.self_gravity = false;
+        let (n, m) = agg.drain_settled(DVec3::ZERO, r0, DVec3::ZERO, 30.0, 1.0e6);
+        assert_eq!(n, 1, "only the settled particle drains");
+        assert!((m - 5.0).abs() < 1e-9, "its mass returns to the planet");
+        assert_eq!(agg.particles.len(), 2, "orbiting + falling matter keeps simulating");
     }
 
     #[test]

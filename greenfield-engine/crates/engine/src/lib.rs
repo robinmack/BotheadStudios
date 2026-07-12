@@ -2495,6 +2495,23 @@ mod app {
                 }
                 agg.step(&mut self.debris_acc, dt);
                 self.sim_since_impact += dt; // the aftermath clock (sim time, not wall time)
+                // DEMOTION (docs/27): settled matter IS Earth again — drain it back into the bulk
+                // summary (mass to the planet, particle removed). Fidelity ∝ observability (docs/13);
+                // FPS follows from honesty — we stop simulating what has stopped happening. r_tol spans
+                // the pile depth; the drained heat is dropped (flagged). Earth's gravity-source mass for
+                // the remaining debris still reads the original EARTH_MASS (≤2% low — flagged).
+                let frag_r = agg.contact.map_or(5.0e5, |c| c.radius);
+                let (n_drained, m_drained) = agg.drain_settled(
+                    earth_pos,
+                    EARTH_RADIUS_M,
+                    self.bodies[1].vel,
+                    30.0,
+                    4.0 * frag_r,
+                );
+                if n_drained > 0 {
+                    self.bodies[1].mass += m_drained; // Earth grows by what it swallowed
+                    self.debris_acc = agg.accelerations(); // particle count changed
+                }
                 // NO merge closure: a pairwise bound-in-contact merge welded disk material to
                 // falling-back material mid-curtain and destroyed the disk (measured: 0.55 → 0.00
                 // M_moon lofted). Accretion is REAL physics here — inelastic contact + self-gravity
