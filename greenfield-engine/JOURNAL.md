@@ -5,6 +5,22 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-11 — Every solid object is matter: the Moon gets the same treatment
+
+**What.** Two representation asymmetries closed (Robin: "Every solid object in the universe is composed
+of matter"): (1) the intact **Moon now renders as a grain shell** — its basalt crust at its measured
+reflectance — exactly like Earth; no more smooth-sphere summary on one body and honest grains on the
+other. (2) **Moon-vs-moon collisions use the same primitives as moon-vs-Earth**: swept CCD on the
+pre-step relative path, the true contact state from the conservation laws (vis-viva + angular momentum),
+an inelastic momentum-conserving merge at the contact configuration, and the dissipated energy
+accounted. Nothing special-cases Earth anymore. Flagged next: materializing a moon-moon impact cloud is
+the same `build_impact_debris` with the target's layered profile parameterized (today it samples Earth's
+profile for the target and the Moon's for the impactor).
+
+**Verified.** 80/80 native; wasm builds.
+
+---
+
 ## 2026-07-11 — Physics/render decoupling: the simulation runs the world; the render just looks at it
 
 **What.** The space band's physics no longer lives inside `render()`. The new architecture (docs/13 made

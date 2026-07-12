@@ -1789,6 +1789,9 @@ mod app {
     /// tint/glow come from the layer profile at each grain's true depth: cool crust rim grading to
     /// white-hot outer-core floor. This (not paint) is why the crater reads as incandescent.
     const WALL_N: usize = 96;
+    /// The intact Moon renders as a grain shell too — every solid object in the universe is composed of
+    /// matter (Robin); a smooth sphere is the same representation lie we removed from Earth.
+    const MOON_SHELL_N: usize = 128;
     const DEBRIS_DT: f64 = 3.0; // s per frame for the shatter — a FIXED observable rate (time-LOD: the
                                 // fine impact event plays out at human speed, not the celestial fast-forward)
     const MOON_DEBRIS_SUBSTEPS: u32 = 4;
@@ -1882,7 +1885,7 @@ mod app {
             let wall_unis: Vec<UniformSlot> = (0..WALL_N)
                 .map(|_| make_space_uniform(&device, &bind_layout))
                 .collect();
-            let moon_unis: Vec<UniformSlot> = (0..num_moons)
+            let moon_unis: Vec<UniformSlot> = (0..num_moons * MOON_SHELL_N)
                 .map(|_| make_space_uniform(&device, &bind_layout))
                 .collect();
             let pipeline = build_space_pipeline(&device, &bind_layout, config.format);
@@ -2233,6 +2236,39 @@ mod app {
                 }
             }
 
+            // MOON-vs-MOON collisions — the SAME primitives as moon-vs-Earth (every solid object is
+            // matter): swept CCD on the pre-step relative path, the true contact state from the
+            // conservation laws, an inelastic momentum-conserving merge, and the dissipated energy
+            // accounted. (Materializing a moon-moon impact cloud — the same builder with the target's
+            // layered profile — is the flagged next step; detection/resolution no longer special-cases
+            // Earth.)
+            let mm_contact = 2.0 * MOON_RADIUS_M;
+            for i in 0..n_moons {
+                for j in (i + 1)..n_moons {
+                    let (a, b) = (self.bodies[2 + i], self.bodies[2 + j]);
+                    let rel_o = rel_old[i] - rel_old[j];
+                    let rel_n = (a.pos - self.bodies[1].pos) - (b.pos - self.bodies[1].pos);
+                    if let Some(t) = crate::orbit::swept_first_contact(rel_o, rel_n, mm_contact) {
+                        let v_rel_o = vel_old[i] - vel_old[j];
+                        let rel_c = rel_o + (rel_n - rel_o) * t;
+                        let n_hat = rel_c.normalize_or_zero();
+                        let mu_g = crate::orbit::G * (a.mass + b.mass);
+                        let v_c = crate::orbit::contact_velocity(rel_o, v_rel_o, n_hat, mm_contact, mu_g);
+                        let m_red = a.mass * b.mass / (a.mass + b.mass);
+                        self.impact_energy_j += 0.5 * m_red * v_c.length_squared();
+                        self.impacted = true;
+                        // Inelastic merge at the contact configuration: both to the COM velocity,
+                        // separated by exactly the contact distance (momentum conserved).
+                        let v_com = (a.vel * a.mass + b.vel * b.mass) / (a.mass + b.mass);
+                        let mid = (a.pos * a.mass + b.pos * b.mass) / (a.mass + b.mass);
+                        self.bodies[2 + i].pos = mid + n_hat * (mm_contact * a.mass / (a.mass + b.mass));
+                        self.bodies[2 + j].pos = mid - n_hat * (mm_contact * b.mass / (a.mass + b.mass));
+                        self.bodies[2 + i].vel = v_com;
+                        self.bodies[2 + j].vel = v_com;
+                    }
+                }
+            }
+
             // Keep already-hit / overlapping bodies parked at the surface (the slow-approach case and
             // the ongoing merge — the heavier Earth barely moves; momentum conserved).
             let (head, tail) = self.bodies.split_at_mut(2);
@@ -2461,21 +2497,35 @@ mod app {
                     );
                 }
             }
-            for (k, uni) in self.moon_unis.iter().enumerate() {
+            // MOONS AS MATTER: each intact moon is a grain shell (like Earth) — its basalt crust at
+            // its real reflectance, no smooth-sphere summary. A shattered moon is its debris instead.
+            let mshell_spacing =
+                MOON_RADIUS_M * (4.0 * std::f64::consts::PI / MOON_SHELL_N as f64).sqrt();
+            let mshell_grain_r = ((0.62 * mshell_spacing) * DISPLAY_SCALE) as f32;
+            for (idx, uni) in self.moon_unis.iter().enumerate() {
+                let k = idx / MOON_SHELL_N;
+                let i = idx % MOON_SHELL_N;
                 if k == 0 && r_shattered {
-                    continue; // moon 0 has SHATTERED — it's drawn as its debris fragments below
+                    // moon 0 has SHATTERED — drawn as its debris fragments below
+                    write_space_uniform(
+                        &self.queue, uni, view_proj, Mat4::from_scale(Vec3::ZERO),
+                        earth_light, [0.0; 4], [0.0; 4],
+                    );
+                    continue;
                 }
                 let bi = 2 + k; // body index of this moon
-                let mpos = ((r_bodies[bi] - focus) * DISPLAY_SCALE).as_vec3();
+                let dir = crate::impact::fib_dir(i, MOON_SHELL_N);
+                let pos_w = r_bodies[bi] + dir * (MOON_RADIUS_M - 0.62 * mshell_spacing);
+                let mpos = ((pos_w - focus) * DISPLAY_SCALE).as_vec3();
                 let mlight = (sun - r_bodies[bi]).as_vec3().normalize();
                 write_space_uniform(
                     &self.queue,
                     uni,
                     view_proj,
-                    Mat4::from_translation(mpos) * Mat4::from_scale(Vec3::splat(moon_r)),
+                    Mat4::from_translation(mpos) * Mat4::from_scale(Vec3::splat(mshell_grain_r)),
                     mlight,
                     self.moon_tint, // aggregate albedo of basalt (docs/17); dark, lit bright by the sun
-                    [0.0; 4],       // intact moon: reflected light only
+                    [0.0; 4],       // intact moon: reflected light only (its hot core is buried)
                 );
             }
             // The shattered Moon: each surviving fragment is drawn as a small basalt sphere at its real
@@ -2559,8 +2609,8 @@ mod app {
                 for uni in self.shell_unis.iter() {
                     draw(&mut pass, uni, &self.sphere_gpu); // Earth: a shell of coarse grains
                 }
-                for (k, uni) in self.moon_unis.iter().enumerate() {
-                    if k == 0 && r_shattered {
+                for (idx, uni) in self.moon_unis.iter().enumerate() {
+                    if idx / MOON_SHELL_N == 0 && r_shattered {
                         continue; // shattered — drawn as debris
                     }
                     draw(&mut pass, uni, &self.sphere_gpu);
