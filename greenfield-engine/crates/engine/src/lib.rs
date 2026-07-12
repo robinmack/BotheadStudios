@@ -2527,9 +2527,13 @@ mod app {
                 if n_drained > 0 {
                     self.bodies[1].mass += m_drained; // Earth grows by what it swallowed
                     // The returned matter refills the bowl: heal by its solid volume (bulk density).
+                    // (hole_radius() inlined via field reads — `agg` holds the moon_debris borrow.)
                     let rho = self.mats[agg.material].density.max(1.0) as f64;
                     self.crater_heal_m3 += m_drained / rho;
-                    agg.set_boundary_hole_radius(self.hole_radius());
+                    let r0 = (2.0 * self.impactor_radius).min(0.55 * EARTH_RADIUS_M);
+                    let vol0 = (2.0 / 3.0) * std::f64::consts::PI * r0.powi(3);
+                    let rem = (vol0 - self.crater_heal_m3).max(0.0);
+                    agg.set_boundary_hole_radius((rem * 3.0 / (2.0 * std::f64::consts::PI)).cbrt());
                     self.debris_acc = agg.accelerations(); // particle count changed
                 }
                 // NO merge closure: a pairwise bound-in-contact merge welded disk material to
