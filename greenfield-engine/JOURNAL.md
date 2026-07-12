@@ -5,6 +5,26 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-11 — The engine watches itself: the rig, the profiler, and a 7× frame
+
+**What.** The agent now verifies scenes with its own eyes before shipping them (Robin: "simulate
+locally and watch — we've been through a lot of iterations you could have seen going wrong"). The watch
+rig (`web/rig`): headed Chromium under xvfb (headless cannot composite WebGPU swapchains — the first
+attempts photographed a blind rig, not a broken app), timed screenshots, a frame profiler, an fps probe.
+First session of use, in order: proved the scenes render correctly; caught a post-impact DEATH SPIRAL
+(one slow frame → 0.25 s backlog → 128 O(n²) substeps → slower still, pinned at 1 fps); profiled
+advance() at 161 ms vs render() at 3 ms; and found the real culprit — `powf(-1.5)` libm calls per
+gravity pair. Hardware sqrt: **161 → 22 ms/frame (7×)**; the native suite dropped 133 → 52 s too.
+Substep budgeting ends the spiral (observable time dilates; the frame stays interactive). Camera opens
+on the sun side (the night side is honestly black now) and rides the BOUND debris extent (escapees no
+longer drag the view out to pixels). Watched verdict at T+13h aftermath: 32 fps, 354 → 62 fragments as
+settled matter demotes into Earth, disk 0.48 M☾ in 3 moonlets — the on-screen numbers now match the
+native emergence tests.
+
+**Verified.** By watching. 91/91 native; profiler numbers above.
+
+---
+
 ## 2026-07-11 — The Birth of the Moon: the SCENE (docs/27)
 
 **What.** The proven giant-impact physics, now watchable: a new scene (**Birth of the Moon** in the scene
