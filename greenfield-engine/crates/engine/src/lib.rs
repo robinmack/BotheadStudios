@@ -2426,7 +2426,7 @@ mod app {
                 .iter()
                 .map(|p| (p.pos - earth.pos).cross((p.vel - earth.vel) * p.mass))
                 .sum::<glam::DVec3>()
-                - clumps.values().map(|(_, l)| *l).sum::<glam::DVec3>();
+                - clumps.values().map(|(_, l, _, _)| *l).sum::<glam::DVec3>();
             self.bodies[1].mass += cloud_mass - promoted;
             self.spin_l += l_rest;
             self.moon_debris = None;
