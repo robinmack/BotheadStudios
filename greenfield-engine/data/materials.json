@@ -191,6 +191,15 @@
       "sources": ["https://www.engineeringtoolbox.com/water-density-specific-weight-d_595.html", "https://www.engineeringtoolbox.com/bulk-modulus-elasticity-d_585.html", "https://www.engineeringtoolbox.com/water-dynamic-kinematic-viscosity-d_596.html", "https://www.khronos.org/gltf/pbr/"]
     },
     {
+      "id": "air", "display_name": "Air (dry, sea level)", "category": "gas", "phase": "gas", "parent": null,
+      "mechanical": { "density": 1.225, "youngs_modulus": 0, "poisson_ratio": 0, "compressive_strength": 0, "tensile_strength": 0, "cohesion": 0, "friction_angle": 0, "hardness_mohs": 0, "ductility": 0, "restitution": 0.0, "friction_coefficient": 0.0, "dynamic_viscosity": 1.81e-5 },
+      "optical": { "albedo": [0.0, 0.0, 0.0], "roughness": 1.0, "metallic": 0.0, "translucency": 1.0, "color_variance": 0.0, "grain": "transparent medium; blue appearance is Rayleigh scattering (docs/26), not a surface albedo" },
+      "thermal": { "specific_heat": 1005, "melt_point": 60, "latent_fusion": 2.6e4, "boil_point": 79, "latent_vaporization": 2.0e5, "molar_mass": 0.028964 },
+      "ranges": { "density": [1.1, 1.3] },
+      "notes": "Dry air at 15 C, 1 atm (docs/26 atmosphere-as-matter). specific_heat is c_p; specific gas constant R_s = R_u/molar_mass = 287 J/(kg K); gamma = 1.4 (diatomic) -> isentropic bulk modulus K = gamma*P. melt/boil are N2-dominated (63 K / 77 K at 1 atm) for cryogenic honesty. As a GAS its resistance to compression is the EOS (K = gamma*P), never an elastic modulus.",
+      "sources": ["https://www.engineeringtoolbox.com/air-properties-d_156.html", "https://en.wikipedia.org/wiki/Density_of_air"]
+    },
+    {
       "id": "crude_oil", "display_name": "Crude oil (light, ~35 API)", "category": "liquid", "phase": "liquid", "parent": null,
       "assumed_condition": "generic light sweet crude, ~35 API (SG ~0.85); density at 15.6 C, viscosity/optics ~20 C",
       "mechanical": { "density": 850, "bulk_modulus": 1.3e9, "dynamic_viscosity": 8.0e-3, "surface_tension": 0.027, "youngs_modulus": null, "poisson_ratio": null, "compressive_strength": null, "tensile_strength": null, "cohesion": null, "friction_angle": null, "hardness_mohs": null, "ductility": null, "restitution": 0.0, "friction_coefficient": null },

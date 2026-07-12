@@ -2770,7 +2770,7 @@ mod tests {
     #[test]
     fn material_database_loads() {
         let mats = materials::load();
-        assert_eq!(mats.len(), 21, "seed database should have 21 materials");
+        assert_eq!(mats.len(), 22, "seed database should have 22 materials");
         for id in ["granite", "dirt", "grass", "iron", "nickel"] {
             let i = materials::index_of(&mats, id);
             assert!(mats[i].density > 0.0, "{id} must have positive density");
