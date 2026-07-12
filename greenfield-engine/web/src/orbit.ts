@@ -324,6 +324,18 @@ async function main(): Promise<void> {
       let eventLine = "";
       if (tPlus >= 0) {
         eventLine = `<br><b style="color:#ffd08a">T+${fmtSim(tPlus)}</b> after impact`;
+        // Live disk stats — the measured answer to "did we achieve orbit?"
+        try {
+          const d = JSON.parse(demo.disk_stats_json()) as {
+            bound: number; escaped: number; biggest: number; clumps: number;
+          } | null;
+          if (d && d.bound > 0.005) {
+            eventLine +=
+              ` · disk <b>${d.bound.toFixed(2)} M☾</b> in <b>${d.clumps}</b> moonlet${d.clumps === 1 ? "" : "s"}` +
+              ` · biggest <b>${d.biggest.toFixed(2)} M☾</b>` +
+              (d.escaped > 0.005 ? ` · escaped ${d.escaped.toFixed(2)} M☾` : "");
+          }
+        } catch { /* stats unavailable */ }
       } else if (birthScene && countdown >= 0) {
         eventLine = `<br><b style="color:#ff8a8a; font-size:16px">IMPACT IN T−${countdown.toFixed(1)} s</b>`;
       }

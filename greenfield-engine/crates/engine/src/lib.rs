@@ -1716,6 +1716,7 @@ mod app {
         bodies: Vec<glam::DVec3>, // positions of [Sun, Earth, Moon(s)]
         debris: Vec<glam::DVec3>, // impact-cloud particle positions (empty before the shatter)
         temps: Vec<f32>,          // impact-cloud temperatures (glow)
+        sizes: Vec<f32>,          // display radius factor ∝ (mass/initial fragment mass)^⅓ — accretion grows moonlets
         shattered: bool,
     }
 
@@ -2221,6 +2222,65 @@ mod app {
             self.debris_rate_mul
         }
 
+        /// Live disk statistics — the HUD's answer to "did we achieve orbit?": JSON
+        /// {"bound":M,"escaped":M,"biggest":M,"clumps":N} with masses in lunar masses. Bound = aloft
+        /// (r > 1.1 R⊕) with negative specific orbital energy; clumps = connected components of contact
+        /// adjacency (rubble-pile moonlets). Pure measurement of the particle state — same yardstick as
+        /// the native emergence test.
+        pub fn disk_stats_json(&self) -> String {
+            const M_MOON: f64 = 7.342e22;
+            let Some(agg) = self.moon_debris.as_ref() else {
+                return String::from("null");
+            };
+            let earth = self.bodies[1];
+            let mu = crate::orbit::G * EARTH_MASS;
+            let touch = agg.contact.map_or(1.0e6, |c| 2.2 * c.radius);
+            let mut aloft: Vec<usize> = Vec::new();
+            let (mut bound_m, mut escaped_m) = (0.0f64, 0.0f64);
+            for (i, p) in agg.particles.iter().enumerate() {
+                let r = (p.pos - earth.pos).length();
+                let eps = 0.5 * (p.vel - earth.vel).length_squared() - mu / r;
+                if eps >= 0.0 {
+                    escaped_m += p.mass;
+                } else if r > 1.1 * EARTH_RADIUS_M {
+                    bound_m += p.mass;
+                    aloft.push(i);
+                }
+            }
+            // Union-find over touching aloft pairs → moonlet clumps.
+            let mut parent: Vec<usize> = (0..aloft.len()).collect();
+            fn find(p: &mut Vec<usize>, i: usize) -> usize {
+                if p[i] != i {
+                    let r = find(p, p[i]);
+                    p[i] = r;
+                }
+                p[i]
+            }
+            for a in 0..aloft.len() {
+                for b in (a + 1)..aloft.len() {
+                    if (agg.particles[aloft[a]].pos - agg.particles[aloft[b]].pos).length() < touch {
+                        let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+                        if ra != rb {
+                            parent[ra] = rb;
+                        }
+                    }
+                }
+            }
+            let mut clump: std::collections::HashMap<usize, f64> = std::collections::HashMap::new();
+            for a in 0..aloft.len() {
+                let root = find(&mut parent, a);
+                *clump.entry(root).or_insert(0.0) += agg.particles[aloft[a]].mass;
+            }
+            let biggest = clump.values().cloned().fold(0.0f64, f64::max);
+            format!(
+                "{{\"bound\":{:.3},\"escaped\":{:.3},\"biggest\":{:.3},\"clumps\":{}}}",
+                bound_m / M_MOON,
+                escaped_m / M_MOON,
+                biggest / M_MOON,
+                clump.len()
+            )
+        }
+
         /// SIM seconds since the impact (−1 before it) — for the HUD's T+ aftermath clock.
         pub fn sim_since_impact_s(&self) -> f64 {
             if self.moon_debris.is_some() {
@@ -2435,22 +2495,31 @@ mod app {
                 }
                 agg.step(&mut self.debris_acc, dt);
                 self.sim_since_impact += dt; // the aftermath clock (sim time, not wall time)
+                // NO merge closure: a pairwise bound-in-contact merge welded disk material to
+                // falling-back material mid-curtain and destroyed the disk (measured: 0.55 → 0.00
+                // M_moon lofted). Accretion is REAL physics here — inelastic contact + self-gravity
+                // clump fragments into rubble-pile moonlets without any rule (Robin: "drive this with
+                // real particle physics").
             }
         }
 
         /// Record the observable state at the current physics clock (the renderer's source of truth).
         fn push_snapshot(&mut self) {
-            let (debris, temps) = match self.moon_debris.as_ref() {
-                Some(agg) => {
-                    (agg.particles.iter().map(|p| p.pos).collect(), agg.temps.clone())
-                }
-                None => (Vec::new(), Vec::new()),
+            let frag0 = (self.impactor_mass / DEBRIS_N as f64).max(1.0);
+            let (debris, temps, sizes) = match self.moon_debris.as_ref() {
+                Some(agg) => (
+                    agg.particles.iter().map(|p| p.pos).collect(),
+                    agg.temps.clone(),
+                    agg.particles.iter().map(|p| (p.mass / frag0).cbrt() as f32).collect(),
+                ),
+                None => (Vec::new(), Vec::new(), Vec::new()),
             };
             self.snaps.push_back(FrameSnap {
                 t: self.phys_clock,
                 bodies: self.bodies.iter().map(|b| b.pos).collect(),
                 debris,
                 temps,
+                sizes,
                 shattered: self.moon_debris.is_some(),
             });
             // Keep a little more history than the lag needs; drop the rest.
@@ -2463,16 +2532,22 @@ mod app {
         /// The state the RENDERER sees: snapshots interpolated at (now − RENDER_LAG_S). Falls back to
         /// the live state before the first snapshot exists.
         #[allow(clippy::type_complexity)]
-        fn sampled_state(&self) -> (Vec<glam::DVec3>, Vec<glam::DVec3>, Vec<f32>, bool) {
+        fn sampled_state(&self) -> (Vec<glam::DVec3>, Vec<glam::DVec3>, Vec<f32>, Vec<f32>, bool) {
             if self.snaps.is_empty() {
-                let (d, t) = match self.moon_debris.as_ref() {
-                    Some(a) => (a.particles.iter().map(|p| p.pos).collect(), a.temps.clone()),
-                    None => (Vec::new(), Vec::new()),
+                let frag0 = (self.impactor_mass / DEBRIS_N as f64).max(1.0);
+                let (d, t, sz) = match self.moon_debris.as_ref() {
+                    Some(a) => (
+                        a.particles.iter().map(|p| p.pos).collect(),
+                        a.temps.clone(),
+                        a.particles.iter().map(|p| (p.mass / frag0).cbrt() as f32).collect(),
+                    ),
+                    None => (Vec::new(), Vec::new(), Vec::new()),
                 };
                 return (
                     self.bodies.iter().map(|b| b.pos).collect(),
                     d,
                     t,
+                    sz,
                     self.moon_debris.is_some(),
                 );
             }
@@ -2498,9 +2573,10 @@ mod app {
                 .zip(s1.bodies.iter())
                 .map(|(a, b)| *a + (*b - *a) * f)
                 .collect();
-            // Debris lerps only when both snapshots carry it (across the shatter boundary, take s1's —
-            // the cloud appears exactly when the rendered clock crosses the shatter instant).
-            let (debris, temps) = if !s0.debris.is_empty() && s0.debris.len() == s1.debris.len() {
+            // Debris lerps only when both snapshots carry it (across the shatter/merge boundary, take
+            // s1's — counts change when moonlets accrete).
+            let (debris, temps, sizes) = if !s0.debris.is_empty() && s0.debris.len() == s1.debris.len()
+            {
                 (
                     s0.debris
                         .iter()
@@ -2508,22 +2584,23 @@ mod app {
                         .map(|(a, b)| *a + (*b - *a) * f)
                         .collect(),
                     s0.temps.clone(),
+                    s0.sizes.clone(),
                 )
             } else if s1.shattered {
-                (s1.debris.clone(), s1.temps.clone())
+                (s1.debris.clone(), s1.temps.clone(), s1.sizes.clone())
             } else {
-                (Vec::new(), Vec::new())
+                (Vec::new(), Vec::new(), Vec::new())
             };
             let shattered = if f < 1.0 { s0.shattered } else { s1.shattered };
             let any_debris = !debris.is_empty();
-            (bodies, debris, temps, shattered || any_debris)
+            (bodies, debris, temps, sizes, shattered || any_debris)
         }
 
         pub fn render(&mut self) -> Result<(), JsValue> {
             // NO physics here (docs/13): the renderer samples the physics snapshots RENDER_LAG_S behind
             // the live state — every event it draws is already fully resolved. The physics is advanced
             // by `advance(real_dt)`, on wall-clock time, independent of this function's call rate.
-            let (r_bodies, r_debris, r_temps, r_shattered) = self.sampled_state();
+            let (r_bodies, r_debris, r_temps, r_sizes, r_shattered) = self.sampled_state();
 
             let view_proj = self.view_proj();
 
@@ -2680,11 +2757,14 @@ mod app {
                     // iron core — the excavated composition is visible, not a uniform gray.
                     let m = &self.mats[mat_ids.and_then(|ids| ids.get(i)).copied().unwrap_or(0)];
                     let tint = [m.albedo[0], m.albedo[1], m.albedo[2], 1.0];
+                    // Display radius grows with the ⅓ power of accreted mass — you can SEE the Moon
+                    // winning: one fragment swells while the count falls.
+                    let size = r_sizes.get(i).copied().unwrap_or(1.0);
                     write_space_uniform(
                         &self.queue,
                         &self.debris_unis[i],
                         view_proj,
-                        Mat4::from_translation(fpos) * Mat4::from_scale(Vec3::splat(frag_r)),
+                        Mat4::from_translation(fpos) * Mat4::from_scale(Vec3::splat(frag_r * size)),
                         flight,
                         tint,
                         glow,

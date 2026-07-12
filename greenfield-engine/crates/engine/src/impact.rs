@@ -14,10 +14,12 @@ use crate::materials::{self, Material};
 use crate::orbit::Body;
 use glam::DVec3;
 
-/// Impactor (Moon) fragments — a coarse rubble cloud.
-pub const DEBRIS_N: usize = 64;
+/// Impactor fragments. Resolution matters PHYSICALLY, not just visually: the proto-lunar disk forms by
+/// collisional angular-momentum exchange between fragments — too few particles and there are no
+/// encounters left to do it (measured: at 64/128 only ~2 fragments stayed aloft; no clumping possible).
+pub const DEBRIS_N: usize = 128;
 /// Target (Earth) impact-region fragments — materialized crust the impactor ploughs into.
-pub const CAP_N: usize = 128;
+pub const CAP_N: usize = 256;
 /// Total materialized particles in the mutual collision.
 pub const IMPACT_N: usize = DEBRIS_N + CAP_N;
 
@@ -114,11 +116,16 @@ pub fn build_impact_debris_between(
     let frag_r = (3.0 * frag_mass / (4.0 * std::f64::consts::PI * (mat.density as f64).max(1.0)))
         .cbrt();
     let contact = granular::contact_from_material(mat, frag_r, frag_mass);
+    // Gravitational softening at FRAGMENT scale (half a grain radius): the contact law provides the
+    // short-range repulsion, so gravity may be honest down to touching distance — with impactor-scale
+    // softening (the old moon_r/2 ≈ 4 grain radii) touching fragments were under-bound and rubble-pile
+    // moonlets could not hold together (accretion is contact + SELF-GRAVITY; both must be real).
+    let softening = 0.5 * frag_r;
     // The bulk planet: a conservative penalty boundary at the REAL surface, with the crater bowl
     // (the materialized half-ball) carved out at the site — debris landing far from the crater rests on
     // the surface; only in the bowl does free space reach cap depth. Matter cannot cross the planet.
     let specific_heat = mat.thermal.as_ref().map_or(840.0, |t| t.specific_heat as f64);
-    let mut agg = Aggregate::new(particles, moon_r * 0.5)
+    let mut agg = Aggregate::new(particles, softening)
         .with_material(basalt) // bulk contact-law material (per-pair material contact: flagged refinement)
         // 1/r² outside the planet, Gauss's-law linear interior inside — no singular core attractor.
         .with_gravity_source(earth_pos, earth_mass, earth_radius)
@@ -312,24 +319,69 @@ mod tests {
             &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia, &earth_profile,
             EARTH_MASS, EARTH_RADIUS_M,
         );
-        let steps = if cfg!(debug_assertions) { 4_000 } else { 15_000 };
+        let steps = if cfg!(debug_assertions) { 3_000 } else { 20_000 };
         for _ in 0..steps {
             agg.step(&mut acc2, 2.0);
         }
+        // MEASURE (no closure, no rule): the lofted bound reservoir, and REAL clumping — connected
+        // components of contact adjacency among aloft fragments. Rubble-pile moonlets are fragments
+        // held touching by inelastic contact + self-gravity; a multi-fragment clump is accretion
+        // happening as physics, nothing merged by hand.
         let mu = G * EARTH_MASS;
-        let mut aloft_bound = 0.0f64;
-        for p in &agg.particles {
-            let r = p.pos.length();
-            let eps = 0.5 * p.vel.length_squared() - mu / r;
-            if eps < 0.0 && r > 1.1 * EARTH_RADIUS_M {
-                aloft_bound += p.mass;
+        let touch = 2.2 * agg.contact.unwrap().radius;
+        let aloft: Vec<usize> = (0..agg.particles.len())
+            .filter(|&i| {
+                let p = &agg.particles[i];
+                let r = p.pos.length();
+                0.5 * p.vel.length_squared() - mu / r < 0.0 && r > 1.1 * EARTH_RADIUS_M
+            })
+            .collect();
+        let aloft_bound: f64 = aloft.iter().map(|&i| agg.particles[i].mass).sum();
+        // Union-find over touching aloft pairs.
+        let mut parent: Vec<usize> = (0..aloft.len()).collect();
+        fn find(parent: &mut Vec<usize>, i: usize) -> usize {
+            if parent[i] != i {
+                let r = find(parent, parent[i]);
+                parent[i] = r;
+            }
+            parent[i]
+        }
+        for a in 0..aloft.len() {
+            for b in (a + 1)..aloft.len() {
+                let d = (agg.particles[aloft[a]].pos - agg.particles[aloft[b]].pos).length();
+                if d < touch {
+                    let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+                    if ra != rb {
+                        parent[ra] = rb;
+                    }
+                }
             }
         }
-        println!("birth scene lofts {:.2} M_moon aloft+bound", aloft_bound / 7.342e22);
+        let mut clump_mass = std::collections::HashMap::new();
+        for a in 0..aloft.len() {
+            let root = find(&mut parent, a);
+            *clump_mass.entry(root).or_insert(0.0f64) += agg.particles[aloft[a]].mass;
+        }
+        let n_clumps = clump_mass.len();
+        let biggest = clump_mass.values().cloned().fold(0.0f64, f64::max);
+        let frag0 = m_theia / DEBRIS_N as f64;
+        println!(
+            "birth scene lofts {:.2} M_moon in {n_clumps} clumps · biggest clump {:.1} fragments ({:.2} M_moon)",
+            aloft_bound / 7.342e22,
+            biggest / frag0,
+            biggest / 7.342e22
+        );
         assert!(
             aloft_bound > 0.3 * 7.342e22,
             "the SCENE's geometry lofts a lunar-mass-scale bound reservoir (got {:.2} M_moon)",
             aloft_bound / 7.342e22
+        );
+        // Real accretion signal: at least one MULTI-fragment rubble-pile moonlet — contact +
+        // self-gravity holding fragments together, no merge rule anywhere.
+        assert!(
+            biggest > 1.5 * frag0,
+            "a multi-fragment moonlet forms by contact + self-gravity (biggest {:.1} fragments)",
+            biggest / frag0
         );
     }
 
