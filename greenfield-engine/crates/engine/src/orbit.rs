@@ -34,7 +34,7 @@ pub fn accelerations(bodies: &[Body]) -> Vec<DVec3> {
             }
             let d = bodies[j].pos - bodies[i].pos;
             let r2 = d.length_squared();
-            acc[i] += d * (G * bodies[j].mass * r2.powf(-1.5));
+            acc[i] += d * (G * bodies[j].mass * (1.0 / (r2 * r2.sqrt())));
         }
     }
     acc

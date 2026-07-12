@@ -103,7 +103,7 @@ impl MassField {
     pub fn acceleration_point_approx(&self, p: Vec3, softening: f32) -> Vec3 {
         let d = self.com - p;
         let r2 = d.length_squared() + softening * softening;
-        d * (G * self.total_mass * r2.powf(-1.5))
+        d * (G * self.total_mass * (1.0 / (r2 * r2.sqrt())))
     }
 
     /// Gravitational acceleration at `p`. `softening` (metres) removes the singularity when very
@@ -116,7 +116,7 @@ impl MassField {
             let d = mp.center - p;
             let r2 = d.length_squared() + s2;
             // 1 / r³ (softened): r2^{-1.5}
-            let inv_r3 = r2.powf(-1.5);
+            let inv_r3 = (1.0 / (r2 * r2.sqrt()));
             a += d * (G * mp.mass * inv_r3);
         }
         a

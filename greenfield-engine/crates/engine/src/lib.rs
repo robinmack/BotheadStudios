@@ -2334,13 +2334,20 @@ mod app {
             (dist / closing) / self.time_scale
         }
 
-        /// Farthest debris fragment from Earth (km) — the camera rides this outward as the disk forms.
+        /// Farthest BOUND debris fragment from Earth (km) — the camera rides the disk outward as it
+        /// forms. Escapees are excluded: chasing them zoomed the view out until the whole scene was a
+        /// handful of dark pixels (watched via the rig).
         pub fn debris_extent_km(&self) -> f64 {
-            let earth = self.bodies[1].pos;
+            let earth = self.bodies[1];
+            let mu = crate::orbit::G * earth.mass;
             self.moon_debris.as_ref().map_or(0.0, |agg| {
                 agg.particles
                     .iter()
-                    .map(|p| (p.pos - earth).length())
+                    .filter_map(|p| {
+                        let r = (p.pos - earth.pos).length();
+                        let eps = 0.5 * (p.vel - earth.vel).length_squared() - mu / r;
+                        (eps < 0.0).then_some(r)
+                    })
                     .fold(0.0, f64::max)
                     / 1000.0
             })
@@ -2365,7 +2372,11 @@ mod app {
             let real_dt = real_dt.clamp(0.0, 0.25); // tab-sleep / hiccup guard
             self.phys_clock += real_dt;
             self.real_accum += real_dt;
-            const MAX_SUBSTEPS: u32 = 128;
+            // Substep budget per advance: generous for the cheap orbital phase; TIGHT once the O(n²)
+            // debris cloud exists — a single slow frame used to trigger a death spiral (0.25 s of
+            // backlog ⇒ 128 heavy substeps ⇒ an even slower frame, pinned at ~1 fps forever, watched
+            // via the rig). Under load the observable clock dilates; the frame stays interactive.
+            let max_substeps: u32 = if self.moon_debris.is_some() { 12 } else { 128 };
             let mut steps = 0u32;
             loop {
                 // Per-mode fixed sim timestep: celestial fast-forward until the shatter, then the fixed
@@ -2378,8 +2389,8 @@ mod app {
                 } else {
                     (self.time_scale / 960.0, 1.0 / 960.0)
                 };
-                if self.real_accum < real_per_sub || steps >= MAX_SUBSTEPS {
-                    if steps >= MAX_SUBSTEPS {
+                if self.real_accum < real_per_sub || steps >= max_substeps {
+                    if steps >= max_substeps {
                         self.real_accum = 0.0; // overloaded: dilate observable time, keep physics true
                     }
                     break;
@@ -2550,7 +2561,7 @@ mod app {
                     .map(|p| {
                         let d = sun_pos - p.pos;
                         let r2 = d.length_squared().max(1.0);
-                        d * (crate::orbit::G * sun_mass * p.mass * r2.powf(-1.5)) * dt
+                        d * (crate::orbit::G * sun_mass * p.mass * (1.0 / (r2 * r2.sqrt()))) * dt
                     })
                     .sum();
                 agg.step(&mut self.debris_acc, dt);

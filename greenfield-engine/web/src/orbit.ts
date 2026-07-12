@@ -208,7 +208,11 @@ async function main(): Promise<void> {
       return Math.max(CLOSE_ZOOM, Math.min(1, demo.moon_distance_km() / LUNAR_KM));
     };
     let followMoon = true;
-    const cam = { yaw: 0.6, pitch: 0.5, zoom: followZoom() };
+    // Start on the SUN side of the focus body: with the ambient fudge removed, the night side is
+    // honestly black — the old default yaw opened on darkness (watched via the rig). Earth sits at +x
+    // of the Sun, so an eye direction near −x̂ (yaw ≈ −π/2) sees the lit hemisphere; offsets give a
+    // pleasant ¾ lighting.
+    const cam = { yaw: -Math.PI / 2 + 0.35, pitch: 0.35, zoom: followZoom() };
     let userInteracted = false;
     let dragging = false;
     let lastX = 0;
@@ -324,9 +328,12 @@ async function main(): Promise<void> {
       let eventLine = "";
       if (tPlus >= 0) {
         eventLine = `<br><b style="color:#ffd08a">T+${fmtSim(tPlus)}</b> after impact`;
-        // Live disk stats — the measured answer to "did we achieve orbit?"
+        // Live disk stats — the measured answer to "did we achieve orbit?" (O(n²) + JSON across the
+        // wasm boundary: throttled to ~1 Hz; ?nostats disables it entirely for profiling via the rig).
         try {
-          const d = JSON.parse(demo.disk_stats_json()) as {
+          if (statsSkip) throw new Error("skipped");
+          diskCache ??= demo.disk_stats_json();
+          const d = JSON.parse(diskCache) as {
             bound: number; escaped: number; biggest: number; clumps: number;
           } | null;
           if (d && d.bound > 0.005) {
@@ -354,6 +361,9 @@ async function main(): Promise<void> {
         eventLine;
     };
 
+    const statsSkip = new URLSearchParams(location.search).has("nostats");
+    let diskCache: string | null = null;
+    setInterval(() => { diskCache = null; }, 1000); // refresh the disk stats at 1 Hz
     let firstFrame = true;
     let lastFrameT = performance.now();
     const frame = () => {
@@ -369,7 +379,11 @@ async function main(): Promise<void> {
       // ~100 ms behind, so every collision it draws is already resolved.
       const dtS = (nowT - lastFrameT) / 1000;
       lastFrameT = nowT;
+      const __t0 = performance.now();
       demo.advance(dtS);
+      const __t1 = performance.now();
+      (window as unknown as { __adv: number[] }).__adv ??= [];
+      (window as unknown as { __adv: number[] }).__adv.push(__t1 - __t0);
       if (!userInteracted) cam.yaw += 0.0015; // gentle idle drift
       if (followMoon) {
         // Ease toward the follow target so re-engaging (Drop/Reset) glides instead of jump-cutting.
@@ -377,7 +391,11 @@ async function main(): Promise<void> {
       }
       demo.set_orbit(cam.yaw, cam.pitch, cam.zoom);
       try {
+        const __r0 = performance.now();
         demo.render();
+        const __r1 = performance.now();
+        (window as unknown as { __ren: number[] }).__ren ??= [];
+        (window as unknown as { __ren: number[] }).__ren.push(__r1 - __r0);
       } catch (err) {
         setStatus(`render error: ${String(err)}`, true);
         return;

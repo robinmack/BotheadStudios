@@ -430,7 +430,7 @@ impl Aggregate {
                     }
                     let d = p[j].pos - p[i].pos;
                     let r2 = d.length_squared() + s2;
-                    acc[i] += d * (G * p[j].mass * r2.powf(-1.5));
+                    acc[i] += d * (G * p[j].mass * (1.0 / (r2 * r2.sqrt())));
                 }
             }
         }
