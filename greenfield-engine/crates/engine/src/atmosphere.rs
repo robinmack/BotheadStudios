@@ -291,13 +291,19 @@ pub fn rayleigh_veil(mu_v: f64, mu_s: f64, cos_theta: f64, tau: [f64; 3], sun_ga
     if mu_s <= 0.0 {
         return [0.0; 3];
     }
-    let mu_v = mu_v.max(0.08); // grazing-path cap in lieu of the true Chapman function (flagged)
-    let phase = (3.0 / (16.0 * std::f64::consts::PI)) * (1.0 + cos_theta * cos_theta);
+    // FIRST-ORDER slab scattering (Chandrasekhar): the reflected single-scatter radiance of an
+    // optically thin layer is L = F·P(Θ)/(4(μᵥ+μₛ))·μₛ·(1 − e^{−τ(1/μᵥ+1/μₛ)}), with the Rayleigh
+    // phase P(Θ) = ¾(1+cos²Θ). Textbook, no tunable weight — the earlier ad-hoc form under-lit the
+    // veil ~3×. Grazing cosines capped in lieu of the true Chapman function (flagged); multiple
+    // scattering and ozone remain the refinement.
+    let mu_v = mu_v.max(0.08);
+    let mu_s_c = mu_s.max(0.08);
+    let phase = 0.75 * (1.0 + cos_theta * cos_theta);
+    let geom = phase / (4.0 * (mu_v + mu_s_c)) * mu_s_c;
+    let path = 1.0 / mu_v + 1.0 / mu_s_c;
     let mut out = [0.0f32; 3];
     for (i, t) in tau.iter().enumerate() {
-        let scattered = 1.0 - (-t / mu_v).exp(); // fraction of the beam scattered along the view path
-        let sun_in = (-t / mu_s.max(0.08)).exp(); // sunlight surviving the way in (twilight reddening)
-        out[i] = (sun_gain * phase * scattered * sun_in * mu_s) as f32;
+        out[i] = (sun_gain * geom * (1.0 - (-t * path).exp())) as f32;
     }
     out
 }

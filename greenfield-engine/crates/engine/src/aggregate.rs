@@ -121,6 +121,16 @@ pub struct Aggregate {
     /// 4.6e34 impactor, 4× more L than exists).
     pub boundary_force_sum: DVec3,
     pub boundary_torque_sum: DVec3,
+    /// Per-particle VAPOR flag (docs/26+27): matter hotter than its boiling point is GAS — it
+    /// interacts through `contact_gas` (EOS pressure, no cohesion, shock closure) instead of the solid
+    /// law. This is the vapor phase of the proto-lunar disk: pressure support spreads material outward
+    /// past the Roche limit, where the Moon can accrete. Condenses back on radiative cooling.
+    pub vapor: Vec<bool>,
+    /// The gas-phase pair law (see `atmosphere::gas_contact_from_material`).
+    pub contact_gas: Option<crate::granular::Contact>,
+    /// Boil threshold (K) for the phase flip — the bulk material's boiling point (1-atm value;
+    /// the local-vapor-pressure criterion is the refinement, flagged).
+    pub boil_k: f64,
 }
 
 impl Aggregate {
@@ -149,6 +159,9 @@ impl Aggregate {
             cool_elapsed: 0.0,
             boundary_force_sum: DVec3::ZERO,
             boundary_torque_sum: DVec3::ZERO,
+            vapor: vec![false; n],
+            contact_gas: None,
+            boil_k: f64::INFINITY,
         }
     }
 
@@ -157,6 +170,14 @@ impl Aggregate {
     pub fn with_contact(mut self, contact: crate::granular::Contact, ref_mass: f64) -> Self {
         self.contact = Some(contact);
         self.contact_ref_mass = ref_mass.max(1.0e-30);
+        self
+    }
+
+    /// Enable the VAPOR phase: pairs with a vaporized member use the gas law; particles flip phase at
+    /// `boil_k` (hotter ⇒ gas, cooler ⇒ condensed back to the solid law).
+    pub fn with_vapor_phase(mut self, gas: crate::granular::Contact, boil_k: f64) -> Self {
+        self.contact_gas = Some(gas);
+        self.boil_k = boil_k;
         self
     }
 
@@ -281,6 +302,9 @@ impl Aggregate {
             cool_elapsed: 0.0,
             boundary_force_sum: DVec3::ZERO,
             boundary_torque_sum: DVec3::ZERO,
+            vapor: vec![false; n],
+            contact_gas: None,
+            boil_k: f64::INFINITY,
         }
     }
 
@@ -467,10 +491,19 @@ impl Aggregate {
             let m_ref = self.contact_ref_mass;
             for i in 0..p.len() {
                 for j in (i + 1)..p.len() {
+                    // Phase-appropriate law per PAIR: a vaporized member makes the encounter gaseous
+                    // (EOS pressure, no cohesion) — the vapor disk's pressure support (docs/27).
+                    let law = if self.contact_gas.is_some()
+                        && (self.vapor.get(i) == Some(&true) || self.vapor.get(j) == Some(&true))
+                    {
+                        self.contact_gas.as_ref().unwrap()
+                    } else {
+                        &c
+                    };
                     // The law's per-mass output × the reference mass = the pair FORCE; each particle
                     // divides by its own mass — equal & opposite FORCES ⇒ momentum conserved for ANY
                     // mass ratio (a dense solid through light air parcels included).
-                    let f = crate::granular::contact_accel(p[i].pos, p[i].vel, p[j].pos, p[j].vel, &c)
+                    let f = crate::granular::contact_accel(p[i].pos, p[i].vel, p[j].pos, p[j].vel, law)
                         * m_ref;
                     acc[i] += f / p[i].mass.max(1.0e-30);
                     acc[j] -= f / p[j].mass.max(1.0e-30);
@@ -632,6 +665,9 @@ impl Aggregate {
                 self.particles.swap_remove(i);
                 self.temps.swap_remove(i);
                 self.mat_ids.swap_remove(i);
+                if !self.vapor.is_empty() {
+                    self.vapor.swap_remove(i);
+                }
                 n += 1;
             } else {
                 i += 1;
@@ -671,6 +707,13 @@ impl Aggregate {
                     }
                 }
                 self.cool_elapsed = 0.0;
+            }
+        }
+        // PHASE (docs/26): hotter than the boil point ⇒ vapor; cooled below ⇒ condensed. The flip is
+        // a state change, not a force — the pair law above reads it.
+        if self.contact_gas.is_some() {
+            for (i, t) in self.temps.iter().enumerate() {
+                self.vapor[i] = (*t as f64) > self.boil_k;
             }
         }
         // Energy conservation (docs/20): the mechanical energy the contact damping/friction removed this

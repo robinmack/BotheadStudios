@@ -159,6 +159,11 @@ async function main(): Promise<void> {
         followMoon = true; // ride the descent down
       });
     }
+    if (birthScene) {
+      // Geologic time (docs/27): retire the particle cloud, evolve the settled moonlets by the
+      // validated secular tidal law — millennia per second. Watch the Moon merge and migrate out.
+      mkBtn("⏭ Geologic", () => demo.enter_geologic_time());
+    }
     mkBtn(birthScene ? "Replay" : "Reset", () => {
       demo.reset_moon();
       followMoon = true;

@@ -1785,6 +1785,11 @@ mod app {
         /// post-impact day length EMERGES from the collision geometry. Fed by the boundary-shear mirror,
         /// demoted matter's orbital L, and drained by tidal torque on the moonlets.
         spin_l: glam::DVec3,
+        /// GEOLOGIC time-LOD (docs/27): once the aftermath is quiet, each settled clump IS one body
+        /// (orbital elements), evolved by the validated secular tidal law — millennia per real second.
+        geologic: bool,
+        geo_moonlets: Vec<crate::tides::Moonlet>,
+        geo_rate_yr_s: f64,
         /// Accumulated rotation angle (rad) about the spin axis — the VISIBLE rotation of the shell
         /// (and its landmask) at the real rate implied by spin_l.
         spin_angle: f64,
@@ -2037,6 +2042,9 @@ mod app {
                     * (crate::tides::moment_of_inertia(EARTH_MASS, EARTH_RADIUS_M)
                         * (2.0 * std::f64::consts::PI / 86_164.0)),
                 spin_angle: 0.0,
+                geologic: false,
+                geo_moonlets: Vec::new(),
+                geo_rate_yr_s: 1_000.0,
                 moon_debris: None,
                 impact_site_rel: None,
                 shell_unis,
@@ -2264,6 +2272,11 @@ mod app {
 
         /// Double/halve the aftermath speed (the ⏩/⏪ controls after an impact). Returns the multiplier.
         pub fn nudge_aftermath_rate(&mut self, faster: bool) -> f64 {
+            if self.geologic {
+                self.geo_rate_yr_s =
+                    (self.geo_rate_yr_s * if faster { 2.0 } else { 0.5 }).clamp(100.0, 1.0e6);
+                return self.geo_rate_yr_s;
+            }
             self.debris_rate_mul = if faster {
                 (self.debris_rate_mul * 2.0).min(64.0)
             } else {
@@ -2279,6 +2292,16 @@ mod app {
         /// the native emergence test.
         pub fn disk_stats_json(&self) -> String {
             const M_MOON: f64 = 7.342e22;
+            if self.geologic {
+                let bound: f64 = self.geo_moonlets.iter().map(|m| m.mass).sum();
+                let biggest = self.geo_moonlets.iter().map(|m| m.mass).fold(0.0, f64::max);
+                return format!(
+                    "{{\"bound\":{:.3},\"escaped\":0,\"biggest\":{:.3},\"clumps\":{}}}",
+                    bound / M_MOON,
+                    biggest / M_MOON,
+                    self.geo_moonlets.len()
+                );
+            }
             let Some(agg) = self.moon_debris.as_ref() else {
                 return String::from("null");
             };
@@ -2331,6 +2354,86 @@ mod app {
             )
         }
 
+        /// Enter GEOLOGIC time (docs/27): promote each aloft bound clump to ONE body on the
+        /// L-conserving circular orbit (tides circularize at ~constant angular momentum — flagged
+        /// first-order), demote everything else into Earth (it has landed or will), retire the
+        /// particle cloud, and hand evolution to the validated secular law.
+        pub fn enter_geologic_time(&mut self) {
+            let Some(agg) = self.moon_debris.as_ref() else { return };
+            let earth = self.bodies[1];
+            let mu = crate::orbit::G * earth.mass;
+            // Cluster aloft bound fragments (same union-find as the disk stats).
+            let touch = agg.contact.map_or(1.0e6, |c| 2.2 * c.radius);
+            let aloft: Vec<usize> = (0..agg.particles.len())
+                .filter(|&i| {
+                    let p = &agg.particles[i];
+                    let r = (p.pos - earth.pos).length();
+                    0.5 * (p.vel - earth.vel).length_squared() - mu / r < 0.0
+                        && r > 1.1 * EARTH_RADIUS_M
+                })
+                .collect();
+            let mut parent: Vec<usize> = (0..aloft.len()).collect();
+            fn find(p: &mut Vec<usize>, i: usize) -> usize {
+                if p[i] != i {
+                    let r = find(p, p[i]);
+                    p[i] = r;
+                }
+                p[i]
+            }
+            for a in 0..aloft.len() {
+                for b in (a + 1)..aloft.len() {
+                    if (agg.particles[aloft[a]].pos - agg.particles[aloft[b]].pos).length() < touch {
+                        let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+                        if ra != rb {
+                            parent[ra] = rb;
+                        }
+                    }
+                }
+            }
+            // Clump state: mass, L, and mass-weighted position/velocity (for the perigee test).
+            let mut clumps: std::collections::HashMap<usize, (f64, glam::DVec3, glam::DVec3, glam::DVec3)> =
+                std::collections::HashMap::new();
+            for a in 0..aloft.len() {
+                let root = find(&mut parent, a);
+                let p = &agg.particles[aloft[a]];
+                let e = clumps
+                    .entry(root)
+                    .or_insert((0.0, glam::DVec3::ZERO, glam::DVec3::ZERO, glam::DVec3::ZERO));
+                e.0 += p.mass;
+                e.1 += (p.pos - earth.pos).cross((p.vel - earth.vel) * p.mass);
+                e.2 += (p.pos - earth.pos) * p.mass;
+                e.3 += (p.vel - earth.vel) * p.mass;
+            }
+            // Promote ONLY clumps whose centre-of-mass PERIGEE clears the surface — a lofted blanket
+            // with little angular momentum is fall-back material, not a moon (watched: "moonlets"
+            // sitting ON the planet at the a-floor; sub-synchronous orbits spiral IN, Phobos' fate).
+            self.geo_moonlets = clumps
+                .values()
+                .filter(|(m, _, rp, rv)| {
+                    crate::orbit::perigee(*rp / *m, *rv / *m, mu)
+                        .is_some_and(|p| p > 1.05 * EARTH_RADIUS_M)
+                })
+                .map(|(m, l, _, _)| crate::tides::Moonlet {
+                    a: ((l.length() / m) * (l.length() / m) / mu).max(1.2 * EARTH_RADIUS_M),
+                    mass: *m,
+                })
+                .collect();
+            // Everything not promoted has landed or will: its mass and angular momentum go home.
+            let promoted: f64 = self.geo_moonlets.iter().map(|m| m.mass).sum();
+            let cloud_mass: f64 = agg.particles.iter().map(|p| p.mass).sum();
+            let l_rest: glam::DVec3 = agg
+                .particles
+                .iter()
+                .map(|p| (p.pos - earth.pos).cross((p.vel - earth.vel) * p.mass))
+                .sum::<glam::DVec3>()
+                - clumps.values().map(|(_, l)| *l).sum::<glam::DVec3>();
+            self.bodies[1].mass += cloud_mass - promoted;
+            self.spin_l += l_rest;
+            self.moon_debris = None;
+            self.debris_acc.clear();
+            self.geologic = true;
+        }
+
         /// Earth's day length (hours) from its live spin state — ∞ (0.0 returned as -1) if not spinning.
         pub fn earth_day_hours(&self) -> f64 {
             let t = crate::tides::spin_period_s(self.spin_l, self.bodies[1].mass, EARTH_RADIUS_M);
@@ -2339,7 +2442,7 @@ mod app {
 
         /// SIM seconds since the impact (−1 before it) — for the HUD's T+ aftermath clock.
         pub fn sim_since_impact_s(&self) -> f64 {
-            if self.moon_debris.is_some() {
+            if self.moon_debris.is_some() || self.geologic {
                 self.sim_since_impact
             } else {
                 -1.0
@@ -2367,6 +2470,9 @@ mod app {
         /// forms. Escapees are excluded: chasing them zoomed the view out until the whole scene was a
         /// handful of dark pixels (watched via the rig).
         pub fn debris_extent_km(&self) -> f64 {
+            if self.geologic {
+                return self.geo_moonlets.iter().map(|m| m.a).fold(0.0, f64::max) / 1000.0;
+            }
             let earth = self.bodies[1];
             let mu = crate::orbit::G * earth.mass;
             self.moon_debris.as_ref().map_or(0.0, |agg| {
@@ -2400,6 +2506,29 @@ mod app {
         pub fn advance(&mut self, real_dt: f64) {
             let real_dt = real_dt.clamp(0.0, 0.25); // tab-sleep / hiccup guard
             self.phys_clock += real_dt;
+            if self.geologic {
+                // Millennia per second: the validated secular law in 50-year strides (exactly
+                // L-conserving; see tides::secular_step). N-body/cloud machinery is retired — at this
+                // LOD the orbit-averaged equations ARE the physics.
+                let years = self.geo_rate_yr_s * real_dt;
+                let year_s = 3.156e7;
+                let mut left = years;
+                while left > 0.0 {
+                    let step = left.min(50.0);
+                    crate::tides::secular_step(
+                        &mut self.geo_moonlets,
+                        &mut self.spin_l,
+                        self.bodies[1].mass,
+                        EARTH_RADIUS_M,
+                        crate::tides::EARTH_K2_OVER_Q,
+                        step * year_s,
+                    );
+                    left -= step;
+                }
+                self.sim_since_impact += years * year_s;
+                self.push_snapshot();
+                return;
+            }
             self.real_accum += real_dt;
             // Substep budget per advance: generous for the cheap orbital phase; TIGHT once the O(n²)
             // debris cloud exists — a single slow frame used to trigger a death spiral (0.25 s of
@@ -3000,6 +3129,34 @@ mod app {
                         flight,
                         tint,
                         glow,
+                    );
+                    debris_count += 1;
+                }
+            }
+            // GEOLOGIC moonlets: one grain ball per body at its true orbital radius. Orbital PHASE is
+            // unresolvable at millennia-per-second (a moonlet completes ~10⁶ orbits per frame), so the
+            // drawn angle is a slow golden-spaced drift — a liveliness cue, honestly not a phase.
+            if self.geologic {
+                let rho = 2_900.0f64; // basalt bulk — the moonlets' crusts have long frozen (docs/27)
+                for (i, m) in self.geo_moonlets.iter().enumerate() {
+                    if i >= self.debris_unis.len() {
+                        break;
+                    }
+                    let ang = 2.399963 * i as f64 + self.phys_clock * 0.15;
+                    let dir = glam::DVec3::new(ang.cos(), ang.sin(), 0.0);
+                    let pos_w = earth_center + dir * m.a;
+                    let r_disp = ((3.0 * m.mass / (4.0 * std::f64::consts::PI * rho)).cbrt()
+                        * DISPLAY_SCALE) as f32;
+                    let fpos = ((pos_w - focus) * DISPLAY_SCALE).as_vec3();
+                    let flight = (sun - pos_w).as_vec3().normalize();
+                    write_space_uniform(
+                        &self.queue,
+                        &self.debris_unis[i],
+                        view_proj,
+                        Mat4::from_translation(fpos) * Mat4::from_scale(Vec3::splat(r_disp)),
+                        flight,
+                        self.moon_tint,
+                        [0.0; 4], // crusted over: reflected light only (interior heat is sub-surface)
                     );
                     debris_count += 1;
                 }

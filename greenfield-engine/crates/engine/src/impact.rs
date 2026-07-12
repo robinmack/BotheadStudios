@@ -125,11 +125,24 @@ pub fn build_impact_debris_between(
     // (the materialized half-ball) carved out at the site — debris landing far from the crater rests on
     // the surface; only in the bowl does free space reach cap depth. Matter cannot cross the planet.
     let specific_heat = mat.thermal.as_ref().map_or(840.0, |t| t.specific_heat as f64);
+    // VAPOR phase (docs/27): shock-heated fragments past the boil point interact as GAS — EOS
+    // pressure anchored at the boiling reference state (vapor pressure ≈ 1 atm at the boil point,
+    // definitionally; flagged first-order). This pressure support is what spreads the proto-lunar
+    // disk outward past the Roche limit.
+    let gas = crate::atmosphere::gas_contact_from_material(mat, frag_r, frag_mass, 101_325.0);
+    // Vaporization is NOT free: fully boiling the fragment consumes the latent heat L_v — for basalt
+    // ≈ 7,100 K of equivalent thermal energy on top of the boil point. Without this sink the first
+    // vapor experiment boiled ALL 384 fragments and the disk evaporated to zero (measured). The
+    // fully-vaporized threshold is boil + L_v/c; partial vaporization is the refinement (flagged).
+    let boil_k = mat.thermal.as_ref().map_or(f64::INFINITY, |t| {
+        t.boil_point as f64 + t.latent_vaporization as f64 / (t.specific_heat as f64).max(1.0)
+    });
     let mut agg = Aggregate::new(particles, softening)
         .with_material(basalt) // bulk contact-law material (per-pair material contact: flagged refinement)
         // 1/r² outside the planet, Gauss's-law linear interior inside — no singular core attractor.
         .with_gravity_source(earth_pos, earth_mass, earth_radius)
         .with_contact(contact, frag_mass)
+        .with_vapor_phase(gas, boil_k)
         .with_specific_heat(specific_heat)
         .with_boundary(earth_pos, earth_radius, contact.stiffness)
         .with_boundary_hole(surface, cap_extent);
@@ -327,6 +340,8 @@ mod tests {
         for _ in 0..steps {
             agg.step(&mut acc2, 2.0);
         }
+        let n_vapor = agg.vapor.iter().filter(|v| **v).count();
+        println!("vapor parcels at end: {n_vapor} of {}", agg.particles.len());
         let l1 = crate::tides::cloud_angular_momentum(&agg.particles, DVec3::ZERO, DVec3::ZERO);
         let spin_l = l0 - l1; // the shear's mirror: what the cloud lost, the planet's spin gained
         let day_h = crate::tides::spin_period_s(spin_l, EARTH_MASS, EARTH_RADIUS_M) / 3600.0;

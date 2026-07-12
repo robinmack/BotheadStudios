@@ -165,6 +165,64 @@ pub fn j2_accel(rel: DVec3, mu: f64, r_planet: f64, j2: f64, s_hat: DVec3) -> DV
     (r_hat * (1.0 - 5.0 * u * u) + s_hat * (2.0 * u)) * k
 }
 
+/// A moonlet at GEOLOGIC time-LOD: a settled rubble pile on a stable orbit is ONE BODY described by
+/// its orbital elements (the scale-relative promotion in reverse — docs/13: when nothing eventful
+/// happens for many orbits, the orbit-averaged secular equations ARE the honest physics, exactly as
+/// the conservation laws are at contact).
+#[derive(Clone, Copy, Debug)]
+pub struct Moonlet {
+    pub a: f64,    // semi-major axis (m)
+    pub mass: f64, // kg
+}
+
+/// One SECULAR step of `dt` (seconds — typically years to millennia): every moonlet migrates by the
+/// validated tidal law, the planet's spin pays for it (angular momentum moves, never appears), and
+/// moonlets whose orbits close within 3.5 mutual Hill radii MERGE (the standard planetesimal
+/// stability criterion, Gladman 1993) — conserving mass and orbital angular momentum exactly
+/// (a_new from L₁+L₂ = (m₁+m₂)·√(G·M·a_new)). Returns the number of mergers.
+pub fn secular_step(
+    moonlets: &mut Vec<Moonlet>,
+    spin_l: &mut DVec3,
+    m_planet: f64,
+    r_planet: f64,
+    k2_over_q: f64,
+    dt: f64,
+) -> usize {
+    let spin_omega = spin_l.length() / moment_of_inertia(m_planet, r_planet);
+    let s_hat = spin_l.normalize_or_zero();
+    for m in moonlets.iter_mut() {
+        // Per-step da capped at 5% of a: the secular law is a rate, not a leap (early migration at
+        // 3 R⊕ is ferocious; an uncapped step overshoots the nonlinear (R/a)⁵ falloff).
+        let da = (tidal_da_dt(k2_over_q, m.mass, m_planet, r_planet, m.a, spin_omega) * dt)
+            .clamp(-0.05 * m.a, 0.05 * m.a);
+        let a_new = (m.a + da).max(r_planet * 1.2);
+        // The spin pays the EXACT orbital-L change (L = m·√(G·M·a) is an identity, not a Taylor
+        // expansion — first-order payment leaked 1.7% over an early-fast migration, measured).
+        let dl = m.mass * (G * m_planet).sqrt() * (a_new.sqrt() - m.a.sqrt());
+        m.a = a_new;
+        *spin_l -= s_hat * dl;
+    }
+    // Hill-criterion mergers, innermost outward.
+    moonlets.sort_by(|x, y| x.a.partial_cmp(&y.a).unwrap());
+    let mut merged = 0;
+    let mut i = 0;
+    while i + 1 < moonlets.len() {
+        let (m1, m2) = (moonlets[i], moonlets[i + 1]);
+        let r_hill = 0.5 * (m1.a + m2.a) * ((m1.mass + m2.mass) / (3.0 * m_planet)).powf(1.0 / 3.0);
+        if (m2.a - m1.a) < 3.5 * r_hill {
+            let mass = m1.mass + m2.mass;
+            let l = m1.mass * (G * m_planet * m1.a).sqrt() + m2.mass * (G * m_planet * m2.a).sqrt();
+            let a_new = (l / (mass * (G * m_planet).sqrt())).powi(2);
+            moonlets[i] = Moonlet { a: a_new, mass };
+            moonlets.remove(i + 1);
+            merged += 1;
+        } else {
+            i += 1;
+        }
+    }
+    merged
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,6 +285,52 @@ mod tests {
         assert!(
             m_per_year > 100.0,
             "close-in migration is fast (got {m_per_year:.1} m/yr)"
+        );
+    }
+
+    #[test]
+    fn geologic_time_merges_the_moonlets_and_migrates_the_moon_outward() {
+        // The endgame (docs/27): three post-impact moonlets under secular tides must (a) MERGE into
+        // one Moon (Hill instability), (b) migrate OUTWARD, (c) conserve total angular momentum —
+        // the day lengthens as the orbit grows, exactly the real Earth–Moon history.
+        let mut moonlets = vec![
+            Moonlet { a: 2.6 * R_E, mass: 0.3 * M_MOON },
+            Moonlet { a: 3.0 * R_E, mass: 0.4 * M_MOON },
+            Moonlet { a: 3.6 * R_E, mass: 0.3 * M_MOON },
+        ];
+        // Post-impact 4-h day.
+        let mut spin = DVec3::new(0.0, 0.0, 1.0)
+            * (moment_of_inertia(M_E, R_E) * 2.0 * std::f64::consts::PI / (4.0 * 3600.0));
+        let l_orbit0: f64 =
+            moonlets.iter().map(|m| m.mass * (G * M_E * m.a).sqrt()).sum();
+        let l_total0 = spin.length() + l_orbit0;
+        let day0 = spin_period_s(spin, M_E, R_E);
+
+        let year = 3.156e7;
+        let mut years = 0.0f64;
+        while moonlets.len() > 1 && years < 2.0e6 {
+            secular_step(&mut moonlets, &mut spin, M_E, R_E, EARTH_K2_OVER_Q, 50.0 * year);
+            years += 50.0;
+        }
+        assert_eq!(moonlets.len(), 1, "the moonlets merge into ONE Moon (after {years:.0} y)");
+        let a_at_merge = moonlets[0].a;
+        for _ in 0..40_000 {
+            secular_step(&mut moonlets, &mut spin, M_E, R_E, EARTH_K2_OVER_Q, 500.0 * year);
+        }
+        let m = moonlets[0];
+        let l_total1 =
+            spin.length() + m.mass * (G * M_E * m.a).sqrt();
+        let day1 = spin_period_s(spin, M_E, R_E);
+        println!(
+            "one Moon: merged at {:.1} R⊕ · after 20 Myr more: a = {:.1} R⊕ · day {:.1} h → {:.1} h · L drift {:.2e}",
+            a_at_merge / R_E, m.a / R_E, day0 / 3600.0, day1 / 3600.0,
+            (l_total1 - l_total0).abs() / l_total0
+        );
+        assert!(m.a > a_at_merge * 1.5, "the Moon migrates outward (got {:.1} R⊕)", m.a / R_E);
+        assert!(day1 > day0 * 1.2, "the day lengthens as the orbit grows");
+        assert!(
+            (l_total1 - l_total0).abs() / l_total0 < 1.0e-6,
+            "angular momentum conserved through mergers and migration"
         );
     }
 
