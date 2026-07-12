@@ -2752,8 +2752,12 @@ mod app {
                     view_proj,
                     Mat4::from_translation(spos) * Mat4::from_scale(Vec3::splat(sun_r_disp)),
                     earth_light,
-                    [0.0, 0.0, 0.0, 1.0],          // no reflectance — it is the illuminant
-                    incandescence(5_772.0),         // the photosphere glows at its real temperature
+                    [0.0, 0.0, 0.0, 1.0], // no reflectance — it is the illuminant
+                    // The photosphere's radiance is ~4.6e4× a sunlit white surface at 1 AU
+                    // (~2e7 vs ~430 W/m²/sr): ANY exposure set for the scene saturates on the Sun.
+                    // incandescence()'s rock-glow intensity (~2) tone-mapped to dull grey — honest
+                    // brightness is the measured ratio, which pins the Reinhard output at white.
+                    [1.0, 1.0, 1.0, 4.6e4],
                 );
             }
             // The BULK INTERIOR (the un-materialized deep Earth): an opaque sphere at the depth the
