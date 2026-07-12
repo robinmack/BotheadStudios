@@ -1958,11 +1958,14 @@ mod app {
             let mats = materials::load();
             // The interior sphere's material/temperature: the layer at the depth the crater exposes
             // (the cap bottom) — for a Moon-scale impact that is the top of the molten outer core.
-            let earth_profile = crate::planet::earth();
-            let interior_r = EARTH_RADIUS_M - 2.0 * MOON_RADIUS_M;
-            let int_mat = &mats[materials::index_of(&mats, earth_profile.layer_at(interior_r).material)];
+            // The bulk just under the crust: OPAQUE DARK ROCK. It sits right beneath the shell grains
+            // so nothing shines through the gaps between them — the old white-hot sphere (meant as the
+            // crater floor, 3,500 km down) bled through the gaps and made Earth look lit from WITHIN,
+            // reading as anti-sun lighting (Robin's "anti-raycasting"). Depth-glow belongs to the
+            // CRATER alone, whose wall grains carry the real layer temperatures.
+            let int_mat = &mats[materials::index_of(&mats, "basalt")];
             let interior_tint = [int_mat.albedo[0], int_mat.albedo[1], int_mat.albedo[2], 1.0];
-            let interior_glow = incandescence(earth_profile.temperature_at(interior_r) as f32);
+            let interior_glow = [0.0f32; 4];
             let earth_comp = [
                 (materials::index_of(&mats, "water"), 0.71),
                 (materials::index_of(&mats, "granite"), 0.24),
@@ -2553,7 +2556,8 @@ mod app {
                 agg.step(&mut self.debris_acc, dt);
                 let p_after: glam::DVec3 =
                     agg.particles.iter().map(|p| p.vel * p.mass).sum();
-                self.bodies[1].vel -= (p_after - p_before - j_sun) / self.bodies[1].mass;
+                let m_e = self.bodies[1].mass;
+                self.bodies[1].vel -= (p_after - p_before - j_sun) / m_e;
                 self.sim_since_impact += dt; // the aftermath clock (sim time, not wall time)
                 // DEMOTION (docs/27): settled matter IS Earth again — drain it back into the bulk
                 // summary (mass to the planet, particle removed). Fidelity ∝ observability (docs/13);
@@ -2757,7 +2761,7 @@ mod app {
             // The planet is not hollow; through the crater you see molten interior, not far-side crust.
             {
                 let ipos = ((earth_center - focus) * DISPLAY_SCALE).as_vec3();
-                let ir = ((EARTH_RADIUS_M - self.cap_extent()) * DISPLAY_SCALE) as f32;
+                let ir = ((EARTH_RADIUS_M * 0.985) * DISPLAY_SCALE) as f32; // just under the shell
                 write_space_uniform(
                     &self.queue,
                     &self.interior_uni,
