@@ -73,12 +73,32 @@ pub struct AirField {
     pub h: f64,     // kernel smoothing length (m)
     pub rs_t: f64,  // R_s·T (isothermal v0)
     pub rho: Vec<f64>,
+    /// GHOST-PARTICLE floor (y = value): parcels within `h` of the floor see their own and their
+    /// neighbours' mirror images below it, completing the kernel support — without this, boundary
+    /// densities are ~2× deficient, the basal pressure halves, and a settling column collapses onto the
+    /// floor (observed; the flagged rung). The ghosts' reaction is carried by the ground — the honest
+    /// statement that the floor supports the column's weight.
+    pub floor_y: Option<f64>,
 }
 
 impl AirField {
     pub fn new(pos: Vec<glam::DVec3>, mass: f64, h: f64, rs_t: f64) -> Self {
         let n = pos.len();
-        AirField { pos, vel: vec![glam::DVec3::ZERO; n], mass, h, rs_t, rho: vec![0.0; n] }
+        AirField {
+            pos,
+            vel: vec![glam::DVec3::ZERO; n],
+            mass,
+            h,
+            rs_t,
+            rho: vec![0.0; n],
+            floor_y: None,
+        }
+    }
+
+    /// Add a ghost-particle floor at height `y`.
+    pub fn with_floor(mut self, y: f64) -> Self {
+        self.floor_y = Some(y);
+        self
     }
 
     /// Cubic spline kernel W(r, h), 3D-normalized (σ = 8/(π h³)), support 0..h.
@@ -107,7 +127,7 @@ impl AirField {
         }
     }
 
-    /// Kernel density estimate at every parcel (includes self-contribution).
+    /// Kernel density estimate at every parcel (includes self-contribution and floor ghosts).
     pub fn compute_density(&mut self) {
         let n = self.pos.len();
         for i in 0..n {
@@ -117,6 +137,20 @@ impl AirField {
                     let r = (self.pos[i] - self.pos[j]).length();
                     if r < self.h {
                         rho += self.mass * self.w(r);
+                    }
+                }
+                // The mirror ghost of j (including j == i): completes the half-kernel at the floor.
+                if let Some(fy) = self.floor_y {
+                    if self.pos[j].y - fy < self.h {
+                        let ghost = glam::DVec3::new(
+                            self.pos[j].x,
+                            2.0 * fy - self.pos[j].y,
+                            self.pos[j].z,
+                        );
+                        let r = (self.pos[i] - ghost).length();
+                        if r < self.h && r > 1.0e-9 {
+                            rho += self.mass * self.w(r);
+                        }
                     }
                 }
             }
@@ -140,6 +174,27 @@ impl AirField {
                 let a = -(d / r) * (self.mass * term * self.dw(r)); // dw < 0 ⇒ repulsive
                 acc[i] += a;
                 acc[j] -= a; // equal-mass parcels: equal/opposite accelerations = forces
+            }
+            // Ghost forces: every real parcel j near the floor (including i itself) has a mirror whose
+            // pressure pushes i away from the boundary. The reaction goes to the GROUND (not to j) —
+            // the floor genuinely carries the column's weight; air momentum alone is not conserved
+            // against a wall, and must not be.
+            if let Some(fy) = self.floor_y {
+                for j in 0..n {
+                    if self.pos[j].y - fy >= self.h {
+                        continue;
+                    }
+                    let ghost =
+                        glam::DVec3::new(self.pos[j].x, 2.0 * fy - self.pos[j].y, self.pos[j].z);
+                    let d = self.pos[i] - ghost;
+                    let r = d.length();
+                    if r >= self.h || r < 1.0e-9 {
+                        continue;
+                    }
+                    let (pi, pj) = (self.rho[i] * self.rs_t, self.rho[j] * self.rs_t);
+                    let term = pi / (self.rho[i] * self.rho[i]) + pj / (self.rho[j] * self.rho[j]);
+                    acc[i] += -(d / r) * (self.mass * term * self.dw(r));
+                }
             }
         }
         acc
@@ -461,13 +516,14 @@ mod tests {
             "SPH pressure forces sum to zero — momentum conserved by construction"
         );
 
-        // (3) FLAGGED NEXT RUNG: 3D hydrostatic settling requires a GHOST-PARTICLE floor — without
-        //     mirrored ghosts, kernel densities at the boundary are ~2× deficient, halving the basal
-        //     pressure support, and the column collapses onto the floor (observed). The 1D column test
-        //     proves the hydrostatic/exponential physics; the 3D field's normalization and momentum
-        //     symmetry are proven above; the ghost boundary is infrastructure, pre-declared here.
+        // (3) FLAGGED (in progress): 3D hydrostatic settling. The ghost-particle floor is IN (mirror
+        //     ghosts complete boundary kernels — basal support measurably improved), but the damped
+        //     relaxation under-converges for this tall column (interior bands still read equal density
+        //     ⇒ not yet at equilibrium). The remaining work is the relaxation protocol (annealed
+        //     damping / longer settling / better initialization), not the physics: the 1D column
+        //     already proves the hydrostatic-exponential result at 0.2%. Pre-declared assertions for
+        //     when it converges: interior ΔP = g·Δm/A, and basal P ≈ the full column weight (~1 atm).
     }
-
     #[test]
     fn air_parcels_released_in_vacuum_expand_freely_and_never_clump() {
         // docs/26 emergence test 3: no cohesion, no fake containment — gas fills whatever it's given.
