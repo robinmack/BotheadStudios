@@ -53,6 +53,7 @@ pub fn contact_from_material(mat: &Material, radius: f64, particle_mass: f64) ->
         tangent_damp: normal_damp, // regularise friction at the same scale as normal damping
         cohesion,
         coh_range: 0.15 * radius, // adhesion reaches a small fraction of a grain beyond touch
+        shock: 0.0,               // solids: restitution-calibrated damping, no shock closure
     }
 }
 
@@ -81,6 +82,13 @@ pub struct Contact {
     pub cohesion: f64,
     /// Range (m) beyond `touch` over which cohesion acts before the bond lets go.
     pub coh_range: f64,
+    /// SUB-PARCEL SHOCK closure (0..1; gases 1, solids 0): real shocks are far thinner than a particle,
+    /// so at parcel LOD the ordered relative motion must thermalize within ONE crossing — which fixes
+    /// the damping GEOMETRICALLY at c = |v_n|/(4·radius) (no tunable constant: c·τ_crossing ≈ ½ ⇒ the
+    /// relative KE is dissipated in the pass). Same epistemic status as friction: a constitutive summary
+    /// of sub-resolution physics. Side effect, also physical: the damping force becomes ∝ v² — the real
+    /// ram-drag law of the hypersonic regime.
+    pub shock: f64,
 }
 
 /// Acceleration on grain *i* due to contact with grain *j* (equal radii). Zero unless they overlap.
@@ -103,8 +111,10 @@ pub fn contact_accel(pi: DVec3, vi: DVec3, pj: DVec3, vj: DVec3, c: &Contact) ->
     // cap — a cap is a fudge; a stiff contact is kept stable by implicit integration, not by clamping.
     // Cohesion lets the net force PULL (attractive) — bonding touching grains — until it breaks past
     // `coh_range`. c.cohesion = 0 recovers the old push-only contact.
+    // Damping = the calibrated constant + the sub-parcel shock closure (see `Contact::shock`).
+    let c_damp = c.normal_damp + c.shock * v_n.abs() / (4.0 * c.radius);
     let f_rep = if overlap > 0.0 {
-        (c.stiffness * overlap - c.normal_damp * v_n).max(0.0)
+        (c.stiffness * overlap - c_damp * v_n).max(0.0)
     } else {
         0.0
     };
@@ -152,7 +162,8 @@ pub fn contact_dissipation(pi: DVec3, vi: DVec3, pj: DVec3, vj: DVec3, c: &Conta
     let overlap = touch - dist;
     let v_rel = vi - vj;
     let v_n = v_rel.dot(n);
-    let f_rep = (c.stiffness * overlap - c.normal_damp * v_n).max(0.0);
+    let c_damp = c.normal_damp + c.shock * v_n.abs() / (4.0 * c.radius); // incl. shock closure
+    let f_rep = (c.stiffness * overlap - c_damp * v_n).max(0.0);
     // Normal: the damping (or the push-only clamp) removes (k·overlap − f_rep)·v_n ≥ 0.
     let p_n = ((c.stiffness * overlap - f_rep) * v_n).max(0.0);
     // Tangential: Coulomb friction opposes the slip exactly — same load (repulsion + adhesion) as the
@@ -203,6 +214,7 @@ mod tests {
     }
 
     fn params() -> Contact {
+        #[allow(clippy::needless_update)]
         Contact {
             radius: 0.5,
             stiffness: 2.0e4,
@@ -211,6 +223,7 @@ mod tests {
             tangent_damp: 200.0,
             cohesion: 0.0, // cohesionless by default (dry) — existing tests are the push-only contact
             coh_range: 0.15,
+            shock: 0.0,
         }
     }
 

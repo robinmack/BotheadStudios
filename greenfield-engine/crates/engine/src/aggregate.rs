@@ -986,6 +986,7 @@ mod tests {
             tangent_damp: 0.0,
             cohesion: 0.0,
             coh_range: 0.1,
+            shock: 0.0,
         };
         let mut agg = Aggregate::new(
             vec![

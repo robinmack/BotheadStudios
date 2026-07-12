@@ -29,6 +29,7 @@ pub fn gas_contact_from_material(mat: &Material, radius: f64, parcel_mass: f64, 
         tangent_damp: 0.0,
         cohesion: 0.0,
         coh_range: 0.0,
+        shock: 1.0, // gas: the sub-parcel shock closure ON (see granular::Contact::shock)
     }
 }
 
@@ -289,15 +290,14 @@ mod tests {
             (p1 - p0).length()
         );
 
-        // HONESTY FLAG (docs/26): heating emerges (parcels double their absolute temperature in one
-        // pass) but under-resolves the stagnation scale (~32,000 K): the linear damper thermalizes on
-        // the contact-oscillator timescale while a hypersonic body crosses a parcel in ω·τ ≈ 0.04 — the
-        // real shock is SUB-PARCEL-thin (like friction is sub-voxel). The closure is speed-dependent
-        // shock damping (thermalize the relative KE within one crossing) — the pre-declared next rung,
-        // not a constant to inflate here.
+        // The sub-parcel shock closure (`Contact::shock` — geometric, no tunable constant) thermalizes
+        // the relative motion within one parcel crossing: the swept air passes visible incandescence,
+        // the docs/26 test-5 bar. HONESTY FLAG: the quantitative post-shock value (Rankine–Hugoniot,
+        // ~12,000 K at Mach 23) needs resolved shock layers / finer parcels — this coarse corridor is
+        // mostly grazing hits; matching that number is the refinement, the GLOW is the emergence.
         assert!(
-            hottest > 450.0,
-            "the swept air heats significantly — entry heating EMERGES (hottest {hottest:.0} K from 288)"
+            hottest > 800.0,
+            "the shocked air GLOWS — entry plasma emerges (hottest {hottest:.0} K from 288)"
         );
         assert!(
             hottest < 3.0 * t_stag,
