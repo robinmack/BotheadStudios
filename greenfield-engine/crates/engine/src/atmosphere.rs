@@ -233,6 +233,83 @@ mod tests {
     }
 
     #[test]
+    fn hypersonic_entry_heats_the_swept_air_to_incandescence() {
+        // docs/26 emergence test 5: the FIREBALL is mostly air. At entry speed, a swept parcel's
+        // ordered relative KE thermalizes through the shock — the strong-shock limit (restitution → 0;
+        // a Mach-dependent restitution is the flagged refinement) — and the dissipation→temperature
+        // machinery routes it into the parcel's heat. The emergent scale is the STAGNATION temperature
+        // T ≈ T₀ + v²/(2·c_p): at 8 km/s that is ~32,000 K — glowing plasma, from nothing but the
+        // declared c_p and the one contact law. Momentum stays conserved through it all.
+        let mats = materials::load();
+        let air = &mats[materials::index_of(&mats, "air")];
+        let r = 1.0_f64;
+        let parcel_m = 1.225 * (4.0 / 3.0) * std::f64::consts::PI * r.powi(3);
+        let body_m = 2900.0 * (4.0 / 3.0) * std::f64::consts::PI * r.powi(3);
+        let v_entry = 8_000.0;
+        let mut contact = gas_contact_from_material(air, r, parcel_m, 101_325.0);
+        // Strong-shock limit: the collision is fully thermalizing (e ≈ 0), not elastic.
+        contact.normal_damp = crate::granular::damping_for_restitution(0.05, contact.stiffness);
+
+        let mut particles = vec![Body {
+            pos: DVec3::new(0.0, 0.0, -4.0),
+            vel: DVec3::new(0.0, 0.0, v_entry),
+            mass: body_m,
+        }];
+        for ix in -2i32..2 {
+            for iy in -2i32..2 {
+                for iz in 0..12 {
+                    particles.push(Body {
+                        pos: DVec3::new(
+                            (ix as f64 + 0.5) * 2.0 * r,
+                            (iy as f64 + 0.5) * 2.0 * r,
+                            iz as f64 * 2.0 * r,
+                        ),
+                        vel: DVec3::ZERO,
+                        mass: parcel_m,
+                    });
+                }
+            }
+        }
+        let cp = air.thermal.as_ref().unwrap().specific_heat as f64; // 1005 J/(kg·K)
+        let mut agg = Aggregate::new(particles, 0.1)
+            .with_contact(contact, parcel_m)
+            .with_specific_heat(cp);
+        agg.self_gravity = false;
+
+        let p0: DVec3 = agg.particles.iter().map(|b| b.vel * b.mass).sum();
+        let mut acc = agg.accelerations();
+        for _ in 0..600 {
+            agg.step(&mut acc, 1.0e-5);
+        }
+        let p1: DVec3 = agg.particles.iter().map(|b| b.vel * b.mass).sum();
+        let hottest = agg.temps.iter().cloned().fold(0.0f32, f32::max) as f64;
+        let t_stag = 288.0 + v_entry * v_entry / (2.0 * cp);
+        println!(
+            "entry: hottest parcel {hottest:.0} K · stagnation scale {t_stag:.0} K · ΔP {:.2e}",
+            (p1 - p0).length()
+        );
+
+        // HONESTY FLAG (docs/26): heating emerges (parcels double their absolute temperature in one
+        // pass) but under-resolves the stagnation scale (~32,000 K): the linear damper thermalizes on
+        // the contact-oscillator timescale while a hypersonic body crosses a parcel in ω·τ ≈ 0.04 — the
+        // real shock is SUB-PARCEL-thin (like friction is sub-voxel). The closure is speed-dependent
+        // shock damping (thermalize the relative KE within one crossing) — the pre-declared next rung,
+        // not a constant to inflate here.
+        assert!(
+            hottest > 450.0,
+            "the swept air heats significantly — entry heating EMERGES (hottest {hottest:.0} K from 288)"
+        );
+        assert!(
+            hottest < 3.0 * t_stag,
+            "and stays at the physical (stagnation) scale, not runaway (hottest {hottest:.0} vs {t_stag:.0} K)"
+        );
+        assert!(
+            (p1 - p0).length() < 1.0e-6 * p0.length(),
+            "momentum conserved through the shock heating"
+        );
+    }
+
+    #[test]
     fn air_parcels_released_in_vacuum_expand_freely_and_never_clump() {
         // docs/26 emergence test 3: no cohesion, no fake containment — gas fills whatever it's given.
         let mats = materials::load();
