@@ -111,6 +111,9 @@ pub struct Aggregate {
     /// (radially to the planet surface, or into the bowl through its wall). Without this the boundary
     /// was dishonestly a whole-planet excavation: debris landing far from the crater sank to cap depth.
     pub boundary_hole: Option<(DVec3, f64)>,
+    /// Sim-seconds since radiative cooling was last applied: per-substep decrements (~1e-4 K) underflow
+    /// f32 at thousands of kelvin, so cooling is applied in batched, resolvable intervals.
+    pub cool_elapsed: f64,
 }
 
 impl Aggregate {
@@ -136,6 +139,7 @@ impl Aggregate {
             boundary: None,
             boundary_vel: DVec3::ZERO,
             boundary_hole: None,
+            cool_elapsed: 0.0,
         }
     }
 
@@ -265,6 +269,7 @@ impl Aggregate {
             boundary: None,
             boundary_vel: DVec3::ZERO,
             boundary_hole: None,
+            cool_elapsed: 0.0,
         }
     }
 
@@ -621,6 +626,28 @@ impl Aggregate {
             b.vel += *a * (0.5 * dt);
         }
         *acc = new_acc;
+        // RADIATIVE COOLING (Stefan–Boltzmann): hot matter in vacuum sheds σ·ε·A·T⁴ — a white-hot
+        // fragment visibly fades over hours-days (Robin: "the white-hot fragments never seem to cool" —
+        // they had no radiative channel at all). Grain surface area from the contact radius (the
+        // mass-agnostic geometry, flagged); rock emissivity ~0.9; space is ~0 K.
+        if let Some(c) = self.contact {
+            // Batched so the decrement is resolvable in f32 (a per-substep ~1e-4 K rounds away at
+            // thousands of kelvin — measured: ΔT stayed exactly 0.00).
+            self.cool_elapsed += dt;
+            if self.cool_elapsed >= 600.0 {
+                const SIGMA: f64 = 5.670e-8;
+                let area = 4.0 * std::f64::consts::PI * c.radius * c.radius * 0.9;
+                for (t, p) in self.temps.iter_mut().zip(self.particles.iter()) {
+                    let tk = *t as f64;
+                    if tk > 3.0 {
+                        let d_t = SIGMA * area * tk.powi(4) * self.cool_elapsed
+                            / (p.mass.max(1.0e-30) * self.specific_heat);
+                        *t = (tk - d_t).max(2.7) as f32;
+                    }
+                }
+                self.cool_elapsed = 0.0;
+            }
+        }
         // Energy conservation (docs/20): the mechanical energy the contact damping/friction removed this
         // step becomes HEAT, split evenly across each dissipating pair — the source of the emergent
         // incandescence (a hard impact glows because the matter genuinely got hot).
@@ -1017,6 +1044,41 @@ mod tests {
         assert!(
             bound < 2.0 * r0,
             "below escape velocity it arcs back — apoapsis stays near the surface, got {bound:.3e} m"
+        );
+    }
+
+    #[test]
+    fn white_hot_fragments_radiate_and_cool() {
+        // Stefan–Boltzmann: a 4,600 K Theia-scale fragment must visibly fade within sim-hours.
+        let mats = crate::materials::load();
+        let basalt = crate::materials::index_of(&mats, "basalt");
+        let m = 5.0e21;
+        let r = (3.0 * m / (4.0 * std::f64::consts::PI * 2900.0)).cbrt();
+        let contact = crate::granular::contact_from_material(&mats[basalt], r, m);
+        let mut agg = Aggregate::new(
+            vec![Body { pos: DVec3::ZERO, vel: DVec3::ZERO, mass: m }],
+            1.0,
+        )
+        .with_contact(contact, m)
+        .with_specific_heat(840.0);
+        agg.self_gravity = false;
+        agg.temps[0] = 4_600.0;
+        let mut acc = agg.accelerations();
+        for _ in 0..7_200 {
+            agg.step(&mut acc, 2.0); // 4 sim-hours
+        }
+        // The HONEST rate, not a cinematic one: a 750-km fragment's thermal mass is enormous per unit
+        // surface, so σT⁴ sheds only ~0.5 K in 4 h — bulk-molten moonlets genuinely glow for MONTHS
+        // (real magma bodies: millennia). Analytic: ΔT = σ·ε·A·T⁴·t/(m·c) ≈ 0.54 K here. What reality
+        // adds that we can't resolve yet is the thin cooled CRUST (fast surface fade over days, molten
+        // interior) — a surface/interior temperature split, flagged for the roadmap.
+        let expect = 5.670e-8 * 0.9 * (4.0 * std::f64::consts::PI * r * r) * 4600.0f64.powi(4)
+            * 14_400.0
+            / (m * 840.0);
+        let cooled = 4_600.0 - agg.temps[0] as f64;
+        assert!(
+            cooled > 0.0 && (cooled - expect).abs() / expect < 0.05,
+            "cools at the Stefan–Boltzmann rate (ΔT {cooled:.2} K vs analytic {expect:.2} K)"
         );
     }
 

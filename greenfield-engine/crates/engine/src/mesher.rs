@@ -183,7 +183,10 @@ pub fn build_uv_sphere(
         for j in 0..sectors as u32 {
             let a = i * stride + j;
             let b = a + stride;
-            indices.extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
+            // CCW seen from OUTSIDE (the space pipeline culls back faces): the old CW winding made
+            // every sphere render inside-out — the near hemisphere was culled and you saw the lit
+            // INNER far wall, so bodies appeared reverse-lit (Earth "brilliantly lit" when backlit).
+            indices.extend_from_slice(&[a, a + 1, b, a + 1, b + 1, b]);
         }
     }
     Mesh { vertices, indices }
