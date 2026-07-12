@@ -77,6 +77,13 @@ pub struct Aggregate {
     /// genuinely escape and slower ones arc back — the honest fall-back/escape balance. Softened at the
     /// source radius so a fragment crossing the surface doesn't see a singularity (contact handles it).
     pub gravity_source: Option<(DVec3, f64, f64)>,
+    /// ALL the system's massive bodies (position, mass, radius) — Sun, planet, other moons — each
+    /// pulling every particle by the SAME law (1/r² outside its radius, Gauss interior inside). No body
+    /// is a special case or a scene modifier: the Sun is declared MATTER (planet::sun(), its mass
+    /// emerging from composition), and without its pull a planet's debris is dynamically wrong within
+    /// days (Earth accelerates ~6 mm/s² around it — an 8 km/s drift over 16 days — and curves away from
+    /// sun-blind debris: the disk visibly "escaped"). Refreshed each substep from the live N-body state.
+    pub gravity_bodies: Vec<(DVec3, f64, f64)>,
     /// Particle–particle CONTACT law (the canonical `granular::Contact`) — when set, non-coincident
     /// particles that overlap push apart via `granular::contact_accel`, the SAME force law the granular
     /// terrain/debris uses. This is what makes matter collide instead of interpenetrate; without it a
@@ -95,6 +102,9 @@ pub struct Aggregate {
     /// penalty spring `stiffness·(radius−dist)` (a FORCE, −∇U — never a velocity reset). The far-field
     /// summary of matter we don't resolve, contacted honestly (docs/24).
     pub boundary: Option<(DVec3, f64, f64)>,
+    /// The boundary body's velocity — the ground the debris shears against moves with its planet.
+    /// (No spin yet — the surface velocity omits rotation, flagged; docs/27 roadmap.)
+    pub boundary_vel: DVec3,
     /// A spherical HOLE carved out of the boundary (centre, radius) — the excavated crater bowl. The
     /// solid region is (inside boundary sphere) MINUS (inside hole ball): a particle in the bowl is in
     /// free space; a particle in the remaining solid is pushed out through the NEAREST free surface
@@ -119,10 +129,12 @@ impl Aggregate {
             gravity: DVec3::ZERO,
             self_gravity: true, // a bare aggregate is a self-gravitating pile
             gravity_source: None,
+            gravity_bodies: Vec::new(),
             contact: None,
             contact_ref_mass: 1.0,
             specific_heat: 1000.0, // generic rock-ish default; set from the material via with_specific_heat
             boundary: None,
+            boundary_vel: DVec3::ZERO,
             boundary_hole: None,
         }
     }
@@ -198,6 +210,11 @@ impl Aggregate {
         }
     }
 
+    /// Refresh the system's massive bodies (position, mass, radius) from the live N-body state.
+    pub fn set_gravity_bodies(&mut self, bodies: Vec<(DVec3, f64, f64)>) {
+        self.gravity_bodies = bodies;
+    }
+
     /// A **cohesive solid**: bond every pair of particles within `cutoff` at their current separation,
     /// so material strength (not gravity) holds it together. `stiffness` is the bond spring constant;
     /// `break_strain` is the fractional stretch at which a bond fractures.
@@ -241,10 +258,12 @@ impl Aggregate {
             // N-body loop — it would otherwise dominate the frame (the probe's ~135 substeps × n²).
             self_gravity: false,
             gravity_source: None,
+            gravity_bodies: Vec::new(),
             contact: None,
             contact_ref_mass: 1.0,
             specific_heat: 1000.0, // generic rock-ish default; set from the material via with_specific_heat
             boundary: None,
+            boundary_vel: DVec3::ZERO,
             boundary_hole: None,
         }
     }
@@ -410,6 +429,20 @@ impl Aggregate {
                 }
             }
         }
+        // Every declared massive body, one law each (see `gravity_bodies`) — the Sun keeps the
+        // debris travelling WITH its planet; nothing is a scene modifier.
+        for &(bp, bm, br) in &self.gravity_bodies {
+            let r3 = (br * br * br).max(1.0);
+            for (i, body) in p.iter().enumerate() {
+                let d = bp - body.pos;
+                let dist = d.length();
+                if dist < 1.0e-9 {
+                    continue;
+                }
+                let g_mag = if dist >= br { G * bm / (dist * dist) } else { G * bm * dist / r3 };
+                acc[i] += (d / dist) * g_mag;
+            }
+        }
         // Particle–particle CONTACT — the canonical granular law (`contact_accel`), the SAME force that
         // governs the terrain/debris grains, now applied to any aggregate of matter. This is what stops
         // particles passing through each other; sticking, ploughing and cratering all emerge from it.
@@ -442,20 +475,44 @@ impl Aggregate {
                 // it's in free space — no force. Otherwise it's in solid: push it out through the
                 // NEAREST free surface — radially to the planet surface, or through the bowl wall.
                 let pen_sphere = radius - dist; // depth below the planet surface
+                // The boundary is MATTER: it contacts with the one canonical law — normal spring +
+                // damping (incl. the shock closure) + Coulomb FRICTION — not a frictionless radial
+                // push (an oblique impactor was skating over the planet with zero shear, Robin's
+                // "flows over the surface"). Normal direction and penetration pick the nearest free
+                // surface (planet surface or crater-bowl wall).
+                let (mut n_hat, mut pen) = (d / dist, pen_sphere);
+                let mut in_solid = true;
                 if let Some((hc, hr)) = self.boundary_hole {
                     let dh = body.pos - hc;
                     let dist_h = dh.length();
                     if dist_h < hr {
-                        continue; // in the excavated bowl: free space
-                    }
-                    let pen_hole = dist_h - hr; // depth into solid beyond the bowl wall
-                    if pen_hole < pen_sphere && dist_h > 1.0e-9 {
-                        // The bowl wall is closer: push toward the hole (into the carved space).
-                        acc[i] -= (dh / dist_h) * (stiffness * pen_hole);
-                        continue;
+                        in_solid = false; // in the excavated bowl: free space
+                    } else {
+                        let pen_hole = dist_h - hr;
+                        if pen_hole < pen_sphere && dist_h > 1.0e-9 {
+                            n_hat = -(dh / dist_h); // out through the bowl wall
+                            pen = pen_hole;
+                        }
                     }
                 }
-                acc[i] += (d / dist) * (stiffness * pen_sphere);
+                if !in_solid {
+                    continue;
+                }
+                let v_rel = body.vel - self.boundary_vel;
+                let v_n = v_rel.dot(n_hat); // >0 exiting the solid
+                let (c_damp, mu, tan_d, sh, cr) = self.contact.map_or((0.0, 0.0, 0.0, 0.0, 1.0), |c| {
+                    (c.normal_damp, c.friction, c.tangent_damp, c.shock, c.radius)
+                });
+                let c_eff = c_damp + sh * v_n.abs() / (4.0 * cr.max(1.0e-9));
+                let f_n = (stiffness * pen - c_eff * v_n).max(0.0);
+                acc[i] += n_hat * f_n;
+                // Coulomb shear against the moving ground: opposes slip, capped at μ·N.
+                let v_t = v_rel - n_hat * v_n;
+                let vt_mag = v_t.length();
+                if vt_mag > 1.0e-9 && mu > 0.0 {
+                    let f_t = (tan_d * vt_mag).min(mu * f_n);
+                    acc[i] -= (v_t / vt_mag) * f_t;
+                }
             }
         }
 

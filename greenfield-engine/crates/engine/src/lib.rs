@@ -1923,7 +1923,9 @@ mod app {
                 crate::orbit::Body {
                     pos: glam::DVec3::ZERO,
                     vel: glam::DVec3::ZERO,
-                    mass: SUN_MASS,
+                    // The Sun's mass EMERGES from its declared composition (planet::sun), like Earth's
+                    // from PREM — the constant is retired from the source of truth.
+                    mass: crate::planet::sun().total_mass(),
                 },
                 crate::orbit::Body {
                     pos: glam::DVec3::new(AU_M, 0.0, 0.0),
@@ -2505,7 +2507,15 @@ mod app {
             if let Some(agg) = self.moon_debris.as_mut() {
                 let earth_pos = self.bodies[1].pos;
                 agg.set_gravity_source_pos(earth_pos);
+                // EVERY massive body pulls the debris — Sun first among them (declared matter, its mass
+                // from planet::sun()'s composition). One law, no scene modifiers.
+                agg.set_gravity_bodies(vec![(
+                    self.bodies[0].pos,
+                    self.bodies[0].mass,
+                    crate::planet::sun().radius(),
+                )]);
                 agg.set_boundary_center(earth_pos);
+                agg.boundary_vel = self.bodies[1].vel; // the ground shears at Earth's velocity (no spin yet)
                 if let Some(rel) = self.impact_site_rel {
                     agg.set_boundary_hole_center(earth_pos + rel); // the crater orbits with its planet
                 }
@@ -3022,7 +3032,7 @@ mod tests {
     #[test]
     fn material_database_loads() {
         let mats = materials::load();
-        assert_eq!(mats.len(), 22, "seed database should have 22 materials");
+        assert_eq!(mats.len(), 23, "seed database should have 23 materials");
         for id in ["granite", "dirt", "grass", "iron", "nickel"] {
             let i = materials::index_of(&mats, id);
             assert!(mats[i].density > 0.0, "{id} must have positive density");

@@ -264,6 +264,25 @@ pub fn earth_surface_material(dir: glam::DVec3) -> &'static str {
     }
 }
 
+/// THE SUN, declared as its real construction (standard solar model, coarse 3-layer binning): H–He
+/// plasma whose layer mean densities carry the enormous compression (150,000 kg/m³ core → ~0.1 near
+/// the surface), exactly as PREM's do for Earth. Its mass — and therefore every orbit in the system —
+/// EMERGES from the declared composition; SUN_MASS-the-constant retires (docs/27: "calculate the sun's
+/// mass as a material so the gravity manifests naturally", Robin).
+pub fn sun() -> LayeredBody {
+    LayeredBody {
+        layers: vec![
+            // Core (0–0.25 R☉): ~half the mass. Fusion region, ~15.7e6 K.
+            Layer { material: "hh_plasma", outer_r: 1.74e8, density: 45_200.0, t_inner: 1.57e7, t_outer: 7.0e6 },
+            // Radiative zone (0.25–0.7 R☉).
+            Layer { material: "hh_plasma", outer_r: 4.87e8, density: 1_940.0, t_inner: 7.0e6, t_outer: 2.0e6 },
+            // Convective zone to the photosphere (5,772 K).
+            Layer { material: "hh_plasma", outer_r: 6.96e8, density: 97.0, t_inner: 2.0e6, t_outer: 5_772.0 },
+        ],
+        atmosphere_mass: 0.0, // the corona is future physics (flagged)
+    }
+}
+
 /// THEIA — the Mars-sized impactor of the giant-impact hypothesis (docs/27: the birth of the Moon).
 /// Declared as a differentiated Mars-like body: iron core, peridotite mantle, hot from accretion.
 /// Layer masses integrate to ~6.5e23 kg (Mars-scale, the theorized impactor class).
@@ -391,6 +410,18 @@ mod tests {
         }
         let frac = land / total;
         assert!((0.25..0.42).contains(&frac), "land fraction plausible (got {frac:.2})");
+    }
+
+    #[test]
+    fn the_declared_solar_composition_yields_the_real_solar_mass_and_gravity() {
+        let s = sun();
+        let m = s.total_mass();
+        assert!(
+            (m - 1.989e30).abs() / 1.989e30 < 0.03,
+            "solar layers integrate to the real solar mass (got {m:.3e} kg)"
+        );
+        let g = s.gravity_at(s.radius());
+        assert!((g - 274.0).abs() < 12.0, "photospheric gravity ≈ 274 m/s² (got {g:.0})");
     }
 
     #[test]
