@@ -704,6 +704,43 @@ impl MatterSim {
         n
     }
 
+    /// **Shared de-resolution primitive** (`docs/22`/`docs/23`): a single grain that has come to REST at
+    /// `pos` (centered coords), of material `material`, returns to the voxel grid — matter-conserving
+    /// (one grain → exactly one voxel). This is the on-demand-resolution principle in reverse: once the
+    /// excitement passes, resolved matter goes back to bulk. It is the SINGLE source of truth for
+    /// depositing a resting grain, used by BOTH the CPU [`Self::step`] settling and the GPU debris
+    /// readback (`lib.rs::settle_gpu_debris`) — "improving one improves all".
+    ///
+    /// Deposits into the column's air-start voxel (stacks / refills the crater). Returns `true` iff the
+    /// grain was deposited (the caller then removes it). Returns `false` — grain STAYS a grain, matter
+    /// still conserved — when the target cell would be INSIDE a dynamic `body` (the probe: debris piles
+    /// ON it, never through it) or the column is already full. NEVER deletes matter to lower a count.
+    pub fn deposit_resting_grain(
+        &mut self,
+        world: &mut World,
+        pos: Vec3,
+        material: usize,
+        bodies: &[Sphere],
+    ) -> bool {
+        let center = world.center();
+        let xi = (pos.x + center.x).floor() as i32;
+        let zi = (pos.z + center.z).floor() as i32;
+        if let Some(ty) = world.surface_top_voxel(xi, zi) {
+            if (ty as usize) < world.h {
+                let cell = Vec3::new(xi as f32 + 0.5, ty as f32 + 0.5, zi as f32 + 0.5) - center;
+                let inside_body = bodies
+                    .iter()
+                    .any(|b| (cell - b.pos).length() < b.radius + PARTICLE_HALF);
+                if !inside_body {
+                    world.set_voxel(xi, ty, zi, Some(material));
+                    self.dirty = true;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Advance all particles by `dt`: gravity from the field, terrain collision, and — when a
     /// particle comes to rest — deposit it back into the voxel grid (piling; matter-conserving).
     /// `bodies` are dynamic solids (the probe) the settling matter must not deposit *inside* — debris
@@ -753,27 +790,10 @@ impl MatterSim {
                 // left grains bouncing above SETTLE_SPEED forever and never depositing.
                 let horiz = (p.vel.x * p.vel.x + p.vel.z * p.vel.z).sqrt();
                 if horiz < SETTLE_SPEED || p.resting_frames > SETTLE_FRAMES {
-                    // Deposit into the column's air-start voxel (stacks / refills the crater) — unless
-                    // a dynamic body occupies that cell, in which case the debris stays a particle and
-                    // rests on the body (coupling resolves the contact); we never inject matter inside
-                    // a solid object. (If the column is full it also stays, rather than being deleted —
-                    // matter is conserved.)
-                    let mut settled = false;
-                    if let Some(ty) = world.surface_top_voxel(xi, zi) {
-                        if (ty as usize) < world.h {
-                            let cell = Vec3::new(xi as f32 + 0.5, ty as f32 + 0.5, zi as f32 + 0.5)
-                                - center;
-                            let inside_body = bodies
-                                .iter()
-                                .any(|b| (cell - b.pos).length() < b.radius + PARTICLE_HALF);
-                            if !inside_body {
-                                world.set_voxel(xi, ty, zi, Some(p.material));
-                                self.dirty = true;
-                                settled = true;
-                            }
-                        }
-                    }
-                    if settled {
+                    // Deposit via the SHARED de-resolution primitive (same law the GPU debris readback
+                    // uses): into the column's air-start voxel — unless a dynamic body occupies that cell
+                    // or the column is full, in which case the grain stays a particle (matter conserved).
+                    if self.deposit_resting_grain(world, p.pos, p.material, bodies) {
                         self.particles.swap_remove(i);
                         continue;
                     }
@@ -903,6 +923,57 @@ mod tests {
         };
         assert!(dig_one(grass) > 0, "the soft grass voxel fractures under the tool");
         assert_eq!(dig_one(iron), 0, "the hard iron voxel resists the same tool");
+    }
+
+    /// The SHARED de-resolution primitive [`MatterSim::deposit_resting_grain`] — the single law used by
+    /// BOTH the CPU settling and the GPU debris readback (`lib.rs`). A resting grain returns to the voxel
+    /// grid matter-conservingly: exactly one grain → one voxel, deposited into the column's air-start
+    /// cell, and NEVER inside a dynamic body (there it stays a grain). This is the on-demand-resolution
+    /// principle in reverse — once the excitement passes, resolved matter goes back to bulk.
+    #[test]
+    fn deposit_resting_grain_conserves_matter_and_respects_bodies() {
+        let mats = materials::load();
+        let basalt = materials::index_of(&mats, "basalt");
+        // 8³ world, one solid basalt voxel at (4,3,4): the column's air-start is y=4.
+        let mut w = World {
+            w: 8,
+            h: 8,
+            d: 8,
+            voxels: vec![0; 8 * 8 * 8],
+            max_top: 4,
+        };
+        w.set_voxel(4, 3, 4, Some(basalt));
+        let before = w.solid_count();
+        let c = w.center();
+        assert_eq!(w.surface_top_voxel(4, 4), Some(4), "air-start above the one solid voxel");
+
+        // A grain resting on that column (centered coords of the air-start cell).
+        let grain = Vec3::new(4.5, 4.5, 4.5) - c;
+        let mut sim = MatterSim::new(64);
+
+        // 1. A body (the probe) sitting on that cell BLOCKS the deposit — the grain must stay a grain,
+        //    matter conserved, no voxel conjured inside the solid object.
+        let body = Sphere::new(Vec3::new(4.5, 4.5, 4.5) - c, 1.0, 1.0);
+        assert!(
+            !sim.deposit_resting_grain(&mut w, grain, basalt, std::slice::from_ref(&body)),
+            "a grain must NOT deposit inside a dynamic body — it stays a grain"
+        );
+        assert_eq!(w.solid_count(), before, "blocked deposit conjures no matter");
+
+        // 2. With no body it deposits into the air-start voxel — one grain becomes one voxel.
+        assert!(
+            sim.deposit_resting_grain(&mut w, grain, basalt, &[]),
+            "an unobstructed resting grain deposits into its column"
+        );
+        assert_eq!(w.solid_count(), before + 1, "exactly one voxel gained (matter conserved)");
+        assert_eq!(
+            w.material_at(4, 4, 4),
+            Some(basalt),
+            "the deposited voxel carries the grain's material, in the air-start cell"
+        );
+        assert!(sim.take_dirty(), "a deposit marks the world dirty (it must remesh)");
+        // The column grew by one — a second grain would stack on top, never overwrite.
+        assert_eq!(w.surface_top_voxel(4, 4), Some(5), "air-start rose after the deposit");
     }
 
     #[test]
