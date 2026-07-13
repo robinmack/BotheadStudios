@@ -81,6 +81,66 @@ impl World {
         None
     }
 
+    /// Is a camera `eye` (in CENTERED coordinates, the frame `center()` maps to voxel space) in free
+    /// air, at least `clearance` metres above the ground beneath it? "Free" means the voxel the eye sits
+    /// in is not solid AND, where a ground column exists under the eye, the eye is `clearance` above that
+    /// column's surface top. Off the terrain footprint (out-of-bounds column) there is no ground beneath,
+    /// so the eye is free — the patch is a finite chunk of matter in vacuum, not walled in.
+    pub fn eye_is_free(&self, eye: Vec3, clearance: f32) -> bool {
+        let p = eye + self.center();
+        let (xi, yi, zi) = (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32);
+        if self.is_solid(xi, yi, zi) {
+            return false;
+        }
+        match self.surface_top_voxel(xi, zi) {
+            Some(top) => p.y >= top as f32 + clearance,
+            None => true, // no ground column here (beside/beyond the patch)
+        }
+    }
+
+    /// Clamp a third-person orbit camera eye (CENTERED coords) so it never sits inside solid matter or
+    /// below the terrain surface. If the requested eye is already free air a `clearance` above the
+    /// ground, it is returned UNCHANGED (normal orbit/zoom stays smooth). Otherwise the eye is pulled
+    /// back along its own radial direction (a third-person "boom", preserving yaw/pitch) in half-voxel
+    /// steps until it reaches free air — the honest fix for zoom-into-the-ground. For a degenerate
+    /// near-straight-down aim (little horizontal spread, or a radial pull-back that can only burrow
+    /// deeper), it falls back to lifting the eye straight up until it clears the surface.
+    pub fn clamp_eye_outside(&self, eye: Vec3, clearance: f32) -> Vec3 {
+        if self.eye_is_free(eye, clearance) {
+            return eye;
+        }
+        let dir = eye.normalize_or_zero();
+        let horiz = (dir.x * dir.x + dir.z * dir.z).sqrt();
+        // World bounding-sphere radius (centered): any point past it is guaranteed outside the matter.
+        let bound = ((self.w * self.w + self.h * self.h + self.d * self.d) as f32).sqrt()
+            + clearance
+            + 4.0;
+
+        // Radial boom pull-back: only meaningful when the ray has real horizontal spread AND is not
+        // aimed down into the ground (a down-pointing ray only burrows deeper as it lengthens).
+        if dir != Vec3::ZERO && horiz >= 0.1 && dir.y >= -0.05 {
+            let mut d = eye.length();
+            while d <= bound {
+                let e = dir * d;
+                if self.eye_is_free(e, clearance) {
+                    return e;
+                }
+                d += 0.5;
+            }
+        }
+
+        // Vertical-lift fallback: raise the eye straight up until it clears the surface above it.
+        let mut e = eye;
+        let ceiling = self.h as f32 - self.center().y + clearance + 1.0;
+        while e.y <= ceiling {
+            if self.eye_is_free(e, clearance) {
+                return e;
+            }
+            e.y += 0.5;
+        }
+        e
+    }
+
     /// Set a voxel's material (`None` = air). Out-of-bounds writes are ignored.
     pub fn set_voxel(&mut self, x: i32, y: i32, z: i32, material: Option<usize>) {
         if x < 0
@@ -427,6 +487,120 @@ mod tests {
         assert!(
             range >= 15.0,
             "peak-to-valley range must be substantial (got {range:.0} voxels)"
+        );
+    }
+
+    #[test]
+    fn ground_is_matter_all_the_way_through() {
+        // Robin: "visible ground is matter all the way through — eliminating the lies of other game
+        // engines." Every column must be SOLID contiguously from its surface top down to the base
+        // (y = 0): no hollow shell, no air pockets. And a downward raycast from high above must strike
+        // solid matter (the surface is not a paper-thin skin over a void).
+        let mats = materials::load();
+        let w = generate(&mats);
+
+        for z in 0..D as i32 {
+            for x in 0..W as i32 {
+                let top = w
+                    .surface_top_voxel(x, z)
+                    .expect("every column must be solid (matter all the way down)");
+                // Contiguous solid from the very base up to the surface top — no gaps anywhere.
+                for y in 0..top {
+                    assert!(
+                        w.is_solid(x, y, z),
+                        "air pocket / hollow at ({x},{y},{z}) below surface top {top}"
+                    );
+                }
+                // The base voxel itself is matter (solid all the way THROUGH to y = 0).
+                assert!(w.is_solid(x, 0, z), "hollow base at ({x},0,{z})");
+            }
+        }
+
+        // A downward raycast from well above the centre column hits solid matter (not a void skin).
+        let c = w.center();
+        let start = Vec3::new(0.0, H as f32 - c.y + 10.0, 0.0); // centered coords, above the terrain
+        let hit = w
+            .raycast(start, Vec3::new(0.0, -1.0, 0.0), 4000.0)
+            .expect("downward ray must strike solid ground");
+        let (hx, hy, hz, _) = hit;
+        assert!(
+            w.is_solid(hx, hy, hz),
+            "raycast reported a non-solid hit voxel"
+        );
+    }
+
+    #[test]
+    fn orbit_camera_never_penetrates_terrain() {
+        // Robin: "camera should never penetrate matter." The terrain orbit camera builds its eye as
+        //   eye = dir * (base_distance * zoom),  dir = (cos(pitch)sin(yaw), sin(pitch), cos(pitch)cos(yaw))
+        // (see the wasm-gated `Engine::view_proj` / `set_orbit` in lib.rs, which is unreachable from
+        // native tests — so we replicate the EXACT construction here). Zoomed in / tilted down, the raw
+        // eye ends up buried in the terrain; `World::clamp_eye_outside` must push it back to free air.
+        let mats = materials::load();
+        let w = generate(&mats);
+
+        let max_dim = w.w.max(w.h).max(w.d) as f32;
+        let base_distance = max_dim * 1.6; // exactly Engine::create's construction
+        let clearance = 2.0;
+
+        let eye_for = |yaw: f32, pitch: f32, zoom: f32| -> Vec3 {
+            let cp = pitch.cos();
+            let dir = Vec3::new(cp * yaw.sin(), pitch.sin(), cp * yaw.cos());
+            dir * (base_distance * zoom)
+        };
+        // A centered eye penetrates iff its voxel is solid, or it sits below the surface of its column.
+        let penetrates = |eye: Vec3| -> bool {
+            let p = eye + w.center();
+            let (xi, yi, zi) = (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32);
+            if w.is_solid(xi, yi, zi) {
+                return true;
+            }
+            match w.surface_top_voxel(xi, zi) {
+                Some(top) => p.y < top as f32,
+                None => false,
+            }
+        };
+
+        // GUARD against a vacuous pass: a config that provably buries the raw eye in the terrain.
+        let buried = eye_for(0.7, -1.4, 0.2);
+        assert!(
+            penetrates(buried),
+            "test setup is vacuous: the raw eye must actually penetrate the terrain, got {buried:?}"
+        );
+
+        // Sweep the full yaw/pitch/zoom envelope (matching set_orbit's clamps: pitch ∈ [-1.5, 1.5],
+        // zoom ∈ [0.2, 6.0]).
+        let mut saw_penetration = false;
+        for &yaw in &[0.0f32, 0.7, 1.5, 2.4, 3.14, 4.7, 6.0] {
+            for &pitch in &[-1.5f32, -1.0, -0.5, -0.16, 0.0, 0.16, 0.6, 1.2, 1.5] {
+                for &zoom in &[0.2f32, 0.4, 0.7, 1.0, 2.0, 4.0, 6.0] {
+                    let raw = eye_for(yaw, pitch, zoom);
+                    if penetrates(raw) {
+                        saw_penetration = true;
+                    }
+                    let clamped = w.clamp_eye_outside(raw, clearance);
+                    // The clamped eye must be free air, never inside/below matter.
+                    assert!(
+                        !penetrates(clamped),
+                        "clamped eye still penetrates at yaw={yaw} pitch={pitch} zoom={zoom}: {clamped:?}"
+                    );
+                    assert!(
+                        w.eye_is_free(clamped, clearance),
+                        "clamped eye not clearance-above ground at yaw={yaw} pitch={pitch} zoom={zoom}"
+                    );
+                    // An already-free eye is returned UNCHANGED (smooth normal orbit).
+                    if w.eye_is_free(raw, clearance) {
+                        assert_eq!(
+                            clamped, raw,
+                            "free eye must be returned unchanged at yaw={yaw} pitch={pitch} zoom={zoom}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            saw_penetration,
+            "sweep must exercise penetrating configs (else the clamp is untested)"
         );
     }
 }

@@ -1075,6 +1075,12 @@ mod app {
                 cp * self.camera.yaw.cos(),
             );
             let eye = dir * (self.camera.base_distance * self.camera.zoom);
+            // Camera collision (Robin: "the camera should never penetrate matter"): clamp the eye out of
+            // any solid voxel / below-ground position — a third-person boom pull-back along the view ray
+            // that keeps yaw/pitch and leaves a free eye untouched. Eliminates the zoom-into-the-ground
+            // clip the other engines fake around.
+            const CAMERA_CLEARANCE: f32 = 2.0; // metres of air kept between the eye and the surface
+            let eye = self.world.clamp_eye_outside(eye, CAMERA_CLEARANCE);
             // Aim near eye height (not down at the world centre) so the gaze is nearly horizontal: the
             // ground plane recedes to a HORIZON with sky above — a surface-of-a-planet view. A little
             // below eye height keeps a gentle downward tilt so the terrain patch stays in frame.
