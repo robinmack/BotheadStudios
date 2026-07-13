@@ -309,6 +309,72 @@ impl MatterSim {
         self.particles.len() - start
     }
 
+    /// **Excavate a FURROW into the terrain via the SHARED impact law** (`docs/28`). Every solid voxel
+    /// inside the [`crate::impact::Furrow`] bowl is removed from the world and re-created as a grain
+    /// carrying the furrow's DECLARED shock-ejection velocity — the SAME excavation the space-band Theia
+    /// strike runs (`impact::furrow_target_grains` fills the same [`Furrow`] with fresh grains; here we
+    /// convert the terrain's REAL voxels). So a meteor craters terrain by the one canonical law, at ANY
+    /// impact angle: an oblique strike carves a downrange-elongated furrow, a vertical one a symmetric
+    /// bowl (the obliquity dependence lives in `Furrow::new`). Matter-conserving like
+    /// [`Self::materialize_region`] — voxels removed == grains made, each grain kept at its own voxel
+    /// centre (PE conserved) with its OWN material/mass/temperature (the layered strata the meteor
+    /// actually struck), NOT one bulk proxy. The furrow's frame is in CENTERED world coords (matching the
+    /// meteor `hit`); `ground_vel` is the surface's bulk motion (0 for static terrain). Returns the count
+    /// materialized; the new grains are `self.particles[start..]`.
+    pub fn materialize_furrow(
+        &mut self,
+        world: &mut World,
+        materials: &[Material],
+        furrow: &crate::impact::Furrow,
+        ground_vel: Vec3,
+    ) -> usize {
+        let center = world.center();
+        let c64 = glam::DVec3::new(center.x as f64, center.y as f64, center.z as f64);
+        let up = furrow.n; // outward surface normal (flat terrain: +y under uniform gravity)
+        // Scan the voxel bounding box the bowl can reach: it spans ±(l_along) about a centre `downrange`
+        // along-track, ±l_lat across, and l_depth into the surface — bound by the largest of these.
+        let reach = (furrow.l_along + furrow.downrange.abs())
+            .max(furrow.l_lat)
+            .max(furrow.l_depth);
+        let sv = Vec3::new(furrow.site.x as f32, furrow.site.y as f32, furrow.site.z as f32) + center;
+        let ri = (reach.ceil() as i32).max(1);
+        let (cx, cy, cz) = (sv.x.floor() as i32, sv.y.floor() as i32, sv.z.floor() as i32);
+        let start = self.particles.len();
+        for dz in -ri..=ri {
+            for dy in -ri..=ri {
+                for dx in -ri..=ri {
+                    if self.particles.len() >= self.max_particles {
+                        break;
+                    }
+                    let (x, y, z) = (cx + dx, cy + dy, cz + dz);
+                    // Voxel centre in CENTERED world coords (f64, the frame the furrow lives in).
+                    let vc = glam::DVec3::new(x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5) - c64;
+                    let below = -(vc - furrow.site).dot(up); // depth beneath the surface plane
+                    if !furrow.contains_point(vc, below) {
+                        continue;
+                    }
+                    let Some(mat) = world.material_at(x, y, z) else {
+                        continue;
+                    };
+                    world.set_voxel(x, y, z, None);
+                    let ej = furrow.ejection(vc, up, below);
+                    self.particles.push(Particle {
+                        pos: Vec3::new(vc.x as f32, vc.y as f32, vc.z as f32), // its own voxel centre (PE conserved)
+                        vel: ground_vel + Vec3::new(ej.x as f32, ej.y as f32, ej.z as f32),
+                        material: mat,
+                        mass: materials[mat].density, // kg (1 m³ voxel)
+                        temp_k: REF_TEMP_K,
+                        resting_frames: 0,
+                    });
+                }
+            }
+        }
+        if self.particles.len() > start {
+            self.dirty = true;
+        }
+        self.particles.len() - start
+    }
+
     /// **Materialize STEEP terrain into grains** (`docs/24` Path B). A heightfield represents gentle
     /// slopes conservatively (a smooth bilinear surface → an exact −∇U penalty), but NOT vertical walls:
     /// a cliff smoothed over one voxel becomes a ~N:1 gradient, a huge non-conservative force that
@@ -854,6 +920,87 @@ mod tests {
                 "the voxel it came from is now air"
             );
         }
+    }
+
+    #[test]
+    fn materialize_furrow_excavates_via_the_shared_law_conserving_matter() {
+        // docs/28: the terrain meteor craters through the SAME impact.rs excavation the space band uses —
+        // voxels inside the shared `Furrow` become grains carrying its shock-ejection velocity. Asserts:
+        // matter conserved (voxels removed == grains made), grains keep their OWN material, sit BELOW the
+        // surface, and an OBLIQUE strike carves a downrange-elongated furrow with lofted ejecta.
+        let mats = materials::load();
+        let mut w = world::generate(&mats);
+        let before = w.solid_count();
+        let c = w.center();
+        let (px, pz) = (c.x as i32, c.z as i32);
+        let surf = w.surface_top_voxel(px, pz).unwrap() as f32 - c.y; // centered surface height
+        // Impact just under the surface at the patch centre; oblique 45° in x–y → downrange +x; local up
+        // +y (the surface normal under uniform surface gravity).
+        let site = glam::DVec3::new(0.0, surf as f64 - 0.5, 0.0);
+        let v_impact = glam::DVec3::new(1.0, -1.0, 0.0).normalize() * 17_000.0;
+        let furrow = crate::impact::Furrow::new(site, glam::DVec3::Y, v_impact, 0.3, 8.0);
+
+        let mut sim = MatterSim::new(200_000);
+        let n = sim.materialize_furrow(&mut w, &mats, &furrow, Vec3::ZERO);
+        assert!(n > 0, "solid terrain inside the furrow materializes into grains");
+        assert_eq!(n, sim.particle_count());
+        // Matter conserved: the world lost exactly n voxels, now held as n grains.
+        assert_eq!(w.solid_count() + sim.particle_count(), before);
+
+        // Every grain sits at its own former voxel centre and at/below the local surface (below the plane).
+        for p in &sim.particles {
+            assert!(p.pos.y <= surf + 1e-3, "grain above the surface: y={}", p.pos.y);
+        }
+        // OBLIQUE: elongated downrange (+x, site.x = 0), centroid pushed downrange of contact.
+        let along: Vec<f32> = sim.particles.iter().map(|p| p.pos.x).collect();
+        let across: Vec<f32> = sim.particles.iter().map(|p| p.pos.z).collect();
+        let span = |v: &[f32]| {
+            v.iter().cloned().fold(f32::MIN, f32::max) - v.iter().cloned().fold(f32::MAX, f32::min)
+        };
+        assert!(
+            span(&along) > span(&across),
+            "oblique furrow elongated downrange (along {:.1} vs across {:.1})",
+            span(&along),
+            span(&across)
+        );
+        let cx = along.iter().sum::<f32>() / along.len() as f32;
+        assert!(cx > 0.0, "furrow centroid downrange of contact, got {cx:.2}");
+        // Ejecta lofted: some grains carry upward velocity from the shared ejection (not all at rest).
+        let max_up = sim.particles.iter().map(|p| p.vel.y).fold(f32::MIN, f32::max);
+        assert!(max_up > 5.0, "some grains are lofted upward (shared shock ejection), got {max_up:.1}");
+        // The excavated column spans the real layered strata, so grains carry more than one material
+        // (grass cap over rock) — each keeps its OWN, not a bulk proxy.
+        let distinct: std::collections::HashSet<usize> =
+            sim.particles.iter().map(|p| p.material).collect();
+        assert!(distinct.len() >= 2, "furrow cuts through layered strata (got {} materials)", distinct.len());
+    }
+
+    #[test]
+    fn materialize_furrow_is_symmetric_for_a_vertical_strike() {
+        // A VERTICAL meteor has no downrange direction, so the shared law excavates a SYMMETRIC bowl
+        // (obliquity is what elongates a furrow — `Furrow::new`). Same matter conservation.
+        let mats = materials::load();
+        let mut w = world::generate(&mats);
+        let before = w.solid_count();
+        let c = w.center();
+        let (px, pz) = (c.x as i32, c.z as i32);
+        let surf = w.surface_top_voxel(px, pz).unwrap() as f32 - c.y;
+        let site = glam::DVec3::new(0.0, surf as f64 - 0.5, 0.0);
+        let furrow = crate::impact::Furrow::new(site, glam::DVec3::Y, -glam::DVec3::Y * 17_000.0, 0.3, 8.0);
+
+        let mut sim = MatterSim::new(200_000);
+        let n = sim.materialize_furrow(&mut w, &mats, &furrow, Vec3::ZERO);
+        assert!(n > 0);
+        assert_eq!(w.solid_count() + sim.particle_count(), before);
+        let span = |sel: &dyn Fn(&Particle) -> f32| {
+            let vals: Vec<f32> = sim.particles.iter().map(sel).collect();
+            vals.iter().cloned().fold(f32::MIN, f32::max) - vals.iter().cloned().fold(f32::MAX, f32::min)
+        };
+        let (sx, sz) = (span(&|p| p.pos.x), span(&|p| p.pos.z));
+        assert!(
+            (sx / sz - 1.0).abs() < 0.3 && (sz / sx - 1.0).abs() < 0.3,
+            "vertical strike excavates a symmetric bowl (x-span {sx:.1} ≈ z-span {sz:.1})"
+        );
     }
 
     #[test]

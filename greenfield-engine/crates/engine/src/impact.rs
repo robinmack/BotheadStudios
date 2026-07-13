@@ -32,36 +32,185 @@ pub fn fib_dir(i: usize, n: usize) -> DVec3 {
     DVec3::new(rxy * phi.cos(), y, rxy * phi.sin())
 }
 
+/// The surface an impact excavates into — a curved body (the space-band planet) or a locally FLAT
+/// terrain patch. The ONE furrow primitive ([`Furrow`], [`furrow_target_grains`]) serves both, so a
+/// meteor into terrain and Theia into Earth excavate by the SAME code (docs/28: "improving one improves
+/// all"). The only difference is geometry: over a sphere the surface curves away under the furrow and
+/// "up" is radial; on a flat patch "up" is a constant local normal (+y under uniform gravity).
+#[derive(Clone, Copy)]
+pub enum ExcavSurface {
+    /// A spherical body centred at `center`, surface radius `radius`: the outward normal is radial and
+    /// grains descend toward the centre (the planet curves away under a tangent furrow).
+    Curved { center: DVec3, radius: f64 },
+    /// A locally flat patch: `up` is the constant outward normal (local-up). `ref_radius` is used ONLY
+    /// to sample a layered body's material/temperature by depth in the native flat test; a real terrain
+    /// scene assigns per-voxel material from the voxels it excavates and ignores it.
+    Flat { up: DVec3, ref_radius: f64 },
+}
+
+impl ExcavSurface {
+    /// Outward unit normal at the impact `site`.
+    fn site_normal(&self, site: DVec3) -> DVec3 {
+        match self {
+            ExcavSurface::Curved { center, .. } => (site - *center).normalize_or_zero(),
+            ExcavSurface::Flat { up, .. } => up.normalize_or_zero(),
+        }
+    }
+    /// Place a grain: from a point on the tangent plane through the site and a (≤0) `depth` into the
+    /// surface, return (position, outward normal there, sample radius for material, depth below surface).
+    /// Curved projects onto the real curved surface first (a flat tangent furrow would bulge out over a
+    /// sphere as it curves away); Flat descends straight along the constant normal.
+    fn place(&self, tangent_pt: DVec3, depth: f64) -> (DVec3, DVec3, f64, f64) {
+        match self {
+            ExcavSurface::Curved { center, radius } => {
+                let outward = (tangent_pt - *center).normalize_or_zero();
+                let r = radius + depth; // depth ≤ 0
+                let pos = *center + outward * r;
+                (pos, outward, r, (radius - r).max(0.0))
+            }
+            ExcavSurface::Flat { up, ref_radius } => {
+                let n = up.normalize_or_zero();
+                let pos = tangent_pt + n * depth;
+                (pos, n, ref_radius + depth, (-depth).max(0.0))
+            }
+        }
+    }
+}
+
+/// The excavation FURROW (docs/28 step 3): a bowl elongated DOWNRANGE along the impact track — not the
+/// old isotropic half-ball (which made every impact look dead-centre regardless of obliquity — Robin:
+/// "looked like it hit the center, not 45°") — PLUS the DECLARED shock→rarefaction ejection velocity it
+/// imparts (step 3b). This is the SINGLE shared law: [`furrow_target_grains`] fills it for a body's cap
+/// (space band), and the terrain meteor tests each voxel against it (`matter::materialize_furrow`), so
+/// every impact — at any angle, on any surface — excavates by the same shape and the same ejection.
+///
+/// The DECLARED shock ejecta velocity is a RESOLUTION IOU: the excavation flow is a continuum shock finer
+/// than a grain, so at N≈384 it cannot emerge from the local contact physics — we declare its KNOWN
+/// result instead, to be DELETED once particle count is high enough for the flow to emerge on its own. It
+/// is honest, not a dial, because it is DERIVED from cited cratering scaling, not tuned: speed =
+/// Housen–Holsapple point-source v = C·v_i·(a/d)^(1/μ), μ ≈ 0.55 (competent rock), C ≈ 0.6 (free-surface
+/// coupling); launch ~45° up-and-downrange (Maxwell Z-model, Z≈3); deep material is DISPLACED not ejected
+/// (speed fades to zero below the excavation depth). See the resolved-vs-declared engine principle (docs/28).
+pub struct Furrow {
+    /// Impact site (surface point of first contact).
+    pub site: DVec3,
+    /// Outward surface normal at the site (radial on a sphere; local-up on a flat patch).
+    pub n: DVec3,
+    /// Downrange tangent — the impact velocity projected onto the surface (the furrow's long axis).
+    pub t: DVec3,
+    /// Lateral tangent (across-track).
+    pub b: DVec3,
+    /// Ellipsoid semi-axis along-track (elongated).
+    pub l_along: f64,
+    /// Ellipsoid semi-axis across-track (narrower).
+    pub l_lat: f64,
+    /// Ellipsoid semi-axis into the surface.
+    pub l_depth: f64,
+    /// Bowl-centre offset downrange of first contact (the impactor ploughs forward as it digs in).
+    pub downrange: f64,
+    /// Below this depth the shock DISPLACES rather than EJECTS (ejection speed fades to zero).
+    pub exc_depth: f64,
+    /// Impact speed (drives the ejecta speed).
+    pub v_mag: f64,
+    /// Impactor radius `a` — the Housen–Holsapple scaling length.
+    pub a: f64,
+}
+
+impl Furrow {
+    /// Build the furrow frame at `site` with outward normal `n`, for an impactor of radius
+    /// `impactor_radius` arriving at `v_impact`, with excavation scale `extent` (≈ impactor size).
+    pub fn new(site: DVec3, n: DVec3, v_impact: DVec3, impactor_radius: f64, extent: f64) -> Self {
+        let v_mag = v_impact.length();
+        // Downrange tangent: the impact velocity projected onto the surface. A near-vertical impact has
+        // no preferred direction — fall back to any tangent (the bowl is symmetric there, so its axis
+        // is arbitrary and unobservable).
+        let tang = v_impact - n * v_impact.dot(n);
+        let v_tan = tang.length();
+        let t = tang.try_normalize().unwrap_or_else(|| {
+            let a = if n.x.abs() < 0.9 { DVec3::X } else { DVec3::Y };
+            (a - n * a.dot(n)).normalize()
+        });
+        let b = n.cross(t).normalize_or_zero();
+        // OBLIQUITY drives the elongation and downrange offset (docs/28): the tangential fraction of the
+        // impact velocity. `oblq` = 0 straight-down, 1 at 45°, up to √2 grazing. A VERTICAL strike
+        // (oblq→0) collapses to a SYMMETRIC bowl (l_along = l_lat, no downrange offset) — the honest 90°
+        // case; only obliquity stretches the furrow along-track and pushes the bowl centre downrange. The
+        // coefficients are pinned so a 45° impact reproduces the previously-tuned furrow exactly
+        // (l_along 1.5·extent, downrange 0.5·extent), so the space-band oblique tests are unperturbed.
+        const SQRT2: f64 = std::f64::consts::SQRT_2;
+        let oblq = if v_mag > 0.0 { SQRT2 * v_tan / v_mag } else { 0.0 };
+        Furrow {
+            site,
+            n,
+            t,
+            b,
+            l_along: extent * (0.6 + 0.9 * oblq),
+            l_lat: extent * 0.6,
+            l_depth: extent * 0.85,
+            downrange: extent * 0.5 * oblq,
+            exc_depth: (extent * 0.5).max(1.0),
+            v_mag,
+            a: impactor_radius,
+        }
+    }
+
+    /// Is a grain at along/across offsets `(along, lat)` and `below` metres beneath the surface inside the
+    /// excavation bowl? (The half-ellipsoid the fill spans: full along/across, downward-only in depth.)
+    pub fn contains(&self, along: f64, lat: f64, below: f64) -> bool {
+        below >= 0.0
+            && ((along - self.downrange) / self.l_along).powi(2)
+                + (lat / self.l_lat).powi(2)
+                + (below / self.l_depth).powi(2)
+                <= 1.0
+    }
+
+    /// Test a world point against the bowl, given its depth `below` beneath the surface (the terrain
+    /// meteor's per-voxel membership test — `matter::materialize_furrow`).
+    pub fn contains_point(&self, pos: DVec3, below: f64) -> bool {
+        let rel = pos - self.site;
+        self.contains(rel.dot(self.t), rel.dot(self.b), below)
+    }
+
+    /// The DECLARED shock→rarefaction ejection velocity at a grain at `pos` (surface normal `outward`
+    /// there, `below` m beneath the surface): H-H point-source speed C·v_i·(a/d)^(1/μ) faded to zero
+    /// below the excavation depth, launched ~45° between local-up (`outward`) and the along-surface
+    /// downrange direction (the Maxwell Z-model excavation flow). Excludes ground motion (caller adds it).
+    pub fn ejection(&self, pos: DVec3, outward: DVec3, below: f64) -> DVec3 {
+        const MU_HH: f64 = 0.55;
+        const C_EJ: f64 = 0.6;
+        let from_site = pos - self.site;
+        let d = from_site.length().max(self.a); // >= a: the (a/d) factor never exceeds 1
+        let fade = (1.0 - below / self.exc_depth).clamp(0.0, 1.0);
+        let speed = C_EJ * self.v_mag * (self.a / d).powf(1.0 / MU_HH) * fade;
+        let horiz = (from_site - outward * from_site.dot(outward))
+            .try_normalize()
+            .unwrap_or(self.t); // outward-along-surface (downrange), fall back to the track
+        let launch = (outward + horiz).normalize_or_zero(); // ~45° up-and-out
+        launch * speed
+    }
+}
+
 /// SHARED excavation primitive (docs/28 step 3): the target matter the impactor ploughs into, shaped as
-/// a FURROW elongated DOWNRANGE along the impact track — not the old isotropic half-ball (which made
-/// every impact look dead-centre regardless of obliquity — Robin: "looked like it hit the center, not
-/// 45°"). Scene-agnostic: any `target` LayeredBody, any site/track, so a meteor into terrain and Theia
-/// into Earth excavate by the SAME code. Grains sit BELOW the real (curved) surface, at rest on the
-/// bulk body, tagged [`SOURCE_TARGET`], with real composition + temperature at their depth.
+/// a FURROW (see [`Furrow`]). Scene-agnostic: any `target` LayeredBody, any `surface` ([`ExcavSurface`],
+/// curved or flat), any site/track, so a meteor into terrain and Theia into Earth excavate by the SAME
+/// code. Grains sit BELOW the real surface, at rest on the bulk body, tagged [`SOURCE_TARGET`], with real
+/// composition + temperature at their depth.
 ///
-/// The excavated grains carry the SHOCK→RAREFACTION ejecta velocity the impact imparts (docs/28 step
-/// 3b). This is a DECLARED (subgrid) model, and a RESOLUTION IOU: the excavation flow is a continuum
-/// shock whose structure is finer than a grain, so at N≈384 it cannot emerge from the local contact
-/// physics — we declare its KNOWN result instead, and this whole velocity injection is to be DELETED
-/// once particle count is high enough for the flow to emerge on its own (it is a stand-in for
-/// resolution, not a permanent law). It is honest, not a dial, because it is DERIVED from cited
-/// impact-cratering scaling, not tuned: speed = Housen–Holsapple point-source v = C·v_i·(a/d)^(1/μ),
-/// μ ≈ 0.55 (competent rock), C ≈ 0.6 (free-surface coupling); launch ~45° up-and-downrange (Maxwell
-/// Z-model, Z≈3); deep material is DISPLACED not ejected (speed fades to zero below the excavation
-/// depth). NB it injects state the local physics did not produce — the tell of a declared model, hence
-/// this label. See the resolved-vs-declared engine principle (docs/28). Near-surface Earth matter is
-/// thus lofted onto bound arcs, forming an Earth-bearing disk instead of being dragged out with the
-/// impactor.
+/// The excavated grains carry the shared [`Furrow`]'s DECLARED shock→rarefaction ejecta velocity (docs/28
+/// step 3b — see [`Furrow`] for the derivation and the resolution-IOU caveat).
 ///
-/// `v_impact` is the impactor's velocity relative to the target (direction sets the furrow's long axis,
-/// magnitude drives the ejecta speed); `impactor_radius` is the scaling length a. `extent` is the
-/// excavation scale (≈ impactor size, clamped). Returns (bodies, mat_ids, temps, source) to append.
+/// `surface` is the geometry the excavation happens on ([`ExcavSurface::Curved`] for the space band,
+/// [`ExcavSurface::Flat`] for a terrain patch). `v_impact` is the impactor's velocity relative to the
+/// target (direction sets the furrow's long axis, magnitude drives the ejecta speed); `impactor_radius`
+/// is the scaling length a. `extent` is the excavation scale (≈ impactor size, clamped). This routine
+/// FILLS the furrow's half-ellipsoid volume with `n_grains` fresh grains (a body has no pre-existing
+/// grains); a terrain scene instead converts its real voxels (`matter::materialize_furrow`), but BOTH
+/// share the [`Furrow`] shape + ejection law. Returns (bodies, mat_ids, temps, source) to append.
 #[allow(clippy::too_many_arguments)]
 pub fn furrow_target_grains(
     mats: &[Material],
     target: &crate::planet::LayeredBody,
-    earth_pos: DVec3,
-    earth_radius: f64,
+    surface: ExcavSurface,
     site: DVec3,
     v_impact: DVec3,
     impactor_radius: f64,
@@ -70,29 +219,8 @@ pub fn furrow_target_grains(
     n_grains: usize,
     extent: f64,
 ) -> (Vec<Body>, Vec<usize>, Vec<f32>, Vec<u8>) {
-    let n = (site - earth_pos).normalize_or_zero(); // outward surface normal
-    let v_mag = v_impact.length();
-    // Housen–Holsapple ejecta-velocity exponent (competent rock) and free-surface coupling — cited
-    // point-source scaling, not dials. Maxwell Z-model launch angle is 45° (Z≈3).
-    const MU_HH: f64 = 0.55;
-    const C_EJ: f64 = 0.6;
-    let exc_depth = (extent * 0.5).max(1.0); // below this the shock displaces rather than ejects
-    // Downrange tangent: the impact velocity projected onto the surface. A near-vertical impact has no
-    // preferred direction — fall back to any tangent so the furrow is a symmetric bowl (honest for 90°).
-    let t = {
-        let tang = v_impact - n * v_impact.dot(n);
-        tang.try_normalize().unwrap_or_else(|| {
-            let a = if n.x.abs() < 0.9 { DVec3::X } else { DVec3::Y };
-            (a - n * a.dot(n)).normalize()
-        })
-    };
-    let b = n.cross(t).normalize_or_zero(); // lateral
-    // Elongated along-track, narrower across and in depth; the bowl centre sits DOWNRANGE of first
-    // contact (the impactor ploughs forward as it digs in).
-    let l_along = extent * 1.5;
-    let l_lat = extent * 0.6;
-    let l_depth = extent * 0.85;
-    let downrange = extent * 0.5;
+    let n = surface.site_normal(site); // outward surface normal at the site
+    let f = Furrow::new(site, n, v_impact, impactor_radius, extent);
 
     let mut bodies = Vec::with_capacity(n_grains);
     let mut mat_ids = Vec::with_capacity(n_grains);
@@ -101,32 +229,21 @@ pub fn furrow_target_grains(
     for i in 0..n_grains {
         let u = fib_dir(i, n_grains);
         let r = ((i as f64 + 0.5) / n_grains as f64).cbrt(); // fill the ellipsoid volume
-        let along = u.dot(t) * r * l_along + downrange;
-        let lat = u.dot(b) * r * l_lat;
-        let depth = -(u.dot(n).abs() * r) * l_depth; // always INTO the planet
-        // Project onto the real curved surface at this along/lateral offset, then descend by `depth`, so
-        // every grain is genuinely below the surface (a flat tangent furrow would bulge out over a
-        // sphere as it curves away).
-        let tangent_pt = site + t * along + b * lat;
-        let radial = (tangent_pt - earth_pos).normalize_or_zero();
-        let pos = earth_pos + radial * (earth_radius + depth);
-        let r_earth = (pos - earth_pos).length();
-        // SHOCK EJECTION (declared): speed = C·v_i·(a/d)^(1/μ), faded to zero below the excavation depth
-        // (deep matter is displaced, not lofted). Launch ~45°: the bisector of local-up and the outward
-        // (downrange) surface direction — the Maxwell Z-model excavation flow to the free surface.
-        let from_site = pos - site;
-        let d = from_site.length().max(impactor_radius); // >= a: the (a/d) factor never exceeds 1
-        let below = (earth_radius - r_earth).max(0.0); // depth beneath the surface
-        let fade = (1.0 - below / exc_depth).clamp(0.0, 1.0);
-        let speed = C_EJ * v_mag * (impactor_radius / d).powf(1.0 / MU_HH) * fade;
-        let horiz = (from_site - radial * from_site.dot(radial))
-            .try_normalize()
-            .unwrap_or(t); // outward-along-surface (downrange), fall back to the track
-        let launch = (radial + horiz).normalize_or_zero(); // ~45° up-and-out
-        bodies.push(Body { pos, vel: ground_vel + launch * speed, mass: frag_mass });
-        let layer = target.layer_at(r_earth);
+        let along = u.dot(f.t) * r * f.l_along + f.downrange;
+        let lat = u.dot(f.b) * r * f.l_lat;
+        let depth = -(u.dot(n).abs() * r) * f.l_depth; // always INTO the surface
+        // Project the along/lateral offset onto the surface (curved or flat), then descend by `depth` so
+        // every grain is genuinely below the surface.
+        let tangent_pt = site + f.t * along + f.b * lat;
+        let (pos, outward, r_sample, below) = surface.place(tangent_pt, depth);
+        bodies.push(Body {
+            pos,
+            vel: ground_vel + f.ejection(pos, outward, below),
+            mass: frag_mass,
+        });
+        let layer = target.layer_at(r_sample);
         mat_ids.push(materials::index_of(mats, layer.material));
-        temps.push(target.temperature_at(r_earth) as f32);
+        temps.push(target.temperature_at(r_sample) as f32);
         source.push(crate::aggregate::SOURCE_TARGET);
     }
     (bodies, mat_ids, temps, source)
@@ -200,8 +317,16 @@ pub fn build_impact_debris_between(
     // swallow the planet; the giant-impact melt region is hemispheric, not global — flagged).
     let cap_extent = (2.0 * moon_r).min(0.55 * earth_radius);
     let (cap_bodies, cap_mats, cap_temps, cap_src) = furrow_target_grains(
-        mats, earth_body, earth_pos, earth_radius, surface, v_contact, moon_r, frag_mass, earth_vel,
-        CAP_N, cap_extent,
+        mats,
+        earth_body,
+        ExcavSurface::Curved { center: earth_pos, radius: earth_radius },
+        surface,
+        v_contact,
+        moon_r,
+        frag_mass,
+        earth_vel,
+        CAP_N,
+        cap_extent,
     );
     particles.extend(cap_bodies);
     mat_ids.extend(cap_mats);
@@ -616,7 +741,15 @@ mod tests {
         // OBLIQUE 45° impact at 10 km/s in the x–y plane → downrange = +x.
         let v_impact = DVec3::new(1.0, -1.0, 0.0).normalize() * 10_000.0;
         let (bodies, mids, temps, src) = furrow_target_grains(
-            &mats, &earth, earth_pos, EARTH_RADIUS_M, site, v_impact, a, frag_mass, DVec3::ZERO, CAP_N,
+            &mats,
+            &earth,
+            ExcavSurface::Curved { center: earth_pos, radius: EARTH_RADIUS_M },
+            site,
+            v_impact,
+            a,
+            frag_mass,
+            DVec3::ZERO,
+            CAP_N,
             extent,
         );
         assert_eq!(bodies.len(), CAP_N);
@@ -662,11 +795,126 @@ mod tests {
         // VERTICAL incidence (track along −n): no preferred direction → a symmetric bowl, still all
         // below the surface (the fallback tangent must not panic or loft matter above the surface).
         let (vb, _, _, _) = furrow_target_grains(
-            &mats, &earth, earth_pos, EARTH_RADIUS_M, site, -DVec3::Y * 10_000.0, a, frag_mass,
-            DVec3::ZERO, CAP_N, extent,
+            &mats,
+            &earth,
+            ExcavSurface::Curved { center: earth_pos, radius: EARTH_RADIUS_M },
+            site,
+            -DVec3::Y * 10_000.0,
+            a,
+            frag_mass,
+            DVec3::ZERO,
+            CAP_N,
+            extent,
         );
         for p in &vb {
             assert!(p.pos.length() <= EARTH_RADIUS_M + 1.0, "vertical: grain above surface");
+        }
+    }
+
+    #[test]
+    fn the_shared_furrow_excavates_a_flat_terrain_patch_at_any_angle() {
+        // The terrain meteor and the space-band Theia strike MUST run the SAME excavation (Robin:
+        // "improving the physical fidelity of one should improve it for all"). This exercises the shared
+        // primitive on a FLAT patch (local-up = +y, as under uniform surface gravity) — the geometry a
+        // meteor into terrain sees. It asserts the SAME honest properties the curved case gives:
+        //   • grains all Earth-tagged (SOURCE_TARGET) and all BELOW the surface plane;
+        //   • an OBLIQUE strike carves a furrow ELONGATED downrange, its centroid pushed downrange;
+        //   • ejecta are LOFTED (outward/up velocity), launched along the LOCAL normal (so the arcs are
+        //     set by the scene's local gravity — a flat uniform-g patch has no escape velocity, so
+        //     "sub-escape" is replaced by the derived-not-dial check: halving the impact speed halves the
+        //     loft, the H-H law responding to the impact, not a fixed kick);
+        //   • a VERTICAL strike is SYMMETRIC (no downrange bias) — obliquity is what elongates a furrow.
+        use crate::aggregate::SOURCE_TARGET;
+        let mats = materials::load();
+        let earth = crate::planet::earth();
+        let up = DVec3::Y; // local surface normal on a flat patch (+y under uniform gravity)
+        let site = DVec3::ZERO; // impact point at the origin of the tangent plane
+        let flat = ExcavSurface::Flat { up, ref_radius: EARTH_RADIUS_M };
+        let frag_mass = 1.0e6;
+        let extent = 12.0; // a meteor-scale crater (metres), not a giant impact
+        let a = 0.3; // impactor radius (scaling length) — a small Fe-Ni body
+        let (t, lat) = (DVec3::X, DVec3::Z); // downrange / lateral tangents for the oblique case below
+
+        // OBLIQUE 45° impact at 17 km/s in the x–y plane → downrange = +x.
+        let v_oblique = DVec3::new(1.0, -1.0, 0.0).normalize() * 17_000.0;
+        let (bodies, mids, temps, src) = furrow_target_grains(
+            &mats, &earth, flat, site, v_oblique, a, frag_mass, DVec3::ZERO, CAP_N, extent,
+        );
+        assert_eq!(bodies.len(), CAP_N);
+        assert_eq!(mids.len(), CAP_N);
+        assert_eq!(temps.len(), CAP_N);
+        assert!(src.iter().all(|&s| s == SOURCE_TARGET), "all grains Earth-tagged (target material)");
+        // All grains sit on/below the flat surface plane (pos·up ≤ site·up).
+        for p in &bodies {
+            assert!(
+                (p.pos - site).dot(up) <= 1e-6,
+                "grain above the flat surface: height {}",
+                (p.pos - site).dot(up)
+            );
+        }
+        // Elongated downrange (+x), centroid pushed downrange of first contact.
+        let along: Vec<f64> = bodies.iter().map(|p| (p.pos - site).dot(t)).collect();
+        let across: Vec<f64> = bodies.iter().map(|p| (p.pos - site).dot(lat)).collect();
+        let span = |v: &[f64]| {
+            v.iter().cloned().fold(f64::MIN, f64::max) - v.iter().cloned().fold(f64::MAX, f64::min)
+        };
+        assert!(
+            span(&along) > 1.3 * span(&across),
+            "oblique furrow must be elongated downrange: along {:.2} vs across {:.2}",
+            span(&along),
+            span(&across)
+        );
+        let cx = along.iter().sum::<f64>() / along.len() as f64;
+        assert!(cx > 0.0, "oblique furrow centroid should be downrange of contact, got {cx:.3}");
+
+        // Ejecta lofted: some grains carry outward (+up) velocity, launched along the LOCAL normal.
+        let up_vel: Vec<f64> = bodies.iter().map(|p| p.vel.dot(up)).collect();
+        let max_up = up_vel.iter().cloned().fold(f64::MIN, f64::max);
+        // The loft is MODEST here and that is honest: the H-H ejection scales as (a/d)^(1/μ) with the
+        // impactor radius a (0.3 m) as the point source, so for a crater extent ≫ a the excavation is
+        // DISPLACEMENT-dominated (grains stay) and only a gentle curtain is lofted — the opposite regime
+        // to the space band, where a ≈ extent (a whole planetesimal) drives violent ejection. We assert
+        // the curtain is genuinely lofted (well above numerical noise), not a specific speed.
+        assert!(max_up > 15.0, "some grains must be lofted (outward/up velocity), got max {max_up:.1}");
+        // Derived, not a dial: a HALF-SPEED impact lofts proportionally slower (the H-H law tracks the
+        // impact — "scaled to" the strike, launched along the local vertical the scene's gravity acts on).
+        let (half, _, _, _) = furrow_target_grains(
+            &mats, &earth, flat, site, v_oblique * 0.5, a, frag_mass, DVec3::ZERO, CAP_N, extent,
+        );
+        let vmax = |b: &[Body]| b.iter().map(|p| p.vel.length()).fold(0.0, f64::max);
+        let (vf, vh) = (vmax(&bodies), vmax(&half));
+        assert!(
+            (vh / vf - 0.5).abs() < 0.05,
+            "ejecta speed scales with the impact (full {vf:.0}, half {vh:.0}; ratio {:.3})",
+            vh / vf
+        );
+
+        // VERTICAL strike (straight down): SYMMETRIC bowl — no downrange bias, along-span ≈ across-span,
+        // and the centroid is centred over the impact (obliquity is what elongates/offsets a furrow).
+        let v_vert = -up * 17_000.0;
+        let (vb, _, _, _) = furrow_target_grains(
+            &mats, &earth, flat, site, v_vert, a, frag_mass, DVec3::ZERO, CAP_N, extent,
+        );
+        // Its tangent axes are arbitrary (no preferred direction), so measure symmetry in two fixed
+        // orthogonal tangents (x, z) of the plane.
+        let vx: Vec<f64> = vb.iter().map(|p| (p.pos - site).dot(DVec3::X)).collect();
+        let vz: Vec<f64> = vb.iter().map(|p| (p.pos - site).dot(DVec3::Z)).collect();
+        let (sx, sz) = (span(&vx), span(&vz));
+        assert!(
+            (sx / sz - 1.0).abs() < 0.25 && (sz / sx - 1.0).abs() < 0.25,
+            "vertical strike must be symmetric (x-span {sx:.2} ≈ z-span {sz:.2})"
+        );
+        let (cx2, cz2) = (
+            vx.iter().sum::<f64>() / vx.len() as f64,
+            vz.iter().sum::<f64>() / vz.len() as f64,
+        );
+        let radius = sx.max(sz);
+        assert!(
+            cx2.abs() < 0.15 * radius && cz2.abs() < 0.15 * radius,
+            "vertical strike bowl is centred over the impact (centroid {cx2:.2},{cz2:.2}; r {radius:.2})"
+        );
+        for p in &vb {
+            assert!((p.pos - site).dot(up) <= 1e-6, "vertical: grain above the flat surface");
         }
     }
 

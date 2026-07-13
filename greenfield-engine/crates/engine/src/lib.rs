@@ -640,16 +640,19 @@ mod app {
                 // The meteor is a real Fe-Ni body: its impact energy is its kinetic energy, ½·m·v².
                 let energy = 0.5 * METEOR_MASS * METEOR_SPEED * METEOR_SPEED;
 
-                // TERRAIN-AS-MATTER (docs/24 Stage 3): instead of carving a crater and handing every
-                // ejecta grain a scripted outward velocity (the old `impact` fudge), we MATERIALIZE the
-                // impact region into real grains and drive them with the meteor's real momentum. The
-                // crater, the ejecta curtain, and the fallback all EMERGE from the same conservative
-                // grain contact the debris already uses — no assigned ejecta speed anywhere.
+                // SHARED IMPACT EXCAVATION (docs/28): the terrain meteor runs the SAME furrow/shock
+                // excavation the space-band Theia strike does — `impact::Furrow`. At the impact point the
+                // voxel summary is REPLACED with materialized particles (`matter::materialize_furrow`) and
+                // the ONE canonical law shapes them: an OBLIQUE strike (the camera ray sets the track)
+                // carves a downrange-elongated furrow, a vertical one a symmetric bowl, and every grain
+                // carries the furrow's declared shock-ejection velocity. "Improving one improves all":
+                // this is the identical `Furrow` the space band fills — a meteor could strike anywhere on
+                // the globe and we would see the same physics. Matter is conserved (excavated voxels →
+                // grains, each with its own strata material). No scripted dig/blast/ejecta speed.
                 //   1. size the disturbed region from the σ·V crater relation (docs/19), LOD-capped;
-                //   2. materialize its solid voxels into grains at rest (mass + PE conserved);
-                //   3. deposit the meteor's momentum p = m·v as an impulse on the coupling core (exact
-                //      momentum conservation) — ejection emerges from the compression/rebound;
-                //   4. the energy the impulse did NOT turn into motion is shock HEAT (radial gradient).
+                //   2. build the shared furrow from the meteor's track + local surface up;
+                //   3. materialize its voxels into grains carrying the shared shock-ejection velocity;
+                //   4. the meteor's KE not lofted as bulk motion is shock HEAT (radial gradient → glow).
                 let hitv = hit + self.world.center();
                 let strength = self
                     .world
@@ -661,20 +664,31 @@ mod app {
                 ));
                 const MATERIALIZE_CAP: f32 = 14.0; // LOD guard: bound the materialized grain count
                 let mat_r = (crater_r as f32).min(MATERIALIZE_CAP);
+                // The meteor's REAL radius is the Housen–Holsapple scaling length a (a 1000 kg Fe-Ni body
+                // is ~0.31 m): a = (3m / 4πρ)^⅓ from the struck iron's own density — not a dial.
+                let rho_fe =
+                    self.mats[materials::index_of(&self.mats, "iron")].density.max(1.0) as f64;
+                let a = (3.0 * METEOR_MASS as f64
+                    / (4.0 * std::f64::consts::PI * rho_fe))
+                    .cbrt();
+                // The shared furrow: site = the strike point, outward normal = local up (+y under uniform
+                // surface gravity), track = the meteor's velocity (camera ray × impact speed), excavation
+                // scale = the crater radius. The SAME struct the space band builds in `impact.rs`.
+                let v_impact = glam::DVec3::new(dir.x as f64, dir.y as f64, dir.z as f64)
+                    * METEOR_SPEED as f64;
+                let site64 = glam::DVec3::new(hit.x as f64, hit.y as f64, hit.z as f64);
+                let furrow =
+                    crate::impact::Furrow::new(site64, glam::DVec3::Y, v_impact, a, mat_r as f64);
                 let start = self.matter.particle_count();
                 self.matter
-                    .materialize_region(&mut self.world, &self.mats, hit, mat_r);
-                // Path B (docs/24): turn any STEEP terrain the ejecta will hit (old crater walls, cliffs)
-                // into grains too — a heightfield can't represent a vertical wall conservatively, and that
-                // was the last energy injector the drag fudge masked. Now the terrain the debris touches
-                // is either grains or a gentle bilinear surface — both conservative.
+                    .materialize_furrow(&mut self.world, &self.mats, &furrow, Vec3::ZERO);
+                // Path B (docs/24): turn any STEEP terrain the ejecta will hit (crater walls, cliffs) into
+                // grains too — a heightfield can't represent a vertical wall conservatively. Now the
+                // terrain the debris touches is either grains or a gentle bilinear surface — both conservative.
                 self.matter
                     .materialize_steep_terrain(&mut self.world, &self.mats, hit, mat_r * 2.0, 3);
-                let momentum = dir * (METEOR_MASS * METEOR_SPEED);
-                let core_r = (mat_r * 0.35).max(2.0); // the impactor's coupling footprint
-                self.matter.deposit_impulse(start, hit, momentum, core_r);
-                // Heat = impact energy minus the bulk KE the impulse just added (a small % — most of a
-                // fast impactor's ½mv² is heat, which falls out of momentum-vs-energy, not a magic 5%).
+                // Heat = impact energy minus the bulk KE the shared ejection lofted (most of a fast
+                // impactor's ½mv² is heat — the incandescent core glows because it genuinely is that hot).
                 let bulk_ke: f32 = self.matter.particles[start..]
                     .iter()
                     .map(|p| 0.5 * p.mass * p.vel.length_squared())
@@ -685,11 +699,6 @@ mod app {
                     (energy - bulk_ke).max(0.0),
                     &self.mats,
                 );
-                // Vapor-driven ejection (docs/24, Robin's model): the shock heat that pushed matter past
-                // vaporization flashes to gas; its expansion throws the ejecta curtain and carves the
-                // bowl. Routes the heat we just deposited into radial ejecta KE (thermal → kinetic,
-                // conserved) — the honest engine of the crater, replacing any scripted ejecta speed.
-                self.matter.deposit_vapor_expansion(start, hit, &self.mats);
                 self.matter.collapse(&mut self.world, &self.mats);
                 self.flush_debris_to_gpu();
 
