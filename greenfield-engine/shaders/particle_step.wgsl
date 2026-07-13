@@ -236,6 +236,23 @@ fn terrain_top(cx : i32, cz : i32) -> f32 {
     return f32(heightfield[u32(z) * P.world_w + u32(x)]) - P.center.y - 0.5;
 }
 
+// The smooth (bilinear) terrain surface height at a position — the SAME surface `terrain_accel` collides
+// against, factored out so the integrate step can tell whether a grain is grounded (for the settle
+// counter). Clamped to the patch edge exactly like `terrain_top`.
+fn terrain_h(pos : vec3<f32>) -> f32 {
+    let vx = pos.x + P.center.x;
+    let vz = pos.z + P.center.z;
+    let cx = i32(floor(vx));
+    let cz = i32(floor(vz));
+    let h00 = terrain_top(cx, cz);
+    let h10 = terrain_top(cx + 1, cz);
+    let h01 = terrain_top(cx, cz + 1);
+    let h11 = terrain_top(cx + 1, cz + 1);
+    let fx = vx - f32(cx);
+    let fz = vz - f32(cz);
+    return mix(mix(h00, h10, fx), mix(h01, h11, fx), fz);
+}
+
 // Terrain contact as a CONSERVATIVE penalty (docs/24 Path B — the honest, Newtonian way). The terrain is
 // solid matter summarised as a per-column heightfield; a grain that sinks below the surface feels a
 // repulsive force. The OLD min-translation normal FLIPPED between up and sideways at voxel edges — a
@@ -366,7 +383,17 @@ fn cs_integrate(@builtin(global_invocation_id) gid : vec3<u32>) {
 
     pt.offset = pos;
     pt.vel = vel;
-    pt.resting = 0.0;
+    // Count consecutive GROUNDED substeps into `resting`. This is the GPU port of the CPU
+    // `matter::step` SETTLE_FRAMES fallback: a grain sitting on the terrain surface but still creeping
+    // (soft contact leaves a small residual horizontal speed above SETTLE_SPEED) would otherwise never
+    // read as "at rest" — so the CPU deposits any grain grounded for enough frames regardless of speed.
+    // The de-resolution readback (lib.rs) deposits a grounded grain once this counter crosses its
+    // threshold OR its horizontal speed is below SETTLE_SPEED — the SAME dual criterion as the CPU.
+    if (pos.y - P.part_half <= terrain_h(pos) + 0.1) {
+        pt.resting = pt.resting + 1.0;
+    } else {
+        pt.resting = 0.0;
+    }
     pt.emission = incandescence(pt.temp);
     particles[i] = pt;
 }

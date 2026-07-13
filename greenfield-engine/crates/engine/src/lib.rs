@@ -115,6 +115,11 @@ mod app {
     // heightfield surface under the penalty spring; count it grounded if its base is within this margin
     // of the terrain top (the shader's own bilinear surface uses the same −0.5 mesh offset).
     const SETTLE_GROUND_MARGIN: f32 = 0.1;
+    // Consecutive GROUNDED substeps (the shader's `resting` counter) after which a grain deposits even if
+    // it is still creeping above SETTLE_SPEED — the GPU port of the CPU `matter::step` SETTLE_FRAMES=10
+    // fallback. cs_integrate runs once per substep (~960/s at ×1), so ~150 substeps ≈ 0.16 s of grounded
+    // contact, matching the CPU's 10 frames at 60 fps. Without this, soft-contact grains creep forever.
+    const SETTLE_REST_SUBSTEPS: f32 = 150.0;
 
     // Phase 3 dig/fracture.
     const MAX_PARTICLES: usize = 60_000;
@@ -920,18 +925,29 @@ mod app {
         /// re-upload the survivors so `gpu_particles.count` drops. Without this the GPU debris path never
         /// returns matter to the grid, so the debris count pinned at thousands forever ("rubble hovers").
         ///
-        /// The GPU shader can't write CPU voxels, so this is a readback: it STALLS the pipeline (maps the
-        /// buffer), hence it runs only every `SETTLE_READBACK_INTERVAL` frames. "At rest" is the SAME
+        /// The GPU shader can't write CPU voxels, so this is a non-blocking readback (two-phase, see
+        /// `begin_readback`/`take_readback`): a copy is kicked off every `SETTLE_READBACK_INTERVAL`
+        /// frames and consumed a frame or two later when the async map completes. "At rest" is the SAME
         /// horizontal-only test the CPU `matter::step` uses (a grounded grain's residual vertical velocity
         /// is snap-contact jitter, not motion). Deposit goes through the SHARED
         /// [`matter::MatterSim::deposit_resting_grain`] primitive, so a grain never lands inside the probe
         /// or a full column — there it stays a grain. Matter is CONSERVED: a grain is removed from the GPU
         /// set ONLY when it became a voxel.
         fn settle_gpu_debris(&mut self) {
-            if self.gpu_particles.count == 0 {
+            // Phase 1: on the interval, kick off a fresh readback (no-op if one is already in flight).
+            if self.frame % SETTLE_READBACK_INTERVAL == 0 {
+                self.gpu_particles.begin_readback(&self.device, &self.queue);
+            }
+            // Phase 2: consume a completed readback, if any.
+            let Some(grains) = self.gpu_particles.take_readback() else {
+                return;
+            };
+            // If the live buffer was appended to since the snapshot (a new meteor mid-flight), the
+            // snapshot indices no longer align with the buffer — do NOT compact against it (that would
+            // drop the freshly-appended grains). Discard this snapshot; the next interval retries.
+            if self.gpu_particles.count != self.gpu_particles.readback_count {
                 return;
             }
-            let grains = self.gpu_particles.readback(&self.device, &self.queue);
             let center = self.world.center();
             // The probe is dynamic matter debris must pile ON, never through — model it as its bounding
             // sphere (COM + collision radius), the same body test `matter::step` applies.
@@ -943,26 +959,45 @@ mod app {
             );
             let bodies = [probe_body];
 
+            let (wmax, dmax) = (self.world.w as f32 - 0.5, self.world.d as f32 - 0.5);
             let mut survivors: Vec<GpuParticle> = Vec::with_capacity(grains.len());
             for g in &grains {
                 let pos = Vec3::new(g.offset[0], g.offset[1], g.offset[2]);
                 let (vx, vz) = (g.vel[0], g.vel[2]);
                 let horiz = (vx * vx + vz * vz).sqrt();
-                // Grounded? Compare the grain's base to the SAME bilinear terrain surface the shader
-                // collides against (heightfield top, mesh iso-surface 0.5 below the air voxel).
-                let xi = (pos.x + center.x).floor() as i32;
-                let zi = (pos.z + center.z).floor() as i32;
+                // Which column did the GPU rest this grain on? The shader's `terrain_top` CLAMPS the
+                // sample to the patch edge (the terrain extends flat past the border — the bulk Earth the
+                // patch is a window onto), so a grain that overflew the finite patch rests on the
+                // edge-clamped extension. Deposit it into that SAME column — clamped to the patch edge —
+                // so matter that came to rest is returned to the resolved grid, matter-conserving. The
+                // clamp is the identical convention `terrain_top` and `materialize_steep_terrain` use.
+                // FLAGGED LOD APPROXIMATION: for this over-energetic meteor most ejecta overfly the 96 m
+                // patch and land on the unresolved extension; returning them at the patch boundary (not
+                // their true, unresolvable landing point 10s–100s of m away) is an approximation — but it
+                // CONSERVES matter (never deletes a grain to lower the count) and matches where the GPU
+                // physically rested each grain. A larger patch / true bulk-mass accounting is the deeper fix.
+                let cxf = (pos.x + center.x).clamp(0.5, wmax);
+                let czf = (pos.z + center.z).clamp(0.5, dmax);
+                let xi = cxf.floor() as i32;
+                let zi = czf.floor() as i32;
                 let ground_y = self
                     .world
                     .surface_top_voxel(xi, zi)
                     .map(|t| t as f32 - center.y - 0.5)
                     .unwrap_or(f32::NEG_INFINITY);
                 let grounded = pos.y - DEBRIS_PART_HALF <= ground_y + SETTLE_GROUND_MARGIN;
+                // "At rest" — the SAME dual criterion as the CPU `matter::step`: horizontal speed below
+                // SETTLE_SPEED, OR grounded for enough consecutive substeps (the shader's `resting`
+                // counter = the CPU SETTLE_FRAMES fallback) so a grain that has settled onto a pile but
+                // still creeps under soft contact still deposits instead of hovering forever.
+                let at_rest = horiz < matter::SETTLE_SPEED || g.resting > SETTLE_REST_SUBSTEPS;
+                // Deposit into the (clamped) column the grain rests on — pass the clamped x,z.
+                let dpos = Vec3::new(cxf - center.x, pos.y, czf - center.z);
                 if grounded
-                    && horiz < matter::SETTLE_SPEED
+                    && at_rest
                     && self.matter.deposit_resting_grain(
                         &mut self.world,
-                        pos,
+                        dpos,
                         g.material as usize,
                         &bodies,
                     )
@@ -1084,15 +1119,13 @@ mod app {
         /// Render one frame (advances the simulation first).
         pub fn render(&mut self) -> Result<(), JsValue> {
             self.step_physics();
-            // Periodically de-resolve settled GPU debris back into voxels (docs/22): grains at rest on
-            // the terrain become voxels again, so the debris count falls to ~0 once the excitement passes
-            // and the crater/terrain fills honestly with settled matter. Amortised (it stalls). Runs
-            // BEFORE the dirty check so the deposits it makes remesh + re-upload the heightfield this
-            // same frame.
+            // De-resolve settled GPU debris back into voxels (docs/22): grains at rest on the terrain
+            // become voxels again, so the debris count falls to ~0 once the excitement passes and the
+            // crater/terrain fills honestly with settled matter. Non-blocking, amortised (a readback is
+            // issued on the interval and consumed a frame or two later). Runs BEFORE the dirty check so
+            // the deposits it makes remesh + re-upload the heightfield this same frame.
             self.frame = self.frame.wrapping_add(1);
-            if self.frame % SETTLE_READBACK_INTERVAL == 0 {
-                self.settle_gpu_debris();
-            }
+            self.settle_gpu_debris();
             if self.matter.take_dirty() {
                 self.remesh_world();
                 self.upload_heightfield_to_gpu(); // the crater changed the column tops
@@ -1684,6 +1717,15 @@ mod app {
         bind: wgpu::BindGroup,
         capacity: u32,
         count: u32,
+        // Non-blocking readback (docs/22 de-resolution). On WebGPU buffer mapping is genuinely async —
+        // we cannot block (`Maintain::Wait` is a no-op in the browser), so the readback is two-phase:
+        // `begin_readback` copies the grains into `readback_staging` and calls `map_async`, whose
+        // callback flips `readback_ready`; a later frame `take_readback` reads the mapped bytes.
+        // `readback_count` snapshots `count` at copy time so `take_readback` can detect an intervening
+        // append (a fresh meteor) and discard the now-misaligned snapshot rather than deposit stale data.
+        readback_staging: Option<wgpu::Buffer>,
+        readback_count: u32,
+        readback_ready: std::rc::Rc<std::cell::Cell<bool>>,
     }
 
     impl GpuParticles {
@@ -1691,7 +1733,12 @@ mod app {
             let buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("gpu-particles-physics"),
                 size: (capacity as usize * std::mem::size_of::<GpuParticle>()) as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                // COPY_SRC so the de-resolution readback (docs/22) can copy the live grains to a MAP_READ
+                // staging buffer — without it copy_buffer_to_buffer is a (silent, async) WebGPU validation
+                // error and the readback reads all zeros.
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
             // 8× render sub-cubes, filled each frame by cs_expand and drawn as instances.
@@ -1847,6 +1894,9 @@ mod app {
                 bind,
                 capacity,
                 count: 0,
+                readback_staging: None,
+                readback_count: 0,
+                readback_ready: std::rc::Rc::new(std::cell::Cell::new(false)),
             }
         }
 
@@ -1917,14 +1967,14 @@ mod app {
             queue.write_buffer(&self.params, 0, bytemuck::bytes_of(params));
         }
 
-        /// Read the live PHYSICS grains back to the CPU (`docs/22` de-resolution). Copies the storage
-        /// buffer into a transient `MAP_READ` staging buffer, maps it, and returns the current
-        /// `GpuParticle` states. This STALLS (maps with `Maintain::Wait`, like `tools/gpu-verify`), so it
-        /// is called only periodically to amortise the cost — never per frame. Returns the first `count`
-        /// grains (the tail past `count` is stale scratch and never stepped).
-        fn readback(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Vec<GpuParticle> {
-            if self.count == 0 {
-                return Vec::new();
+        /// Phase 1 of the non-blocking de-resolution readback (`docs/22`): copy the live PHYSICS grains
+        /// into a transient `MAP_READ` staging buffer and kick off `map_async`. Its callback flips the
+        /// shared `readback_ready` flag when the GPU has finished (on WebGPU that lands during the JS
+        /// event loop between frames — we can NOT block for it, unlike native `tools/gpu-verify`). A
+        /// no-op if the buffer is empty or a readback is already in flight.
+        fn begin_readback(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+            if self.count == 0 || self.readback_staging.is_some() {
+                return;
             }
             let size = self.count as u64 * std::mem::size_of::<GpuParticle>() as u64;
             let staging = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1937,14 +1987,34 @@ mod app {
                 device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
             enc.copy_buffer_to_buffer(&self.buf, 0, &staging, 0, size);
             queue.submit(std::iter::once(enc.finish()));
-            let slice = staging.slice(..);
-            slice.map_async(wgpu::MapMode::Read, |_| {});
-            device.poll(wgpu::Maintain::Wait);
-            let data = slice.get_mapped_range();
+            self.readback_ready.set(false);
+            let flag = self.readback_ready.clone();
+            staging.slice(..).map_async(wgpu::MapMode::Read, move |res| {
+                if res.is_ok() {
+                    flag.set(true);
+                }
+            });
+            self.readback_count = self.count;
+            self.readback_staging = Some(staging);
+        }
+
+        /// Phase 2: if the in-flight readback has completed, return the snapshotted grains (a `Vec` of the
+        /// `readback_count` grains as they were at copy time) and clear the in-flight state. Returns
+        /// `None` while still pending or when nothing is in flight. If the live buffer was appended to
+        /// since the copy (a new meteor), the snapshot no longer aligns with the buffer, so the caller
+        /// must NOT compact against it — `take_readback` reports the snapshot count via `readback_count`
+        /// so the caller can detect the mismatch.
+        fn take_readback(&mut self) -> Option<Vec<GpuParticle>> {
+            if !self.readback_ready.get() {
+                return None;
+            }
+            let staging = self.readback_staging.take()?;
+            let data = staging.slice(..).get_mapped_range();
             let out = bytemuck::cast_slice::<u8, GpuParticle>(&data).to_vec();
             drop(data);
             staging.unmap();
-            out
+            self.readback_ready.set(false);
+            Some(out)
         }
 
         /// Replace the buffer contents with `survivors` and set `count` to their number — the compaction
