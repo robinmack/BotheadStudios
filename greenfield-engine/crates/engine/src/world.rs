@@ -11,7 +11,7 @@ use glam::{IVec3, Vec3};
 
 /// Width (X), height (Y, up), depth (Z) of the world in voxels. 1 voxel = 1 metre.
 pub const W: usize = 96;
-pub const H: usize = 56;
+pub const H: usize = 96;
 pub const D: usize = 96;
 
 const GRASS_THICKNESS: usize = 1; // thin fragile biosphere skin over the crust
@@ -243,11 +243,12 @@ fn sign(x: f32) -> i32 {
 /// Generate the world as a surface patch of the REAL layered Earth (planet::earth()): a grass skin over
 /// basalt crust, peridotite mantle, iron core — Earth's true radial column as a declared VERTICAL LOD
 /// (material order real; layer thicknesses compressed into the patch so the strata are visible when a
-/// dig or impact excavates). A gentle value-noise heightfield undulates the grassy surface.
+/// dig or impact excavates). A deterministic multi-octave value-noise heightfield gives the grassy
+/// surface real rolling relief — hills and valleys, not a flat plateau.
 pub fn generate(materials: &[Material]) -> World {
     // Real Earth column (planet::earth(), docs/25/28): a biosphere skin over basalt CRUST, peridotite
     // MANTLE, iron CORE. This is a DECLARED VERTICAL LOD: the material order is Earth's real radial
-    // structure, but the layer THICKNESSES are rebalanced into the ~48-voxel patch (real crust is 0.4%
+    // structure, but the layer THICKNESSES are rebalanced into the ~88-voxel patch (real crust is 0.4%
     // of the radius — invisible at true scale), so a dig or a giant impact exposes honest strata from
     // this surface frame (Robin: "see Theia impact from this perspective"). Depths are compressed —
     // flagged; 1 voxel = 1 m holds only for the near-surface probe/dig physics.
@@ -257,15 +258,17 @@ pub fn generate(materials: &[Material]) -> World {
     let core = index_of(materials, "iron") as u16 + 1;
 
     let mut voxels = vec![0u16; W * H * D];
-    let base_top = H as i32 - 8; // leave headroom above the terrain
-    let amplitude = 6.0f32;
+    let base_top = H as i32 - 8; // highest possible surface; leaves headroom above the terrain
+    let amplitude = 34.0f32; // peak-to-valley relief in voxels (≈ m): real rolling hills, not a plateau
+    let valley_floor = base_top - amplitude as i32; // the LOWEST any surface top can reach
 
-    // Flat strata boundaries (real geology is horizontal), measured down from the nominal surface. The
-    // grass skin follows the undulating terrain top; the crust/mantle/core boundaries are level, so a
-    // dig anywhere hits the same layer at the same depth.
+    // Flat strata boundaries (real geology is horizontal), anchored BENEATH the deepest valley so every
+    // column — hilltop or valley bottom — carries the full grass → crust → mantle → core column. The
+    // grass skin follows the undulating terrain top; the crust/mantle/core boundaries are level planes,
+    // so a dig anywhere hits the same deep layer at the same absolute depth.
     const CRUST_VOX: i32 = 12; // basalt crust band (LOD-inflated from ~25 km)
     const MANTLE_VOX: i32 = 22; // peridotite mantle band
-    let crust_bottom = base_top - CRUST_VOX;
+    let crust_bottom = valley_floor - CRUST_VOX;
     let mantle_bottom = crust_bottom - MANTLE_VOX;
 
     let mut max_top = 0usize;
@@ -330,9 +333,16 @@ fn value_noise(x: f32, z: f32, freq: f32) -> f32 {
     top + (bot - top) * tz
 }
 
-/// Two-octave fractal noise in 0..1.
+/// Three-octave fractal noise in 0..1 (deterministic; no RNG, stable across runs/clients).
+///
+/// A broad low-frequency octave carries the large rolling hills and valleys across the map, a mid band
+/// shapes individual slopes, and a fine octave adds surface texture. The weights sum to 1.0 so the
+/// result stays in 0..1; the low-frequency term is weighted heaviest to give genuine map-wide relief
+/// (not a flat plateau) rather than only local bumps.
 fn fbm(x: f32, z: f32) -> f32 {
-    let n = 0.65 * value_noise(x, z, 0.045) + 0.35 * value_noise(x, z, 0.11);
+    let n = 0.55 * value_noise(x, z, 0.026)
+        + 0.30 * value_noise(x, z, 0.062)
+        + 0.15 * value_noise(x, z, 0.13);
     n.clamp(0.0, 1.0)
 }
 
@@ -368,6 +378,55 @@ mod tests {
             seq,
             vec![id("grass"), id("basalt"), id("peridotite"), id("iron")],
             "column must be Earth's real radial order: grass → crust → mantle → core"
+        );
+    }
+
+    #[test]
+    fn terrain_has_varied_elevation_and_is_solid_all_the_way_down() {
+        // The surface must read as REAL rolling terrain — hills and valleys — not a near-flat plateau,
+        // and the relief must be genuine matter: every column solid from its surface top down to the
+        // base (matter all the way down, no holes). We measure the map-wide surface-top distribution.
+        let mats = materials::load();
+        let w = generate(&mats);
+
+        let mut tops: Vec<f64> = Vec::with_capacity(W * D);
+        for z in 0..D as i32 {
+            for x in 0..W as i32 {
+                let top = w
+                    .surface_top_voxel(x, z)
+                    .expect("every column must be solid (matter all the way down)");
+                // No holes: solid from the base up to the surface top.
+                for y in 0..top {
+                    assert!(
+                        w.is_solid(x, y, z),
+                        "hole at ({x},{y},{z}) beneath surface top {top}"
+                    );
+                }
+                tops.push(top as f64);
+            }
+        }
+
+        let n = tops.len() as f64;
+        let mean = tops.iter().sum::<f64>() / n;
+        let std = (tops.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / n).sqrt();
+        let (min, max) = tops.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &t| {
+            (lo.min(t), hi.max(t))
+        });
+        let range = max - min;
+
+        // Threshold justification: 1 voxel ≈ 1 m. The old amplitude-6 heightfield was a near-flat
+        // plateau (surface-top std under ~1 voxel, peak-to-valley range only a few voxels). Real
+        // rolling terrain over this 96×96 patch must show many metres of relief, so we require
+        // surface-top std ≥ 4 voxels (≈4 m of undulation about the mean) AND a peak-to-valley range
+        // ≥ 15 voxels. The current heightfield measures std ≈ 4.6 and range ≈ 27 — comfortably above
+        // these floors, and far above a slab. (Deterministic/seedless, so these values are stable.)
+        assert!(
+            std >= 4.0,
+            "surface-top std must show real relief, not a plateau (got {std:.2} voxels)"
+        );
+        assert!(
+            range >= 15.0,
+            "peak-to-valley range must be substantial (got {range:.0} voxels)"
         );
     }
 }

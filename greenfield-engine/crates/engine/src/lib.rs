@@ -3534,36 +3534,40 @@ mod tests {
     }
 
     #[test]
-    fn world_is_layered_rock_dirt_grass() {
+    fn world_column_is_density_sorted_light_skin_over_heavy_depths() {
+        // The surface patch is gravitationally sorted like the real Earth: a light organic skin on top,
+        // then progressively DENSER matter with depth, down to the iron core. (This supersedes the old
+        // granite/dirt/grass game world, which the engine no longer generates; the precise material
+        // ORDER — grass → basalt → peridotite → iron — is asserted by world::tests::
+        // column_is_earths_real_layers_top_to_bottom. Here we assert the distinct honest property:
+        // scanning DOWN a column, density never decreases, and several distinct layers are stacked.)
         let mats = materials::load();
         let w = world::generate(&mats);
-        let rock = materials::index_of(&mats, "granite");
-        let dirt = materials::index_of(&mats, "dirt");
-        let grass = materials::index_of(&mats, "grass");
 
         let (x, z) = (w.w as i32 / 2, w.d as i32 / 2);
         assert!(w.is_solid(x, 0, z), "world must be solid at the bottom");
+        let top = w.surface_top_voxel(x, z).expect("solid column at centre");
 
-        let mut seen_grass = false;
-        let mut seen_dirt = false;
-        let mut seen_rock = false;
-        for y in (0..w.h as i32).rev() {
-            match w.material_at(x, y, z) {
-                Some(m) if m == grass => seen_grass = true,
-                Some(m) if m == dirt => {
-                    seen_dirt = true;
-                    assert!(seen_grass, "should hit grass before dirt scanning down");
-                }
-                Some(m) if m == rock => {
-                    seen_rock = true;
-                    assert!(seen_dirt, "should hit dirt before rock scanning down");
-                }
-                _ => {}
+        let mut prev_density = 0.0f32;
+        let mut layers = 0usize;
+        let mut last_mat: Option<usize> = None;
+        for y in (0..top).rev() {
+            let m = w.material_at(x, y, z).expect("solid below the surface top (no holes)");
+            let d = mats[m].density;
+            assert!(
+                d >= prev_density - 1e-3,
+                "denser matter must sit deeper: {} (ρ={d}) sits below ρ={prev_density}",
+                mats[m].id
+            );
+            prev_density = d;
+            if last_mat != Some(m) {
+                layers += 1;
+                last_mat = Some(m);
             }
         }
         assert!(
-            seen_grass && seen_dirt && seen_rock,
-            "all three layers must be present"
+            layers >= 3,
+            "the column must show multiple stacked layers, not one slab (got {layers})"
         );
     }
 
