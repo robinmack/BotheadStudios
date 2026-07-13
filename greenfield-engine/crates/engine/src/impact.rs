@@ -413,6 +413,66 @@ mod tests {
     }
 
     #[test]
+    fn audit_disk_provenance_temp() {
+        // TEMPORARY AUDIT TEST — measures Earth-cap vs impactor provenance of the lofted disk.
+        let mats = materials::load();
+        let theia = crate::planet::theia();
+        let earth = crate::planet::earth();
+        let m_theia = theia.total_mass();
+        let site = DVec3::new(0.0, EARTH_RADIUS_M, 0.0);
+        let v_esc =
+            (2.0 * G * (EARTH_MASS + m_theia) / (EARTH_RADIUS_M + theia.radius())).sqrt();
+        let v_contact = DVec3::new(v_esc * 0.7071, -v_esc * 0.7071, 0.0);
+        let (mut agg, mut acc) = build_impact_debris_between(
+            &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia, &earth,
+            EARTH_MASS, EARTH_RADIUS_M,
+        );
+        let mu = G * EARTH_MASS;
+        let mut max_cap_r: f64 = 0.0;
+        let mut ever_aloft = vec![false; IMPACT_N];
+        for s in 0..20_000 {
+            agg.step(&mut acc, 2.0);
+            if s % 100 == 0 {
+                for (i, p) in agg.particles.iter().enumerate() {
+                    let r = p.pos.length();
+                    if i >= DEBRIS_N {
+                        max_cap_r = max_cap_r.max(r);
+                    }
+                    if r > 1.1 * EARTH_RADIUS_M {
+                        ever_aloft[i] = true;
+                    }
+                }
+            }
+        }
+        let m_moon_real = 7.342e22;
+        let (mut aloft_imp, mut aloft_cap, mut esc_imp, mut esc_cap) = (0.0f64, 0.0, 0.0, 0.0);
+        let (mut n_ai, mut n_ac) = (0usize, 0usize);
+        for (i, p) in agg.particles.iter().enumerate() {
+            let r = p.pos.length();
+            let eps = 0.5 * p.vel.length_squared() - mu / r;
+            let cap = i >= DEBRIS_N;
+            if eps >= 0.0 {
+                if cap { esc_cap += p.mass } else { esc_imp += p.mass }
+            } else if r > 1.1 * EARTH_RADIUS_M {
+                if cap { aloft_cap += p.mass; n_ac += 1 } else { aloft_imp += p.mass; n_ai += 1 }
+            }
+        }
+        let cap_ever = ever_aloft[DEBRIS_N..].iter().filter(|b| **b).count();
+        let vap_cap = agg.vapor[DEBRIS_N..].iter().filter(|v| **v).count();
+        let vap_imp = agg.vapor[..DEBRIS_N].iter().filter(|v| **v).count();
+        let hot_cap = agg.temps[DEBRIS_N..].iter().cloned().fold(0.0f32, f32::max);
+        println!(
+            "PROVENANCE: disk impactor {:.2} M_moon ({n_ai} pcl) | disk EARTH {:.2} M_moon ({n_ac} pcl) | escaped imp {:.2} cap {:.2}",
+            aloft_imp / m_moon_real, aloft_cap / m_moon_real, esc_imp / m_moon_real, esc_cap / m_moon_real
+        );
+        println!(
+            "cap: max r ever {mr:.3} R_e | cap ever-aloft {cap_ever}/{cn} | vapor cap {vap_cap} imp {vap_imp} | hottest cap {hot_cap:.0} K",
+            mr = max_cap_r / EARTH_RADIUS_M,
+            cn = CAP_N
+        );
+    }
+
+    #[test]
     fn a_dropped_moon_impact_leaves_most_debris_gravitationally_bound() {
         // A dropped Moon strikes at ~escape speed (~11.2 km/s at contact). The impact energy
         // ½μΔv² ≈ 4.3e30 J over the combined Earth+Moon cloud (3 lunar masses) is ~2e7 J/kg —

@@ -1718,6 +1718,8 @@ mod app {
         debris: Vec<glam::DVec3>, // impact-cloud particle positions (empty before the shatter)
         temps: Vec<f32>,          // impact-cloud temperatures (glow)
         sizes: Vec<f32>,          // display radius factor ∝ (mass/initial fragment mass)^⅓ — accretion grows moonlets
+        mats: Vec<usize>,         // per-fragment material index — snapshotted so tints track the SAME lagged
+        //                           order as positions (a live read desynced after drain's swap_remove)
         shattered: bool,
     }
 
@@ -1746,6 +1748,10 @@ mod app {
         moon_tint: [f32; 4],
         /// Snapshot of the initial [Sun, Earth, Moon] state, for the "reset" control.
         initial_bodies: Vec<crate::orbit::Body>,
+        /// Snapshot of the initial spin angular momentum, restored on Reset alongside `initial_bodies`.
+        /// Without this a Reset kept the impact-induced spin — a world reset that conjured angular
+        /// momentum out of the previous run (a render-truth bug, docs/28).
+        initial_spin_l: glam::DVec3,
         /// True once any moon has struck the Earth (contact resolution fired) — for the HUD.
         impacted: bool,
         /// Per-moon "has already hit" flags, so each moon's impact energy is counted exactly once
@@ -1968,6 +1974,10 @@ mod app {
             }
             let acc = crate::orbit::accelerations(&bodies);
             let initial_bodies = bodies.clone();
+            // Modern Earth: the measured sidereal day, spin axis ⊥ the orbital (x-y) plane.
+            let spin_l = glam::DVec3::new(0.0, 0.0, 1.0)
+                * (crate::tides::moment_of_inertia(EARTH_MASS, EARTH_RADIUS_M)
+                    * (2.0 * std::f64::consts::PI / 86_164.0));
 
             // Body colours derived from a real composition, aggregated (docs/17) — NOT hand-picked.
             // Earth: ~71% ocean water, ~24% continental (granitic) rock, ~5% polar ice. This EXCLUDES
@@ -2037,10 +2047,8 @@ mod app {
                 debris_rate_mul: 1.0,
                 crater_heal_m3: 0.0,
                 sim_since_impact: 0.0,
-                // Modern Earth: the measured sidereal day, spin axis ⊥ the orbital (x-y) plane.
-                spin_l: glam::DVec3::new(0.0, 0.0, 1.0)
-                    * (crate::tides::moment_of_inertia(EARTH_MASS, EARTH_RADIUS_M)
-                        * (2.0 * std::f64::consts::PI / 86_164.0)),
+                spin_l,
+                initial_spin_l: spin_l,
                 spin_angle: 0.0,
                 geologic: false,
                 geo_moonlets: Vec::new(),
@@ -2098,6 +2106,12 @@ mod app {
             self.debris_acc.clear();
             self.impact_site_rel = None;
             self.sim_since_impact = 0.0;
+            self.geologic = false;
+            self.geo_moonlets.clear();
+            // Restore the pristine spin: without this the impact-induced spin_l survived a world reset,
+            // conjuring angular momentum from the previous run (render-truth bug, docs/28).
+            self.spin_l = self.initial_spin_l;
+            self.spin_angle = 0.0;
             self.crater_heal_m3 = 0.0;
             // Drop the snapshot history — the renderer must not interpolate across the reset.
             self.snaps.clear();
@@ -2243,6 +2257,8 @@ mod app {
             // too much. Wider aim keeps the ~45° obliquity at the slower closing rate.
             // Proto-Earth spin: UNKNOWN, declared zero (flagged) — the post-impact day must EMERGE.
             self.spin_l = glam::DVec3::ZERO;
+            self.initial_spin_l = glam::DVec3::ZERO; // Reset in birth mode restores the non-spinning proto-Earth.
+            self.spin_angle = 0.0;
             let d0 = 9.6e7; // ≈ 25% of lunar distance — the scene's opening framing
             let v_in = 5_000.0;
             let b = 1.46 * contact;
@@ -2811,13 +2827,14 @@ mod app {
         /// Record the observable state at the current physics clock (the renderer's source of truth).
         fn push_snapshot(&mut self) {
             let frag0 = (self.impactor_mass / DEBRIS_N as f64).max(1.0);
-            let (debris, temps, sizes) = match self.moon_debris.as_ref() {
+            let (debris, temps, sizes, mats) = match self.moon_debris.as_ref() {
                 Some(agg) => (
                     agg.particles.iter().map(|p| p.pos).collect(),
                     agg.temps.clone(),
                     agg.particles.iter().map(|p| (p.mass / frag0).cbrt() as f32).collect(),
+                    agg.mat_ids.clone(),
                 ),
-                None => (Vec::new(), Vec::new(), Vec::new()),
+                None => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
             };
             self.snaps.push_back(FrameSnap {
                 t: self.phys_clock,
@@ -2825,7 +2842,12 @@ mod app {
                 debris,
                 temps,
                 sizes,
-                shattered: self.moon_debris.is_some(),
+                mats,
+                // Shattered is FOREVER (until Replay): keying this off moon_debris alone RESURRECTED
+                // the parked impactor's grain shell when geologic mode retired the cloud — a
+                // Theia-sized ghost sitting on Earth with no orbit ("pure fudge" — a render-state bug
+                // conjuring mass, and I had rationalized it in my own screenshot instead of chasing it).
+                shattered: self.moon_debris.is_some() || self.geologic,
             });
             // Keep a little more history than the lag needs; drop the rest.
             let horizon = self.phys_clock - (RENDER_LAG_S + 0.5);
@@ -2837,22 +2859,26 @@ mod app {
         /// The state the RENDERER sees: snapshots interpolated at (now − RENDER_LAG_S). Falls back to
         /// the live state before the first snapshot exists.
         #[allow(clippy::type_complexity)]
-        fn sampled_state(&self) -> (Vec<glam::DVec3>, Vec<glam::DVec3>, Vec<f32>, Vec<f32>, bool) {
+        fn sampled_state(
+            &self,
+        ) -> (Vec<glam::DVec3>, Vec<glam::DVec3>, Vec<f32>, Vec<f32>, Vec<usize>, bool) {
             if self.snaps.is_empty() {
                 let frag0 = (self.impactor_mass / DEBRIS_N as f64).max(1.0);
-                let (d, t, sz) = match self.moon_debris.as_ref() {
+                let (d, t, sz, mt) = match self.moon_debris.as_ref() {
                     Some(a) => (
                         a.particles.iter().map(|p| p.pos).collect(),
                         a.temps.clone(),
                         a.particles.iter().map(|p| (p.mass / frag0).cbrt() as f32).collect(),
+                        a.mat_ids.clone(),
                     ),
-                    None => (Vec::new(), Vec::new(), Vec::new()),
+                    None => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
                 };
                 return (
                     self.bodies.iter().map(|b| b.pos).collect(),
                     d,
                     t,
                     sz,
+                    mt,
                     self.moon_debris.is_some(),
                 );
             }
@@ -2880,32 +2906,35 @@ mod app {
                 .collect();
             // Debris lerps only when both snapshots carry it (across the shatter/merge boundary, take
             // s1's — counts change when moonlets accrete).
-            let (debris, temps, sizes) = if !s0.debris.is_empty() && s0.debris.len() == s1.debris.len()
-            {
-                (
-                    s0.debris
-                        .iter()
-                        .zip(s1.debris.iter())
-                        .map(|(a, b)| *a + (*b - *a) * f)
-                        .collect(),
-                    s0.temps.clone(),
-                    s0.sizes.clone(),
-                )
-            } else if s1.shattered {
-                (s1.debris.clone(), s1.temps.clone(), s1.sizes.clone())
-            } else {
-                (Vec::new(), Vec::new(), Vec::new())
-            };
+            // mats travels with whichever snapshot supplies temps/sizes, so tints stay aligned to the
+            // fragment order those came from.
+            let (debris, temps, sizes, mats) =
+                if !s0.debris.is_empty() && s0.debris.len() == s1.debris.len() {
+                    (
+                        s0.debris
+                            .iter()
+                            .zip(s1.debris.iter())
+                            .map(|(a, b)| *a + (*b - *a) * f)
+                            .collect(),
+                        s0.temps.clone(),
+                        s0.sizes.clone(),
+                        s0.mats.clone(),
+                    )
+                } else if s1.shattered {
+                    (s1.debris.clone(), s1.temps.clone(), s1.sizes.clone(), s1.mats.clone())
+                } else {
+                    (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+                };
             let shattered = if f < 1.0 { s0.shattered } else { s1.shattered };
             let any_debris = !debris.is_empty();
-            (bodies, debris, temps, sizes, shattered || any_debris)
+            (bodies, debris, temps, sizes, mats, shattered || any_debris)
         }
 
         pub fn render(&mut self) -> Result<(), JsValue> {
             // NO physics here (docs/13): the renderer samples the physics snapshots RENDER_LAG_S behind
             // the live state — every event it draws is already fully resolved. The physics is advanced
             // by `advance(real_dt)`, on wall-clock time, independent of this function's call rate.
-            let (r_bodies, r_debris, r_temps, r_sizes, r_shattered) = self.sampled_state();
+            let (r_bodies, r_debris, r_temps, r_sizes, r_mats, r_shattered) = self.sampled_state();
 
             let view_proj = self.view_proj();
 
@@ -3016,12 +3045,21 @@ mod app {
             // The planet is not hollow; through the crater you see molten interior, not far-side crust.
             {
                 let ipos = ((earth_center - focus) * DISPLAY_SCALE).as_vec3();
-                let ir = ((EARTH_RADIUS_M * 0.985) * DISPLAY_SCALE) as f32; // just under the shell
+                // The interior must wear the SAME oblate figure as the shell, else at the post-impact
+                // ~13% flattening the poles sink below a perfect 0.985 R sphere and the interior pokes
+                // OUT through the crust at both poles (a render-truth bug). Ellipsoid: equator +f/3,
+                // poles −2f/3 about the spin axis — one non-uniform scale, oriented to the spin axis.
+                let ir = (EARTH_RADIUS_M * 0.985) * DISPLAY_SCALE;
+                let ir_eq = (ir * (1.0 + flat / 3.0)) as f32;
+                let ir_pol = (ir * (1.0 - 2.0 * flat / 3.0)) as f32;
+                let align = glam::DQuat::from_rotation_arc(glam::DVec3::Z, spin_axis);
                 write_space_uniform(
                     &self.queue,
                     &self.interior_uni,
                     view_proj,
-                    Mat4::from_translation(ipos) * Mat4::from_scale(Vec3::splat(ir)),
+                    Mat4::from_translation(ipos)
+                        * Mat4::from_quat(align.as_quat())
+                        * Mat4::from_scale(Vec3::new(ir_eq, ir_eq, ir_pol)),
                     earth_light,
                     self.interior_tint,
                     self.interior_glow, // outer-core iron: self-lit at its real temperature
@@ -3103,8 +3141,8 @@ mod app {
             let mut debris_count = 0usize;
             if !r_debris.is_empty() {
                 let frag_r = moon_r / (DEBRIS_N as f32).cbrt(); // N fragments ≈ the Moon's volume
-                // Composition is static once materialized; positions/temps come from the sampled state.
-                let mat_ids = self.moon_debris.as_ref().map(|a| a.mat_ids.as_slice());
+                // Composition rides the SAME lagged snapshot as positions/temps (r_mats): a live read of
+                // moon_debris.mat_ids desynced after drain's swap_remove reordered the live array.
                 for (i, pos) in r_debris.iter().enumerate() {
                     if i >= self.debris_unis.len() {
                         break;
@@ -3116,7 +3154,7 @@ mod app {
                     let glow = incandescence(r_temps.get(i).copied().unwrap_or(0.0));
                     // Each fragment wears ITS material's reflectance: basalt crust, peridotite mantle,
                     // iron core — the excavated composition is visible, not a uniform gray.
-                    let m = &self.mats[mat_ids.and_then(|ids| ids.get(i)).copied().unwrap_or(0)];
+                    let m = &self.mats[r_mats.get(i).copied().unwrap_or(0)];
                     let tint = [m.albedo[0], m.albedo[1], m.albedo[2], 1.0];
                     // Display radius grows with the ⅓ power of accreted mass — you can SEE the Moon
                     // winning: one fragment swells while the count falls.
