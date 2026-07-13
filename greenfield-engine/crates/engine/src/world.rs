@@ -141,6 +141,38 @@ impl World {
         e
     }
 
+    /// Clamp a terrain camera eye (CENTERED coords) so it can NEVER go below the real Earth surface —
+    /// anywhere, not just over the resolved 96 m voxel patch. The bulk planet is a sphere of `radius`
+    /// centred at `earth_center` (in the same centered frame; ≈ a full Earth radius straight down under
+    /// the uniform surface gravity). Two constraints, both enforced:
+    ///   1. The eye stays at least `clearance` ABOVE the Earth sphere: its distance from `earth_center`
+    ///      is ≥ `radius + clearance`. If it dips inside, it is pushed radially back out from the centre
+    ///      (so off the patch, over the summarized bulk surface, the horizon still walls the eye in —
+    ///      closing the old "off-footprint is free" hole that only the fake flat plane made safe).
+    ///   2. The eye stays out of the resolved voxel hills (the existing local clamp), which can rise
+    ///      ABOVE the smooth sphere where the patch relief pokes up.
+    /// Computed in f64: `radius` is ~6.4e6 m, so the metre-scale curvature drop is below f32 precision.
+    pub fn clamp_eye_above_earth(
+        &self,
+        eye: Vec3,
+        earth_center: Vec3,
+        radius: f32,
+        clearance: f32,
+    ) -> Vec3 {
+        let c = earth_center.as_dvec3();
+        let rel = eye.as_dvec3() - c;
+        let d = rel.length();
+        let min_d = radius as f64 + clearance as f64;
+        let lifted = if d > 1e-9 && d < min_d {
+            (c + rel * (min_d / d)).as_vec3()
+        } else {
+            eye
+        };
+        // Then keep it clear of the resolved voxel patch (lifting only ever increases the distance from
+        // the Earth centre, so the sphere constraint from above still holds).
+        self.clamp_eye_outside(lifted, clearance)
+    }
+
     /// Set a voxel's material (`None` = air). Out-of-bounds writes are ignored.
     pub fn set_voxel(&mut self, x: i32, y: i32, z: i32, material: Option<usize>) {
         if x < 0
@@ -601,6 +633,90 @@ mod tests {
         assert!(
             saw_penetration,
             "sweep must exercise penetrating configs (else the clamp is untested)"
+        );
+    }
+
+    #[test]
+    fn eye_never_goes_below_the_earth_sphere_anywhere() {
+        // Robin rejected the flat decorative ground: off the 96 m patch the OLD clamp treated the eye as
+        // "free" (no ground column) — a hole that was only safe because a fake infinite plane hid it.
+        // With the real curved Earth surface, the eye must be walled in by the planet EVERYWHERE — over
+        // the patch AND far off it — never below the sphere at radius R centred a full Earth radius down.
+        use crate::planet;
+        let mats = materials::load();
+        let w = generate(&mats);
+
+        let radius = planet::earth().radius() as f32; // ≈6.371e6 m — the SAME body the space band draws
+        // The patch centre's surface height in centered coords; the Earth centre is `radius` below it.
+        let c = w.center();
+        let surf_y = w
+            .surface_top_voxel(c.x as i32, c.z as i32)
+            .map(|t| t as f32 - c.y)
+            .expect("solid centre column");
+        let earth_center = Vec3::new(0.0, surf_y - radius, 0.0);
+        let clearance = 2.0f32;
+
+        // True below-the-surface test (f64: the metre-scale drop is below f32 precision at R≈6.4e6).
+        let below_sphere = |eye: Vec3| -> bool {
+            (eye.as_dvec3() - earth_center.as_dvec3()).length() < radius as f64
+        };
+
+        // GUARD (non-vacuous): an eye placed 5 km OFF the patch and 40 m below the local surface height.
+        // The cap there has dropped only ~2 m, so this eye is well below the real sphere — exactly the
+        // off-footprint case the old clamp let through.
+        let off_patch_buried = Vec3::new(5000.0, surf_y - 40.0, 0.0);
+        assert!(
+            below_sphere(off_patch_buried),
+            "test setup vacuous: the off-patch eye must actually start below the Earth sphere"
+        );
+        let fixed = w.clamp_eye_above_earth(off_patch_buried, earth_center, radius, clearance);
+        assert!(
+            !below_sphere(fixed),
+            "clamp failed to lift an off-patch eye above the Earth sphere: {fixed:?}"
+        );
+
+        // The terrain orbit eye (exact `Engine::view_proj` construction, wasm-gated so replicated here).
+        let max_dim = w.w.max(w.h).max(w.d) as f32;
+        let base_distance = max_dim * 1.6;
+        let eye_for = |yaw: f32, pitch: f32, zoom: f32| -> Vec3 {
+            let cp = pitch.cos();
+            let dir = Vec3::new(cp * yaw.sin(), pitch.sin(), cp * yaw.cos());
+            dir * (base_distance * zoom)
+        };
+
+        // Sweep the full envelope; a steep downward pitch drives the raw eye below the sphere.
+        let mut saw_below = false;
+        let extra_lateral = [
+            Vec3::new(9000.0, surf_y - 10.0, 0.0),
+            Vec3::new(-12000.0, surf_y - 30.0, 6000.0),
+            Vec3::new(0.0, surf_y - 200.0, 15000.0),
+        ];
+        for &yaw in &[0.0f32, 0.7, 1.5, 2.4, 3.14, 4.7, 6.0] {
+            for &pitch in &[-1.5f32, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5] {
+                for &zoom in &[0.2f32, 0.7, 1.0, 2.0, 4.0, 6.0] {
+                    let raw = eye_for(yaw, pitch, zoom);
+                    if below_sphere(raw) {
+                        saw_below = true;
+                    }
+                    let clamped = w.clamp_eye_above_earth(raw, earth_center, radius, clearance);
+                    assert!(
+                        !below_sphere(clamped),
+                        "clamped eye still below the Earth sphere at yaw={yaw} pitch={pitch} zoom={zoom}: {clamped:?}"
+                    );
+                }
+            }
+        }
+        for &e in &extra_lateral {
+            assert!(below_sphere(e), "lateral guard {e:?} must start below the sphere");
+            let clamped = w.clamp_eye_above_earth(e, earth_center, radius, clearance);
+            assert!(
+                !below_sphere(clamped),
+                "clamped lateral eye still below the Earth sphere: {clamped:?}"
+            );
+        }
+        assert!(
+            saw_below,
+            "sweep must exercise below-sphere configs (else the sphere clamp is untested)"
         );
     }
 }

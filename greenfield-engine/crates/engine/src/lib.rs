@@ -70,6 +70,14 @@ mod app {
     /// itself, sized to its bond stiffness (`Aggregate::stable_substeps`).
     const DEBRIS_SUBSTEPS: u32 = 16;
     const DEFAULT_TIME_SCALE: f32 = 1.0; // real-time: Earth-like surface gravity needs no fast-forward
+    /// How far the real Earth-surface cap extends (m). It curves down to a horizon at a finite distance
+    /// (√(2·R·h) ≈ 16 km for the default ~20 m eye height), well inside this radius and the render far
+    /// plane, so the horizon you see is the planet's true curvature — not a cap edge, not infinity.
+    const EARTH_CAP_RADIUS: f32 = 26_000.0;
+    /// Render far plane (m) — pushed out from 6 km so the curved cap's horizon is in view. The distant
+    /// cap is smooth, so the mild depth imprecision far out is acceptable; the near patch is fine.
+    const CAMERA_FAR: f32 = 30_000.0;
+    const CAMERA_NEAR: f32 = 0.5;
 
     /// Cohesive-bond geometry + stability for the steel probe (`docs/23`). The bond stiffness is the
     /// material's REAL elastic modulus (k = E·L for a lattice of spacing L) — rigidity is cohesive
@@ -183,9 +191,10 @@ mod app {
 
         world_gpu: GpuMesh,
         world_uni: UniformSlot,
-        /// The horizon ground plane (surface-of-a-planet framing). Reuses `world_uni` (same identity
-        /// model / view_proj / light / material textures) — it is just another mesh in the world pass.
-        ground_gpu: GpuMesh,
+        /// The REAL bulk-Earth surface: a curved spherical cap at Earth's true radius (mesher::build_earth_cap)
+        /// that curves down to a finite horizon — NOT a flat decorative plane. Reuses `world_uni` (same
+        /// identity model / view_proj / light / material textures); it is just another mesh in the world pass.
+        earth_cap_gpu: GpuMesh,
 
         /// The honest sky: a fullscreen Rayleigh single-scatter pass (sky.wgsl) drawn behind the world.
         /// `atm_tau` is the declared atmosphere's optical depth (same as the space band's blue marble).
@@ -292,15 +301,12 @@ mod app {
 
             let world_mesh = mesher::build_surface_nets(&world, &mats);
             let world_gpu = upload_mesh(&device, "world", &world_mesh);
-            // Horizon ground plane at the patch's centre surface height (world-centered coords). Extent
-            // just inside the 6 km far plane so it fills down to a true horizon under the sky.
+            // The patch centre surface height (world-centered coords) — where the real Earth cap touches.
             let cc = world.center();
             let surf_y = world
                 .surface_top_voxel(cc.x as i32, cc.z as i32)
                 .map(|t| t as f32 - cc.y)
                 .unwrap_or(0.0);
-            let ground_mesh = ground_plane_mesh(&mats, surf_y, 5800.0);
-            let ground_gpu = upload_mesh(&device, "ground", &ground_mesh);
             log::info!("meshes: world {} tris", world_mesh.indices.len() / 3);
 
             // --- Spawn the probe: a cohesive iron ball of real matter (docs/23) ---
@@ -316,6 +322,14 @@ mod app {
             let planet_mass = planet.total_mass();
             let planet_radius = planet.radius();
             let surface_g = planet.gravity_at(planet_radius) as f32;
+
+            // The REAL bulk-Earth surface as a curved spherical CAP at Earth's true radius (NOT a flat
+            // decorative plane): it curves DOWN to a real horizon a few km out under the Rayleigh sky.
+            // Same body the space band draws; the resolved voxel patch sits flush at the top of the cap.
+            let earth_cap_mesh =
+                mesher::build_earth_cap(&mats, surf_y, planet_radius as f32, EARTH_CAP_RADIUS);
+            let earth_cap_gpu = upload_mesh(&device, "earth-cap", &earth_cap_mesh);
+
             let mut probe = build_probe(&mats, spawn, surface_g as f64);
             let probe_acc = probe.accelerations();
             let probe_instances = device.create_buffer(&wgpu::BufferDescriptor {
@@ -546,7 +560,7 @@ mod app {
                 pipeline,
                 world_gpu,
                 world_uni,
-                ground_gpu,
+                earth_cap_gpu,
                 sky_pipeline,
                 sky_uni,
                 atm_tau,
@@ -1066,9 +1080,9 @@ mod app {
                 pass.draw(0..3, 0..1);
 
                 pass.set_pipeline(&self.pipeline);
-                // Horizon ground plane first (shares world_uni), then the detailed patch on top of it —
-                // the plane hides the patch's floating side walls and carries the ground to the horizon.
-                draw(&mut pass, &self.world_uni, &self.ground_gpu);
+                // The real Earth-surface cap first (shares world_uni): the bulk planet curving down to a
+                // true horizon, hiding the patch's side walls. Then the resolved voxel patch flush on top.
+                draw(&mut pass, &self.world_uni, &self.earth_cap_gpu);
                 draw(&mut pass, &self.world_uni, &self.world_gpu);
 
                 // Particle pipeline: the probe (cohesive ball, its particles) + the GPU debris.
@@ -1160,7 +1174,8 @@ mod app {
 
         fn view_proj(&self) -> (Mat4, Vec3) {
             let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
-            let proj = Mat4::perspective_rh(0.9, aspect, 0.5, 6000.0);
+            // Far plane pushed out (CAMERA_FAR) so the curved Earth cap's horizon is visible.
+            let proj = Mat4::perspective_rh(0.9, aspect, CAMERA_NEAR, CAMERA_FAR);
             let cp = self.camera.pitch.cos();
             let dir = Vec3::new(
                 cp * self.camera.yaw.sin(),
@@ -1168,12 +1183,17 @@ mod app {
                 cp * self.camera.yaw.cos(),
             );
             let eye = dir * (self.camera.base_distance * self.camera.zoom);
-            // Camera collision (Robin: "the camera should never penetrate matter"): clamp the eye out of
-            // any solid voxel / below-ground position — a third-person boom pull-back along the view ray
-            // that keeps yaw/pitch and leaves a free eye untouched. Eliminates the zoom-into-the-ground
-            // clip the other engines fake around.
+            // Camera collision (Robin: "the camera should never penetrate matter"): clamp the eye above
+            // the REAL Earth sphere EVERYWHERE (not just over the 96 m patch — the old off-footprint "free"
+            // case was only safe behind the fake plane) AND out of the resolved voxel hills. The Earth
+            // centre is a full radius straight down under the uniform surface gravity.
             const CAMERA_CLEARANCE: f32 = 2.0; // metres of air kept between the eye and the surface
-            let eye = self.world.clamp_eye_outside(eye, CAMERA_CLEARANCE);
+            let r = self.planet_radius as f32;
+            let surf_y = self.ground_under(0.0, 0.0); // patch-centre surface height (centered coords)
+            let earth_center = Vec3::new(0.0, surf_y - r, 0.0);
+            let eye = self
+                .world
+                .clamp_eye_above_earth(eye, earth_center, r, CAMERA_CLEARANCE);
             // Aim near eye height (not down at the world centre) so the gaze is nearly horizontal: the
             // ground plane recedes to a HORIZON with sky above — a surface-of-a-planet view. A little
             // below eye height keeps a gentle downward tilt so the terrain patch stays in frame.
@@ -1860,31 +1880,6 @@ mod app {
         // Surface gravity is the field of the WHOLE planet below (matter all the way down), ~uniform over
         // this small patch — passed in, computed from planet::earth(), not a hardcoded constant.
         probe.with_gravity(glam::DVec3::new(0.0, -surface_g, 0.0))
-    }
-
-    /// A large flat ground quad at surface level (world-centered coords), meshed with the surface
-    /// material. It continues the detailed terrain patch out to the horizon and occludes the patch's
-    /// exposed side walls — so the scene reads as a surface OF a planet, not a floating cube. Flat is
-    /// honest for an Earth-sized world: the curvature drop over the visible ~km is a couple of metres.
-    fn ground_plane_mesh(materials: &[materials::Material], surf_y: f32, extent: f32) -> Mesh {
-        let grass = materials::index_of(materials, "grass");
-        let col = materials[grass].albedo;
-        let n = [0.0f32, 1.0, 0.0];
-        let v = |x: f32, z: f32| mesher::Vertex {
-            pos: [x, surf_y, z],
-            nrm: n,
-            col,
-            mat: grass as u32,
-        };
-        // Corners CCW seen from above (+Y up); triplanar sampling tiles the material across it.
-        let vertices = vec![
-            v(-extent, -extent),
-            v(extent, -extent),
-            v(extent, extent),
-            v(-extent, extent),
-        ];
-        let indices = vec![0u32, 1, 2, 0, 2, 3];
-        Mesh { vertices, indices }
     }
 
     fn upload_mesh(device: &wgpu::Device, label: &str, mesh: &Mesh) -> GpuMesh {

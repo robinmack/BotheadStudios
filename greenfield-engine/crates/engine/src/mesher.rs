@@ -6,7 +6,7 @@
 //! `build_uv_sphere` (probe). All emit the same `Vertex` (position, normal, color, material id), so
 //! they share one pipeline and the triplanar texturing.
 
-use crate::materials::Material;
+use crate::materials::{index_of, Material};
 use crate::world::World;
 
 #[repr(C)]
@@ -192,6 +192,87 @@ pub fn build_uv_sphere(
     Mesh { vertices, indices }
 }
 
+/// Build the REAL bulk-Earth surface as a curved spherical CAP (NOT a flat decorative plane): a
+/// tessellated polar disk at Earth's true radius, so it curves DOWN to a horizon at a finite (~km)
+/// distance — the honest replacement for a flat ground skirt whose horizon would be at infinity.
+///
+/// Geometry: in the terrain's local frame "down" (−Y under the uniform surface gravity) is toward the
+/// Earth's centre, which sits at `(0, surf_y − radius, 0)` (a full Earth radius below the patch's local
+/// surface height `surf_y`). A cap vertex at horizontal distance `d` from the patch centre drops to
+/// `y = surf_y − d²/(2·radius)` — the parabolic approximation of the sphere (accurate to <1 m over the
+/// visible ~km, and cheaper than a trig sphere). Its per-vertex normal is the true outward sphere
+/// normal `(pos − earth_centre)`, so the curvature also shades: the ground bends away from the sun.
+///
+/// This is the SUMMARIZED bulk planet — smooth, because fine relief is only resolved inside the voxel
+/// patch (which sits flush at the top of the cap). That is honest LOD, not a painted skirt: it is the
+/// same `planet::earth()` matter the space band draws and the surface gravity emerges from, zoomed in.
+/// Tessellation is fine near the patch and geometrically coarser toward the horizon.
+pub fn build_earth_cap(materials: &[Material], surf_y: f32, radius: f32, r_max: f32) -> Mesh {
+    use std::f32::consts::TAU;
+    let grass = index_of(materials, "grass"); // the SAME surface skin the voxel patch wears
+    let col = materials[grass].albedo;
+    let earth_c = glam::Vec3::new(0.0, surf_y - radius, 0.0);
+    let cap_y = |d: f32| -> f32 { surf_y - d * d / (2.0 * radius) };
+
+    // Geometric radial rings: dense near the patch (where the eye is), coarse toward the horizon.
+    let mut radii: Vec<f32> = vec![0.0];
+    let mut step = 8.0f32;
+    let mut r = step;
+    while r < r_max {
+        radii.push(r);
+        step *= 1.12;
+        r += step;
+    }
+    if *radii.last().unwrap() < r_max {
+        radii.push(r_max);
+    }
+
+    const SEG: usize = 96; // angular segments — enough for a smooth horizon circle
+    let vert = |x: f32, z: f32| -> Vertex {
+        let d = (x * x + z * z).sqrt();
+        let pos = glam::Vec3::new(x, cap_y(d), z);
+        let nrm = (pos - earth_c).normalize_or_zero();
+        Vertex {
+            pos: pos.into(),
+            nrm: nrm.into(),
+            col,
+            mat: grass as u32,
+        }
+    };
+
+    let mut vertices: Vec<Vertex> = Vec::new();
+    // Ring 0 (radii[0] == 0) is the single centre vertex; every further ring has SEG vertices.
+    vertices.push(vert(0.0, 0.0));
+    for &rr in &radii[1..] {
+        for s in 0..SEG {
+            let a = s as f32 / SEG as f32 * TAU;
+            vertices.push(vert(rr * a.cos(), rr * a.sin()));
+        }
+    }
+
+    let mut indices: Vec<u32> = Vec::new();
+    // Fan from the centre vertex out to the first real ring.
+    for s in 0..SEG {
+        let a = 1 + s as u32;
+        let b = 1 + ((s + 1) % SEG) as u32;
+        indices.extend_from_slice(&[0, a, b]);
+    }
+    // Quad strips between successive rings.
+    for k in 1..radii.len() - 1 {
+        let base_in = 1 + (k - 1) * SEG;
+        let base_out = 1 + k * SEG;
+        for s in 0..SEG {
+            let s1 = (s + 1) % SEG;
+            let i0 = (base_in + s) as u32;
+            let i1 = (base_in + s1) as u32;
+            let o0 = (base_out + s) as u32;
+            let o1 = (base_out + s1) as u32;
+            indices.extend_from_slice(&[i0, o0, o1, i0, o1, i1]);
+        }
+    }
+    Mesh { vertices, indices }
+}
+
 /// Build a small cube mesh centered on its local origin (half-extent `half`), colored `color`.
 /// Used as the instanced base mesh for debris particles (Phase 3); the per-instance offset places
 /// each copy, so `color` here is just a fallback.
@@ -370,4 +451,83 @@ fn shade(albedo: [f32; 3], x: usize, y: usize, z: usize) -> [f32; 3] {
         (albedo[1] * jitter).clamp(0.0, 1.0),
         (albedo[2] * jitter).clamp(0.0, 1.0),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::materials;
+    use crate::planet;
+
+    #[test]
+    fn earth_cap_is_curved_not_a_flat_plane() {
+        // The distant ground is the REAL Earth surface, a spherical cap at Earth's true radius — it must
+        // CURVE DOWN to a finite horizon, NOT sit flat (a flat plane's horizon is at infinity, the fudge
+        // this scene exists to kill). We assert the cap's vertex height falls as ≈ d²/(2R) with horizontal
+        // distance d — and, as a guard against a regressed flat plane, that the far edge drops by MANY
+        // metres (a flat quad would drop 0).
+        let mats = materials::load();
+        let radius = planet::earth().radius() as f32; // ≈6.371e6 m, the same body the space band draws
+        let surf_y = 20.0f32;
+        let r_max = 26_000.0f32;
+        let mesh = build_earth_cap(&mats, surf_y, radius, r_max);
+
+        // The centre vertex sits at the patch surface height; height must decrease monotonically with
+        // horizontal distance, matching the sphere's parabolic drop d²/(2R).
+        let mut max_d = 0.0f32;
+        let mut min_y = f32::INFINITY;
+        for v in &mesh.vertices {
+            let [x, y, z] = v.pos;
+            let d = (x * x + z * z).sqrt();
+            // Every vertex must lie on the sphere drop (parabolic approx) to sub-metre tolerance.
+            let expected = surf_y - d * d / (2.0 * radius);
+            assert!(
+                (y - expected).abs() < 1.0,
+                "cap vertex off the sphere at d={d:.0}: y={y:.3} expected {expected:.3}"
+            );
+            if d > max_d {
+                max_d = d;
+                min_y = y;
+            }
+        }
+        // The centre (d≈0) is at surf_y; the far edge is well below it — a real curve, not a flat plane.
+        let centre = mesh.vertices[0].pos[1];
+        assert!((centre - surf_y).abs() < 0.01, "cap centre at the surface height");
+        let drop = surf_y - min_y;
+        let expected_drop = max_d * max_d / (2.0 * radius);
+        assert!(
+            drop > 20.0,
+            "far cap edge must drop many metres (curved), got {drop:.2} m — a flat plane would be 0"
+        );
+        assert!(
+            (drop - expected_drop).abs() < 1.0,
+            "far drop must match the sphere's d²/2R (got {drop:.2}, sphere {expected_drop:.2})"
+        );
+
+        // Per-vertex normals must TILT away from straight-up as the cap curves (a flat plane's normals are
+        // all EXACTLY +Y — zero horizontal component). The tilt is honestly tiny because Earth is huge:
+        // the outward sphere normal leans by ≈ d/R from vertical. We assert the far normal's horizontal
+        // lean is strictly non-zero AND matches the sphere geometry d/R — a flat plane would give 0.
+        let far = mesh
+            .vertices
+            .iter()
+            .max_by(|a, b| {
+                let da = a.pos[0] * a.pos[0] + a.pos[2] * a.pos[2];
+                let db = b.pos[0] * b.pos[0] + b.pos[2] * b.pos[2];
+                da.partial_cmp(&db).unwrap()
+            })
+            .unwrap();
+        let n = far.nrm;
+        let horiz = (n[0] * n[0] + n[2] * n[2]).sqrt();
+        let d_far = (far.pos[0] * far.pos[0] + far.pos[2] * far.pos[2]).sqrt();
+        let expected_lean = d_far / radius; // sphere: tan(tilt) = d/R, small-angle ≈ sin ≈ horiz
+        assert!(
+            horiz > 1e-4,
+            "cap normals must tilt with curvature, not stay flat +Y (horizontal lean {horiz:.6})"
+        );
+        assert!(
+            (horiz - expected_lean).abs() < 0.2 * expected_lean,
+            "normal lean must match the sphere's d/R (got {horiz:.6}, sphere {expected_lean:.6})"
+        );
+    }
 }
