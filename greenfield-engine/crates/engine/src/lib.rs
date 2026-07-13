@@ -206,6 +206,10 @@ mod app {
         pipeline: wgpu::RenderPipeline,
 
         world_gpu: GpuMesh,
+        /// The SEA: the flat top of the filled `water` matter at the waterline, a SEPARATE open surface
+        /// (kept out of `world_gpu` so the solid land stays a watertight manifold). Same world pass /
+        /// uniforms / textures; the shader gives the `water` material its Fresnel-sky water shading.
+        sea_gpu: GpuMesh,
         world_uni: UniformSlot,
         /// The REAL bulk-Earth surface: a curved spherical cap at Earth's true radius (mesher::build_earth_cap)
         /// that curves down to a finite horizon — NOT a flat decorative plane. Reuses `world_uni` (same
@@ -320,6 +324,10 @@ mod app {
 
             let world_mesh = mesher::build_surface_nets(&world, &mats);
             let world_gpu = upload_mesh(&device, "world", &world_mesh);
+            // The sea: a separate open surface (the flat top of the filled water matter) drawn in the
+            // same world pass. Kept out of the world mesh so the land stays watertight.
+            let sea_mesh = mesher::build_sea(&world, &mats);
+            let sea_gpu = upload_mesh(&device, "sea", &sea_mesh);
             // World centre (world-centered frame) — the cap samples the SHARED terrain_height about it, so
             // it joins the resolved patch as ONE continuous rolling surface (no flat-cap-above-valley step).
             let world_center = world.center();
@@ -422,10 +430,14 @@ mod app {
                 address_mode_w: wgpu::AddressMode::Repeat,
                 ..Default::default()
             });
-            // Per-material shine params: [roughness, metallic, _, _] (padded to 32 for the shader).
+            // Per-material shine params: [roughness, metallic, is_liquid, _] (padded to 32 for the
+            // shader). `is_liquid` (from the DB phase, not a hardcoded index) tells the world shader to
+            // render that material as water — Fresnel reflection of the sky over a dark absorbing body,
+            // the honest reason calm water reads blue (docs/28).
             let mut params: Vec<[f32; 4]> = vec![[0.0; 4]; 32];
             for (i, m) in mats.iter().enumerate().take(32) {
-                params[i] = [m.roughness, m.metallic, 0.0, 0.0];
+                let is_liquid = if m.phase == "liquid" { 1.0 } else { 0.0 };
+                params[i] = [m.roughness, m.metallic, is_liquid, 0.0];
             }
             let matparams_buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("matparams"),
@@ -575,6 +587,7 @@ mod app {
                 depth_view,
                 pipeline,
                 world_gpu,
+                sea_gpu,
                 world_uni,
                 earth_cap_gpu,
                 sky_pipeline,
@@ -890,6 +903,10 @@ mod app {
         fn remesh_world(&mut self) {
             let mesh = mesher::build_surface_nets(&self.world, &self.mats);
             self.world_gpu = upload_mesh(&self.device, "world", &mesh);
+            // The sea rides the same matter store — rebuild it too (a dig/impact that lowers the seabed
+            // or a displaced-water level change re-surfaces the sea consistently with the land).
+            let sea = mesher::build_sea(&self.world, &self.mats);
+            self.sea_gpu = upload_mesh(&self.device, "sea", &sea);
         }
 
         /// Move newly-fractured CPU particles into the GPU debris buffer, then clear them from the CPU:
@@ -1206,6 +1223,10 @@ mod app {
                 // true horizon, hiding the patch's side walls. Then the resolved voxel patch flush on top.
                 draw(&mut pass, &self.world_uni, &self.earth_cap_gpu);
                 draw(&mut pass, &self.world_uni, &self.world_gpu);
+                // The sea on top of the land it fills (same uniforms; the shader gives `water` its
+                // Fresnel-sky water shading). Drawn after the land so its open surface reads as water
+                // pooling in the basins.
+                draw(&mut pass, &self.world_uni, &self.sea_gpu);
 
                 // Particle pipeline: the probe (cohesive ball, its particles) + the GPU debris.
                 pass.set_pipeline(&self.particle_pipeline);

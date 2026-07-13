@@ -732,7 +732,26 @@ impl MatterSim {
                     .iter()
                     .any(|b| (cell - b.pos).length() < b.radius + PARTICLE_HALF);
                 if !inside_body {
-                    world.set_voxel(xi, ty, zi, Some(material));
+                    // If the seabed air-start `ty` is under the SEA (a submerged column), the sinking
+                    // grain DISPLACES the water it lands in rather than annihilating it: relocate one
+                    // water voxel up to the first air cell above the water column, so the sea volume is
+                    // conserved (the displaced water rises — the level goes up as the basin fills) and
+                    // total matter is conserved. STATIC-sea placeholder for real splash/displacement
+                    // dynamics (deferred): the grain sinks to the seabed, the water it pushed aside rises.
+                    if world.is_water(xi, ty, zi) {
+                        let mut wy = ty;
+                        while (wy as usize) < world.h && world.is_water(xi, wy, zi) {
+                            wy += 1;
+                        }
+                        // Only sink the grain if the displaced water has an air cell to rise into; else
+                        // the grain STAYS a particle (matter conserved — never annihilate the water).
+                        if (wy as usize) < world.h && world.material_at(xi, wy, zi).is_none() {
+                            world.set_voxel(xi, wy, zi, world.water_mat); // displaced water rises
+                        } else {
+                            return false;
+                        }
+                    }
+                    world.set_voxel(xi, ty, zi, Some(material)); // grain settles on the seabed / crater
                     self.dirty = true;
                     return true;
                 }
@@ -915,6 +934,7 @@ mod tests {
                 d: 8,
                 voxels: vec![0; 8 * 8 * 8],
                 max_top: 4,
+                water_mat: None,
             };
             w.set_voxel(4, 3, 4, Some(mat));
             let hit = Vec3::new(4.5, 3.5, 4.5) - w.center(); // centered coords of that voxel
@@ -941,6 +961,7 @@ mod tests {
             d: 8,
             voxels: vec![0; 8 * 8 * 8],
             max_top: 4,
+            water_mat: None,
         };
         w.set_voxel(4, 3, 4, Some(basalt));
         let before = w.solid_count();
@@ -1561,6 +1582,7 @@ mod tests {
             d: d_,
             voxels: vec![0u16; w_ * h_ * d_],
             max_top: 16,
+            water_mat: None,
         };
         let (y0, z0, len) = (15i32, 4i32, 6i32);
         for y in 0..=y0 {
@@ -1634,6 +1656,7 @@ mod tests {
             d: n,
             voxels,
             max_top: 2,
+            water_mat: None,
         };
         let mats = materials::load();
         let field = gravity::MassField::build(&w, &mats, 4);
@@ -1732,6 +1755,7 @@ mod tests {
             d: n,
             voxels: vec![water as u16 + 1; n * n * n],
             max_top: n,
+            water_mat: None,
         };
         let mut sp = MatterSim::new(200_000);
         let splash = sp.impact(&mut pond, &mats, Vec3::ZERO, Vec3::NEG_Y, 50.0);
@@ -1758,6 +1782,7 @@ mod tests {
             d: n,
             voxels: vec![gi as u16 + 1; n * n * n],
             max_top: n,
+            water_mat: None,
         };
         let energy = 200.0 * sigma; // enough to excavate ~200 voxels
         let mut sim = MatterSim::new(200_000);
@@ -1784,6 +1809,7 @@ mod tests {
             d: n,
             voxels: vec![bi as u16 + 1; n * n * n],
             max_top: n,
+            water_mat: None,
         };
         let mut sim = MatterSim::new(500_000);
         // Enough energy that the concentrated core exceeds basalt's melting point.
@@ -1823,6 +1849,7 @@ mod tests {
             d: n,
             voxels: vec![bi as u16 + 1; n * n * n],
             max_top: n,
+            water_mat: None,
         };
         let mut sim = MatterSim::new(500_000);
         sim.impact(&mut w, &mats, Vec3::ZERO, Vec3::NEG_Y, 1.0e12);

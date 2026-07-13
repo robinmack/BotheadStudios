@@ -22,16 +22,35 @@ const BASE_TOP: f32 = (H - 8) as f32;
 /// Peak-to-valley relief of the procedural heightfield (voxels ≈ metres): real rolling hills, not a slab.
 const AMPLITUDE: f32 = 34.0;
 
-/// Sea-level datum (voxel-y, metres in the patch's own frame): the reference height the upcoming oceans
-/// work will fill water BELOW (water above the seabed, up to this level). Land is ABOVE this datum,
-/// potential seabed below it. No water is simulated yet — this only DECLARES the datum honestly.
+/// Sea-level datum (voxel-y, metres in the patch's own frame): the reference height the oceans fill
+/// water BELOW (real `water` matter above the seabed, up to this level; land is ABOVE it). This is the
+/// waterline where the ONE continuous hydrostatic column switches from air (pressure decreasing upward,
+/// the declared atmosphere) to water (pressure increasing downward, [`ocean_pressure`]) — exactly
+/// parallel to the atmosphere, P = P_atm at depth 0.
 ///
-/// NOTE (current coarse map): this patch sits on a CONTINENT — `planet::is_land` is true for its 10°
-/// landmask cell — so every procedural surface top here is above sea level: it is ALL LAND at this LOD.
-/// The seabed side of the datum is exercised elsewhere / once a finer real elevation map (ETOPO) drops
-/// into `terrain_height` (see its TODO). Chosen below the deepest procedural valley (`BASE_TOP -
-/// AMPLITUDE`) so the whole patch is honestly land, not fudged above a hidden ocean.
-pub const SEA_LEVEL_Y: f32 = 40.0;
+/// DEMONSTRATION SEA LEVEL (flagged): the coarse 10° landmask calls this cell all-land, so there is no
+/// real bathymetry to pin the datum yet. It is chosen to sit WITHIN the terrain's relief band
+/// (`BASE_TOP - AMPLITUDE` = 54 .. `BASE_TOP` = 88, procedural tops ~54..81) so the low basins are
+/// genuinely submerged and the sea is visible, while hills stay dry. When real elevation/bathymetry
+/// (ETOPO) drops into `terrain_height`, the true 0 m geoid replaces this demonstration value.
+pub const SEA_LEVEL_Y: f32 = 64.0;
+
+/// Hydrostatic pressure (Pa) in the ocean at `depth_below_sea` metres beneath [`SEA_LEVEL_Y`], for a
+/// surface gravity `g` (m/s²). This is the SAME hydrostatic law the air column obeys, continued
+/// DOWNWARD through the water: `P(depth) = P_atm + ρ_water · g · depth`. It is continuous with the
+/// atmosphere at the waterline — at `depth = 0` it returns exactly `P_atm`, the declared atmosphere's
+/// weight (`planet::earth().surface_pressure()`) — so air-above and water-below are ONE column, not two.
+///
+/// DERIVED, not dialed: `ρ_water` is the DB `water` material's density and `P_atm` is the emergent
+/// surface pressure of the declared atmosphere. Above the waterline (`depth_below_sea < 0`) there is no
+/// water, so it clamps to `P_atm` (the atmosphere takes over there). Approximation (flagged): constant
+/// ρ (water's ~0.05%/km compressibility is ignored) and constant g over the shallow column.
+pub fn ocean_pressure(depth_below_sea: f64, g: f64) -> f64 {
+    let p_atm = crate::planet::earth().surface_pressure();
+    let mats = crate::materials::load();
+    let rho_water = mats[index_of(&mats, "water")].density as f64;
+    p_atm + rho_water * g * depth_below_sea.max(0.0)
+}
 
 pub struct World {
     pub w: usize,
@@ -41,6 +60,12 @@ pub struct World {
     pub voxels: Vec<u16>,
     /// Tallest column, for centering the camera on the terrain.
     pub max_top: usize,
+    /// Material index treated as LIQUID water (the sea), if the world has one. Water voxels are real
+    /// matter (they carry mass — see gravity — and render), but they are NOT load-bearing SOLID: they
+    /// are excluded from [`Self::is_solid`], so the structural-support model, the camera/land-surface
+    /// queries, and the terrain strata all continue to mean the solid ground beneath the sea. `None`
+    /// for hand-built worlds (tests) and any world without an ocean.
+    pub water_mat: Option<usize>,
 }
 
 impl World {
@@ -69,9 +94,22 @@ impl World {
         }
     }
 
+    /// Is this voxel LIQUID water (the sea)? Water is matter but not solid ground.
+    #[inline]
+    pub fn is_water(&self, x: i32, y: i32, z: i32) -> bool {
+        self.water_mat.is_some() && self.material_at(x, y, z) == self.water_mat
+    }
+
+    /// Is this voxel SOLID (load-bearing) ground — matter that is NOT liquid water? The structural
+    /// support model, the land-surface/camera queries, and the strata all key off this, so the sea does
+    /// not masquerade as ground. Use [`Self::material_at`] (`is_some()`) when you want "any matter
+    /// present" (e.g. gravity mass, rendering), which INCLUDES the water.
     #[inline]
     pub fn is_solid(&self, x: i32, y: i32, z: i32) -> bool {
-        self.material_at(x, y, z).is_some()
+        match self.material_at(x, y, z) {
+            Some(m) => Some(m) != self.water_mat,
+            None => false,
+        }
     }
 
     /// The offset used to center the world on the origin (shared by the mesher, gravity, and
@@ -432,9 +470,16 @@ impl World {
                     if directly[i] {
                         continue; // supported from below already
                     }
-                    let Some(mat) = self.material_at(x as i32, y as i32, z as i32) else {
-                        continue; // air
-                    };
+                    // Only SOLID ground is subject to structural (cantilever) support. Liquid water is
+                    // matter but not load-bearing — it is held by hydrostatic pressure, not by bracing —
+                    // so it is never "collapsed" by this model (excluding it here stops the whole sea from
+                    // being flagged unsupported and shattering into debris). Air is skipped too.
+                    if !self.is_solid(x as i32, y as i32, z as i32) {
+                        continue;
+                    }
+                    let mat = self
+                        .material_at(x as i32, y as i32, z as i32)
+                        .expect("is_solid ⇒ material present");
                     let d = dist[z * self.w + x];
                     let braced = d >= 0 && (d as f32) <= reach[mat];
                     if !braced {
@@ -493,6 +538,8 @@ pub fn generate(materials: &[Material]) -> World {
     let crust = index_of(materials, "basalt") as u16 + 1;
     let mantle = index_of(materials, "peridotite") as u16 + 1;
     let core = index_of(materials, "iron") as u16 + 1;
+    let water_idx = index_of(materials, "water");
+    let water = water_idx as u16 + 1;
 
     let mut voxels = vec![0u16; W * H * D];
     let base_top = BASE_TOP as i32; // highest possible surface; leaves headroom above the terrain
@@ -531,12 +578,33 @@ pub fn generate(materials: &[Material]) -> World {
         }
     }
 
+    // OCEAN PASS — water as real matter (docs/28; the sea, parallel to the atmosphere). Fill every AIR
+    // voxel that lies below the sea-level datum and ABOVE the solid land top with the DB `water`
+    // material, so the terrain's below-sea-level basins become genuine water bodies (filled voxels that
+    // carry mass and render), never a decorative plane. The solid strata beneath the seabed are left
+    // untouched — water sits in the air space above the grass, up to SEA_LEVEL_Y. STATIC filled sea for
+    // now: no flow/waves/splash yet (that dynamic step — water resolving into flowing particles when a
+    // meteor/dig disturbs it — is deferred and must NOT be faked). The hydrostatic pressure of this
+    // column is [`ocean_pressure`], continuous with the atmosphere at the waterline.
+    let sea_level = SEA_LEVEL_Y.round() as i32;
+    for z in 0..D {
+        for x in 0..W {
+            for y in 0..sea_level.min(H as i32) {
+                let i = (y as usize * D + z) * W + x;
+                if voxels[i] == 0 {
+                    voxels[i] = water; // air below the datum, above the land → sea
+                }
+            }
+        }
+    }
+
     World {
         w: W,
         h: H,
         d: D,
         voxels,
         max_top,
+        water_mat: Some(water_idx),
     }
 }
 
@@ -603,6 +671,7 @@ mod tests {
             d,
             voxels: vec![0u16; w * h * d],
             max_top: y0 as usize + 1,
+            water_mat: None,
         };
         let z0 = (d / 2) as i32;
         // Support wall: a full column to the base at x=0, so its top voxel at y0 is DIRECTLY supported.
@@ -725,27 +794,152 @@ mod tests {
     }
 
     #[test]
-    fn terrain_here_is_all_land_above_the_sea_level_datum() {
-        // SEA_LEVEL_Y is the declared datum for the upcoming oceans (water fills below it). At this coarse
-        // landmask cell the patch is a CONTINENT, so every surface top must sit ABOVE sea level — all
-        // land, no seabed exposed locally. Also pins the datum honest: below the deepest valley floor, so
-        // it isn't fudged above a hidden ocean.
+    fn sea_fills_the_low_basins_below_the_datum_and_only_there() {
+        // Water is REAL MATTER (docs/28): generate() fills every air voxel below SEA_LEVEL_Y and above the
+        // solid land with the DB `water` material, so the terrain's below-sea-level basins become genuine
+        // water bodies — never a decorative plane. Asserts (a) the datum sits WITHIN the relief so the sea
+        // is genuinely visible (some columns submerged, some dry), (b) water appears ONLY in the air space
+        // below the datum and above the land, filling [land_top, sea) so the surface is FLAT at the
+        // waterline, and (c) no water leaks at or above the waterline. (This replaces the pre-ocean
+        // "all land above the datum" invariant, which the sea intentionally supersedes.)
         let mats = materials::load();
         let w = generate(&mats);
+        let water = materials::index_of(&mats, "water");
+        let sea = SEA_LEVEL_Y.round() as i32;
+
+        // (a) The demonstration datum is inside the terrain's relief band → genuinely part sea, part land.
         assert!(
-            SEA_LEVEL_Y < BASE_TOP - AMPLITUDE,
-            "sea level {SEA_LEVEL_Y} must sit below the valley floor {} (all-land patch)",
-            BASE_TOP - AMPLITUDE
+            SEA_LEVEL_Y > BASE_TOP - AMPLITUDE && SEA_LEVEL_Y < BASE_TOP,
+            "sea level {SEA_LEVEL_Y} must sit within the relief band ({}..{}) to be visible",
+            BASE_TOP - AMPLITUDE,
+            BASE_TOP
         );
+
+        let (mut water_cols, mut land_cols, mut water_voxels) = (0usize, 0usize, 0usize);
         for z in 0..D as i32 {
             for x in 0..W as i32 {
-                let top = w.surface_top_voxel(x, z).expect("solid column") as f32;
-                assert!(
-                    top > SEA_LEVEL_Y,
-                    "column ({x},{z}) top {top} must be land (above SEA_LEVEL_Y {SEA_LEVEL_Y})"
-                );
+                // surface_top_voxel is the SOLID land top — the sea is excluded from is_solid, so this is
+                // the seabed, not the waterline.
+                let land_top = w.surface_top_voxel(x, z).expect("solid land column");
+                if land_top < sea {
+                    water_cols += 1;
+                    // (b) water fills exactly [land_top, sea): matter above the seabed, up to the waterline.
+                    for y in 0..H as i32 {
+                        let is_w = w.material_at(x, y, z) == Some(water);
+                        let should = y >= land_top && y < sea;
+                        assert_eq!(
+                            is_w, should,
+                            "water fill wrong at ({x},{y},{z}) with seabed top {land_top}"
+                        );
+                        if is_w {
+                            water_voxels += 1;
+                        }
+                    }
+                    assert!(w.is_water(x, land_top, z), "the seabed voxel is water");
+                    assert!(!w.is_solid(x, land_top, z), "water is matter but NOT solid ground");
+                    assert!(w.is_solid(x, land_top - 1, z), "solid seabed directly under the water");
+                } else {
+                    land_cols += 1;
+                    // (c) a dry column carries no water anywhere.
+                    for y in 0..H as i32 {
+                        assert!(
+                            w.material_at(x, y, z) != Some(water),
+                            "water above the waterline at dry column ({x},{y},{z})"
+                        );
+                    }
+                }
+                // No water ever sits at or above the waterline datum (the surface is flat AT sea level).
+                assert!(!w.is_water(x, sea, z), "no water at the waterline voxel ({x},{sea},{z})");
             }
         }
+        assert!(
+            water_cols > 200,
+            "the sea must be visibly large, not a puddle (got {water_cols} submerged columns)"
+        );
+        assert!(
+            land_cols > water_cols,
+            "the patch is mostly land, part sea (land {land_cols} vs sea {water_cols})"
+        );
+        assert!(water_voxels > 0, "the sea is real filled matter");
+    }
+
+    #[test]
+    fn land_strata_beneath_the_seabed_are_intact() {
+        // The sea must NOT corrupt the solid column beneath it: under a submerged basin the seabed still
+        // reads grass → basalt → peridotite → iron (Earth's real radial order), with water in the air
+        // space ABOVE the grass, up to the waterline. Guards docs/28's "water sits above the land strata".
+        let mats = materials::load();
+        let w = generate(&mats);
+        let id = |name| materials::index_of(&mats, name);
+        let sea = SEA_LEVEL_Y.round() as i32;
+
+        // Find a submerged column (its solid land top is below the waterline).
+        let mut found = None;
+        'outer: for z in 0..D as i32 {
+            for x in 0..W as i32 {
+                if w.surface_top_voxel(x, z).unwrap() < sea {
+                    found = Some((x, z));
+                    break 'outer;
+                }
+            }
+        }
+        let (x, z) = found.expect("the demonstration sea must submerge at least one basin");
+        let land_top = w.surface_top_voxel(x, z).unwrap();
+
+        // Water directly above the seabed; grass is the seabed skin just below it.
+        assert!(w.is_water(x, land_top, z), "water fills the air space above the seabed");
+        assert_eq!(w.material_at(x, land_top - 1, z), Some(id("grass")), "seabed skin is grass");
+
+        // The solid strata below, top to bottom, are Earth's real radial order — unchanged by the sea.
+        let mut seq: Vec<usize> = Vec::new();
+        for y in (0..land_top).rev() {
+            if let Some(m) = w.material_at(x, y, z) {
+                if seq.last() != Some(&m) {
+                    seq.push(m);
+                }
+            }
+        }
+        assert_eq!(
+            seq,
+            vec![id("grass"), id("basalt"), id("peridotite"), id("iron")],
+            "seabed column must still be grass → crust → mantle → core"
+        );
+    }
+
+    #[test]
+    fn ocean_pressure_is_continuous_with_the_atmosphere_and_grows_hydrostatically() {
+        // The ocean is ONE hydrostatic column with the atmosphere (docs/28): at the waterline P = P_atm
+        // (the declared atmosphere's weight), and it grows DOWNWARD as P = P_atm + ρ_water·g·depth — the
+        // same hydrostatic law the air obeys, continued through the water. DERIVED from the DB water
+        // density and the declared atmosphere's surface pressure, not a dial.
+        let mats = materials::load();
+        let p_atm = crate::planet::earth().surface_pressure();
+        let rho = mats[materials::index_of(&mats, "water")].density as f64;
+        let g = 9.88; // emergent surface gravity (Engine::surface_g)
+
+        // Continuity at the waterline: depth 0 → exactly the atmosphere's surface pressure.
+        assert!(
+            (ocean_pressure(0.0, g) - p_atm).abs() < 1e-6,
+            "at the waterline the ocean pressure must equal P_atm ({p_atm} Pa)"
+        );
+        // Above the waterline there is no water column — it clamps to P_atm (the atmosphere takes over).
+        assert_eq!(ocean_pressure(-5.0, g), ocean_pressure(0.0, g));
+
+        // Grows linearly with depth at exactly ρ_water·g per metre.
+        for &d in &[1.0f64, 5.0, 10.0, 100.0] {
+            let expect = p_atm + rho * g * d;
+            assert!(
+                (ocean_pressure(d, g) - expect).abs() < 1e-6,
+                "hydrostatic law at depth {d} m: got {} expected {expect}",
+                ocean_pressure(d, g)
+            );
+        }
+        // ≈1 atm of added pressure per ~10 m of water — the real, familiar result (magnitude sanity).
+        let ten_m = ocean_pressure(10.0, g) - p_atm;
+        assert!(
+            ten_m > 9.0e4 && ten_m < 1.1e5,
+            "≈1 atm added per 10 m of water (got {ten_m} Pa)"
+        );
     }
 
     #[test]

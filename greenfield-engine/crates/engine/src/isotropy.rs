@@ -43,6 +43,7 @@ fn ball_world(n: usize, radius: f32, mat: usize) -> World {
         d: n,
         voxels,
         max_top: n, // makes center() = (n/2, n/2, n/2): a symmetric frame
+        water_mat: None,
     }
 }
 
@@ -55,6 +56,7 @@ fn solid_world(n: usize, mat: usize) -> World {
         d: n,
         voxels: vec![mat as u16 + 1; n * n * n],
         max_top: n,
+        water_mat: None,
     }
 }
 

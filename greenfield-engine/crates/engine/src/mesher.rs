@@ -121,8 +121,8 @@ pub fn build(world: &World, materials: &[Material]) -> Mesh {
                     let nx = x as i32 + offset[0];
                     let ny = y as i32 + offset[1];
                     let nz = z as i32 + offset[2];
-                    if world.is_solid(nx, ny, nz) {
-                        continue; // face is buried
+                    if world.material_at(nx, ny, nz).is_some() {
+                        continue; // face is buried behind matter (solid or water)
                     }
                     let base = vertices.len() as u32;
                     for c in corners.iter() {
@@ -362,6 +362,9 @@ pub fn build_surface_nets(world: &World, materials: &[Material]) -> Mesh {
     for y in 0..world.h {
         for z in 0..world.d {
             for x in 0..world.w {
+                // SOLID ground only — the smooth land surface. The sea is meshed separately as a flat
+                // surface at the waterline (see [`append_sea_surface`]), so its mirror-flat top reads as
+                // water and catches the specular sun-glint instead of being smoothed into the hills.
                 if world.is_solid(x as i32, y as i32, z as i32) {
                     occ[Shape::linearize([x as u32 + PAD, y as u32 + PAD, z as u32 + PAD])
                         as usize] = 1.0;
@@ -401,6 +404,106 @@ pub fn build_surface_nets(world: &World, materials: &[Material]) -> Mesh {
         vertices,
         indices: buffer.indices,
     }
+}
+
+/// Build the SEA as its own mesh: the flat top of the real filled water matter, at the waterline datum
+/// `SEA_LEVEL_Y`, over every submerged column, plus vertical shore walls where the water meets dry land
+/// or the patch edge. This is NOT a decorative disconnected plane — it is the literal top surface of the
+/// `water` voxels the world store filled below the datum (their sides/bottom rest against the seabed and
+/// are hidden). Kept SEPARATE from [`build_surface_nets`] so the solid land stays a watertight manifold
+/// (a water surface is legitimately an open shell). Flat `+Y` normals so the calm water reads as a mirror
+/// and catches the specular sun-glint (unlike the smoothed land), tagged with the DB `water` material so
+/// the shader gives it water optics. FLAGGED refinements (need more shader/physics work, or the deferred
+/// dynamic step): volumetric scattering/absorption to the seabed, refraction, and waves/flow — the sea
+/// is STATIC.
+pub fn build_sea(world: &World, materials: &[Material]) -> Mesh {
+    let mut vertices: Vec<Vertex> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    let center = world.center();
+    let Some(water) = world.water_mat else {
+        return Mesh { vertices, indices }; // no sea in this world
+    };
+    let col = materials[water].albedo;
+    let sea = crate::world::SEA_LEVEL_Y; // waterline (voxel-y); the top water voxel's top face sits here
+    let (w, d) = (world.w as i32, world.d as i32);
+
+    // Solid land top of a column (the seabed / shore height); None off the patch.
+    let land_top = |x: i32, z: i32| -> Option<i32> { world.surface_top_voxel(x, z) };
+    // Surface the sea only where it is at least MIN_RENDER_DEPTH voxels deep. The water MATTER (and its
+    // hydrostatic pressure) still fills every voxel below the datum — this is purely a RENDER guard: at
+    // the paper-thin (~1 voxel) shoreline fringe the flat waterline quad sits within the smoothed LAND
+    // surface's ~1-voxel rounding and z-fights it into a speckle band, so we don't draw the surface there
+    // (the shore just reads as wet-edged grass). Flagged: the thin shallows aren't surfaced yet.
+    const MIN_RENDER_DEPTH: f32 = 2.0;
+    let submerged = |x: i32, z: i32| -> bool {
+        land_top(x, z).map_or(false, |t| sea - (t as f32) >= MIN_RENDER_DEPTH)
+    };
+
+    let push_quad = |vertices: &mut Vec<Vertex>,
+                     indices: &mut Vec<u32>,
+                     c: [glam::Vec3; 4],
+                     nrm: glam::Vec3| {
+        let base = vertices.len() as u32;
+        for pos in c {
+            vertices.push(Vertex {
+                pos: (pos - center).into(),
+                nrm: nrm.into(),
+                col,
+                mat: water as u32,
+            });
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    };
+
+    for z in 0..d {
+        for x in 0..w {
+            if !submerged(x, z) {
+                continue;
+            }
+            let (xf, zf) = (x as f32, z as f32);
+            // TOP face: a unit quad at the waterline, wound CCW seen from above → outward normal +Y.
+            push_quad(
+                &mut vertices,
+                &mut indices,
+                [
+                    glam::Vec3::new(xf, sea, zf),
+                    glam::Vec3::new(xf, sea, zf + 1.0),
+                    glam::Vec3::new(xf + 1.0, sea, zf + 1.0),
+                    glam::Vec3::new(xf + 1.0, sea, zf),
+                ],
+                glam::Vec3::Y,
+            );
+
+            // SHORE walls: on each edge where the neighbour is NOT submerged (dry land or off-patch),
+            // drop a vertical face from the waterline down to this column's seabed so the water body is
+            // closed at the shoreline (a real edge, not a floating sheet).
+            let bed = land_top(x, z).unwrap_or(sea as i32) as f32;
+            let hi = sea;
+            for (dx, dz, n) in [
+                (1i32, 0i32, glam::Vec3::X),
+                (-1, 0, glam::Vec3::NEG_X),
+                (0, 1, glam::Vec3::Z),
+                (0, -1, glam::Vec3::NEG_Z),
+            ] {
+                if submerged(x + dx, z + dz) {
+                    continue; // interior water/water edge — no wall
+                }
+                // The four corners of the shared edge between (x,z) and its neighbour, at the two heights.
+                let (a, b) = match (dx, dz) {
+                    (1, 0) => (glam::Vec3::new(xf + 1.0, 0.0, zf), glam::Vec3::new(xf + 1.0, 0.0, zf + 1.0)),
+                    (-1, 0) => (glam::Vec3::new(xf, 0.0, zf + 1.0), glam::Vec3::new(xf, 0.0, zf)),
+                    (0, 1) => (glam::Vec3::new(xf + 1.0, 0.0, zf + 1.0), glam::Vec3::new(xf, 0.0, zf + 1.0)),
+                    _ => (glam::Vec3::new(xf, 0.0, zf), glam::Vec3::new(xf + 1.0, 0.0, zf)),
+                };
+                let a_hi = glam::Vec3::new(a.x, hi, a.z);
+                let b_hi = glam::Vec3::new(b.x, hi, b.z);
+                let a_lo = glam::Vec3::new(a.x, bed, a.z);
+                let b_lo = glam::Vec3::new(b.x, bed, b.z);
+                push_quad(&mut vertices, &mut indices, [a_hi, a_lo, b_lo, b_hi], n);
+            }
+        }
+    }
+    Mesh { vertices, indices }
 }
 
 /// Separable 3-tap box blur applied `passes` times (border-clamped). Smooths a 0/1 occupancy field
@@ -498,6 +601,35 @@ mod tests {
     use super::*;
     use crate::materials;
     use crate::planet;
+
+    #[test]
+    fn the_sea_surface_is_meshed_flat_at_the_waterline() {
+        // The world mesh must render the sea: water-tagged vertices whose TOP sits exactly at the
+        // waterline datum (SEA_LEVEL_Y), spanning the low basins — the visible flat sea, meshed from the
+        // real filled water matter (not a decorative plane). The flat top gives the +Y normals that catch
+        // the Fresnel sky-reflection in the shader.
+        use crate::world;
+        let mats = materials::load();
+        let w = world::generate(&mats);
+        let water = materials::index_of(&mats, "water");
+        let mesh = build_sea(&w, &mats);
+        let c = w.center();
+        let wv: Vec<&Vertex> = mesh.vertices.iter().filter(|v| v.mat as usize == water).collect();
+        assert_eq!(wv.len(), mesh.vertices.len(), "the sea mesh is all water-tagged");
+        assert!(wv.len() > 100, "the sea must be meshed as a visible body (got {} verts)", wv.len());
+        // The highest water vertices are the flat top faces — they sit AT the waterline datum.
+        let top_y = wv.iter().map(|v| v.pos[1] + c.y).fold(f32::MIN, f32::max);
+        assert!(
+            (top_y - world::SEA_LEVEL_Y).abs() < 1e-3,
+            "sea surface top {top_y} must sit at the waterline SEA_LEVEL_Y {}",
+            world::SEA_LEVEL_Y
+        );
+        // Some water vertex has a flat, upward normal (the mirror surface the Fresnel water shading needs).
+        assert!(
+            wv.iter().any(|v| v.nrm[1] > 0.99),
+            "the sea surface must have flat +Y (mirror) faces at the waterline"
+        );
+    }
 
     #[test]
     fn earth_cap_follows_the_shared_terrain_and_curves_to_a_horizon() {

@@ -138,6 +138,7 @@ mod tests {
             d,
             voxels,
             max_top: 4,
+            water_mat: None,
         }
     }
 
@@ -158,6 +159,7 @@ mod tests {
             d,
             voxels,
             max_top: 8,
+            water_mat: None,
         }
     }
 
