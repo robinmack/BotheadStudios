@@ -216,18 +216,29 @@ pub fn build_uv_sphere(
 /// without a tonal seam, while the planetary curvature (`∂/∂d = d/R`) still tilts the far ground away
 /// from the sun. Tessellation is dense near the patch (where the eye is) and coarser toward the horizon.
 ///
-/// ANNULUS, not a full disk: the cap leaves a HOLE exactly over the resolved patch's (x,z) footprint —
-/// its innermost ring follows the patch's square perimeter — and fills ONLY beyond it. Inside the
-/// footprint ONLY the voxel patch renders, so a crater/dig excavated BELOW the surface stays visible as a
-/// real bowl instead of being hidden under a cap lid (Robin: "a plain level floor... debris disappearing
-/// beneath the texture" — that flat floor WAS the old cap drawn over the patch). The seam ring sits on
-/// the footprint boundary at the shared `terrain_height`, so it joins the patch edge continuously.
-pub fn build_earth_cap(materials: &[Material], center: glam::Vec3, radius: f32, r_max: f32) -> Mesh {
+/// BULK EVERYWHERE by default (`hole = None`): the cap is a FULL polar disk that samples the shared
+/// `terrain_height` from its very centre outward, so the DEFAULT terrain is one continuous smooth bulk
+/// surface over the whole footprint and beyond — no finite voxel block, nothing special about any square
+/// (Robin: "dissolve the fixed cube"). Near the centre the rings are fine (≈1.5 m radial, ≈few-m arc), so
+/// the bulk cap resolves the rolling relief where the eye is; far out they grow geometrically to the
+/// horizon (that coarse far sampling is OPTIMIZATION of the one authoritative heightfield, not a fudge).
+///
+/// ON-DEMAND HOLE (`hole = Some(half_extents)`): when a region has been RESOLVED into voxels (an active
+/// impact/dig), the cap leaves a square HOLE of those half-extents (centred on the origin) so the resolved
+/// voxels — the crater bowl, its walls, exposed strata — render there instead of being hidden under a cap
+/// lid, while the rest of the world stays bulk. The seam ring sits on the hole boundary at the shared
+/// `terrain_height`, so it joins the resolved patch edge continuously (no step, no gap → one surface).
+pub fn build_earth_cap(
+    materials: &[Material],
+    center: glam::Vec3,
+    radius: f32,
+    r_max: f32,
+    hole: Option<glam::Vec2>,
+) -> Mesh {
     use crate::world::terrain_height;
     use std::f32::consts::TAU;
     let grass = index_of(materials, "grass"); // the SAME surface skin the voxel patch wears
     let col = materials[grass].albedo;
-    // Patch-centre surface height in centered coords — where the resolved voxel patch touches the cap.
     // Surface height (centered coords) at cap point (cx, cz): shared relief minus the sphere drop.
     let cap_y = |cx: f32, cz: f32| -> f32 {
         let d = (cx * cx + cz * cz).sqrt();
@@ -242,7 +253,8 @@ pub fn build_earth_cap(materials: &[Material], center: glam::Vec3, radius: f32, 
         glam::Vec3::new(-dh_dx, 1.0, -dh_dz).normalize()
     };
 
-    const SEG: usize = 96; // angular segments — enough for a smooth horizon circle
+    const SEG: usize = 160; // angular segments — smooth horizon AND fine bulk sampling near the centre
+    let angle = |s: usize| s as f32 / SEG as f32 * TAU;
     let vert = |x: f32, z: f32| -> Vertex {
         let pos = glam::Vec3::new(x, cap_y(x, z), z);
         Vertex {
@@ -253,60 +265,85 @@ pub fn build_earth_cap(materials: &[Material], center: glam::Vec3, radius: f32, 
         }
     };
 
-    // Inner seam follows the patch footprint SQUARE (half-extents = the world centre offset, since the
-    // patch is centred on the origin): a ray at angle `a` meets the square at distance
-    // `min(hx/|cos a|, hz/|sin a|)`, so the seam polygon lies exactly on the footprint edges — the hole
-    // is the footprint, no cap triangle covers the patch.
-    let (hx, hz) = (center.x, center.z);
-    let r_square = |a: f32| -> f32 {
+    // The list of ring radii, and (for the hole case) an inner SQUARE seam ring on the hole boundary.
+    // A ray at angle `a` meets a square of half-extents (hx, hz) at `min(hx/|cos a|, hz/|sin a|)`.
+    let square_r = |hx: f32, hz: f32, a: f32| -> f32 {
         let (ca, sa) = (a.cos().abs(), a.sin().abs());
         let tx = if ca > 1e-6 { hx / ca } else { f32::INFINITY };
         let tz = if sa > 1e-6 { hz / sa } else { f32::INFINITY };
         tx.min(tz)
     };
-    // Circular rings begin just OUTSIDE the square's far corner (its half-diagonal) so no circle ever dips
-    // into the footprint, then grow geometrically to the horizon.
-    let r_inner_circle = (hx * hx + hz * hz).sqrt() + 1.0;
-    let mut circ_radii: Vec<f32> = Vec::new();
-    let mut step = 8.0f32;
-    let mut r = r_inner_circle;
-    while r < r_max {
-        circ_radii.push(r);
-        step *= 1.12;
-        r += step;
-    }
-    if circ_radii.last().copied().unwrap_or(0.0) < r_max {
-        circ_radii.push(r_max);
+
+    let mut vertices: Vec<Vertex> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    // `rings[k]` gives the per-segment radius of ring k; consecutive rings are quad-stripped together.
+    let mut rings: Vec<Vec<f32>> = Vec::new();
+    let mut has_center = false;
+
+    match hole {
+        Some(h) => {
+            // Ring 0 = the SQUARE seam on the hole boundary (per-angle radius). Circular rings begin just
+            // outside the square's far corner so no ring ever dips into the hole, then grow to the horizon.
+            rings.push((0..SEG).map(|s| square_r(h.x, h.y, angle(s))).collect());
+            let mut r = (h.x * h.x + h.y * h.y).sqrt() + 1.0;
+            let mut step = 8.0f32;
+            while r < r_max {
+                rings.push(vec![r; SEG]);
+                step *= 1.12;
+                r += step;
+            }
+            if rings.last().map(|ring| ring[0]).unwrap_or(0.0) < r_max {
+                rings.push(vec![r_max; SEG]);
+            }
+        }
+        None => {
+            // FULL DISK: a centre vertex, then fine rings out to the footprint half-diagonal, growing
+            // geometrically to the horizon. The bulk terrain covers everything — no hole, no cube.
+            has_center = true;
+            let fp = (center.x * center.x + center.z * center.z).sqrt(); // footprint half-diagonal
+            let mut r = 0.0f32;
+            let mut step = 1.5f32;
+            loop {
+                r += step;
+                if r >= r_max {
+                    rings.push(vec![r_max; SEG]);
+                    break;
+                }
+                rings.push(vec![r; SEG]);
+                if r > fp {
+                    step *= 1.12; // coarsen only past the footprint (the near field stays fine)
+                }
+            }
+        }
     }
 
-    let angle = |s: usize| s as f32 / SEG as f32 * TAU;
-    let mut vertices: Vec<Vertex> = Vec::new();
-    // Ring 0 = the square seam (per-angle radius on the footprint boundary); then the circular rings.
-    for s in 0..SEG {
-        let a = angle(s);
-        let rr = r_square(a);
-        vertices.push(vert(rr * a.cos(), rr * a.sin()));
-    }
-    for &rr in &circ_radii {
+    // Emit vertices: optional centre, then each ring's SEG points.
+    if has_center {
+        vertices.push(vert(0.0, 0.0)); // index 0
+        // Triangle fan from the centre to ring 0.
         for s in 0..SEG {
+            let s1 = (s + 1) % SEG;
+            indices.extend_from_slice(&[0, 1 + s as u32, 1 + s1 as u32]);
+        }
+    }
+    let base0 = vertices.len() as u32; // first ring's base index
+    for ring in &rings {
+        for (s, &rr) in ring.iter().enumerate() {
             let a = angle(s);
             vertices.push(vert(rr * a.cos(), rr * a.sin()));
         }
     }
-
-    let mut indices: Vec<u32> = Vec::new();
-    // Quad strips between successive rings (seam → circle 0 → circle 1 → … → horizon). All rings are
-    // SEG-aligned by angle, so strips connect vertex s to vertex s in the next ring.
-    let ring_count = 1 + circ_radii.len();
-    for k in 0..ring_count - 1 {
-        let base_in = k * SEG;
-        let base_out = (k + 1) * SEG;
+    // Quad strips between successive rings. All rings are SEG-aligned by angle.
+    for k in 0..rings.len().saturating_sub(1) {
+        let base_in = base0 + (k * SEG) as u32;
+        let base_out = base0 + ((k + 1) * SEG) as u32;
         for s in 0..SEG {
-            let s1 = (s + 1) % SEG;
-            let i0 = (base_in + s) as u32;
-            let i1 = (base_in + s1) as u32;
-            let o0 = (base_out + s) as u32;
-            let o1 = (base_out + s1) as u32;
+            let s1 = ((s + 1) % SEG) as u32;
+            let s = s as u32;
+            let i0 = base_in + s;
+            let i1 = base_in + s1;
+            let o0 = base_out + s;
+            let o1 = base_out + s1;
             indices.extend_from_slice(&[i0, o0, o1, i0, o1, i1]);
         }
     }
@@ -675,7 +712,8 @@ mod tests {
         let w = world::generate(&mats);
         let center = w.center();
         let r_max = 26_000.0f32;
-        let mesh = build_earth_cap(&mats, center, radius, r_max);
+        // Default BULK cap (no hole): the full disk over the whole footprint and beyond.
+        let mesh = build_earth_cap(&mats, center, radius, r_max, None);
 
         // (a) Every vertex sits EXACTLY on the shared heightfield minus the sphere drop — proving the cap
         //     is the same terrain_height surface, not an independent flat plane.
@@ -747,16 +785,52 @@ mod tests {
     }
 
     #[test]
-    fn earth_cap_leaves_a_hole_over_the_patch_and_joins_it_at_the_boundary() {
-        // The cap is an ANNULUS: it must (1) leave a HOLE exactly over the resolved patch footprint so a
-        // crater/dig excavated below the surface stays visible (no cap lid drawn over it), and (2) meet
-        // the patch edge CONTINUOUSLY at the footprint boundary (no step, no gap → one surface).
+    fn earth_cap_full_disk_covers_the_footprint_as_one_bulk_surface() {
+        // BULK EVERYWHERE (Robin: "dissolve the fixed cube"): with NO hole the cap is a FULL disk that
+        // samples the shared terrain_height from its very centre outward, so the default terrain is one
+        // continuous smooth bulk surface over the whole footprint — nothing special about any square. The
+        // per-vertex height must still be exactly the shared heightfield (minus the sphere drop) so the
+        // near bulk cap is the SAME surface the resolved voxels would be, and the interior must be COVERED
+        // (vertices actually fall inside the footprint — no hole where a floating cube used to sit).
+        use crate::world::{self, terrain_height, D, W};
+        let mats = materials::load();
+        let radius = planet::earth().radius() as f32;
+        let w = world::generate(&mats);
+        let center = w.center();
+        let mesh = build_earth_cap(&mats, center, radius, 26_000.0, None);
+
+        let mut inside_count = 0usize;
+        for v in &mesh.vertices {
+            let [x, y, z] = v.pos;
+            let d = (x * x + z * z).sqrt();
+            let expected = terrain_height(x + center.x, z + center.z) - center.y - d * d / (2.0 * radius);
+            assert!(
+                (y - expected).abs() < 0.01,
+                "bulk cap vertex off the shared heightfield at d={d:.0}: y={y:.3} expected {expected:.3}"
+            );
+            let (vx, vz) = (x + center.x, z + center.z); // centered → voxel frame
+            if vx > 1.0 && vx < W as f32 - 1.0 && vz > 1.0 && vz < D as f32 - 1.0 {
+                inside_count += 1;
+            }
+        }
+        assert!(
+            inside_count > 200,
+            "the full disk must COVER the footprint interior (bulk, no cube-hole), got {inside_count} verts inside"
+        );
+    }
+
+    #[test]
+    fn earth_cap_with_a_hole_leaves_the_resolved_region_open_and_joins_it() {
+        // ON-DEMAND HOLE: when a region is RESOLVED into voxels, the cap must (1) leave a HOLE exactly over
+        // that region (here the whole footprint) so a crater/dig excavated below the surface stays visible
+        // (no cap lid over it), and (2) meet the resolved patch edge CONTINUOUSLY at the boundary.
         use crate::world::{self, D, W};
         let mats = materials::load();
         let radius = planet::earth().radius() as f32;
         let w = world::generate(&mats);
         let center = w.center();
-        let mesh = build_earth_cap(&mats, center, radius, 26_000.0);
+        // Resolve the whole footprint: hole half-extents = the patch's centre offset (its half-extents).
+        let mesh = build_earth_cap(&mats, center, radius, 26_000.0, Some(glam::Vec2::new(center.x, center.z)));
 
         // (1) HOLE: NO cap vertex may lie strictly inside the patch footprint (voxel (x,z) in 0..W, 0..D).
         //     A cap vertex there would be a lid drawn over the patch, hiding craters/digs beneath it.
@@ -769,11 +843,11 @@ mod tests {
             );
         }
 
-        // (2) CONTINUOUS: the seam ring (the FIRST SEG=96 vertices) lies ON the footprint boundary; each
+        // (2) CONTINUOUS: the seam ring (the FIRST SEG vertices) lies ON the footprint boundary; each
         //     must match the patch's edge surface there. Tolerance covers the patch's integer rounding
         //     (≤0.5 m), the ≤1-voxel offset from the boundary to the nearest resolved column, and the
         //     (sub-mm) sphere drop across the 96 m patch — a genuine no-step bound against 34 m of relief.
-        const SEG: usize = 96;
+        const SEG: usize = 160;
         assert!(mesh.vertices.len() >= SEG, "cap has no seam ring");
         let mut checked = 0;
         for v in &mesh.vertices[..SEG] {

@@ -167,6 +167,18 @@ impl World {
         h - c.y - 0.5
     }
 
+    /// The BULK terrain surface height (centered coords) at horizontal `(x, z)` — the DEFAULT ground
+    /// everywhere, resolved or not (Robin: "the default terrain is the bulk heightmap everywhere"). It is
+    /// the shared continuous [`terrain_height`] (the SAME field the distant Earth cap and the resolved
+    /// voxels sample), converted from the patch's voxel frame into centered coords. Unlike
+    /// [`Self::surface_top_voxel`] it is defined over the WHOLE plane — off the finite voxel footprint the
+    /// bulk ground continues, so a probe or grain out there rests on real terrain instead of falling into
+    /// the void. Smooth (no voxel rounding); the on-demand voxels only refine it locally around an impact.
+    pub fn bulk_height(&self, x: f32, z: f32) -> f32 {
+        let c = self.center();
+        terrain_height(x + c.x, z + c.z) - c.y
+    }
+
     /// Is a camera `eye` (in CENTERED coordinates, the frame `center()` maps to voxel space) in free
     /// air, at least `clearance` metres above the ground beneath it? "Free" means the voxel the eye sits
     /// in is not solid AND, where a ground column exists under the eye, the eye is `clearance` above that
@@ -804,6 +816,44 @@ mod tests {
         for e in expected {
             assert!(unsup.contains(&e), "floating chunk voxel {e:?} must collapse");
         }
+    }
+
+    #[test]
+    fn bulk_height_is_the_shared_terrain_everywhere_including_off_the_footprint() {
+        // Increment 1 (dissolve the cube): the DEFAULT ground is the bulk heightmap EVERYWHERE. bulk_height
+        // must (a) equal the shared terrain_height (in centered coords) so it is the SAME surface the cap
+        // and the resolved voxels use, (b) match the resolved patch top within the footprint (both are
+        // terrain_height, up to the ≤0.5 m voxel rounding), and (c) be defined OFF the footprint (the bulk
+        // continues — a probe/grain out there rests on real terrain, not the void the old finite patch left).
+        let mats = materials::load();
+        let w = generate(&mats);
+        let c = w.center();
+
+        // (a) exactly terrain_height, converted to centered coords, at arbitrary (incl. fractional) points.
+        for &(x, z) in &[(10.0f32, 20.0f32), (48.5, 48.5), (0.0, 95.0), (-500.0, 800.0)] {
+            let expect = terrain_height(x + c.x, z + c.z) - c.y;
+            assert!(
+                (w.bulk_height(x, z) - expect).abs() < 1e-4,
+                "bulk_height({x},{z}) != terrain_height there"
+            );
+        }
+
+        // (b) within the footprint, agrees with the resolved patch top (both are terrain_height ± rounding).
+        for z in (2..D as i32 - 2).step_by(7) {
+            for x in (2..W as i32 - 2).step_by(7) {
+                let patch = w.surface_top_voxel(x, z).unwrap() as f32 - c.y;
+                // bulk_height takes CENTERED coords; convert the voxel index (x,z) → centered (x−c.x, z−c.z).
+                let bulk = w.bulk_height(x as f32 - c.x, z as f32 - c.z);
+                assert!(
+                    (patch - bulk).abs() <= 1.0,
+                    "bulk vs resolved patch top disagree at ({x},{z}): bulk {bulk:.2} patch {patch:.2}"
+                );
+            }
+        }
+
+        // (c) far OFF the footprint the bulk still returns finite real terrain (the old patch had none).
+        let off = w.bulk_height(5000.0, -3000.0);
+        assert!(off.is_finite(), "bulk terrain must extend off the footprint");
     }
 
     #[test]

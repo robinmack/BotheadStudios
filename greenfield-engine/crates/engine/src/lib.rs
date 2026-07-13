@@ -215,6 +215,13 @@ mod app {
         /// that curves down to a finite horizon — NOT a flat decorative plane. Reuses `world_uni` (same
         /// identity model / view_proj / light / material textures); it is just another mesh in the world pass.
         earth_cap_gpu: GpuMesh,
+        /// Has a region been RESOLVED into voxels (an impact/dig)? When `false` (the DEFAULT, fresh scene)
+        /// the whole terrain is the BULK heightmap — only the full-disk `earth_cap_gpu` renders, so there
+        /// is no finite voxel block, nothing special about any square, nothing to see under (Robin:
+        /// "dissolve the fixed cube"). When an impact resolves the patch this flips true: the voxel patch
+        /// (`world_gpu`, with its crater) renders and the cap is rebuilt WITH a hole over the resolved
+        /// region so the crater bowl shows instead of a cap lid. De-resolving back to bulk is increment 3.
+        patch_resolved: bool,
 
         /// The honest sky: a fullscreen Rayleigh single-scatter pass (sky.wgsl) drawn behind the world.
         /// `atm_tau` is the declared atmosphere's optical depth (same as the space band's blue marble).
@@ -350,8 +357,15 @@ mod app {
             // The REAL bulk-Earth surface as a curved spherical CAP at Earth's true radius (NOT a flat
             // decorative plane): it curves DOWN to a real horizon a few km out under the Rayleigh sky.
             // Same body the space band draws; the resolved voxel patch sits flush at the top of the cap.
-            let earth_cap_mesh =
-                mesher::build_earth_cap(&mats, world_center, planet_radius as f32, EARTH_CAP_RADIUS);
+            // DEFAULT = BULK EVERYWHERE (no hole): the fresh scene is one continuous smooth bulk surface,
+            // no finite voxel block. The cap gains a hole only when an impact resolves the patch (below).
+            let earth_cap_mesh = mesher::build_earth_cap(
+                &mats,
+                world_center,
+                planet_radius as f32,
+                EARTH_CAP_RADIUS,
+                None,
+            );
             let earth_cap_gpu = upload_mesh(&device, "earth-cap", &earth_cap_mesh);
 
             let mut probe = build_probe(&mats, spawn, surface_g as f64);
@@ -590,6 +604,7 @@ mod app {
                 sea_gpu,
                 world_uni,
                 earth_cap_gpu,
+                patch_resolved: false,
                 sky_pipeline,
                 sky_uni,
                 atm_tau,
@@ -716,6 +731,7 @@ mod app {
             let far = inv.project_point3(Vec3::new(ndc_x, ndc_y, 1.0));
             let dir = (far - near).normalize_or_zero();
             if let Some((_x, _y, _z, hit)) = self.world.raycast(eye, dir, 6000.0) {
+                self.resolve_patch(); // resolve voxels + open the cap hole so the dig is visible
                 let power = if blast { BLAST_POWER } else { DIG_POWER };
                 self.matter
                     .dig(&mut self.world, &self.mats, hit, DIG_RADIUS, power);
@@ -743,6 +759,7 @@ mod app {
         }
 
         pub fn meteor(&mut self, ndc_x: f32, ndc_y: f32) {
+            self.resolve_patch(); // resolve voxels + open the cap hole so the crater is visible
             let (view_proj, eye) = self.view_proj();
             let inv = view_proj.inverse();
             let near = inv.project_point3(Vec3::new(ndc_x, ndc_y, 0.0));
@@ -898,6 +915,40 @@ mod app {
                 let p_at = dir * momentum_mag * (e_at / energy);
                 body.deposit_impact(mats, site, p_at, e_at);
             }
+        }
+
+        /// RESOLVE the terrain patch into voxels on demand (Robin: "creating texels as needed around the
+        /// impact site"). Called at the start of a dig/meteor: flips the scene from BULK (only the full-disk
+        /// cap draws) to RESOLVED (the voxel patch draws, and the cap is rebuilt WITH a hole over the
+        /// resolved region so the crater bowl shows instead of a cap lid). Idempotent — a no-op once
+        /// resolved. FLAGGED (increment 2, deferred): the resolved region is the WHOLE 96 m footprint, not
+        /// yet a LOCAL rect sized from the impact's predicted crater radius — that local sizing + a matching
+        /// local cap hole is the next refinement; de-resolving back to bulk after settling is increment 3.
+        fn resolve_patch(&mut self) {
+            if self.patch_resolved {
+                return;
+            }
+            self.patch_resolved = true;
+            self.rebuild_earth_cap();
+        }
+
+        /// Rebuild the Earth cap for the current resolution state: a FULL bulk disk when nothing is
+        /// resolved, or a disk with a HOLE over the resolved footprint so the resolved voxels render there.
+        fn rebuild_earth_cap(&mut self) {
+            let center = self.world.center();
+            let hole = if self.patch_resolved {
+                Some(glam::Vec2::new(center.x, center.z)) // hole over the whole resolved footprint
+            } else {
+                None // bulk everywhere
+            };
+            let mesh = mesher::build_earth_cap(
+                &self.mats,
+                center,
+                self.planet_radius as f32,
+                EARTH_CAP_RADIUS,
+                hole,
+            );
+            self.earth_cap_gpu = upload_mesh(&self.device, "earth-cap", &mesh);
         }
 
         fn remesh_world(&mut self) {
@@ -1225,10 +1276,15 @@ mod app {
                 pass.draw(0..3, 0..1);
 
                 pass.set_pipeline(&self.pipeline);
-                // The real Earth-surface cap first (shares world_uni): the bulk planet curving down to a
-                // true horizon, hiding the patch's side walls. Then the resolved voxel patch flush on top.
+                // The BULK Earth surface first (shares world_uni): the full-disk heightmap curving down to
+                // a true horizon. In the DEFAULT scene this is the WHOLE terrain — one continuous smooth
+                // surface, no finite voxel block. The resolved voxel patch (with its crater) draws on top
+                // ONLY once an impact has resolved it; until then it is not drawn at all, so nothing is
+                // special about any square and there is nothing to see under (Robin: "dissolve the cube").
                 draw(&mut pass, &self.world_uni, &self.earth_cap_gpu);
-                draw(&mut pass, &self.world_uni, &self.world_gpu);
+                if self.patch_resolved {
+                    draw(&mut pass, &self.world_uni, &self.world_gpu);
+                }
                 // The sea on top of the land it fills (same uniforms; the shader gives `water` its
                 // Fresnel-sky water shading). Drawn after the land so its open surface reads as water
                 // pooling in the basins.
@@ -1281,13 +1337,18 @@ mod app {
             for p in &mut self.probe.particles {
                 let xi = (p.pos.x as f32 + c.x).floor() as i32;
                 let zi = (p.pos.z as f32 + c.z).floor() as i32;
-                let ground = self
-                    .world
-                    // −0.5: surface_top_voxel is the air-start voxel, but the surface-nets iso-surface
-                    // (what's drawn) sits half a voxel below it — rest on the VISIBLE surface, not above.
-                    .surface_top_voxel(xi, zi)
-                    .map(|t| t as f64 - 0.5 - c.y as f64)
-                    .unwrap_or(-1.0e9);
+                // DEFAULT = rest on the BULK surface (the full-disk cap, what's drawn) at terrain_height.
+                // Where the patch is RESOLVED, rest on the visible voxel iso-surface (−0.5: surface_top_voxel
+                // is the air-start voxel, but the drawn surface-nets iso sits half a voxel below it), so the
+                // ball sags into a real crater. Off the footprint the bulk continues (no void to fall into).
+                let ground = if self.patch_resolved {
+                    self.world
+                        .surface_top_voxel(xi, zi)
+                        .map(|t| t as f64 - 0.5 - c.y as f64)
+                        .unwrap_or_else(|| self.world.bulk_height(p.pos.x as f32, p.pos.z as f32) as f64)
+                } else {
+                    self.world.bulk_height(p.pos.x as f32, p.pos.z as f32) as f64
+                };
                 let floor = ground + half;
                 if p.pos.y < floor {
                     // Correct only the penetration BEYOND a small dead zone, and gently. Hard-snapping
@@ -1311,14 +1372,20 @@ mod app {
             }
         }
 
-        /// Terrain surface height (centered coords) under a column; far below off the footprint.
+        /// Terrain surface height (centered coords) under a column. DEFAULT = the BULK heightmap everywhere
+        /// (`World::bulk_height`, defined on the whole plane, resolved or not). Only where the patch has
+        /// been RESOLVED into voxels (a crater) does it read the resolved column top instead — so the
+        /// crater is felt where it exists, and the bulk terrain is felt everywhere else (including off the
+        /// finite footprint, where the old code returned a void far below and things fell forever).
         fn ground_under(&self, x: f32, z: f32) -> f32 {
-            let c = self.world.center();
-            let (xi, zi) = ((x + c.x).floor() as i32, (z + c.z).floor() as i32);
-            self.world
-                .surface_top_voxel(xi, zi)
-                .map(|t| t as f32 - c.y)
-                .unwrap_or(-c.y - 1.0)
+            if self.patch_resolved {
+                let c = self.world.center();
+                let (xi, zi) = ((x + c.x).floor() as i32, (z + c.z).floor() as i32);
+                if let Some(t) = self.world.surface_top_voxel(xi, zi) {
+                    return t as f32 - c.y;
+                }
+            }
+            self.world.bulk_height(x, z)
         }
 
         fn view_proj(&self) -> (Mat4, Vec3) {
