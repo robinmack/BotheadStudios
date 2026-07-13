@@ -136,6 +136,37 @@ impl World {
         None
     }
 
+    /// The smooth (bilinear) terrain surface height at a world position, returned in CENTERED coords —
+    /// the SAME surface the GPU debris step collides grains against (`particle_step.wgsl::terrain_h`):
+    /// the four surrounding column tops (edge-clamped to the patch, `-1` for an empty column, then
+    /// `-0.5` for the mesh iso-surface) bilinearly interpolated. Debris comes to rest ON this bilinear
+    /// surface, NOT on a single column's top. The CPU de-resolution readback must judge "grounded"
+    /// against this SAME surface — otherwise a grain resting on a SLOPE (binned into the lower column of
+    /// its cell, but physically held up by the higher corner) reads as airborne against the single lower
+    /// column top and never de-resolves, so the pile stacked on it can never peel down to voxels either
+    /// (the "rubble that never returns to the grid" stall). Mirrors the shader by construction.
+    pub fn surface_height_bilinear(&self, pos: Vec3) -> f32 {
+        let c = self.center();
+        let vx = pos.x + c.x;
+        let vz = pos.z + c.z;
+        let cx = vx.floor() as i32;
+        let cz = vz.floor() as i32;
+        let top = |x: i32, z: i32| -> f32 {
+            let xc = x.clamp(0, self.w as i32 - 1);
+            let zc = z.clamp(0, self.d as i32 - 1);
+            self.surface_top_voxel(xc, zc).unwrap_or(-1) as f32
+        };
+        let h00 = top(cx, cz);
+        let h10 = top(cx + 1, cz);
+        let h01 = top(cx, cz + 1);
+        let h11 = top(cx + 1, cz + 1);
+        let fx = vx - cx as f32;
+        let fz = vz - cz as f32;
+        let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+        let h = lerp(lerp(h00, h10, fx), lerp(h01, h11, fx), fz);
+        h - c.y - 0.5
+    }
+
     /// Is a camera `eye` (in CENTERED coordinates, the frame `center()` maps to voxel space) in free
     /// air, at least `clearance` metres above the ground beneath it? "Free" means the voxel the eye sits
     /// in is not solid AND, where a ground column exists under the eye, the eye is `clearance` above that
@@ -1216,6 +1247,64 @@ mod tests {
         assert!(
             saw_below,
             "sweep must exercise below-sphere configs (else the sphere clamp is untested)"
+        );
+    }
+
+    #[test]
+    fn bilinear_surface_grounds_a_grain_resting_on_a_slope() {
+        // Regression: GPU debris rests on the BILINEAR terrain surface (particle_step.wgsl::terrain_h),
+        // but the CPU de-resolution readback USED to test "grounded" against only the single column the
+        // grain is binned into. On a slope those disagree: a grain in the LOW column of a cell is held up
+        // by the cell's HIGH corner, so the single-low-column top judged it airborne and it never
+        // de-resolved — and the pile stacked on it stalled as rubble that never returned to the grid
+        // (the debris count plateaus at thousands instead of falling to ~0). `surface_height_bilinear`
+        // mirrors the shader, so grounding now agrees with where the grain physically rests.
+        const PART_HALF: f32 = 0.5; // DEBRIS_PART_HALF (lib.rs) — a grain's collision half-extent
+        const MARGIN: f32 = 0.1; //   SETTLE_GROUND_MARGIN (lib.rs)
+
+        // A pure x-slope: column x=3 tops out low (voxel top = 5), x=4 tops out high (voxel top = 10).
+        let (w, h, d) = (8usize, 16usize, 8usize);
+        let mut world = World { w, h, d, voxels: vec![0u16; w * h * d], max_top: 10, water_mat: None };
+        for z in 0..d as i32 {
+            for y in 0..5 {
+                world.set_voxel(3, y, z, Some(0)); // solid 0..=4 ⇒ surface_top_voxel = 5
+            }
+            for y in 0..10 {
+                world.set_voxel(4, y, z, Some(0)); // solid 0..=9 ⇒ surface_top_voxel = 10
+            }
+        }
+        let c = world.center(); // center.y = max_top/2 = 5
+        assert_eq!(world.surface_top_voxel(3, 0), Some(5));
+        assert_eq!(world.surface_top_voxel(4, 0), Some(10));
+
+        // A grain binned into the LOW column (x=3) but sitting near the HIGH corner (fx = 0.9) of the
+        // cell [3,4]. In centered coords that x is (3.9 - center.x).
+        let vx = 3.9_f32;
+        let vz = 3.5_f32;
+        let pos_xz = Vec3::new(vx - c.x, 0.0, vz - c.z);
+
+        // The bilinear surface here is ~lerp(5,10,0.9)=9.5 voxels ⇒ centered 9.5 - 5 - 0.5 = 4.0.
+        let surf = world.surface_height_bilinear(pos_xz);
+        assert!((surf - 4.0).abs() < 1e-4, "bilinear slope surface should be ~4.0, got {surf}");
+
+        // The single LOW column (x=3) top in the same centered convention: 5 - 5 - 0.5 = -0.5. Far below.
+        let single_low = world.surface_top_voxel(3, 0).unwrap() as f32 - c.y - 0.5;
+        assert!((single_low + 0.5).abs() < 1e-4);
+
+        // A grain resting ON the bilinear surface: its bottom touches `surf`, so its center is surf+HALF.
+        let grain_y = surf + PART_HALF;
+        let pos = Vec3::new(pos_xz.x, grain_y, pos_xz.z);
+
+        // The FIX: grounded against the bilinear surface — TRUE (the grain really is on the slope).
+        assert!(
+            pos.y - PART_HALF <= world.surface_height_bilinear(pos) + MARGIN,
+            "a grain resting on the bilinear slope must read as grounded"
+        );
+        // The BUG it replaces: grounded against only the low column top would be FALSE (surf 4.0 sits far
+        // above single_low -0.5 + margin), so the grain — and everything piled on it — never de-resolved.
+        assert!(
+            !(pos.y - PART_HALF <= single_low + MARGIN),
+            "the old single-low-column test wrongly judged the slope grain airborne (the stall)"
         );
     }
 }

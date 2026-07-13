@@ -995,14 +995,15 @@ mod app {
                 // physically rested each grain. A larger patch / true bulk-mass accounting is the deeper fix.
                 let cxf = (pos.x + center.x).clamp(0.5, wmax);
                 let czf = (pos.z + center.z).clamp(0.5, dmax);
-                let xi = cxf.floor() as i32;
-                let zi = czf.floor() as i32;
-                let ground_y = self
-                    .world
-                    .surface_top_voxel(xi, zi)
-                    .map(|t| t as f32 - center.y - 0.5)
-                    .unwrap_or(f32::NEG_INFINITY);
-                let grounded = pos.y - DEBRIS_PART_HALF <= ground_y + SETTLE_GROUND_MARGIN;
+                // Grounded against the SAME bilinear surface the GPU step rests grains on (not a single
+                // column top). On a slope a grain is binned into the lower column of its cell but is
+                // physically held up by the higher corner; testing only the lower column top judged it
+                // airborne and it never de-resolved — so the whole pile stacked on it stalled as rubble
+                // that never returned to the grid (observed: the debris count plateaus at thousands
+                // instead of falling to ~0). The bilinear surface mirrors `particle_step.wgsl::terrain_h`.
+                let surf_y = self.world.surface_height_bilinear(pos);
+                let grounded = surf_y.is_finite()
+                    && pos.y - DEBRIS_PART_HALF <= surf_y + SETTLE_GROUND_MARGIN;
                 // "At rest" — the SAME dual criterion as the CPU `matter::step`: horizontal speed below
                 // SETTLE_SPEED, OR grounded for enough consecutive substeps (the shader's `resting`
                 // counter = the CPU SETTLE_FRAMES fallback) so a grain that has settled onto a pile but
@@ -1180,7 +1181,12 @@ mod app {
                 let dt = (self.time_scale / 60.0) / DEBRIS_SUBSTEPS as f32;
                 self.gpu_particles
                     .set_params(&self.queue, &self.gpu_step_params(dt));
-                for _ in 0..MOON_DEBRIS_SUBSTEPS {
+                // Advance the FULL DEBRIS_SUBSTEPS the `dt` above is sized for. (Regression fix: this loop
+                // was dispatching only MOON_DEBRIS_SUBSTEPS=4 while `dt` still divided the frame by 16, so
+                // terrain debris advanced a quarter of a frame per render — grains fell in slow motion and
+                // hung in the air, never reaching rest. The Moon scene keeps its own substep count in its
+                // own step at debris_frame_dt / MOON_DEBRIS_SUBSTEPS; the two must not be crossed.)
+                for _ in 0..DEBRIS_SUBSTEPS {
                     self.gpu_particles.dispatch(&mut encoder);
                 }
                 // Expand the settled physics grains into the 8× render sub-cubes (once, after stepping).
