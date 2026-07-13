@@ -124,8 +124,21 @@ async function main(): Promise<void> {
       alignItems: "stretch",
       maxHeight: "90vh",
     });
+    // Button feedback: a hover lift, a pressed (held) state, and a brief accent flash on click so a tap
+    // visibly registers — the controls fire a one-shot action (Geologic, Replay) with no other on-screen
+    // acknowledgement, so without this you can't tell a click landed.
+    const btnStyle = document.createElement("style");
+    btnStyle.textContent = `
+      .gf-btn { transition: background 120ms, transform 80ms, box-shadow 120ms; }
+      .gf-btn:hover { background: rgba(38,46,74,0.82) !important; }
+      .gf-btn:active { transform: scale(0.96); }
+      .gf-btn.gf-flash { background: rgba(90,150,255,0.9) !important;
+        box-shadow: 0 0 0 2px rgba(120,170,255,0.7), 0 0 14px rgba(90,150,255,0.6); }
+    `;
+    document.head.appendChild(btnStyle);
     const mkBtn = (label: string, onClick: () => void): HTMLButtonElement => {
       const b = document.createElement("button");
+      b.className = "gf-btn";
       b.textContent = label;
       Object.assign(b.style, {
         padding: "9px 13px",
@@ -138,7 +151,11 @@ async function main(): Promise<void> {
         cursor: "pointer",
         touchAction: "manipulation",
       });
-      b.addEventListener("click", onClick);
+      b.addEventListener("click", () => {
+        b.classList.add("gf-flash");
+        setTimeout(() => b.classList.remove("gf-flash"), 180);
+        onClick();
+      });
       bar.appendChild(b);
       return b;
     };
