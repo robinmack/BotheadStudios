@@ -690,7 +690,7 @@ mod app {
                 self.matter
                     .dig(&mut self.world, &self.mats, hit, DIG_RADIUS, power);
                 // Anything the dig undercut or isolated now collapses and falls.
-                self.matter.collapse(&mut self.world, &self.mats);
+                self.matter.collapse(&mut self.world, &self.mats, self.surface_g);
                 self.flush_debris_to_gpu();
             }
         }
@@ -790,7 +790,7 @@ mod app {
                     (energy - bulk_ke).max(0.0),
                     &self.mats,
                 );
-                self.matter.collapse(&mut self.world, &self.mats);
+                self.matter.collapse(&mut self.world, &self.mats, self.surface_g);
                 self.flush_debris_to_gpu();
 
                 // The meteor is NOT assumed to vaporize — at 1 m resolution its 1000 kg of Fe-Ni is ~0.13 m³,

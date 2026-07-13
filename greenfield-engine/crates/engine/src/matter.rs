@@ -622,29 +622,48 @@ impl MatterSim {
         e_expand
     }
 
-    /// Structural collapse: detach every voxel no longer connected to the anchored base into a
-    /// falling particle (starting from rest). Run after an edit that may have undercut or isolated
-    /// matter (a dig). One pass suffices — `find_unsupported` returns the complete disconnected set,
-    /// so the remainder is fully supported. Returns the number collapsed.
-    pub fn collapse(&mut self, world: &mut World, materials: &[Material]) -> usize {
+    /// Structural collapse: detach every voxel gravity cannot hold into a falling particle (starting
+    /// from rest). Run after an edit that may have undercut or isolated matter (a dig, a meteor crater).
+    /// Uses the honest support model [`World::find_structurally_unsupported`] — support propagates from
+    /// the base UPWARD with a material-strength-limited cantilever — so an undercut crater lip that hangs
+    /// off the rim SIDEWAYS (which the old 6-connectivity `find_unsupported` wrongly kept) now falls.
+    ///
+    /// `g` is the terrain's surface gravity (the emergent ~9.88, `Engine::surface_g`), which sets each
+    /// material's cantilever reach. We iterate to a FIXPOINT: removing an overhang's undercut tip can
+    /// leave the next voxels beyond reach of the (now shorter) braced span, so we re-evaluate until the
+    /// standing matter is self-consistently supported. Each pass only removes voxels, so it terminates;
+    /// for uniform material one pass already converges. Matter-conserving (one particle per voxel).
+    /// Returns the total number collapsed.
+    pub fn collapse(&mut self, world: &mut World, materials: &[Material], g: f32) -> usize {
         let center = world.center();
         let mut n = 0;
-        for (x, y, z) in world.find_unsupported() {
-            if self.particles.len() >= self.max_particles {
+        loop {
+            let unsupported = world.find_structurally_unsupported(materials, g);
+            if unsupported.is_empty() {
                 break;
             }
-            if let Some(mat) = world.material_at(x, y, z) {
-                world.set_voxel(x, y, z, None);
-                let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5) - center;
-                self.particles.push(Particle {
-                    pos,
-                    vel: Vec3::ZERO,
-                    material: mat,
-                    mass: materials[mat].density,
-                    temp_k: REF_TEMP_K,
-                    resting_frames: 0,
-                });
-                n += 1;
+            let mut removed = 0;
+            for (x, y, z) in unsupported {
+                if self.particles.len() >= self.max_particles {
+                    break;
+                }
+                if let Some(mat) = world.material_at(x, y, z) {
+                    world.set_voxel(x, y, z, None);
+                    let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5) - center;
+                    self.particles.push(Particle {
+                        pos,
+                        vel: Vec3::ZERO,
+                        material: mat,
+                        mass: materials[mat].density,
+                        temp_k: REF_TEMP_K,
+                        resting_frames: 0,
+                    });
+                    n += 1;
+                    removed += 1;
+                }
+            }
+            if removed == 0 {
+                break; // hit the particle cap with nothing left to remove — stop cleanly
             }
         }
         if n > 0 {
@@ -1319,7 +1338,8 @@ mod tests {
         assert_eq!(w.find_unsupported(), vec![(5, fy, 5)]);
 
         let mut sim = MatterSim::new(50_000);
-        let n = sim.collapse(&mut w, &mats);
+        let g = 9.88; // emergent surface gravity (Engine::surface_g)
+        let n = sim.collapse(&mut w, &mats, g);
         assert_eq!(n, 1, "only the isolated voxel collapses");
         assert!(w.find_unsupported().is_empty(), "nothing floating remains");
         assert_eq!(w.solid_count() + sim.particle_count(), before + 1);
@@ -1333,6 +1353,49 @@ mod tests {
         }
         assert_eq!(sim.particle_count(), 0, "collapsed matter settles");
         assert_eq!(w.solid_count(), before + 1, "matter conserved");
+    }
+
+    #[test]
+    fn collapse_drops_an_undercut_overhang_and_conserves_matter() {
+        // docs/28 (e): an overhanging lip attached SIDEWAYS to a wall — nothing beneath it — past its
+        // material's cantilever reach must collapse, and collapse conserves matter (voxels removed ==
+        // particles spawned). This is the crater-lip bug: a soil overhang the old 6-connectivity model
+        // called "supported" because it touched the rim. Grass reach ≈ 1 m, so a 6-voxel grass overhang
+        // sheds everything past the first voxel.
+        let mats = materials::load();
+        let g = 9.88;
+        let grass = materials::index_of(&mats, "grass");
+        // A support wall (column to base at x=0) with a 6-voxel grass overhang jutting over air at y0.
+        let (w_, h_, d_) = (48usize, 24usize, 8usize);
+        let mut w = World {
+            w: w_,
+            h: h_,
+            d: d_,
+            voxels: vec![0u16; w_ * h_ * d_],
+            max_top: 16,
+        };
+        let (y0, z0, len) = (15i32, 4i32, 6i32);
+        for y in 0..=y0 {
+            w.set_voxel(0, y, z0, Some(grass));
+        }
+        for x in 1..=len {
+            w.set_voxel(x, y0, z0, Some(grass)); // overhang: nothing below it
+        }
+        let before = w.solid_count();
+
+        let mut sim = MatterSim::new(50_000);
+        let n = sim.collapse(&mut w, &mats, g);
+        assert!(n > 0, "the undercut grass overhang collapses");
+        // Matter conserved: exactly n voxels removed, n particles spawned.
+        assert_eq!(n, sim.particle_count(), "one particle spawned per collapsed voxel");
+        assert_eq!(w.solid_count() + sim.particle_count(), before, "matter conserved");
+        // After collapse the standing matter is self-consistently supported (fixpoint reached).
+        assert!(
+            w.find_structurally_unsupported(&mats, g).is_empty(),
+            "nothing unsupported remains after collapse"
+        );
+        // The support wall survives (it is a column to the base).
+        assert!(w.is_solid(0, y0, z0), "the support wall holds");
     }
 
     #[test]
