@@ -105,6 +105,17 @@ mod app {
     // Stage 1), see `granular::damping_for_restitution` in `gpu_step_params`.
     const CONTACT_TANGENT_DAMP: f32 = 100.0; // friction ramp with slip speed
 
+    // How often the GPU debris is de-resolved back into voxels (docs/22): a grain that has come to REST
+    // on the terrain returns to the voxel grid, matter-conserving, so the debris count falls to ~0 once
+    // the excitement passes (no more "rubble hovering forever"). The readback STALLS the pipeline, so we
+    // amortise it — every N frames, not per frame. ~4×/s at 60 fps is imperceptible next to the ~30 s
+    // settle window and keeps the sky clearing smoothly.
+    const SETTLE_READBACK_INTERVAL: u64 = 15;
+    // A grounded grain whose vertical velocity is only snap-contact jitter still sits a hair BELOW the
+    // heightfield surface under the penalty spring; count it grounded if its base is within this margin
+    // of the terrain top (the shader's own bilinear surface uses the same −0.5 mesh offset).
+    const SETTLE_GROUND_MARGIN: f32 = 0.1;
+
     // Phase 3 dig/fracture.
     const MAX_PARTICLES: usize = 60_000;
     const PARTICLE_CUBE_HALF: f32 = 0.21; // half of the old 0.42 — finer debris, now GPU can afford it
@@ -232,6 +243,9 @@ mod app {
         // GPU-compute debris (docs/22): constructed here so the compute shader/pipeline validate on the
         // device; stepping/rendering are wired incrementally.
         gpu_particles: GpuParticles,
+        /// Frame counter driving the periodic GPU-debris de-resolution (`settle_gpu_debris`): the
+        /// readback stalls the pipeline, so we amortise it over `SETTLE_READBACK_INTERVAL` frames.
+        frame: u64,
 
         camera: Camera,
     }
@@ -578,6 +592,7 @@ mod app {
                 particle_instances,
                 particle_bind,
                 gpu_particles,
+                frame: 0,
                 camera,
             })
         }
@@ -899,6 +914,69 @@ mod app {
             self.matter.particles.clear();
         }
 
+        /// **De-resolution of GPU debris** (`docs/22`, the on-demand-resolution principle in reverse):
+        /// read the live GPU grains back to the CPU and, for every grain that has come to REST on the
+        /// terrain, deposit it back into the voxel grid — matter-conserving (one grain → one voxel), then
+        /// re-upload the survivors so `gpu_particles.count` drops. Without this the GPU debris path never
+        /// returns matter to the grid, so the debris count pinned at thousands forever ("rubble hovers").
+        ///
+        /// The GPU shader can't write CPU voxels, so this is a readback: it STALLS the pipeline (maps the
+        /// buffer), hence it runs only every `SETTLE_READBACK_INTERVAL` frames. "At rest" is the SAME
+        /// horizontal-only test the CPU `matter::step` uses (a grounded grain's residual vertical velocity
+        /// is snap-contact jitter, not motion). Deposit goes through the SHARED
+        /// [`matter::MatterSim::deposit_resting_grain`] primitive, so a grain never lands inside the probe
+        /// or a full column — there it stays a grain. Matter is CONSERVED: a grain is removed from the GPU
+        /// set ONLY when it became a voxel.
+        fn settle_gpu_debris(&mut self) {
+            if self.gpu_particles.count == 0 {
+                return;
+            }
+            let grains = self.gpu_particles.readback(&self.device, &self.queue);
+            let center = self.world.center();
+            // The probe is dynamic matter debris must pile ON, never through — model it as its bounding
+            // sphere (COM + collision radius), the same body test `matter::step` applies.
+            let com = self.probe.com();
+            let probe_body = crate::body::Sphere::new(
+                Vec3::new(com.x as f32, com.y as f32, com.z as f32),
+                self.probe.total_mass() as f32,
+                SPHERE_RADIUS,
+            );
+            let bodies = [probe_body];
+
+            let mut survivors: Vec<GpuParticle> = Vec::with_capacity(grains.len());
+            for g in &grains {
+                let pos = Vec3::new(g.offset[0], g.offset[1], g.offset[2]);
+                let (vx, vz) = (g.vel[0], g.vel[2]);
+                let horiz = (vx * vx + vz * vz).sqrt();
+                // Grounded? Compare the grain's base to the SAME bilinear terrain surface the shader
+                // collides against (heightfield top, mesh iso-surface 0.5 below the air voxel).
+                let xi = (pos.x + center.x).floor() as i32;
+                let zi = (pos.z + center.z).floor() as i32;
+                let ground_y = self
+                    .world
+                    .surface_top_voxel(xi, zi)
+                    .map(|t| t as f32 - center.y - 0.5)
+                    .unwrap_or(f32::NEG_INFINITY);
+                let grounded = pos.y - DEBRIS_PART_HALF <= ground_y + SETTLE_GROUND_MARGIN;
+                if grounded
+                    && horiz < matter::SETTLE_SPEED
+                    && self.matter.deposit_resting_grain(
+                        &mut self.world,
+                        pos,
+                        g.material as usize,
+                        &bodies,
+                    )
+                {
+                    continue; // became a voxel — drop it from the GPU set
+                }
+                survivors.push(*g);
+            }
+
+            if survivors.len() != grains.len() {
+                self.gpu_particles.replace(&self.queue, &survivors);
+            }
+        }
+
         /// Re-upload the terrain heightfield (the GPU step collides debris against it) after the world
         /// changes (a dig/impact alters column tops).
         /// Upload the probe's particles to its render instance buffer, glowing by temperature.
@@ -1006,6 +1084,15 @@ mod app {
         /// Render one frame (advances the simulation first).
         pub fn render(&mut self) -> Result<(), JsValue> {
             self.step_physics();
+            // Periodically de-resolve settled GPU debris back into voxels (docs/22): grains at rest on
+            // the terrain become voxels again, so the debris count falls to ~0 once the excitement passes
+            // and the crater/terrain fills honestly with settled matter. Amortised (it stalls). Runs
+            // BEFORE the dirty check so the deposits it makes remesh + re-upload the heightfield this
+            // same frame.
+            self.frame = self.frame.wrapping_add(1);
+            if self.frame % SETTLE_READBACK_INTERVAL == 0 {
+                self.settle_gpu_debris();
+            }
             if self.matter.take_dirty() {
                 self.remesh_world();
                 self.upload_heightfield_to_gpu(); // the crater changed the column tops
@@ -1828,6 +1915,49 @@ mod app {
 
         fn set_params(&self, queue: &wgpu::Queue, params: &GpuStepParams) {
             queue.write_buffer(&self.params, 0, bytemuck::bytes_of(params));
+        }
+
+        /// Read the live PHYSICS grains back to the CPU (`docs/22` de-resolution). Copies the storage
+        /// buffer into a transient `MAP_READ` staging buffer, maps it, and returns the current
+        /// `GpuParticle` states. This STALLS (maps with `Maintain::Wait`, like `tools/gpu-verify`), so it
+        /// is called only periodically to amortise the cost — never per frame. Returns the first `count`
+        /// grains (the tail past `count` is stale scratch and never stepped).
+        fn readback(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Vec<GpuParticle> {
+            if self.count == 0 {
+                return Vec::new();
+            }
+            let size = self.count as u64 * std::mem::size_of::<GpuParticle>() as u64;
+            let staging = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("gpu-particles-readback"),
+                size,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut enc =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            enc.copy_buffer_to_buffer(&self.buf, 0, &staging, 0, size);
+            queue.submit(std::iter::once(enc.finish()));
+            let slice = staging.slice(..);
+            slice.map_async(wgpu::MapMode::Read, |_| {});
+            device.poll(wgpu::Maintain::Wait);
+            let data = slice.get_mapped_range();
+            let out = bytemuck::cast_slice::<u8, GpuParticle>(&data).to_vec();
+            drop(data);
+            staging.unmap();
+            out
+        }
+
+        /// Replace the buffer contents with `survivors` and set `count` to their number — the compaction
+        /// half of de-resolution. Grains that settled back into voxels (CPU-side) are simply not in
+        /// `survivors`, so `count` drops; the tail past the new count is left as-is (never stepped/drawn
+        /// because every pass bounds itself by `count`). Matter is NOT destroyed here — the caller has
+        /// already turned each removed grain into a voxel; this only shrinks the live GPU set.
+        fn replace(&mut self, queue: &wgpu::Queue, survivors: &[GpuParticle]) {
+            let take = survivors.len().min(self.capacity as usize);
+            if take > 0 {
+                queue.write_buffer(&self.buf, 0, bytemuck::cast_slice(&survivors[..take]));
+            }
+            self.count = take as u32;
         }
     }
 
