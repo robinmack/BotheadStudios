@@ -15,3 +15,13 @@ opt-level = "s"
 lto = true
 codegen-units = 1
 panic = "abort"
+
+# The test suite is dominated by long numerical-integration loops (e.g.
+# 200_000-step atmosphere settling, 100_000-step body integration), so it is
+# runtime-bound, not compile-bound. Without this override tests would inherit
+# the default dev opt-level = 0 and every loop would run unoptimized. Building
+# tests at opt-level = 3 cuts suite wall-time ~8x (≈193s → ≈24s) for a one-time
+# ~40s compile — a clear win for a runtime-bound suite. (opt-level = 2 measured
+# ≈25s at the same compile cost, so 3 is the marginally honest winner.)
+[profile.test]
+opt-level = 3
