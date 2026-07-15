@@ -378,7 +378,6 @@ pub fn furrow_target_grains(
 /// incandescence). No deposited momentum, no assigned heat, no scripted anything. Returns the aggregate +
 /// its initial accelerations.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub fn build_impact_debris_between(
     mats: &[Material],
     site: DVec3,
@@ -391,23 +390,53 @@ pub fn build_impact_debris_between(
     earth_mass: f64,
     earth_radius: f64,
 ) -> (Aggregate, Vec<DVec3>) {
+    build_impact_debris_scaled(
+        mats, site, earth_pos, earth_vel, impactor_mass, v_contact, impactor, target, earth_mass,
+        earth_radius, DEBRIS_N, CAP_N,
+    )
+}
+
+/// The mutual-impact builder at an EXPLICIT resolution (`debris_n` impactor fragments, `cap_n` excavated
+/// target grains) — the RESOLUTION knob for docs/28's "raise N globally" path. Grain count matters
+/// PHYSICALLY: the proto-lunar disk forms by collisional angular-momentum exchange, and the excavation
+/// flow / ploughing that lofts Earth material is a continuum finer than a grain (declared as an IOU today,
+/// [`Furrow::ejection`]); both EMERGE only as N rises toward the collisional regime. This function lets the
+/// tests sweep N to measure that emergence (self-gravity is O(n²), so the cost rises as N²). The public
+/// [`build_impact_debris_between`] is this at the default (`DEBRIS_N`, `CAP_N`). The CAP_N/DEBRIS_N RATIO
+/// sets the excavated cap mass relative to the impactor (today 2×, a flagged over-mass — docs/28 item 4).
+#[allow(clippy::too_many_arguments)]
+pub fn build_impact_debris_scaled(
+    mats: &[Material],
+    site: DVec3,
+    earth_pos: DVec3,
+    earth_vel: DVec3,
+    impactor_mass: f64,
+    v_contact: DVec3,
+    impactor: &crate::planet::LayeredBody,
+    target: &crate::planet::LayeredBody,
+    earth_mass: f64,
+    earth_radius: f64,
+    debris_n: usize,
+    cap_n: usize,
+) -> (Aggregate, Vec<DVec3>) {
+    let impact_n = debris_n + cap_n;
     let moon_mass = impactor_mass;
     let moon_r = impactor.radius();
     let basalt = materials::index_of(mats, "basalt");
     let mat = &mats[basalt];
     // Equal-mass grains (the mass-agnostic contact model): the target's crust is materialized at the
     // SAME grain mass as the impactor's, so `contact_accel` applies directly and momentum conserves.
-    let frag_mass = moon_mass / DEBRIS_N as f64;
+    let frag_mass = moon_mass / debris_n as f64;
     let n = (site - earth_pos).normalize_or_zero(); // outward surface normal at the impact point
     let surface = earth_pos + n * earth_radius; // where the impactor meets the ground
 
-    let mut particles = Vec::with_capacity(IMPACT_N);
-    let mut mat_ids = Vec::with_capacity(IMPACT_N);
-    let mut temps = Vec::with_capacity(IMPACT_N);
+    let mut particles = Vec::with_capacity(impact_n);
+    let mut mat_ids = Vec::with_capacity(impact_n);
+    let mut temps = Vec::with_capacity(impact_n);
     // PROVENANCE (docs/28): tag which body each grain is, as a physical attribute — so the disk's
     // composition can be MEASURED (is any of the Moon Earth-derived, as the real one is?) and tinted by
     // origin, not inferred from an index convention that swap_remove would scramble.
-    let mut source = Vec::with_capacity(IMPACT_N);
+    let mut source = Vec::with_capacity(impact_n);
 
     // Both bodies are LAYERED (docs/25): each materialized particle samples the real construction —
     // material AND internal temperature — at its own radius. Nothing is uniform "rock": the Moon brings
@@ -420,8 +449,8 @@ pub fn build_impact_debris_between(
     // IMPACTOR — a rubble ball touching the surface, moving at the TRUE contact velocity (relative to
     // the target). Its momentum and kinetic energy are carried mechanically, exactly once.
     let moon_center = surface + n * moon_r;
-    for i in 0..DEBRIS_N {
-        let rr = moon_r * ((i as f64 + 0.5) / DEBRIS_N as f64).cbrt();
+    for i in 0..debris_n {
+        let rr = moon_r * ((i as f64 + 0.5) / debris_n as f64).cbrt();
         particles.push(Body {
             pos: moon_center + fib_dir(i, DEBRIS_N) * rr,
             vel: earth_vel + v_contact,
@@ -451,7 +480,7 @@ pub fn build_impact_debris_between(
         moon_r,
         frag_mass,
         earth_vel,
-        CAP_N,
+        cap_n,
         cap_extent,
         moon_mass, // impactor mass → the impact-energy cap (Theia is within budget: no scaling)
         surface_g, // gravity-regime ejecta velocity scale K·√(g·R_crater)
@@ -850,6 +879,122 @@ mod tests {
             aloft_earth / MOON_MASS,
             aloft_theia / MOON_MASS
         );
+    }
+
+    #[test]
+    #[ignore = "N-scaling sweep — long-running (O(n²)); run explicitly with --ignored"]
+    fn disk_provenance_vs_resolution_sweep() {
+        // docs/28 "raise N globally": does Earth-derived material loft into the bound disk as RESOLUTION
+        // rises — i.e. does the progressive ploughing that makes the Moon Earth-derived EMERGE from the
+        // contact physics, letting us delete the declared shock-ejection IOU? This is a MEASUREMENT, not a
+        // pass/fail: it prints the bound-aloft Earth/Theia split and the escaped fraction at several N, so
+        // the N→emergence trend is a number, not a guess. Self-gravity is O(n²), so wall-time rises ~N².
+        // MEASURED (2026-07-14): Earth 0.000 at every N (384/768/1536); the declared 45°/sub-orbital
+        // ejection re-impacts regardless of N. The deficit is a MISSING MECHANISM, not resolution.
+        let mats = materials::load();
+        let theia = crate::planet::theia();
+        let earth = crate::planet::earth();
+        let m_theia = theia.total_mass();
+        let site = DVec3::new(0.0, EARTH_RADIUS_M, 0.0);
+        let v_esc = (2.0 * G * (EARTH_MASS + m_theia) / (EARTH_RADIUS_M + theia.radius())).sqrt();
+        let v_contact = DVec3::new(v_esc * 0.7071, -v_esc * 0.7071, 0.0);
+        let mu = G * EARTH_MASS;
+        // Keep the CAP_N/DEBRIS_N ratio at the current 2:1 (the cap-mass fudge is docs/28 item 4, held
+        // fixed here so this isolates the effect of RESOLUTION alone). Sweep the linear scale ×1,×2,×4.
+        println!("\n N (deb+cap) | Earth aloft | Theia aloft | Earth esc | Theia esc  (M_moon)");
+        for &(debris_n, cap_n) in &[(128usize, 256usize), (256, 512), (512, 1024)] {
+            let (mut agg, mut acc) = build_impact_debris_scaled(
+                &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia, &earth, EARTH_MASS,
+                EARTH_RADIUS_M, debris_n, cap_n,
+            );
+            for _ in 0..3000 {
+                agg.step(&mut acc, 2.0);
+            }
+            let (mut ae, mut at, mut ee, mut et) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+            for (i, p) in agg.particles.iter().enumerate() {
+                let r = p.pos.length();
+                let bound = 0.5 * p.vel.length_squared() - mu / r < 0.0;
+                let is_earth = agg.source[i] == crate::aggregate::SOURCE_TARGET;
+                if bound && r > 1.1 * EARTH_RADIUS_M {
+                    if is_earth {
+                        ae += p.mass
+                    } else {
+                        at += p.mass
+                    }
+                } else if !bound {
+                    if is_earth {
+                        ee += p.mass
+                    } else {
+                        et += p.mass
+                    }
+                }
+            }
+            println!(
+                " {:>4}+{:<5} | {:>10.3} | {:>10.3} | {:>8.3} | {:>8.3}",
+                debris_n,
+                cap_n,
+                ae / MOON_MASS,
+                at / MOON_MASS,
+                ee / MOON_MASS,
+                et / MOON_MASS
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "N-scaling EMERGENCE sweep — long-running (O(n²)); run explicitly with --ignored"]
+    fn disk_provenance_emergence_no_declared_ejection() {
+        // The decisive test of docs/28's "raise N" hypothesis ON ITS OWN TERMS: with the DECLARED shock
+        // ejection turned OFF (the cap starts AT REST), does the impactor's CONTACT ploughing loft Earth
+        // material into the disk — the emergence docs/24 wants — and does it GROW with resolution? If Earth
+        // stays ~0 as N rises here, contact ploughing is not lofting target material at feasible N (the
+        // µs shock is sub-resolution at ANY N — docs/24 problem #1), so raising N alone is not the lever.
+        // MEASURED (2026-07-14): Earth 0.000 at N=384 AND N=1536 — contact ploughing drives the resting
+        // cap DOWN into the planet, not up. Confirms the deficit is mechanism, not resolution.
+        let mats = materials::load();
+        let theia = crate::planet::theia();
+        let earth = crate::planet::earth();
+        let m_theia = theia.total_mass();
+        let site = DVec3::new(0.0, EARTH_RADIUS_M, 0.0);
+        let v_esc = (2.0 * G * (EARTH_MASS + m_theia) / (EARTH_RADIUS_M + theia.radius())).sqrt();
+        let v_contact = DVec3::new(v_esc * 0.7071, -v_esc * 0.7071, 0.0);
+        let mu = G * EARTH_MASS;
+        println!("\n[EMERGENCE: cap at REST, contact must do the lofting]");
+        println!(" N (deb+cap) | Earth aloft | Theia aloft   (M_moon)");
+        for &(debris_n, cap_n) in &[(128usize, 256usize), (512, 1024)] {
+            let (mut agg, mut acc) = build_impact_debris_scaled(
+                &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia, &earth, EARTH_MASS,
+                EARTH_RADIUS_M, debris_n, cap_n,
+            );
+            // Strip the DECLARED ejection: every target grain back to rest (ground velocity = 0 here).
+            for (i, p) in agg.particles.iter_mut().enumerate() {
+                if agg.source[i] == crate::aggregate::SOURCE_TARGET {
+                    p.vel = DVec3::ZERO;
+                }
+            }
+            acc = agg.accelerations();
+            for _ in 0..3000 {
+                agg.step(&mut acc, 2.0);
+            }
+            let (mut ae, mut at) = (0.0f64, 0.0f64);
+            for (i, p) in agg.particles.iter().enumerate() {
+                let r = p.pos.length();
+                if 0.5 * p.vel.length_squared() - mu / r < 0.0 && r > 1.1 * EARTH_RADIUS_M {
+                    if agg.source[i] == crate::aggregate::SOURCE_TARGET {
+                        ae += p.mass
+                    } else {
+                        at += p.mass
+                    }
+                }
+            }
+            println!(
+                " {:>4}+{:<5} | {:>10.3} | {:>10.3}",
+                debris_n,
+                cap_n,
+                ae / MOON_MASS,
+                at / MOON_MASS
+            );
+        }
     }
 
     #[test]

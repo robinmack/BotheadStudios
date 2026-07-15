@@ -5,6 +5,58 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-14 — Measured: "raise N" does NOT loft Earth material (the disk deficit is a mechanism, not a resolution, problem)
+
+**What.** Investigated docs/28 step 3 (progressive excavation) — why the proto-lunar disk is ~100%
+impactor ("nothing is taken from Earth"). Made the impact resolution a real knob
+(`impact::build_impact_debris_scaled(.., debris_n, cap_n)`; the const `build_impact_debris_between`
+delegates at the default 128/256) and added two `#[ignore]` measurement sweeps
+(`disk_provenance_vs_resolution_sweep`, `disk_provenance_emergence_no_declared_ejection`). Then MEASURED
+the bound-aloft disk composition across N — the honest test of the "raise N globally" hypothesis.
+
+**Why.** Before spending the O(n²)→tree perf work that a global N increase would require, prove that more
+resolution actually lofts Earth-derived material. It does not.
+
+**Verified (measured, native).** Bound-aloft mass by provenance (M☾), 3000×2 s aftermath:
+- Declared ejection ON: N=384/768/1536 → **Earth 0.000 / 0.000 / 0.000**; Theia 0.69 / 0.35 / 0.72
+  (the Theia disk mass does not even converge — it is relaxation-noise-limited, the docs/28 collisionless
+  ceiling, not resolution-starved).
+- Declared ejection OFF (cap AT REST, contact ploughing must do the lofting): N=384/1536 →
+  **Earth 0.000 / 0.000**; Theia 0.69 / 0.84.
+
+**Earth material lofts in NONE of the six configurations.** The cause is provable and N-INDEPENDENT: a
+grain launched from the surface needs a near-tangential speed ≥ the ~7.9 km/s circular velocity to hold a
+perigee above the surface. The declared `Furrow::ejection` gives ~5.9 km/s at ~45° (horizontal ≈ 4.1
+km/s) — sub-orbital, so every cap grain re-impacts, at any N. With the ejection OFF, contact ploughing
+drives the resting cap DOWN and downrange into the planet, not up — the shock-driven excavation flow that
+would loft it is sub-resolution at any feasible N (docs/24 problem #1), so it never emerges. **Conclusion:
+the Earth-lofting deficit is a MISSING MECHANISM, not a resolution shortfall; "raise N globally" is not
+the lever.** A separate dead end confirmed and reverted en route: a momentum-conserving "ploughing drag"
+(impactor drags cap downrange toward the COM tangential velocity) makes it WORSE (both → 0.000) — full
+inelastic sharing drops the impactor to v_t/3 and guts its own disk, and the cap only reaches ~2.2 km/s,
+still sub-orbital.
+
+**The real levers (for the next session / Robin's steer), all no-fudge (docs/23, docs/24):**
+1. **Materials-honest contact.** Theia's *construction* is layered (iron core + peridotite mantle, as
+   theorized), but its collision *physics* is bulk **basalt** for every grain (restitution 0.40, basalt
+   density for grain radius, equal grain mass). That basalt restitution IS the disk's damping law. The
+   aggregate contact already carries per-grain `mat_ids` and is momentum-conserving for ANY mass ratio
+   (equal-and-opposite forces ÷ each own mass) — so per-grain real material + real ρ·V mass is viable at
+   full resolution; it just needs the contact loop to read `mat_ids`. This also fixes docs/28 item 4 (the
+   cap is ~6.5× over-massed: 2× impactor vs the physical ρ·V furrow ≈ 0.31× impactor).
+2. **The docs/24 emergence subsystem** — deposit the impactor's momentum/energy as real compression so
+   REBOUND lofts material (delete the declared `Furrow::ejection`). Since the µs shock is sub-resolution
+   at any N, the honest form is a momentum-CONSERVING loft that gives near-track excavated Earth material
+   *near-orbital tangential* velocity from the impactor's momentum (not the radial 45° script) — the
+   corrected version of the reverted drag, unblocked once the cap mass is physical (item 1).
+
+**Shipped this pass:** the N knob + the two reproducible measurement sweeps (all 136 native tests green;
+the sweeps are `--ignored`, O(n²)). No physics claim shipped — the finding is the deliverable. On-device
+rig-watch not required (nothing visual changed). NOTE: the Jul 12 render-truth fixes and the Jul 13
+terrain-contact/furrow commits are still un-journaled — a catch-up entry is outstanding.
+
+---
+
 ## 2026-07-11 — The engine watches itself: the rig, the profiler, and a 7× frame
 
 **What.** The agent now verifies scenes with its own eyes before shipping them (Robin: "simulate
