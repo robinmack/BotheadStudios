@@ -1147,6 +1147,60 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "orbit-vs-resolution sweep — long-running (O(n²)); run with --ignored"]
+    fn disk_orbit_vs_resolution() {
+        // Does the TRULY-ORBITING disk (perigee > R, the honest metric) grow with resolution, now that the
+        // full fluid physics is in (plough loft + real vapor SPH pressure + PdV + latent heat)? If the
+        // orbiting mass climbs with N, resolution is the lever (the disk is a fluid that needs enough
+        // parcels — a Moon-forming SPH run uses 10⁴–10⁶); if flat, we learned it cheaply. O(n²) ⇒ ~N² cost.
+        let mats = materials::load();
+        let theia = crate::planet::theia();
+        let earth = crate::planet::earth();
+        let m_theia = theia.total_mass();
+        let site = DVec3::new(0.0, EARTH_RADIUS_M, 0.0);
+        let v_esc = (2.0 * G * (EARTH_MASS + m_theia) / (EARTH_RADIUS_M + theia.radius())).sqrt();
+        let v_contact = DVec3::new(v_esc * 0.7071, -v_esc * 0.7071, 0.0);
+        let mu = G * EARTH_MASS;
+        println!("\n N (deb+cap) | Earth orbiting | Theia orbiting | total (M_moon, perigee>R)");
+        for &(dn, cn) in &[(128usize, 256usize), (256, 512), (512, 1024)] {
+            let (mut agg, mut acc) = build_impact_debris_scaled(
+                &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia, &earth, EARTH_MASS,
+                EARTH_RADIUS_M, dn, cn,
+            );
+            for _ in 0..3000 {
+                agg.step(&mut acc, 2.0);
+            }
+            let (mut earth_orb, mut theia_orb) = (0.0f64, 0.0f64);
+            for (i, p) in agg.particles.iter().enumerate() {
+                let r = p.pos.length();
+                let eps = 0.5 * p.vel.length_squared() - mu / r;
+                if eps >= 0.0 || r <= 1.1 * EARTH_RADIUS_M {
+                    continue;
+                }
+                let h = p.pos.cross(p.vel).length();
+                let e = (1.0 + 2.0 * eps * h * h / (mu * mu)).max(0.0).sqrt();
+                let perigee = (-mu / (2.0 * eps)) * (1.0 - e);
+                if perigee > EARTH_RADIUS_M {
+                    if agg.source[i] == crate::aggregate::SOURCE_TARGET {
+                        earth_orb += p.mass;
+                    } else {
+                        theia_orb += p.mass;
+                    }
+                }
+            }
+            let mm = MOON_MASS;
+            println!(
+                " {:>4}+{:<5} | {:>14.4} | {:>14.4} | {:.4}",
+                dn,
+                cn,
+                earth_orb / mm,
+                theia_orb / mm,
+                (earth_orb + theia_orb) / mm
+            );
+        }
+    }
+
+    #[test]
     #[ignore = "energy-budget diagnostic — run with --ignored"]
     fn impact_energy_budget_is_heat_created_or_converted() {
         // Heat-budget check (docs/28): the vapor sits at ~18,500 K, far above real (~few 1000 K). Is that
