@@ -144,6 +144,11 @@ pub struct Aggregate {
     /// `step`, cools as it expands (energy-conserving). 0 ⇒ fall back to the old `contact_gas` overlap law.
     pub vapor_rs: f64,
     pub vapor_h: f64,
+    /// LATENT-HEAT offset L_v/c (K): the energy absorbed by the phase change itself, which is stored in
+    /// the parcel's tracked `temps` (it must reach boil + L_v/c to flag vapor) but is NOT thermal motion —
+    /// so the pressure-driving temperature is `temps − vapor_latent_k` (docs/28: latent heat has a
+    /// reservoir, not fake sensible T). Without this the vapor pressure over-reads by ~L_v/c ≈ 7,000 K.
+    pub vapor_latent_k: f64,
     /// Cached SPH density at each vaporized parcel (from `accelerations`), reused by `step`'s PdV cooling.
     pub vapor_rho: Vec<f64>,
     /// Per-particle PROVENANCE (docs/28): which body this matter came from — [`SOURCE_IMPACTOR`] (Theia)
@@ -190,6 +195,7 @@ impl Aggregate {
             boil_k: f64::INFINITY,
             vapor_rs: 0.0,
             vapor_h: 0.0,
+            vapor_latent_k: 0.0,
             vapor_rho: Vec::new(),
             source: vec![SOURCE_IMPACTOR; n],
         }
@@ -214,9 +220,10 @@ impl Aggregate {
     /// Enable the REAL SPH vapor pressure field (docs/26/27): `rs` = the vapor's specific gas constant
     /// (`atmosphere::specific_gas_constant`), `h` = the kernel smoothing length (≈ a few vapor-parcel
     /// spacings). Vapor↔vapor pairs then use a continuum P = ρ·R_s·T pressure instead of the overlap hack.
-    pub fn with_vapor_sph(mut self, rs: f64, h: f64) -> Self {
+    pub fn with_vapor_sph(mut self, rs: f64, h: f64, latent_k: f64) -> Self {
         self.vapor_rs = rs;
         self.vapor_h = h;
+        self.vapor_latent_k = latent_k.max(0.0);
         self
     }
 
@@ -347,6 +354,7 @@ impl Aggregate {
             boil_k: f64::INFINITY,
             vapor_rs: 0.0,
             vapor_h: 0.0,
+            vapor_latent_k: 0.0,
             vapor_rho: Vec::new(),
             source: vec![SOURCE_IMPACTOR; n],
         }
@@ -679,8 +687,11 @@ impl Aggregate {
                     if r >= h || r < 1.0e-9 {
                         continue;
                     }
-                    let pi = rho[i] * self.vapor_rs * self.temps[i] as f64;
-                    let pj = rho[j] * self.vapor_rs * self.temps[j] as f64;
+                    // Pressure-driving temperature EXCLUDES the latent heat (docs/28): P = ρ·R_s·(T − L_v/c).
+                    let ti = (self.temps[i] as f64 - self.vapor_latent_k).max(1.0);
+                    let tj = (self.temps[j] as f64 - self.vapor_latent_k).max(1.0);
+                    let pi = rho[i] * self.vapor_rs * ti;
+                    let pj = rho[j] * self.vapor_rs * tj;
                     let term = pi / (rho[i] * rho[i]) + pj / (rho[j] * rho[j]);
                     let grad = (dv / r) * crate::atmosphere::sph_dw(r, h); // dW<0 ⇒ repulsive
                     acc[i] += grad * (-term * self.particles[j].mass);
@@ -806,8 +817,10 @@ impl Aggregate {
                     if ri <= 0.0 || rj <= 0.0 {
                         continue;
                     }
-                    let pi = ri * self.vapor_rs * self.temps[i] as f64;
-                    let pj = rj * self.vapor_rs * self.temps[j] as f64;
+                    let ti = (self.temps[i] as f64 - self.vapor_latent_k).max(1.0); // latent-excluded (docs/28)
+                    let tj = (self.temps[j] as f64 - self.vapor_latent_k).max(1.0);
+                    let pi = ri * self.vapor_rs * ti;
+                    let pj = rj * self.vapor_rs * tj;
                     let grad = (dv / r) * crate::atmosphere::sph_dw(r, h);
                     let dwv = (self.particles[i].vel - self.particles[j].vel).dot(grad); // (v_i−v_j)·∇_iW
                     du[i] += (pi / (ri * ri)) * self.particles[j].mass * dwv;
@@ -976,7 +989,7 @@ mod tests {
         let spacing = 1.0;
         let ps = cloud(3, spacing, 1.0); // 27 equal-mass parcels
         let (c, rs, h, t0) = (840.0f64, 100.0f64, 2.5 * spacing, 6000.0f32);
-        let mut agg = Aggregate::new(ps, 0.0).with_vapor_sph(rs, h).with_specific_heat(c);
+        let mut agg = Aggregate::new(ps, 0.0).with_vapor_sph(rs, h, 0.0).with_specific_heat(c);
         agg.self_gravity = false; // isolate the vapor pressure from gravity
         agg.boil_k = 0.0; // keep parcels flagged vapor as they cool (temp stays > 0)
         agg.temps = vec![t0; agg.particles.len()];

@@ -548,7 +548,11 @@ pub fn build_impact_debris_scaled(
         // REAL vapor pressure (docs/26/27): once shock heat vaporizes the parcels, a continuum SPH pressure
         // P = ρ·R_s·T (basalt's gas constant) does the expansion work the overlap hack couldn't — the plume
         // launches and cools by PdV. Smoothing length ≈ the impactor radius (a few initial parcel spacings).
-        .with_vapor_sph(crate::atmosphere::specific_gas_constant(mat), moon_r.max(1.0))
+        .with_vapor_sph(
+            crate::atmosphere::specific_gas_constant(mat),
+            moon_r.max(1.0),
+            mat.thermal.as_ref().map_or(0.0, |t| t.latent_vaporization as f64 / specific_heat),
+        )
         .with_specific_heat(specific_heat)
         .with_boundary(earth_pos, earth_radius, contact.stiffness)
         .with_boundary_hole(surface, cap_extent);
@@ -1139,6 +1143,73 @@ mod tests {
             100.0 * vapor_mass / total,
             tmean,
             tmax
+        );
+    }
+
+    #[test]
+    #[ignore = "energy-budget diagnostic — run with --ignored"]
+    fn impact_energy_budget_is_heat_created_or_converted() {
+        // Heat-budget check (docs/28): the vapor sits at ~18,500 K, far above real (~few 1000 K). Is that
+        // heat CREATED (a conservation bug) or CONVERTED from the impact + gravitational energy (real, but
+        // with too few outlets)? Total energy E = KE + U(heat) + PE_ext + PE_self must only ever DECREASE
+        // (radiation removes it); if U grows more than the available KE+PE, energy is being manufactured.
+        let mats = materials::load();
+        let theia = crate::planet::theia();
+        let earth = crate::planet::earth();
+        let m_theia = theia.total_mass();
+        let site = DVec3::new(0.0, EARTH_RADIUS_M, 0.0);
+        let v_esc = (2.0 * G * (EARTH_MASS + m_theia) / (EARTH_RADIUS_M + theia.radius())).sqrt();
+        let v_contact = DVec3::new(v_esc * 0.7071, -v_esc * 0.7071, 0.0);
+        let (mut agg, mut acc) = build_impact_debris_scaled(
+            &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia, &earth, EARTH_MASS,
+            EARTH_RADIUS_M, 128, 256,
+        );
+        let c = agg.specific_heat;
+        let energy = |a: &Aggregate| -> (f64, f64, f64, f64) {
+            let ke: f64 = a.particles.iter().map(|p| 0.5 * p.mass * p.vel.length_squared()).sum();
+            let u: f64 =
+                a.particles.iter().zip(a.temps.iter()).map(|(p, &t)| p.mass * c * t as f64).sum();
+            let (mu, r_e) = (G * EARTH_MASS, EARTH_RADIUS_M);
+            let pe_ext: f64 = a
+                .particles
+                .iter()
+                .map(|p| {
+                    let r = p.pos.length();
+                    let phi = if r >= r_e {
+                        -mu / r
+                    } else {
+                        -mu / (2.0 * r_e) * (3.0 - (r / r_e).powi(2))
+                    };
+                    p.mass * phi
+                })
+                .sum();
+            let s2 = a.softening * a.softening;
+            let mut pe_self = 0.0;
+            for i in 0..a.particles.len() {
+                for j in (i + 1)..a.particles.len() {
+                    let d2 = (a.particles[i].pos - a.particles[j].pos).length_squared() + s2;
+                    pe_self -= G * a.particles[i].mass * a.particles[j].mass / d2.sqrt();
+                }
+            }
+            (ke, u, pe_ext, pe_self)
+        };
+        let (ke0, u0, pe0, ps0) = energy(&agg);
+        let e0 = ke0 + u0 + pe0 + ps0;
+        for _ in 0..300 {
+            agg.step(&mut acc, 2.0);
+        }
+        let (ke1, u1, pe1, ps1) = energy(&agg);
+        let e1 = ke1 + u1 + pe1 + ps1;
+        println!("\n           KE           U(heat)      PE_ext       PE_self      TOTAL");
+        println!("t=0    {ke0:.3e} {u0:.3e} {pe0:.3e} {ps0:.3e} {e0:.3e}");
+        println!("t=end  {ke1:.3e} {u1:.3e} {pe1:.3e} {ps1:.3e} {e1:.3e}");
+        println!("impact KE input      = {:.3e} J", 0.5 * m_theia * v_contact.length_squared());
+        println!("ΔU (heat generated)  = {:.3e} J", u1 - u0);
+        println!("ΔKE                  = {:.3e} J", ke1 - ke0);
+        println!("ΔPE (ext+self)       = {:.3e} J", (pe1 + ps1) - (pe0 + ps0));
+        println!(
+            "TOTAL energy drift   = {:.2}%  (must be ≤ 0: only radiation removes energy)",
+            100.0 * (e1 - e0) / e0.abs()
         );
     }
 
