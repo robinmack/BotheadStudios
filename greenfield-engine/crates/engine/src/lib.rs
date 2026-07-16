@@ -35,6 +35,7 @@ mod isotropy;
 mod materials;
 mod matter;
 mod mesher;
+mod neighbors;
 mod orbit;
 mod texture;
 mod world;
