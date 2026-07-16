@@ -749,6 +749,32 @@ impl Aggregate {
         ((2.0 * dt * omega).ceil() as usize).max(1)
     }
 
+    /// PER-PARTICLE timestep (docs/30 stage 3, the foundation of block/individual timesteps): each
+    /// particle's own stable step from its DYNAMICAL time at the current acceleration `acc[i]` — the
+    /// free-fall time √(ε/|a|) (ε = the gravity softening, the shortest resolved length), tightened by the
+    /// turnaround time |v|/|a| where a particle is being violently accelerated (a fresh contact). `eta` is
+    /// the accuracy factor (~0.03–0.05). The violent shocked core comes out with a TINY dt (must be updated
+    /// often); the quiescent disk with a LARGE dt (can coast) — the split a block scheduler buckets by, so
+    /// per-step cost drops from O(N) to O(N_active). The scheduler that consumes these (a hierarchical,
+    /// conservation-checked leapfrog with prediction) is the next, larger piece — this criterion is its
+    /// small, testable foundation, and it changes NOTHING until that scheduler is wired in.
+    pub fn particle_timesteps(&self, acc: &[DVec3], eta: f64) -> Vec<f64> {
+        let eps = self.softening.max(1.0e-9);
+        self.particles
+            .iter()
+            .zip(acc)
+            .map(|(p, a)| {
+                let amag = a.length();
+                if amag <= 1.0e-30 {
+                    return f64::INFINITY; // unaccelerated ⇒ no constraint (a lone drifting body)
+                }
+                let t_ff = (eps / amag).sqrt(); // free-fall / dynamical time
+                let t_coll = p.vel.length() / amag; // turnaround time (velocity / accel)
+                eta * if t_coll > 0.0 { t_ff.min(t_coll) } else { t_ff }
+            })
+            .collect()
+    }
+
     /// A coordination-corrected, **sub-critical** bond damping (N·s/m) that settles the solid without
     /// the explicit integrator going unstable. A particle with `z` bonds sees effective damping `z·c`;
     /// its critical damping is `2√(K·m) = 2√(z·k·m)`, so per bond `c_crit = 2√(k·m)/√z`. We use
@@ -1003,6 +1029,26 @@ impl Aggregate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn particle_timesteps_shrink_with_acceleration() {
+        // docs/30 stage 3 criterion: a violently-accelerated particle gets a SMALLER dt than a quiescent
+        // one (the whole point — it must be updated more often), positive/finite for real accel, and an
+        // unaccelerated body is unconstrained (∞). Free-fall scaling dt ∝ √(ε/|a|) with velocity 0.
+        let ps = vec![
+            Body { pos: DVec3::ZERO, vel: DVec3::ZERO, mass: 1.0 },
+            Body { pos: DVec3::X, vel: DVec3::ZERO, mass: 1.0 },
+            Body { pos: DVec3::X * 2.0, vel: DVec3::ZERO, mass: 1.0 },
+        ];
+        let mut agg = Aggregate::new(ps, 1.0); // softening ε = 1
+        agg.self_gravity = false;
+        let acc = vec![DVec3::X * 100.0, DVec3::X * 1.0, DVec3::ZERO]; // violent, gentle, none
+        let dt = agg.particle_timesteps(&acc, 0.05);
+        assert!(dt[0] < dt[1], "violent particle needs a smaller dt: {} !< {}", dt[0], dt[1]);
+        assert!(dt[0] > 0.0 && dt[0].is_finite(), "positive finite dt for real accel");
+        assert!(dt[2].is_infinite(), "unaccelerated body is unconstrained");
+        assert!((dt[1] / dt[0] - 10.0).abs() < 1e-6, "dt ∝ 1/√|a|: 100× accel ⇒ dt/10");
+    }
 
     #[test]
     fn contact_grid_matches_brute_force() {
