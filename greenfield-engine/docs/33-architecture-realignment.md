@@ -20,10 +20,12 @@ measurement tests; see JOURNAL for numbers):
   7–12% ceiling (docs/31). docs/28 root-cause #1 dissolved: Earth sheds its own mantle into the disk.
   (Sub-Earth scale + coarse N — the DIRECTION, not a converged number.)
 
-**Stage 4a DONE (2026-07-17):** the GPU force kernel `shaders/sph_step.wgsl` (SPH density + Tillotson +
+**Stage 4a+4b DONE (2026-07-17):** the GPU force kernel `shaders/sph_step.wgsl` (SPH density + Tillotson +
 Monaghan AV + direct self-gravity + du/dt) is **verified on the RTX 2070** (`tools/sph-verify`) against an
-independent f64 CPU computation — RMS rel error 1.9e-6 (f32 precision). One O(N²) force evaluation. Ahead:
-4b (port neighbours.rs grid + bhtree for O(N log N)), 4c (KDK loop + adaptive dt on-GPU + scene wiring).
+independent f64 CPU computation — RMS rel error 1.9e-6 (f32 precision). 4b added the **spatial-hash neighbour
+grid** for the short-range SPH (O(N) not O(N²)), verified exact via a cell-membership guard (defeats
+hash-collision double-counting). Gravity stays direct O(N²) (a GPU tree is a later opt). Ahead: 4c (KDK loop
++ adaptive dt on-GPU + scene wiring, with the accretion operator).
 
 **Remaining:** 4b/4c (as above), 5 (unify containers —
 fold `hydrostatic`/`AirField` into `Aggregate`), 6 (energy-tiered just-in-time particalization). The

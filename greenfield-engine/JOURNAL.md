@@ -5,6 +5,31 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-17 — Realignment stage 4b: the SPH neighbour grid on GPU, verified (docs/33)
+
+**What.** Added a spatial-hash **neighbour grid** to `shaders/sph_step.wgsl` so the short-range SPH
+(density + pressure + AV) scans only the 27 neighbouring cells — O(N) instead of O(N²). Two new kernels
+(`cs_grid_clear`, `cs_grid_insert`, atomic bucketing, adapted from `particle_step.wgsl`) build the grid; the
+density and force passes look up neighbours via it. Long-range self-gravity stays direct O(N²) (GPU-tiled
+direct summation is tractable at these N; a GPU Barnes–Hut tree is a later optimization). Verified on the
+RTX 2070 (`tools/sph-verify`): gridded output matches the CPU physics to f32 precision (acceleration RMS
+1.9e-6, density 5.6e-7) — the grid is EXACT, like `neighbors.rs`.
+
+**BUG found + fixed (the interesting part).** The first gridded version was 20% off — it found MORE
+neighbours than truth (109 vs 88 for the worst particle): **hash collisions among the 27 scanned cells made
+some real neighbours read TWICE** (two cells hashing to the same bucket → the bucket processed twice). The
+fix is a **cell-membership guard**: when scanning cell C, a bucketed particle j is used only if
+`cell_of(j) == C` — so each neighbour is counted exactly once (and collided far particles are skipped),
+regardless of table collisions or bucket size. This is the exactness guarantee `neighbors.rs` gets for free
+on the CPU. Isolated it by (a) confirming all-N density was exact, then (b) a neighbour-count diagnostic
+showing over-counting — not a coverage/precision miss.
+
+**Verified (real GPU).** `sph-verify` PASS at production bucket_k=64: density (grid) max rel error 5.6e-7,
+acceleration RMS 1.9e-6, du/dt 4.4e-6. Ahead: 4c — the KDK integration loop + adaptive Courant dt on-GPU +
+scene wiring (with the accretion operator).
+
+---
+
 ## 2026-07-17 — Realignment stage 4a: the GPU SPH kernel, verified on the RTX 2070 (docs/33)
 
 **What.** Ported the space-band self-gravitating condensed-matter force step to a WGSL compute shader

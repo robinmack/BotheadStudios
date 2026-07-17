@@ -42,7 +42,13 @@ struct Params {
     softening: f32,
     av_alpha: f32,
     av_beta: f32,
+    cell_size: f32,
+    table_mask: u32,
+    bucket_k: u32,
+    _pad: u32,
 }
+const TABLE_SIZE: u32 = 1 << 15; // 32768 cells
+const BUCKET_K: u32 = 64; // >> ~18 particles/cell (cell-membership guard makes the grid exact regardless)
 
 const G: f64 = 6.674e-11;
 const AV_ALPHA: f64 = 1.0;
@@ -193,10 +199,19 @@ fn main() {
     let mut particles = build_config(n);
 
     // ---- CPU reference ----
-    let (acc_cpu, dudt_cpu) = cpu_forces(&mut particles.clone(), &eos, soft);
+    let mut cpu_particles = particles.clone();
+    let (acc_cpu, dudt_cpu) = cpu_forces(&mut cpu_particles, &eos, soft);
 
     // ---- GPU ----
-    let (acc_gpu, dudt_gpu) = run_gpu(&particles, &eos, soft);
+    let (acc_gpu, dudt_gpu, gpu_particles) = run_gpu(&particles, &eos, soft);
+
+    // ---- density check (isolates the grid) ----
+    let mut d_max = 0.0f64;
+    for i in 0..n {
+        let rel = (gpu_particles[i].rho as f64 - cpu_particles[i].rho as f64).abs() / (cpu_particles[i].rho as f64).max(1.0);
+        d_max = d_max.max(rel);
+    }
+    println!("density (grid): max rel error GPU vs CPU {:.2e}", d_max);
 
     // ---- compare ----
     let mut sum_sq = 0.0;
@@ -233,7 +248,7 @@ fn main() {
     std::process::exit(if ok { 0 } else { 1 });
 }
 
-fn run_gpu(particles: &[Particle], eos: &[Eos], soft: f64) -> (Vec<[f32; 4]>, Vec<f32>) {
+fn run_gpu(particles: &[Particle], eos: &[Eos], soft: f64) -> (Vec<[f32; 4]>, Vec<f32>, Vec<Particle>) {
     use wgpu::util::DeviceExt;
     let n = particles.len() as u32;
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor { backends: wgpu::Backends::VULKAN, ..Default::default() });
@@ -265,18 +280,23 @@ fn run_gpu(particles: &[Particle], eos: &[Eos], soft: f64) -> (Vec<[f32; 4]>, Ve
             storage(2, true),
             storage(3, false),
             storage(4, false),
+            storage(5, false),
+            storage(6, false),
         ],
     });
     let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[&layout], push_constant_ranges: &[] });
     let mk = |e: &str| device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some(e), layout: Some(&pl), module: &module, entry_point: Some(e), compilation_options: Default::default(), cache: None });
-    let (p_density, p_forces) = (mk("cs_density"), mk("cs_forces"));
+    let (p_clear, p_insert, p_density, p_forces) = (mk("cs_grid_clear"), mk("cs_grid_insert"), mk("cs_density"), mk("cs_forces"));
 
-    let params = Params { n, softening: soft as f32, av_alpha: AV_ALPHA as f32, av_beta: AV_BETA as f32 };
+    let cell_size = particles.iter().map(|p| p.h).fold(0.0f32, f32::max);
+    let params = Params { n, softening: soft as f32, av_alpha: AV_ALPHA as f32, av_beta: AV_BETA as f32, cell_size, table_mask: TABLE_SIZE - 1, bucket_k: BUCKET_K, _pad: 0 };
     let pbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("particles"), contents: bytemuck::cast_slice(particles), usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC });
     let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("params"), contents: bytemuck::bytes_of(&params), usage: wgpu::BufferUsages::UNIFORM });
     let ebuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("eos"), contents: bytemuck::cast_slice(eos), usage: wgpu::BufferUsages::STORAGE });
     let abuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("acc"), size: (n as u64) * 16, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
     let dbuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("dudt"), size: (n as u64) * 4, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+    let gcount = device.create_buffer(&wgpu::BufferDescriptor { label: Some("grid_count"), size: (TABLE_SIZE as u64) * 4, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
+    let gbucket = device.create_buffer(&wgpu::BufferDescriptor { label: Some("grid_bucket"), size: (TABLE_SIZE as u64) * (BUCKET_K as u64) * 4, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
     let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &layout,
@@ -286,14 +306,17 @@ fn run_gpu(particles: &[Particle], eos: &[Eos], soft: f64) -> (Vec<[f32; 4]>, Ve
             wgpu::BindGroupEntry { binding: 2, resource: ebuf.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 3, resource: abuf.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 4, resource: dbuf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 5, resource: gcount.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 6, resource: gbucket.as_entire_binding() },
         ],
     });
     let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-    for pipe in [&p_density, &p_forces] {
+    // One pass per stage (memory barrier at pass boundary): clear grid → insert → density → forces.
+    for (pipe, threads) in [(&p_clear, TABLE_SIZE), (&p_insert, n), (&p_density, n), (&p_forces, n)] {
         let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
         pass.set_pipeline(pipe);
         pass.set_bind_group(0, &bind, &[]);
-        pass.dispatch_workgroups(n.div_ceil(64), 1, 1);
+        pass.dispatch_workgroups(threads.div_ceil(64), 1, 1);
     }
     queue.submit(Some(enc.finish()));
 
@@ -310,5 +333,6 @@ fn run_gpu(particles: &[Particle], eos: &[Eos], soft: f64) -> (Vec<[f32; 4]>, Ve
     };
     let acc = bytemuck::cast_slice::<u8, [f32; 4]>(&read(&abuf, (n as u64) * 16)).to_vec();
     let dudt = bytemuck::cast_slice::<u8, f32>(&read(&dbuf, (n as u64) * 4)).to_vec();
-    (acc, dudt)
+    let out_particles = bytemuck::cast_slice::<u8, Particle>(&read(&pbuf, (n as u64) * std::mem::size_of::<Particle>() as u64)).to_vec();
+    (acc, dudt, out_particles)
 }
