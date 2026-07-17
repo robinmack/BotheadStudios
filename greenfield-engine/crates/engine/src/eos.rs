@@ -160,17 +160,20 @@ impl Tillotson {
         }
     }
 
-    /// Iron (Benz, Cameron & Melosh 1989 — PROVISIONAL, unverified against the primary table). Core material.
+    /// Iron core material. COMPRESSED BRANCH verified/open: ρ₀, A, B, a, b, E₀ are the Wissing & Hobbs
+    /// (2020, A&A 635 A21, Table 2) Tillotson refit to modern shock data (Brown et al. 2000) — this is all a
+    /// STATIC planet needs. VAPOR BRANCH (e_iv/e_cv/α/β) is still the provisional Melosh-1989-family value —
+    /// it only bites at impact energies (stage 3); verify against the primary table before then.
     pub fn iron() -> Self {
         Tillotson {
-            rho0: 7800.0,
-            a: 0.5,
-            b: 1.5,
-            cap_a: 1.28e11,
-            cap_b: 1.05e11,
-            e0: 9.5e6,
-            e_iv: 2.4e6,
-            e_cv: 8.67e6,
+            rho0: 7850.0,   // Wissing & Hobbs 2020
+            a: 0.5,         // Wissing & Hobbs 2020
+            b: 1.28,        // Wissing & Hobbs 2020
+            cap_a: 1.28e11, // A = 128 GPa (Wissing & Hobbs 2020)
+            cap_b: 1.815e11, // B = C = 181.5 GPa (Wissing & Hobbs 2020)
+            e0: 1.425e7,    // E₀ = 14.25 MJ/kg (Wissing & Hobbs 2020)
+            e_iv: 2.4e6,    // PROVISIONAL (Melosh-family; vapor branch, stage-3 concern)
+            e_cv: 8.67e6,   // PROVISIONAL
             alpha: 5.0,
             beta: 5.0,
         }
@@ -271,11 +274,14 @@ mod tests {
         for (name, mk) in MATS {
             let t = mk();
             let rho = t.rho0 * 0.7;
-            let eps = 1.0e-3;
+            // Tiny straddle so the finite slope contributes negligibly (the function is continuous, so the
+            // jump → 0 as δ → 0). The scale floor is tied to the bulk modulus A so it does NOT collapse where
+            // P crosses zero (iron's tension branch near E_iv) and give a spuriously tight relative tolerance.
+            let eps = 1.0e-5;
             for &e_bound in &[t.e_iv, t.e_cv] {
                 let below = t.pressure(rho, e_bound * (1.0 - eps));
                 let above = t.pressure(rho, e_bound * (1.0 + eps));
-                let scale = below.abs().max(above.abs()).max(1.0e5);
+                let scale = below.abs().max(above.abs()).max(1.0e-2 * t.cap_a);
                 assert!(
                     (below - above).abs() < 1.0e-2 * scale,
                     "{name}: P discontinuous across u={e_bound:.2e} ({below:.3e} vs {above:.3e})"

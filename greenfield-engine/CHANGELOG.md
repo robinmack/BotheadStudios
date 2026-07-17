@@ -9,13 +9,16 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
-### Added
 - **Self-gravitating EOS body — a particle planet in hydrostatic equilibrium** (`hydrostatic.rs`, `docs/33`
   stage 2) — composes the shared kernels (`eos::Tillotson` + the SPH kernel + `bhtree` self-gravity) into a
   cloud of particles that holds itself up under its own gravity via EOS pressure, instead of the rigid
-  analytic boundary the impact scene uses (docs/28 #1). Verified: a 1500 km basalt body settles to a stable
-  RMS radius (spread 1.1%) with pointwise hydrostatic balance dP/dr=−ρg (3–17%) and a central pressure of
-  the right order. The prerequisite for a deformable Earth; folds into `Aggregate` at unification.
+  analytic boundary the impact scene uses (docs/28 #1). **Single-material (2a):** a 1500 km basalt body
+  settles with pointwise hydrostatic balance dP/dr=−ρg (rel 0.00–0.01). **Differentiated (2b):** an
+  Earth-mass iron-core + basalt-mantle body (equal-mass particles + adaptive smoothing length, the Genda
+  2012 method) COMPRESSES (RMS 5709→3973 km, no puff-up), stays stratified (core ρ 15,591 vs mantle 5534
+  kg/m³), holds balance (rel 6%), and reaches a central pressure of 572 GPa — the order of Earth's real 364
+  GPa. Iron EOS uses the verified Wissing & Hobbs 2020 compressed-branch refit. The prerequisite for a
+  deformable Earth; folds into `Aggregate` at unification.
 - **Tillotson condensed-matter EOS** (`eos.rs`, `docs/33` stage 1) — `P(ρ, u)` across cold / shock-
   compressed / decompressed / vapor states in one closure (Tillotson 1962; Melosh 1989; Benz et al. 1989),
   with cited parameters for granite, basalt, peridotite (dunite/olivine), and iron. `pressure`,

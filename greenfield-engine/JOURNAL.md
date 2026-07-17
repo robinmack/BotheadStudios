@@ -5,6 +5,39 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-17 — Realignment stage 2b: a differentiated iron-core Earth holds itself up (docs/33)
+
+**What.** Built the layered/differentiated planet — an **Earth-mass iron-core + basalt-mantle** particle body
+that holds itself in hydrostatic equilibrium as real matter. Rewrote `hydrostatic.rs` with the **Genda et al.
+2012 method** (the fix for the earlier puff-up): **equal-mass particles** at the number density that recovers
+each material's ρ₀, with a **per-particle adaptive smoothing length** `h_i ∝ (m/ρ₀)^⅓` (dense core sampled
+finely, light mantle coarsely) and a symmetric per-pair `h_ij=½(h_i+h_j)`; per-particle EOS. `HydroBody`
+gained `new_differentiated(core, mantle, core_r, total_r, u, N)`. Iron EOS updated to the verified/open
+**Wissing & Hobbs 2020** compressed-branch refit (ρ₀=7850, A=128, B=181.5 GPa, a=0.5, b=1.28, E₀=14.25
+MJ/kg); its vapor branch stays flagged provisional (stage-3 concern). Also fixed the EOS continuity test's
+tolerance (it collapsed at iron's tension zero-crossing near E_iv — the function is continuous; smaller δ +
+a bulk-modulus scale floor).
+
+**Verified (native, #[ignore], ~326 s).** `a_differentiated_iron_core_earth_settles_compresses_and_
+stratifies` (N=3000, M=5.96e24 kg):
+- **COMPRESSES, does not puff up** — settled mass-weighted RMS **3973 km** from 5709 km initial (the old
+  equal-volume prototype blew up to 15,700 km; the equal-mass fix is decisive).
+- **Stratified:** iron core (mean r 2326 km) stays inside the mantle (4591 km); core settled ρ **15,591**
+  kg/m³ (compressed above iron's ρ₀=7850 — real inner core ~13,000), mantle **5534** (real lower mantle
+  ~4400–5500). Core denser than mantle ✓.
+- **Hydrostatic balance rel 6%** at r=1986 km.
+- **Central pressure 572 GPa** vs Earth's real **364 GPa** (Wissing & Hobbs 2020) — same ORDER (~1.6×).
+  Honest caveats: coarse N=3000, Tillotson iron over-compresses at high P (a known Tillotson limitation), and
+  basalt ≠ the denser perovskite lower mantle — so order-correct, not exact.
+Stage 2a (single-material) re-verified green after the refactor — adaptive-h tightened its balance to rel
+0.00–0.01. EOS 6/6; full fast suite 151/151; wasm builds.
+
+**Why.** docs/33 stage 2: a planet that is real matter can shed its own mantle into the disk — the
+prerequisite for dissolving the rigid boundary (docs/28 #1, docs/31). The differentiated Earth is the object
+the impact (stage 3) will hit. Still isothermal (u fixed); the adiabatic energy equation is stage 3.
+
+---
+
 ## 2026-07-17 — Research note: sourced EOS data + the differentiated-body method fix (docs/33)
 
 Verification dig for the layered-planet params/method (some primary tables are book-only — Melosh 1989
