@@ -5,6 +5,29 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-17 — Research note: sourced EOS data + the differentiated-body method fix (docs/33)
+
+Verification dig for the layered-planet params/method (some primary tables are book-only — Melosh 1989
+p.234 — and Robin's linked review is paywalled). What I could source from OPEN literature:
+
+- **Iron Tillotson (compressed branch), Wissing & Hobbs 2020 (A&A 635 A21), refit to Brown et al. 2000
+  shock data:** ρ₀=7850, A=128 GPa, B=181.5 GPa, a=0.5, b=1.28, E₀=14.25 MJ/kg. (Vapor-branch E_iv/E_cv/α/β
+  NOT given there — still need the primary Melosh table for those; but the compressed branch is all a static
+  planet needs.) My current `eos::iron` has A=128 GPa ✓ but b, B, E₀ differ from this refit — update pending.
+- **Real Earth-layer structure, Wissing & Hobbs 2020 Table 1** (their PREM fit — a validation dataset for a
+  layered particle Earth): inner core ρ₀=7744/B₀=166 GPa, outer core 6920/115, lower mantle 4121/231,
+  transition 3622/160, asthenosphere 3380/130, crust 2300/100; M=5.97e24 kg, central P=**364.1 GPa**,
+  T_c=5300 K. (A is ≈ the bulk modulus B₀, so these cross-check the Tillotson A values.)
+- **Basalt Tillotson: VERIFIED, Benz & Asphaug 1999 Table 2** (exact match to `eos::basalt`).
+- **Differentiated-body METHOD, confirmed from Genda et al. 2012 (the puff-up fix):** SPH particles all
+  **equal mass**, placed on a **3D FCC lattice** (iron inside, rock outside), internal energy set to
+  **1.0×10⁶ J/kg**, relaxed until velocities < 100 m/s. My equal-VOLUME/unequal-mass init was the bug.
+
+Still blocked (needs the primary Melosh 1989 p.234 table or paywall access): full Tillotson sets (esp. the
+vapor branch) for **granite, dunite, and iron**. Flagged provisional in `eos.rs`.
+
+---
+
 ## 2026-07-17 — Honesty pass: EOS parameter provenance + stage-2b puff-up (docs/33)
 
 **What.** Two honest corrections while extending stage 2 to a layered/differentiated planet (stage 2b):
