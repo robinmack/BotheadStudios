@@ -5,6 +5,33 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-17 — Stage 4c.3: the accretion / growth operator, conservation-verified (docs/33/34)
+
+**What.** New engine module `crates/engine/src/accretion.rs` — the growth law that lets a round Moon emerge
+from the disk. A giant-impact disk of equal-mass SPH particles has no fusion operator (masses never grow), so
+it can never coalesce a Moon (diagnosis, JOURNAL entry below). The operator: friends-of-friends clustering
+(union-find over particles within a linking length, the same primitive `disk_stats_json` uses) → classify
+each clump for two **honesty gates** — (1) genuinely self-bound (`Σ½mᵢ|vᵢ−v_com|² + PE_self < 0`) and (2)
+outside the remnant's fluid Roche limit `2.44·R·(ρ_planet/ρ_clump)^⅓` — → PROMOTE each qualifying clump to
+ONE body at its COM (mass `Σm`, velocity `Σmv/Σm`, radius from ρ·V). A clump inside Roche is left as particles
+(it should tidally shred, not accrete — consistent with `tides::secular_step`).
+
+**Why.** Stage 4c.2 made the disk collisional at high N; this adds the law that turns a bound clump into a
+body. Designed as a pure, decoupled function over `(pos, vel, mass, rho)` arrays so it is unit-testable and
+reusable — not welded to a scene struct.
+
+**Verified (TDD, `bash scripts/test.sh accretion`, 3/3).** (1) `accretion_conserves_mass_momentum_and_com` —
+promote two cold blobs among scattered singletons; expanding bodies+residuals back out conserves total mass,
+linear momentum, and centre of mass to **< 1e-12** (exact to f64 round-off), and the 5 singletons are left
+alone. (2) `roche_gate_blocks_accretion_inside_the_limit` — the *same* clump accretes outside Roche but NOT
+inside it. (3) `unbound_hot_group_does_not_accrete` — a spatially-tight but hot (KE ≫ binding) group is
+classified unbound and rejected. Honest about what promotion cannot conserve: internal random KE is absorbed
+as heat (physical for inelastic accretion) and internal spin L is folded in — both reported, never dropped.
+Full fast suite 155/155. Next: 4c.4 (browser scene wiring) — and a demonstration of the operator on a real
+high-N `impact-run` disk.
+
+---
+
 ## 2026-07-17 — Stage 4c.2: high-N giant impact on the GPU — the disk number CONVERGES to Earth-majority (docs/33/34)
 
 **What.** Built `tools/impact-run` — a standalone offline harness that runs the deformable-Earth giant impact

@@ -22,8 +22,11 @@ because **we are our own first customers** and pin exact engine versions in our 
   deformable-Earth giant impact at N up to 35 000 on the RTX 2070 (minutes, vs the CPU's ~2100-particle cap):
   energy conserved to 0.3–0.5 % over ~10 h of aftermath, and the orbiting disk's **Earth-derived fraction
   converges upward with resolution — 28 %→33 %→50 % (N=2100→14000→35000)** toward the CPU's 58 %, confirming
-  and strengthening the Earth-majority disk (the isotopic-crisis direction, docs/31). The accretion operator
-  + scene wiring are the rest of stage 4c.
+  and strengthening the Earth-majority disk (the isotopic-crisis direction, docs/31). Stage 4c.3 adds the
+  **accretion / growth operator** (`accretion.rs`): friends-of-friends bound-clump detection gated on genuine
+  self-boundedness AND the remnant's Roche limit, promoting each qualifying clump to one body at its COM —
+  conserving mass, momentum, and centre of mass exactly (TDD-verified to <1e-12), the growth law a round Moon
+  needs. Scene wiring is the rest of stage 4c.
 - **Deformable-Earth giant impact — the isotopic crisis, re-measured** (`hydrostatic.rs`, `docs/33` stage
   3) — a full thermodynamic SPH giant impact between two real EOS particle bodies: the SPH internal-energy
   equation + Monaghan artificial viscosity (shock capture) + an energy-conserving KDK leapfrog with an

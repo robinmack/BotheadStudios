@@ -57,7 +57,12 @@ Run the deformable-Earth impact at N~10⁴–10⁵ on the GPU (offline is fine �
 - Collide obliquely at ~mutual escape speed; step on GPU; measure the bound orbiting disk by the
   perigee-above-remnant criterion (copy the 3c test). This converges the coarse-N 58% number.
 
-### 4c.3 — Accretion operator (NEW physics — the Moon-formation fix)
+### 4c.3 — Accretion operator (NEW physics — the Moon-formation fix) — DONE ✓ (`accretion.rs`, TDD 3/3)
+> `crates/engine/src/accretion.rs`: FoF clumps → gates (self-bound `Σ½mᵢ|vᵢ−v_com|²+PE_self<0` AND outside
+> Roche `2.44·R·(ρ_p/ρ_clump)^⅓`) → promote to one body at COM (mass Σm, vel Σmv/Σm, radius from ρ·V).
+> Conserves mass/momentum/COM to <1e-12 (test); internal KE→heat + spin L folded in (reported). Inside-Roche
+> clumps left to shred. Tests: conservation, Roche gate, unbound-rejection. Pure fn over (pos,vel,mass,rho).
+
 Diagnosis (JOURNAL 2026-07-17): the disk never accretes a Moon because (a) at low N it's collisionless and
 (b) there is NO fusion/growth operator — particle masses never grow. Higher N (4c.2) makes it collisional;
 this adds the growth law so a round Moon can emerge.

@@ -20,6 +20,7 @@
 // exercise them. (A future `matter-core` crate split, per docs, removes the need for this.)
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 
+mod accretion;
 mod aggregate;
 mod atmosphere;
 mod bhtree;
