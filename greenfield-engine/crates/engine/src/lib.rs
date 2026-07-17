@@ -3414,7 +3414,12 @@ mod app {
                         d * (crate::orbit::G * sun_mass * p.mass * (1.0 / (r2 * r2.sqrt()))) * dt
                     })
                     .sum();
-                agg.step(&mut self.debris_acc, dt);
+                // BLOCK-TIMESTEP advance (docs/30 stage 3): the quiescent orbiting disk coasts at the base
+                // dt while the violent shocked/vapor core sub-steps internally — so the high-N debris swarm
+                // evolves faster (the win grows with the base dt the time-LOD hands us under load). Verified
+                // to reproduce the global-dt disk (impact::birth_impact_with_step_block_reproduces_the_disk)
+                // and conserve energy; the per-substep force/heat physics is identical, just scheduled.
+                agg.step_block(dt, 0.1);
                 let p_after: glam::DVec3 =
                     agg.particles.iter().map(|p| p.vel * p.mass).sum();
                 let m_e = self.bodies[1].mass;

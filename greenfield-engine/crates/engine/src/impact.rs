@@ -1147,6 +1147,62 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "block-timestep impact verification — run with --ignored"]
+    fn birth_impact_with_step_block_reproduces_the_disk() {
+        // The full test of the block scheduler on the REAL coupled impact (gravity + contact + SPH + PdV +
+        // heat): step_block must reproduce the orbiting disk that the global-dt step() forms. Run the same
+        // birth impact both ways for the same total time and compare the perigee-above-surface disk.
+        let mats = materials::load();
+        let theia = crate::planet::theia();
+        let earth = crate::planet::earth();
+        let m_theia = theia.total_mass();
+        let site = DVec3::new(0.0, EARTH_RADIUS_M, 0.0);
+        let v_esc = (2.0 * G * (EARTH_MASS + m_theia) / (EARTH_RADIUS_M + theia.radius())).sqrt();
+        let v_contact = DVec3::new(v_esc * 0.7071, -v_esc * 0.7071, 0.0);
+        let mu = G * EARTH_MASS;
+        let orbiting = |agg: &crate::aggregate::Aggregate| -> f64 {
+            let mut m = 0.0;
+            for p in &agg.particles {
+                let r = p.pos.length();
+                let eps = 0.5 * p.vel.length_squared() - mu / r;
+                if eps >= 0.0 || r <= 1.1 * EARTH_RADIUS_M {
+                    continue;
+                }
+                let h = p.pos.cross(p.vel).length();
+                let e = (1.0 + 2.0 * eps * h * h / (mu * mu)).max(0.0).sqrt();
+                if (-mu / (2.0 * eps)) * (1.0 - e) > EARTH_RADIUS_M {
+                    m += p.mass;
+                }
+            }
+            m / MOON_MASS
+        };
+        let build = || {
+            build_impact_debris_scaled(
+                &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia, &earth, EARTH_MASS,
+                EARTH_RADIUS_M, 128, 256,
+            )
+        };
+        let (mut ag, mut acc) = build();
+        for _ in 0..3000 {
+            ag.step(&mut acc, 2.0);
+        }
+        let disk_global = orbiting(&ag);
+        let (mut ab, _) = build();
+        for _ in 0..3000 {
+            ab.step_block(2.0, 0.1); // same base dt; step_block sub-steps the fast set internally
+        }
+        let disk_block = orbiting(&ab);
+        println!(
+            "\nDISK — global step() {disk_global:.3} M_moon | block step_block {disk_block:.3} M_moon"
+        );
+        assert!(disk_block > 0.3, "step_block must form a bound disk on the real impact (got {disk_block:.3})");
+        assert!(
+            (disk_block - disk_global).abs() < 0.5 * disk_global.max(0.2) + 0.3,
+            "block disk must track the global-dt disk (block {disk_block:.3} vs global {disk_global:.3})"
+        );
+    }
+
+    #[test]
     #[ignore = "orbit-vs-resolution sweep — long-running (O(n²)); run with --ignored"]
     fn disk_orbit_vs_resolution() {
         // Does the TRULY-ORBITING disk (perigee > R, the honest metric) grow with resolution, now that the

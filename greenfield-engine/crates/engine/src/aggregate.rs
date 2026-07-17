@@ -850,6 +850,10 @@ impl Aggregate {
                     acc[i] = new_acc[i];
                 }
             }
+            // Thermodynamics at the fine sub-step (docs/26/27): the vapor/contact set is fast — active every
+            // sub-step — so its PdV cooling, dissipation heating, radiation and phase flips run at dt_min,
+            // exactly where they belong. Uses the SPH density the accelerations() call above just cached.
+            self.apply_thermo(dt_min);
         }
     }
 
@@ -922,7 +926,16 @@ impl Aggregate {
             b.vel += *a * (0.5 * dt);
         }
         *acc = new_acc;
-        // One short-range neighbour grid for step()'s vapor PdV + contact-dissipation passes (docs/30):
+        self.apply_thermo(dt);
+    }
+
+    /// The per-step THERMODYNAMICS (docs/26/27), split out of [`step`] so the block-timestep integrator
+    /// [`step_block`] can apply it each sub-step: PdV vapor cooling (thermal → kinetic as the plume
+    /// expands), Stefan–Boltzmann radiation, the solid↔vapor phase flip, and contact-dissipation heating.
+    /// Uses the SPH density cached by the preceding `accelerations` call and the current velocities, so it
+    /// must run right after a force evaluation. Cheap where there is no vapor/contact (isolated grains).
+    fn apply_thermo(&mut self, dt: f64) {
+        // One short-range neighbour grid for the vapor PdV + contact-dissipation passes (docs/30):
         // O(N) not O(N²), built at the post-step positions and shared by both.
         let step_pos: Vec<DVec3> = self.particles.iter().map(|b| b.pos).collect();
         let step_grid = crate::neighbors::NeighborGrid::build(&step_pos, self.short_range_cell());
