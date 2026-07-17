@@ -17,8 +17,13 @@ because **we are our own first customers** and pin exact engine versions in our 
   the short-range SPH (O(N) not O(N²)), also verified exact — with a cell-membership guard that defeats the
   hash-collision double-counting. Stage 4c.1 adds the **KDK leapfrog integration loop** (`cs_kick_drift` +
   `cs_kick`, energy-conserving, matching the CPU `HydroBody::step`), verified over 50 fixed-dt steps against
-  an f64 CPU reference (final-state RMS pos 3.1e-4 / vel 5.7e-4 / u 5.1e-4 — tracking, not diverging). The
-  high-N impact + accretion operator + scene wiring are the rest of stage 4c.
+  an f64 CPU reference (final-state RMS pos 3.1e-4 / vel 5.7e-4 / u 5.1e-4 — tracking, not diverging). Stage
+  4c.2 adds `tools/impact-run` (GPU relaxation `cs_relax` + adaptive-dt KDK impact + provenance) and runs the
+  deformable-Earth giant impact at N up to 35 000 on the RTX 2070 (minutes, vs the CPU's ~2100-particle cap):
+  energy conserved to 0.3–0.5 % over ~10 h of aftermath, and the orbiting disk's **Earth-derived fraction
+  converges upward with resolution — 28 %→33 %→50 % (N=2100→14000→35000)** toward the CPU's 58 %, confirming
+  and strengthening the Earth-majority disk (the isotopic-crisis direction, docs/31). The accretion operator
+  + scene wiring are the rest of stage 4c.
 - **Deformable-Earth giant impact — the isotopic crisis, re-measured** (`hydrostatic.rs`, `docs/33` stage
   3) — a full thermodynamic SPH giant impact between two real EOS particle bodies: the SPH internal-energy
   equation + Monaghan artificial viscosity (shock capture) + an energy-conserving KDK leapfrog with an

@@ -46,6 +46,10 @@ struct Params {
     table_mask: u32,
     bucket_k: u32,
     dt: f32,
+    damp: f32,
+    _p0: f32,
+    _p1: f32,
+    _p2: f32,
 }
 const TABLE_SIZE: u32 = 1 << 15; // 32768 cells
 const BUCKET_K: u32 = 64; // >> ~18 particles/cell (cell-membership guard makes the grid exact regardless)
@@ -432,7 +436,7 @@ fn run_gpu(particles: &[Particle], eos: &[Eos], soft: f64) -> (Vec<[f32; 4]>, Ve
     let (p_clear, p_insert, p_density, p_forces) = (mk("cs_grid_clear"), mk("cs_grid_insert"), mk("cs_density"), mk("cs_forces"));
 
     let cell_size = particles.iter().map(|p| p.h).fold(0.0f32, f32::max);
-    let params = Params { n, softening: soft as f32, av_alpha: AV_ALPHA as f32, av_beta: AV_BETA as f32, cell_size, table_mask: TABLE_SIZE - 1, bucket_k: BUCKET_K, dt: 0.0 };
+    let params = Params { n, softening: soft as f32, av_alpha: AV_ALPHA as f32, av_beta: AV_BETA as f32, cell_size, table_mask: TABLE_SIZE - 1, bucket_k: BUCKET_K, dt: 0.0, damp: 0.0, _p0: 0.0, _p1: 0.0, _p2: 0.0 };
     let pbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("particles"), contents: bytemuck::cast_slice(particles), usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC });
     let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("params"), contents: bytemuck::bytes_of(&params), usage: wgpu::BufferUsages::UNIFORM });
     let ebuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("eos"), contents: bytemuck::cast_slice(eos), usage: wgpu::BufferUsages::STORAGE });
@@ -525,7 +529,7 @@ fn run_gpu_steps(particles: &[Particle], eos: &[Eos], soft: f64, dt: f64, steps:
         (mk("cs_grid_clear"), mk("cs_grid_insert"), mk("cs_density"), mk("cs_forces"), mk("cs_kick_drift"), mk("cs_kick"));
 
     let cell_size = particles.iter().map(|p| p.h).fold(0.0f32, f32::max);
-    let params = Params { n, softening: soft as f32, av_alpha: AV_ALPHA as f32, av_beta: AV_BETA as f32, cell_size, table_mask: TABLE_SIZE - 1, bucket_k: BUCKET_K, dt: dt as f32 };
+    let params = Params { n, softening: soft as f32, av_alpha: AV_ALPHA as f32, av_beta: AV_BETA as f32, cell_size, table_mask: TABLE_SIZE - 1, bucket_k: BUCKET_K, dt: dt as f32, damp: 0.0, _p0: 0.0, _p1: 0.0, _p2: 0.0 };
     let pbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("particles"), contents: bytemuck::cast_slice(particles), usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC });
     let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("params"), contents: bytemuck::bytes_of(&params), usage: wgpu::BufferUsages::UNIFORM });
     let ebuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("eos"), contents: bytemuck::cast_slice(eos), usage: wgpu::BufferUsages::STORAGE });

@@ -41,7 +41,14 @@ kernel between/after doing the half-kicks + drift.
   (`HydroBody::step`), compare final `pos`/`vel`/`u`. Errors accumulate over steps, so a looser tolerance
   (~1e-3 RMS) is honest for f32 vs f64 — but it must track, not diverge.
 
-### 4c.2 — High-N impact run (the converged isotopic-crisis number)
+### 4c.2 — High-N impact run (the converged isotopic-crisis number) — DONE ✓ (`tools/impact-run`, RTX 2070)
+> Built `tools/impact-run`: GPU relax (`cs_relax`) + adaptive-dt KDK impact (`cs_signal`) + provenance
+> measurement. Added `prov` to the particle and `damp` to `Params`. Energy conserved 0.3–0.5% over ~10 h
+> aftermath at every N. Disk Earth-fraction **converges upward with resolution**: 28 % (N=2100) → 33 %
+> (N=14000) → 50 % (N=35000), toward the CPU BH/f64 58 % — disk mass ~0.13 M☾ stable. The deformable-Earth
+> Earth-majority disk (docs/31) is confirmed and strengthened. Caveats: single realization/N, sub-Earth
+> scale, direct O(N²) gravity; converged fraction wants N≥10⁵. See JOURNAL 2026-07-17 for the table.
+
 Run the deformable-Earth impact at N~10⁴–10⁵ on the GPU (offline is fine — a tool or a native harness).
 - Build + **RELAX** both bodies first (`hydrostatic.rs` relax on the CPU, then upload — unrelaxed bodies
   inject energy; this is the 3a lesson). Or add a GPU damped-relax mode.

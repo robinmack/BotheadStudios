@@ -28,13 +28,15 @@ struct Params {
   cell_size: f32,   // = the max smoothing length (so the 27-cell scan is exact)
   table_mask: u32,  // hash table size − 1 (power of two)
   bucket_k: u32,    // max particles stored per cell
-  dt: f32,          // fixed integration timestep for cs_kick_drift/cs_kick (KDK leapfrog, stage 4c.1)
+  dt: f32,          // integration timestep for cs_kick_drift/cs_kick/cs_relax (KDK leapfrog, stage 4c.1)
+  damp: f32,        // velocity damping for cs_relax (settle to hydrostatic equilibrium, stage 4c.2)
+  _p0: f32, _p1: f32, _p2: f32,
 }
 
 struct Particle {
   pos: vec3<f32>, h: f32,
   vel: vec3<f32>, u: f32,
-  mass: f32, mat: u32, rho: f32, _pad: f32,
+  mass: f32, mat: u32, rho: f32, prov: u32, // prov: provenance tag (0=Earth, 1=Theia) — survives the round-trip
 }
 struct Eos {
   rho0: f32, a: f32, b: f32, cap_a: f32,
@@ -49,6 +51,7 @@ struct Eos {
 @group(0) @binding(4) var<storage, read_write> dudt: array<f32>;
 @group(0) @binding(5) var<storage, read_write> grid_count: array<atomic<u32>>;
 @group(0) @binding(6) var<storage, read_write> grid_bucket: array<u32>;
+@group(0) @binding(7) var<storage, read_write> signal: array<f32>; // Courant signal h/(c+|v|); CPU min→dt (4c.2)
 
 fn cell_of(pos: vec3<f32>) -> vec3<i32> { return vec3<i32>(floor(pos / P.cell_size)); }
 fn hash_cell(c: vec3<i32>) -> u32 {
@@ -229,4 +232,30 @@ fn cs_kick(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (i >= P.n) { return; }
   particles[i].vel = particles[i].vel + acc[i] * (0.5 * P.dt);
   particles[i].u = max(particles[i].u + dudt[i] * (0.5 * P.dt), 0.0);
+}
+
+// --- Damped relaxation (stage 4c.2): settle a body to hydrostatic equilibrium before colliding it (an
+// UNRELAXED body dumps startup non-equilibrium into the shock, tripling the energy — the 3a lesson). Matches
+// the CPU `HydroBody::relax_step`: v = (v + a·dt)·damp; x += v·dt. Damping is numerical; the equilibrium
+// (dP/dr = −ρg) is the physics. Internal energy is held fixed here (relaxation is mechanical). One relax step
+// = ONE force eval (clear→insert→density→forces) then this kernel. Reads acc from that eval.
+@compute @workgroup_size(64)
+fn cs_relax(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= P.n) { return; }
+  let v = (particles[i].vel + acc[i] * P.dt) * P.damp;
+  particles[i].vel = v;
+  particles[i].pos = particles[i].pos + v * P.dt;
+}
+
+// Per-particle Courant signal speed h_i/(c_i+|v_i|); the CPU reduces min·cfl → the adaptive dt (stage 4c.2).
+// During a shock the material compresses and c_i rises steeply (Tillotson), so dt shrinks to stay stable —
+// the fixed-dt version injected energy exactly because it didn't. Needs density (cs_density ran).
+@compute @workgroup_size(64)
+fn cs_signal(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= P.n) { return; }
+  let pi = particles[i];
+  let c = sound_speed(eos[pi.mat], pi.rho, pi.u);
+  signal[i] = pi.h / max(c + length(pi.vel), 1.0);
 }
