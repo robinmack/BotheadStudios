@@ -45,7 +45,7 @@ struct Params {
     cell_size: f32,
     table_mask: u32,
     bucket_k: u32,
-    _pad: u32,
+    dt: f32,
 }
 const TABLE_SIZE: u32 = 1 << 15; // 32768 cells
 const BUCKET_K: u32 = 64; // >> ~18 particles/cell (cell-membership guard makes the grid exact regardless)
@@ -154,6 +154,98 @@ fn cpu_forces(ps: &mut [Particle], eos: &[Eos], soft: f64) -> (Vec<[f64; 3]>, Ve
     (acc, dudt)
 }
 
+// ---- f64 CPU KDK reference (matches HydroBody::step EXACTLY) for the multi-step integration verify (4c.1).
+// State carried in f64 (no f32 round-trip between steps) so it is a genuine higher-precision reference the
+// GPU's f32 stepper is compared against. Direct O(N²) density+forces — the exact physics, no grid.
+struct CpuState {
+    pos: Vec<[f64; 3]>,
+    vel: Vec<[f64; 3]>,
+    u: Vec<f64>,
+    h: Vec<f64>,
+    mass: Vec<f64>,
+    mat: Vec<usize>,
+}
+impl CpuState {
+    fn from_particles(ps: &[Particle]) -> Self {
+        CpuState {
+            pos: ps.iter().map(|p| [p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64]).collect(),
+            vel: ps.iter().map(|p| [p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64]).collect(),
+            u: ps.iter().map(|p| p.u as f64).collect(),
+            h: ps.iter().map(|p| p.h as f64).collect(),
+            mass: ps.iter().map(|p| p.mass as f64).collect(),
+            mat: ps.iter().map(|p| p.mat as usize).collect(),
+        }
+    }
+    // Density (SPH) + accelerations (gravity + SPH-EOS pressure + Monaghan AV) + du/dt — the SAME equations
+    // as cpu_forces / sph_step.wgsl, on the f64 state.
+    fn forces_and_dudt(&self, eos: &[Eos], soft: f64) -> (Vec<[f64; 3]>, Vec<f64>) {
+        let n = self.pos.len();
+        let mut rho = vec![0.0f64; n];
+        for i in 0..n {
+            rho[i] = self.mass[i] * sph_w(0.0, self.h[i]);
+            for j in 0..n {
+                if i == j { continue; }
+                let d = [self.pos[i][0] - self.pos[j][0], self.pos[i][1] - self.pos[j][1], self.pos[i][2] - self.pos[j][2]];
+                let r = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                let hij = 0.5 * (self.h[i] + self.h[j]);
+                if r < hij { rho[i] += self.mass[j] * sph_w(r, hij); }
+            }
+        }
+        let s2 = soft * soft;
+        let mut acc = vec![[0.0f64; 3]; n];
+        let mut dudt = vec![0.0f64; n];
+        for i in 0..n {
+            let ei = &eos[self.mat[i]];
+            let p_i = pressure(ei, rho[i], self.u[i]);
+            let c_i = sound_speed(ei, rho[i], self.u[i]);
+            for j in 0..n {
+                if i == j { continue; }
+                let d = [self.pos[j][0] - self.pos[i][0], self.pos[j][1] - self.pos[i][1], self.pos[j][2] - self.pos[i][2]];
+                let r2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+                let g = G * self.mass[j] / (r2 + s2).powf(1.5);
+                for k in 0..3 { acc[i][k] += d[k] * g; }
+                let r = r2.sqrt();
+                let hij = 0.5 * (self.h[i] + self.h[j]);
+                if r < hij && r > 1.0e-9 {
+                    let ej = &eos[self.mat[j]];
+                    let p_j = pressure(ej, rho[j], self.u[j]);
+                    let c_j = sound_speed(ej, rho[j], self.u[j]);
+                    let dvel = [self.vel[i][0] - self.vel[j][0], self.vel[i][1] - self.vel[j][1], self.vel[i][2] - self.vel[j][2]];
+                    let dpos = [-d[0], -d[1], -d[2]];
+                    let vr = dvel[0] * dpos[0] + dvel[1] * dpos[1] + dvel[2] * dpos[2];
+                    let pi_ij = if vr < 0.0 {
+                        let mu = hij * vr / (r * r + 0.01 * hij * hij);
+                        let c_bar = 0.5 * (c_i + c_j);
+                        let rho_bar = 0.5 * (rho[i] + rho[j]);
+                        (-AV_ALPHA * c_bar * mu + AV_BETA * mu * mu) / rho_bar
+                    } else { 0.0 };
+                    let coeff = p_i / (rho[i] * rho[i]) + p_j / (rho[j] * rho[j]) + pi_ij;
+                    let dwdr = sph_dw(r, hij);
+                    let grad = [dpos[0] / r * dwdr, dpos[1] / r * dwdr, dpos[2] / r * dwdr];
+                    for k in 0..3 { acc[i][k] += grad[k] * (-coeff * self.mass[j]); }
+                    dudt[i] += 0.5 * self.mass[j] * coeff * (dvel[0] * grad[0] + dvel[1] * grad[1] + dvel[2] * grad[2]);
+                }
+            }
+        }
+        (acc, dudt)
+    }
+    // One KDK leapfrog step — byte-for-byte the operator order of HydroBody::step and cs_kick_drift/cs_kick.
+    fn step(&mut self, eos: &[Eos], soft: f64, dt: f64) {
+        let n = self.pos.len();
+        let (a1, du1) = self.forces_and_dudt(eos, soft);
+        for i in 0..n {
+            for k in 0..3 { self.vel[i][k] += a1[i][k] * 0.5 * dt; }
+            self.u[i] = (self.u[i] + du1[i] * 0.5 * dt).max(0.0);
+            for k in 0..3 { self.pos[i][k] += self.vel[i][k] * dt; }
+        }
+        let (a2, du2) = self.forces_and_dudt(eos, soft);
+        for i in 0..n {
+            for k in 0..3 { self.vel[i][k] += a2[i][k] * 0.5 * dt; }
+            self.u[i] = (self.u[i] + du2[i] * 0.5 * dt).max(0.0);
+        }
+    }
+}
+
 // Deterministic pseudo-random in [-1,1) (no rand crate; reproducible).
 fn rnd(i: usize, salt: u64) -> f64 {
     let mut x = (i as u64).wrapping_add(salt).wrapping_mul(0x9E37_79B9_7F4A_7C15);
@@ -196,7 +288,7 @@ fn main() {
     let n = 300usize;
     let soft = 1.0e4f64;
     let eos = [eos_basalt(), eos_iron()];
-    let mut particles = build_config(n);
+    let particles = build_config(n);
 
     // ---- CPU reference ----
     let mut cpu_particles = particles.clone();
@@ -243,9 +335,60 @@ fn main() {
     println!("N={n}  acceleration: RMS rel error {:.2e}, max per-particle {:.2e}", rms_rel, max_rel);
     println!("        energy rate du/dt: RMS rel error {:.2e}", dudt_rms);
     // f32 GPU vs f64 CPU: expect ~1e-3–1e-2 (f32 mantissa + the sound-speed finite-diff). 3% is the bound.
-    let ok = rms_rel < 3.0e-2 && dudt_rms < 5.0e-2 && acc_gpu.iter().all(|a| a.iter().all(|c| c.is_finite()));
-    println!("{}", if ok { "PASS — GPU sph_step.wgsl matches the CPU physics" } else { "FAIL — GPU/CPU mismatch" });
+    let force_ok = rms_rel < 3.0e-2 && dudt_rms < 5.0e-2 && acc_gpu.iter().all(|a| a.iter().all(|c| c.is_finite()));
+    println!("{}", if force_ok { "PASS (force) — GPU sph_step.wgsl matches the CPU physics" } else { "FAIL (force) — GPU/CPU mismatch" });
+
+    // ---- 4c.1: multi-step KDK integration verify (GPU stepper vs f64 CPU HydroBody::step) ----
+    let step_ok = verify_integration(&eos, soft);
+
+    let ok = force_ok && step_ok;
+    println!("{}", if ok { "PASS — GPU force kernel + KDK integrator both match the CPU physics" } else { "FAIL" });
     std::process::exit(if ok { 0 } else { 1 });
+}
+
+// Run K fixed-dt KDK steps on the GPU and on the f64 CPU reference from the SAME initial config; compare the
+// final pos/vel/u. Errors accumulate over steps (f32 GPU vs f64 CPU), so the bound is looser than the
+// single-eval force check — but the state must TRACK, not diverge. Fixed dt on both sides (per docs/34).
+fn verify_integration(eos: &[Eos], soft: f64) -> bool {
+    let n = 300usize;
+    let steps = 50usize;
+    let dt = 0.5f64; // safely below the ~5 s Courant limit of this ~100 km cluster (c≈3 km/s, h≈63 km)
+    let particles = build_config(n);
+
+    let gpu = run_gpu_steps(&particles, eos, soft, dt, steps);
+
+    let mut cpu = CpuState::from_particles(&particles);
+    for _ in 0..steps { cpu.step(eos, soft, dt); }
+
+    // RMS relative error of position (displacement-scaled), velocity, and internal energy over all particles.
+    let (mut pe, mut pr, mut ve, mut vr, mut ue, mut ur) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    // Position error is scaled by the RMS DISPLACEMENT from the initial config, not absolute position (the
+    // cluster sits at ~10^5 m but only moves ~10^2 m in 25 s — absolute-scaling would hide all the dynamics).
+    for i in 0..n {
+        for k in 0..3 {
+            let dx = gpu[i].pos[k] as f64 - cpu.pos[i][k];
+            let disp = cpu.pos[i][k] - particles[i].pos[k] as f64;
+            pe += dx * dx;
+            pr += disp * disp;
+            let dv = gpu[i].vel[k] as f64 - cpu.vel[i][k];
+            ve += dv * dv;
+            vr += cpu.vel[i][k] * cpu.vel[i][k];
+        }
+        let d = gpu[i].u as f64 - cpu.u[i];
+        ue += d * d;
+        ur += cpu.u[i] * cpu.u[i];
+    }
+    let pos_rms = (pe / pr.max(1e-300)).sqrt();
+    let vel_rms = (ve / vr.max(1e-300)).sqrt();
+    let u_rms = (ue / ur.max(1e-300)).sqrt();
+    let finite = gpu.iter().all(|p| p.pos.iter().chain(p.vel.iter()).all(|c| c.is_finite()) && p.u.is_finite());
+
+    println!("--- integration: {steps} KDK steps, dt={dt}s (GPU f32 vs CPU f64) ---");
+    println!("  pos RMS rel (displacement-scaled) {:.2e}   vel RMS rel {:.2e}   u RMS rel {:.2e}", pos_rms, vel_rms, u_rms);
+    // f32 accumulates over 50 steps: ~1e-3 is honest (docs/34). Must track, not diverge.
+    let ok = finite && pos_rms < 5.0e-3 && vel_rms < 5.0e-3 && u_rms < 5.0e-3;
+    println!("  {}", if ok { "PASS (integration) — GPU KDK stepper tracks the CPU leapfrog" } else { "FAIL (integration) — GPU/CPU state diverged" });
+    ok
 }
 
 fn run_gpu(particles: &[Particle], eos: &[Eos], soft: f64) -> (Vec<[f32; 4]>, Vec<f32>, Vec<Particle>) {
@@ -289,7 +432,7 @@ fn run_gpu(particles: &[Particle], eos: &[Eos], soft: f64) -> (Vec<[f32; 4]>, Ve
     let (p_clear, p_insert, p_density, p_forces) = (mk("cs_grid_clear"), mk("cs_grid_insert"), mk("cs_density"), mk("cs_forces"));
 
     let cell_size = particles.iter().map(|p| p.h).fold(0.0f32, f32::max);
-    let params = Params { n, softening: soft as f32, av_alpha: AV_ALPHA as f32, av_beta: AV_BETA as f32, cell_size, table_mask: TABLE_SIZE - 1, bucket_k: BUCKET_K, _pad: 0 };
+    let params = Params { n, softening: soft as f32, av_alpha: AV_ALPHA as f32, av_beta: AV_BETA as f32, cell_size, table_mask: TABLE_SIZE - 1, bucket_k: BUCKET_K, dt: 0.0 };
     let pbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("particles"), contents: bytemuck::cast_slice(particles), usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC });
     let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("params"), contents: bytemuck::bytes_of(&params), usage: wgpu::BufferUsages::UNIFORM });
     let ebuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("eos"), contents: bytemuck::cast_slice(eos), usage: wgpu::BufferUsages::STORAGE });
@@ -335,4 +478,98 @@ fn run_gpu(particles: &[Particle], eos: &[Eos], soft: f64) -> (Vec<[f32; 4]>, Ve
     let dudt = bytemuck::cast_slice::<u8, f32>(&read(&dbuf, (n as u64) * 4)).to_vec();
     let out_particles = bytemuck::cast_slice::<u8, Particle>(&read(&pbuf, (n as u64) * std::mem::size_of::<Particle>() as u64)).to_vec();
     (acc, dudt, out_particles)
+}
+
+// Run `steps` KDK leapfrog steps at fixed `dt` on the GPU (stage 4c.1) and read back the final particles.
+// Per step: clear→insert→density→forces → cs_kick_drift → clear→insert→density→forces → cs_kick. All passes
+// go into ONE command buffer — consecutive compute passes in a submission are ordered & memory-synchronized,
+// so the drift of step k is visible to the density of step k+1.
+fn run_gpu_steps(particles: &[Particle], eos: &[Eos], soft: f64, dt: f64, steps: usize) -> Vec<Particle> {
+    use wgpu::util::DeviceExt;
+    let n = particles.len() as u32;
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor { backends: wgpu::Backends::VULKAN, ..Default::default() });
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+    }))
+    .expect("no Vulkan adapter (RTX 2070 expected)");
+    let (device, queue) = pollster::block_on(adapter.request_device(
+        &wgpu::DeviceDescriptor { label: Some("sph-verify-steps"), required_features: wgpu::Features::empty(), required_limits: wgpu::Limits::default(), memory_hints: wgpu::MemoryHints::Performance },
+        None,
+    ))
+    .expect("request_device");
+
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("sph_step"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
+    let storage = |b: u32, ro: bool| wgpu::BindGroupLayoutEntry {
+        binding: b,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: ro }, has_dynamic_offset: false, min_binding_size: None },
+        count: None,
+    };
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("l"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
+            storage(1, false),
+            storage(2, true),
+            storage(3, false),
+            storage(4, false),
+            storage(5, false),
+            storage(6, false),
+        ],
+    });
+    let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[&layout], push_constant_ranges: &[] });
+    let mk = |e: &str| device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some(e), layout: Some(&pl), module: &module, entry_point: Some(e), compilation_options: Default::default(), cache: None });
+    let (p_clear, p_insert, p_density, p_forces, p_kd, p_k) =
+        (mk("cs_grid_clear"), mk("cs_grid_insert"), mk("cs_density"), mk("cs_forces"), mk("cs_kick_drift"), mk("cs_kick"));
+
+    let cell_size = particles.iter().map(|p| p.h).fold(0.0f32, f32::max);
+    let params = Params { n, softening: soft as f32, av_alpha: AV_ALPHA as f32, av_beta: AV_BETA as f32, cell_size, table_mask: TABLE_SIZE - 1, bucket_k: BUCKET_K, dt: dt as f32 };
+    let pbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("particles"), contents: bytemuck::cast_slice(particles), usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC });
+    let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("params"), contents: bytemuck::bytes_of(&params), usage: wgpu::BufferUsages::UNIFORM });
+    let ebuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("eos"), contents: bytemuck::cast_slice(eos), usage: wgpu::BufferUsages::STORAGE });
+    let abuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("acc"), size: (n as u64) * 16, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+    let dbuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("dudt"), size: (n as u64) * 4, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+    let gcount = device.create_buffer(&wgpu::BufferDescriptor { label: Some("grid_count"), size: (TABLE_SIZE as u64) * 4, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
+    let gbucket = device.create_buffer(&wgpu::BufferDescriptor { label: Some("grid_bucket"), size: (TABLE_SIZE as u64) * (BUCKET_K as u64) * 4, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
+    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: pbuf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: ebuf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: abuf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 4, resource: dbuf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 5, resource: gcount.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 6, resource: gbucket.as_entire_binding() },
+        ],
+    });
+    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    let force_eval: [(&wgpu::ComputePipeline, u32); 4] = [(&p_clear, TABLE_SIZE), (&p_insert, n), (&p_density, n), (&p_forces, n)];
+    let pass = |enc: &mut wgpu::CommandEncoder, pipe: &wgpu::ComputePipeline, threads: u32| {
+        let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
+        p.set_pipeline(pipe);
+        p.set_bind_group(0, &bind, &[]);
+        p.dispatch_workgroups(threads.div_ceil(64), 1, 1);
+    };
+    for _ in 0..steps {
+        for (pipe, threads) in force_eval { pass(&mut enc, pipe, threads); } // eval 1
+        pass(&mut enc, &p_kd, n); // half-kick + drift
+        for (pipe, threads) in force_eval { pass(&mut enc, pipe, threads); } // eval 2
+        pass(&mut enc, &p_k, n); // final half-kick
+    }
+    queue.submit(Some(enc.finish()));
+
+    let size = (n as u64) * std::mem::size_of::<Particle>() as u64;
+    let staging = device.create_buffer(&wgpu::BufferDescriptor { label: None, size, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    enc.copy_buffer_to_buffer(&pbuf, 0, &staging, 0, size);
+    queue.submit(Some(enc.finish()));
+    let slice = staging.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    device.poll(wgpu::Maintain::Wait);
+    let out = bytemuck::cast_slice::<u8, Particle>(&slice.get_mapped_range()).to_vec();
+    out
 }

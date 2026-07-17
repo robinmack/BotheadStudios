@@ -15,7 +15,10 @@ because **we are our own first customers** and pin exact engine versions in our 
   Verified headless on the RTX 2070 (native Vulkan wgpu) against an independent f64 CPU computation of the
   same equations to f32 precision (RMS rel error 1.9e-6). Stage 4b adds a **spatial-hash neighbour grid** for
   the short-range SPH (O(N) not O(N²)), also verified exact — with a cell-membership guard that defeats the
-  hash-collision double-counting. The integration loop + scene wiring are stage 4c.
+  hash-collision double-counting. Stage 4c.1 adds the **KDK leapfrog integration loop** (`cs_kick_drift` +
+  `cs_kick`, energy-conserving, matching the CPU `HydroBody::step`), verified over 50 fixed-dt steps against
+  an f64 CPU reference (final-state RMS pos 3.1e-4 / vel 5.7e-4 / u 5.1e-4 — tracking, not diverging). The
+  high-N impact + accretion operator + scene wiring are the rest of stage 4c.
 - **Deformable-Earth giant impact — the isotopic crisis, re-measured** (`hydrostatic.rs`, `docs/33` stage
   3) — a full thermodynamic SPH giant impact between two real EOS particle bodies: the SPH internal-energy
   equation + Monaghan artificial viscosity (shock capture) + an energy-conserving KDK leapfrog with an

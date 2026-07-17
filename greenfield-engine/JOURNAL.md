@@ -5,6 +5,29 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-17 — Stage 4c.1: GPU KDK integration loop, verified over 50 steps (docs/33/34)
+
+**What.** Turned the verified 4a/4b force kernel into a **time integrator**. Added two kernels to
+`shaders/sph_step.wgsl` — `cs_kick_drift` (first half-kick of v & u, clamp `u=max(u,0)`, then drift x) and
+`cs_kick` (final half-kick) — and a `dt` field to `Params` (repurposed the trailing `_pad`). One dynamical
+step = TWO force evals with a half-kick+drift between and a half-kick after, matching the CPU
+`HydroBody::step` KDK leapfrog operator-for-operator (energy-conserving, no damping). Per docs/34 the verify
+uses a FIXED dt on both sides; GPU adaptive Courant dt (CPU read-back of a min) is deferred until it's needed
+by a real run.
+
+**Why.** The force kernel was one evaluation; a giant impact needs the loop. Verify-before-wire discipline
+(docs/30): prove the integrator matches the CPU leapfrog before running it at high N or wiring it to a scene.
+
+**Verified (RTX 2070, `tools/sph-verify`).** Extended the harness with an f64 CPU KDK reference (genuine f64
+state, no f32 round-trip between steps — a true higher-precision reference) and a GPU multi-step runner (all
+passes in one command buffer; consecutive compute passes are ordered & memory-synchronized so step k's drift
+is visible to step k+1's density). 50 steps at dt=0.5s from the same IC: GPU f32 vs CPU f64 final state
+**pos RMS 3.1e-4, vel 5.7e-4, u 5.1e-4** (displacement-scaled pos) — inside the ~1e-3 honest f32-vs-f64
+bound and *tracking*, not diverging. The single-eval force check still PASSes (acc 1.85e-6, du/dt 4.36e-6).
+`cargo run --release` exits 0 on both. Next: 4c.2 (high-N impact for the converged disk-provenance number).
+
+---
+
 ## 2026-07-17 — Stage 4c prepped for a fresh session + landing hero shipped (docs/34)
 
 **What.** Two things closing out a long session. (1) Built + deployed the **landing-page hero N-body

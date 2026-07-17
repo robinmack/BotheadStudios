@@ -24,7 +24,11 @@ A self-contained hand-off so the next session executes 4c without re-deriving an
 
 ## The 4c tasks, in order — each verified before the next
 
-### 4c.1 — GPU KDK integration loop (+ adaptive Courant dt)
+### 4c.1 — GPU KDK integration loop (+ adaptive Courant dt) — DONE ✓ (verified RTX 2070, 50 steps)
+> Implemented: `cs_kick_drift` + `cs_kick` in `sph_step.wgsl`, `dt` field in `Params`. `tools/sph-verify`
+> extended with an f64 CPU KDK reference + GPU multi-step runner; 50 steps @ dt=0.5s tracks to pos 3.1e-4 /
+> vel 5.7e-4 / u 5.1e-4 RMS (f32 vs f64). Fixed dt on both sides. GPU adaptive Courant dt deferred to 4c.2.
+
 Turn the verified force kernel into a time integrator. Match the CPU `HydroBody::step` KDK exactly:
 `compute density+forces → v += a·dt/2, u += du·dt/2 → x += v·dt → recompute density+forces → v += a·dt/2,
 u += du·dt/2`. So one step = TWO force evals (each = clear→insert→density→forces) with an `cs_integrate`

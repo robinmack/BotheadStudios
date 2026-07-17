@@ -13,8 +13,9 @@
 // dropped) — like the CPU `neighbors.rs`, verified by tools/sph-verify (the gridded output still matches the
 // O(N²) CPU physics to f32 precision). LONG-RANGE self-gravity stays direct O(N²) here — GPU-tiled direct
 // summation is tractable at these N; a Barnes–Hut tree (CPU has one in bhtree.rs) is the further optimization
-// if profiling at 10^5 demands it. The KDK integration loop + adaptive dt + scene wiring are stage 4c/5.
-// VERIFIED on the RTX 2070 (tools/sph-verify) to f32 precision.
+// if profiling at 10^5 demands it. The KDK integration loop (cs_kick_drift/cs_kick, stage 4c.1) is BELOW;
+// adaptive Courant dt + scene wiring are stage 4c.2+/5. VERIFIED on the RTX 2070 (tools/sph-verify) to f32
+// precision — the force kernel per-eval AND the integrator over 50 steps vs the CPU HydroBody::step leapfrog.
 
 const PI: f32 = 3.14159265359;
 const G: f32 = 6.674e-11;
@@ -27,7 +28,7 @@ struct Params {
   cell_size: f32,   // = the max smoothing length (so the 27-cell scan is exact)
   table_mask: u32,  // hash table size − 1 (power of two)
   bucket_k: u32,    // max particles stored per cell
-  _pad: u32,
+  dt: f32,          // fixed integration timestep for cs_kick_drift/cs_kick (KDK leapfrog, stage 4c.1)
 }
 
 struct Particle {
@@ -202,4 +203,30 @@ fn cs_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   acc[i] = a;
   dudt[i] = de;
+}
+
+// --- KDK leapfrog integration (stage 4c.1) ---
+// One dynamical step = TWO force evals with a half-kick+drift between and a half-kick after, matching the CPU
+// `HydroBody::step` EXACTLY (energy-conserving; no damping). Internal energy is integrated alongside velocity
+// (its rate du/dt is the pressure/AV work) and clamped u = max(u, 0) as the CPU does. Per step the host
+// dispatches: clear→insert→density→forces → cs_kick_drift → clear→insert→density→forces → cs_kick.
+
+// First half-kick (v, u) then DRIFT position. Reads acc/dudt from the FIRST force eval of the step.
+@compute @workgroup_size(64)
+fn cs_kick_drift(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= P.n) { return; }
+  let v = particles[i].vel + acc[i] * (0.5 * P.dt);
+  particles[i].vel = v;
+  particles[i].u = max(particles[i].u + dudt[i] * (0.5 * P.dt), 0.0);
+  particles[i].pos = particles[i].pos + v * P.dt;
+}
+
+// Final half-kick (v, u). Reads acc/dudt from the SECOND force eval of the step.
+@compute @workgroup_size(64)
+fn cs_kick(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= P.n) { return; }
+  particles[i].vel = particles[i].vel + acc[i] * (0.5 * P.dt);
+  particles[i].u = max(particles[i].u + dudt[i] * (0.5 * P.dt), 0.0);
 }
