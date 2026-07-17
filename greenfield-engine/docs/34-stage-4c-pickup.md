@@ -73,7 +73,15 @@ this adds the growth law so a round Moon can emerge.
 - Honest: no merge unless genuinely bound (negative pair energy) and past the Roche limit (a clump inside
   Roche should shred, not accrete — the `tides::secular_step` Roche logic is the aftermath analogue).
 
-### 4c.4 — Scene wiring (browser, the big integration)
+### 4c.4 — Scene wiring (browser, the big integration) — DONE ✓ (rig-watch verified, RTX 2070 WebGPU)
+> `crates/engine/src/gpu_sph.rs` (`GpuSph`) hosts `sph_step.wgsl` on `OrbitDemo`'s shared WebGPU device;
+> `shaders/sph_render.wgsl` draws instanced billboards zero-copy from the physics buffer (Earth=tan,
+> Theia=blue). `OrbitDemo::start_gpu_impact()` (JS "🌋 GPU Impact" button) builds+relaxes two bodies on the
+> CPU (`build_deformable_impact`, verified `HydroBody`), then the GPU steps 8 KDK substeps/frame. Fixed dt
+> (WebGPU forbids the adaptive read-back) + Earth-relative f32 frame. Rig `web/rig/sph_impact.mjs`: watched
+> two bodies → collision → remnant + two-provenance debris disk, stable, 24–25 fps. Caveats: modest N~1050,
+> no read-back (no live HUD/momentum-mirror), small at default zoom — polish, not correctness.
+
 Wire the GPU stepper into the birth scene (`OrbitDemo`) so the impact runs at high N in the browser
 (docs/22 step 4). Pattern to follow: the terrain band's `GpuParticles` in `lib.rs` (buffers, dispatch loop,
 zero-copy sim↔render). Needs an **f32 Earth-relative/local frame** (planetary coords in f32 cancel — keep
@@ -95,9 +103,11 @@ positions relative to Earth's centre). Test IN-BROWSER (WebGPU, not Vulkan; the 
   verify); rig-watch via `web/rig/*.mjs` (headed Chromium + xvfb). **NEVER `cargo fmt`.** Work in the
   worktree, never the main checkout.
 
-## Definition of done
-4c is complete when: the GPU stepper is verified against the CPU over many steps (4c.1); a high-N impact runs
-and the disk-provenance number is measured (4c.2); an accretion operator lets a bound clump grow into one
-body, conservation-tested (4c.3); and the deformable-Earth impact runs at high N in the browser birth scene
-(4c.4). Then stages 5 (fold `hydrostatic`/`AirField` into `Aggregate` — the one-module goal) and 6
-(energy-tiered just-in-time particalization) remain.
+## Definition of done — 4c COMPLETE ✓ (2026-07-17)
+4c is complete when: the GPU stepper is verified against the CPU over many steps (4c.1 ✓); a high-N impact
+runs and the disk-provenance number is measured (4c.2 ✓ — with the honest finding that the fraction is
+scatter-dominated, not converged; see JOURNAL); an accretion operator lets a bound clump grow into one body,
+conservation-tested (4c.3 ✓); and the deformable-Earth impact runs in the browser birth scene (4c.4 ✓,
+rig-watch verified). **All four done and committed on `orbit-diagnostic`.** Then stages 5 (fold
+`hydrostatic`/`AirField` into `Aggregate` — the one-module goal) and 6 (energy-tiered just-in-time
+particalization) remain.

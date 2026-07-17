@@ -109,6 +109,8 @@ async function main(): Promise<void> {
     const stats = document.getElementById("stats");
     if (stats) stats.hidden = false;
     report("info", "orbit demo created OK");
+    // Rig-watch / debug handle (docs/33 stage 4c.4): lets a headless driver call demo.start_gpu_impact().
+    (window as unknown as { __demo?: OrbitDemo }).__demo = demo;
 
     // --- Control bar: frame of reference + the orbital-decay experiment + time control ---
     // Controls live on the LEFT, stacked vertically — the bottom bar overlapped the simulation
@@ -176,6 +178,10 @@ async function main(): Promise<void> {
     });
     void camEarth;
     void camMoon;
+
+    // GPU deformable-Earth giant impact (docs/33 stage 4c.4): swap the rigid-Earth model for the live
+    // GPU SPH particle field — two differentiated bodies colliding, stepped by sph_step.wgsl in-browser.
+    mkBtn("🌋 GPU Impact", () => demo.start_gpu_impact());
 
     // Orbital decay: brake the Moon until its orbit crashes into the planet. (The birth scene has no
     // such controls — the encounter IS the scene; Reset replays it.)

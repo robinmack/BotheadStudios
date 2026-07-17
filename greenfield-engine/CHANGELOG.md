@@ -29,7 +29,11 @@ because **we are our own first customers** and pin exact engine versions in our 
   **accretion / growth operator** (`accretion.rs`): friends-of-friends bound-clump detection gated on genuine
   self-boundedness AND the remnant's Roche limit, promoting each qualifying clump to one body at its COM —
   conserving mass, momentum, and centre of mass exactly (TDD-verified to <1e-12), the growth law a round Moon
-  needs. Scene wiring is the rest of stage 4c.
+  needs. Stage 4c.4 completes stage 4c: the deformable-Earth giant impact now **runs live in the browser**
+  (`gpu_sph.rs` hosts `sph_step.wgsl` on the space-band WebGPU device; `sph_render.wgsl` draws the particle
+  field instanced; `OrbitDemo::start_gpu_impact()` / a "GPU Impact" button triggers it) — rig-watch verified
+  on the RTX 2070: two differentiated bodies collide into a remnant + a two-provenance debris disk, stable at
+  interactive frame rates.
 - **Deformable-Earth giant impact — the isotopic crisis, re-measured** (`hydrostatic.rs`, `docs/33` stage
   3) — a full thermodynamic SPH giant impact between two real EOS particle bodies: the SPH internal-energy
   equation + Monaghan artificial viscosity (shock capture) + an energy-conserving KDK leapfrog with an

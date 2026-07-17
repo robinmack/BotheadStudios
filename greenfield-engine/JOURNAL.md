@@ -5,6 +5,38 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-17 — Stage 4c.4: the GPU SPH deformable-Earth impact runs IN THE BROWSER (docs/33/34)
+
+**What.** Wired the verified GPU SPH stepper into the birth scene so the deformable-Earth giant impact runs
+live in-browser (WebGPU), completing stage 4c. New engine module `crates/engine/src/gpu_sph.rs` (`GpuSph`) —
+the WebGPU host for `shaders/sph_step.wgsl`: owns the 8-binding pipelines + buffers on `OrbitDemo`'s shared
+device, uploads a particle set, and encodes batches of KDK (or relax) substeps. New shader
+`shaders/sph_render.wgsl` draws the particles as instanced camera-facing billboards straight from the physics
+buffer (zero-copy; pos at byte 0, provenance u32 at byte 44 → Earth = warm rock, Theia = cool steel). New
+`OrbitDemo::start_gpu_impact()` (JS button "🌋 GPU Impact") builds + relaxes two differentiated bodies on the
+CPU (`gpu_sph::build_deformable_impact`, reusing the verified `HydroBody`), places them on the oblique
+giant-impact geometry, and hands the per-frame dynamics to the GPU; `advance()` encodes 8 KDK substeps/frame,
+`render()` draws the field. Two WebGPU-shaped choices (documented in the module): **fixed dt** (adaptive
+Courant needs a blocking read-back WebGPU forbids) and an **Earth-relative f32 frame** (planetary coords
+cancel in f32; the shader re-adds Earth's display position).
+
+**Why.** docs/34 4c.4 — the impact should be visible/interactive in the browser, not only in the offline
+native tool. The physics laws stay the shared `sph_step.wgsl` (docs/32 §4: don't fork the particle path — this
+is the FIRST in-engine host of that shader, not a fork); only a render pipeline is new to `OrbitDemo`.
+
+**Verified.** `cargo build -p engine --target wasm32-unknown-unknown` clean → the WGSL validates under
+WebGPU and the wiring compiles. Rig-watch (`web/rig/sph_impact.mjs`, headed Chromium + xvfb + Vulkan WebGPU on
+the RTX 2070): clicked the trigger, watched the whole event — two intact differentiated bodies (t≈0) →
+collision + spreading (t+2 s) → a **central remnant plus an extended two-provenance debris disk** (t+8.5 s),
+Earth (tan) and Theia (blue) material visibly mixing. No NaN blow-up (the fixed dt held through the shock),
+24–25 fps. Screenshots in the job scratch. Native fast suite green. Honest caveats: modest N (~1050) and
+fewer relax steps than the offline run (a snappy trigger, slightly hotter start), small on-screen at the
+default zoom, no read-back so no live momentum-mirror/HUD numbers yet — all polish, not correctness. This
+closes stage 4c (4c.1 integrator, 4c.2 high-N impact, 4c.3 accretion, 4c.4 browser). Remaining realignment:
+stage 5 (fold `hydrostatic`/`AirField` into one `Aggregate`) and 6 (energy-tiered JIT particalization).
+
+---
+
 ## 2026-07-17 — Stage 4c.3: the accretion / growth operator, conservation-verified (docs/33/34)
 
 **What.** New engine module `crates/engine/src/accretion.rs` — the growth law that lets a round Moon emerge

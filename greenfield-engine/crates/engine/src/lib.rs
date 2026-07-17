@@ -29,6 +29,7 @@ mod damage;
 mod emission;
 mod eos;
 mod granular;
+mod gpu_sph;
 mod gravity;
 mod hydrostatic;
 mod impact;
@@ -2477,6 +2478,14 @@ mod app {
         debris_acc: Vec<glam::DVec3>,
         /// A pool of sphere-render slots for the fragments (one draw each, like `moon_unis`).
         debris_unis: Vec<UniformSlot>,
+        // --- GPU SPH deformable-Earth impact in the browser (docs/33 stage 4c.4) ---
+        /// The GPU SPH particle system (built + relaxed on the CPU at `start_gpu_impact`, then stepped on the
+        /// GPU each frame via the verified `sph_step.wgsl` kernels). `None` until triggered.
+        gpu_sph: Option<crate::gpu_sph::GpuSph>,
+        sph_pipeline: wgpu::RenderPipeline, // instanced billboard particles (sph_render.wgsl)
+        sph_cam: UniformSlot,               // view-proj + Earth display origin + scale for the particle shader
+        sph_active: bool,
+        sph_dt: f32, // fixed integration timestep (chosen at build; WebGPU forbids the adaptive read-back)
     }
 
     // Moon-shot Stage A constants.
@@ -2596,6 +2605,23 @@ mod app {
                 .map(|_| make_space_uniform(&device, &bind_layout))
                 .collect();
             let pipeline = build_space_pipeline(&device, &bind_layout, config.format);
+            // GPU SPH deformable-Earth impact (stage 4c.4): its instanced-particle pipeline + a camera
+            // uniform (reuses the uniform-only `bind_layout`; the buffer is sized for `SphCam`).
+            let sph_pipeline = build_sph_pipeline(&device, &bind_layout, config.format);
+            let sph_cam = {
+                let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("sph-cam"),
+                    size: std::mem::size_of::<crate::gpu_sph::SphCam>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("sph-cam-bind"),
+                    layout: &bind_layout,
+                    entries: &[wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() }],
+                });
+                UniformSlot { buf, bind }
+            };
 
             // The real three-body system in SI units: [Sun, Earth, Moon] (orbit.rs). The Earth carries
             // its true heliocentric velocity and the Moon co-moves with it plus its own orbital speed,
@@ -2724,6 +2750,11 @@ mod app {
                 real_accum: 0.0,
                 debris_acc: Vec::new(),
                 debris_unis,
+                gpu_sph: None,
+                sph_pipeline,
+                sph_cam,
+                sph_active: false,
+                sph_dt: 0.0,
             })
         }
 
@@ -3178,6 +3209,25 @@ mod app {
             (self.bodies[2].pos - self.bodies[1].pos).length() / 1000.0
         }
 
+        /// Start the GPU deformable-Earth giant impact (docs/33 stage 4c.4): build + relax two differentiated
+        /// EOS bodies on the CPU, place them on the oblique giant-impact geometry, and hand the per-frame
+        /// dynamics to the GPU SPH stepper (the verified `sph_step.wgsl` kernels — same physics as the offline
+        /// `tools/impact-run`). The scene then renders the live particle field instead of the rigid-Earth
+        /// debris model. Call from JS on the `OrbitDemo` handle, like `drop_moon()`.
+        pub fn start_gpu_impact(&mut self) {
+            // Modest N for the browser (per-frame GPU stepping is trivial at this size; the CPU relax is the
+            // one-time cost). The offline tool is where the converged high-N number lives.
+            let (particles, eos, softening, dt) = crate::gpu_sph::build_deformable_impact(900, 150, 900);
+            let cap = particles.len() as u32;
+            let mut sph = crate::gpu_sph::GpuSph::new(&self.device, cap);
+            sph.upload(&self.queue, &particles, &eos, softening);
+            sph.set_dt(&self.queue, dt, 1.0);
+            self.gpu_sph = Some(sph);
+            self.sph_dt = dt;
+            self.sph_active = true;
+            self.focus = 1; // centre on Earth (the particle system sits at the display origin)
+        }
+
         /// Advance the PHYSICS by `real_dt` wall-clock seconds. Fixed sim-timestep substeps whose
         /// COUNT (not size) varies with the wall clock — so the physics rate is independent of the
         /// display frame rate (a 30 fps client and a 120 fps client simulate the same world), and the
@@ -3186,6 +3236,18 @@ mod app {
         /// the physics with an oversized step — time slows before truth breaks.
         pub fn advance(&mut self, real_dt: f64) {
             let real_dt = real_dt.clamp(0.0, 0.25); // tab-sleep / hiccup guard
+            // GPU SPH deformable-Earth impact owns the frame while active (docs/33 stage 4c.4): encode a batch
+            // of KDK substeps on the GPU and skip the CPU orbital physics. Fixed dt (WebGPU forbids the
+            // adaptive read-back); ~8 substeps/frame plays the ~10 h aftermath out over a few seconds.
+            if self.sph_active {
+                const SPH_SUBSTEPS: u32 = 8;
+                if let Some(sph) = self.gpu_sph.as_ref() {
+                    let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sph-step") });
+                    sph.encode_kdk(&mut enc, SPH_SUBSTEPS);
+                    self.queue.submit(std::iter::once(enc.finish()));
+                }
+                return;
+            }
             self.phys_clock += real_dt;
             if self.geologic {
                 // Millennia per second: the validated secular law in 50-year strides (exactly
@@ -3641,6 +3703,19 @@ mod app {
             let sun = r_bodies[0];
             let moon_r = (self.impactor_radius * DISPLAY_SCALE) as f32;
 
+            // GPU SPH impact (docs/33 stage 4c.4): push the particle-shader camera uniform. The particle
+            // system lives in an Earth-relative f32 frame, so its display origin is Earth's position in the
+            // focused frame; the shader maps each Earth-relative position through DISPLAY_SCALE and view_proj.
+            if self.sph_active {
+                let origin = ((r_bodies[1] - focus) * DISPLAY_SCALE).as_vec3();
+                let cam = crate::gpu_sph::SphCam {
+                    view_proj: view_proj.to_cols_array_2d(),
+                    origin: [origin.x, origin.y, origin.z, 0.0],
+                    params: [DISPLAY_SCALE as f32, 0.006, 0.0, 0.0], // (m→display scale, billboard half-size)
+                };
+                self.queue.write_buffer(&self.sph_cam.buf, 0, bytemuck::bytes_of(&cam));
+            }
+
             // Light direction = TO the real Sun from each body (per-body; the Sun is the illuminant,
             // not a hardcoded direction). So the lit hemisphere and the phases come from the geometry.
             let earth_light = (sun - r_bodies[1]).as_vec3().normalize();
@@ -3960,21 +4035,36 @@ mod app {
                 });
                 pass.set_pipeline(&self.pipeline);
                 draw(&mut pass, &self.sun_uni, &self.sphere_gpu); // the Sun, where it really is
-                draw(&mut pass, &self.interior_uni, &self.sphere_gpu); // the glowing deep interior
-                for uni in self.wall_unis.iter() {
-                    draw(&mut pass, uni, &self.sphere_gpu); // crater bowl wall (zero-scale when intact)
-                }
-                for uni in self.shell_unis.iter() {
-                    draw(&mut pass, uni, &self.sphere_gpu); // Earth: a shell of coarse grains
-                }
-                for (idx, uni) in self.moon_unis.iter().enumerate() {
-                    if idx / MOON_SHELL_N == 0 && r_shattered {
-                        continue; // shattered — drawn as debris
+                // The rigid-Earth + sphere-debris model draws only when the GPU SPH impact is NOT running
+                // (docs/33 stage 4c.4): with the deformable impact active, the particle field IS the planet.
+                if !self.sph_active {
+                    draw(&mut pass, &self.interior_uni, &self.sphere_gpu); // the glowing deep interior
+                    for uni in self.wall_unis.iter() {
+                        draw(&mut pass, uni, &self.sphere_gpu); // crater bowl wall (zero-scale when intact)
                     }
-                    draw(&mut pass, uni, &self.sphere_gpu);
+                    for uni in self.shell_unis.iter() {
+                        draw(&mut pass, uni, &self.sphere_gpu); // Earth: a shell of coarse grains
+                    }
+                    for (idx, uni) in self.moon_unis.iter().enumerate() {
+                        if idx / MOON_SHELL_N == 0 && r_shattered {
+                            continue; // shattered — drawn as debris
+                        }
+                        draw(&mut pass, uni, &self.sphere_gpu);
+                    }
+                    for uni in self.debris_unis.iter().take(debris_count) {
+                        draw(&mut pass, uni, &self.sphere_gpu);
+                    }
                 }
-                for uni in self.debris_unis.iter().take(debris_count) {
-                    draw(&mut pass, uni, &self.sphere_gpu);
+                // GPU SPH particles: instanced billboards straight from the physics buffer (zero-copy).
+                if self.sph_active {
+                    if let Some(sph) = self.gpu_sph.as_ref() {
+                        if sph.count() > 0 {
+                            pass.set_pipeline(&self.sph_pipeline);
+                            pass.set_bind_group(0, &self.sph_cam.bind, &[]);
+                            pass.set_vertex_buffer(0, sph.particle_buffer().slice(..));
+                            pass.draw(0..6, 0..sph.count());
+                        }
+                    }
                 }
             }
             self.queue.submit(std::iter::once(encoder.finish()));
@@ -4116,6 +4206,75 @@ mod app {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview: None,
+            cache: None,
+        })
+    }
+
+    /// The instanced particle pipeline for the GPU SPH impact (docs/33 stage 4c.4). One camera-facing
+    /// billboard quad per particle, generated in the vertex shader; the instance buffer is the `sph_step.wgsl`
+    /// particle buffer itself (48-byte stride, pos at offset 0, provenance u32 at offset 44). No mesh, no
+    /// per-vertex buffer — the quad corners come from the vertex index.
+    fn build_sph_pipeline(
+        device: &wgpu::Device,
+        bind_layout: &wgpu::BindGroupLayout,
+        format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("sph-render-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/sph_render.wgsl").into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sph-render-pipeline-layout"),
+            bind_group_layouts: &[bind_layout],
+            push_constant_ranges: &[],
+        });
+        // Instance-step layout over the SPH particle buffer: pos (vec3 @ 0) + provenance (u32 @ 44).
+        const ATTRS: [wgpu::VertexAttribute; 2] = [
+            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
+            wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32, offset: 44, shader_location: 1 },
+        ];
+        let instance_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<crate::gpu_sph::SphParticle>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &ATTRS,
+        };
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("sph-render-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[instance_layout],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None, // billboards always face the camera
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
