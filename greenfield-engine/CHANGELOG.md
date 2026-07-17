@@ -10,6 +10,11 @@ because **we are our own first customers** and pin exact engine versions in our 
 ## [Unreleased]
 
 ### Added
+- **Architecture map, CLAUDE.md, and realignment plan** (`docs/32`, `docs/33`, `CLAUDE.md`) — a durable
+  orientation for future sessions (module-by-module with `file:line` anchors; the shared-laws-vs-forked-
+  solvers map; the EOS inventory confirming NO condensed-matter EOS exists) plus a staged plan to realign
+  the engine to its principles: one particle/material module, one Tillotson EOS spanning solid→liquid→vapor,
+  and energy-tiered calculations (T0 bulk → T3 full-EOS-shock, selected by energy density). No code change.
 - **Proto-Earth spin + the isotopic crisis** (`docs/31`) — the excavated Earth cap is surface mantle that
   co-rotated before the impact, so `build_impact_debris_scaled` now takes an `earth_omega` and gives each
   target grain its co-rotating velocity `ω × (pos − centre)` before the ploughing loft (`ω = 0` is

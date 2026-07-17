@@ -5,6 +5,45 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-17 — Architecture map + first-principles realignment plan (docs/32, docs/33, CLAUDE.md)
+
+**What.** Mapped the whole engine and wrote it up for future Claude sessions (Robin: too many "surprises"
+about what already exists). Four parallel readers covered the physics core, terrain/atmosphere, scene/render/
+GPU, and docs/build/deploy; synthesized into **docs/32-architecture-map.md** (module-by-module with
+`file:line` anchors, the shared-laws-vs-forked-solvers map, the EOS inventory, the birth-of-the-Moon scene
+trace, and the workflow rules), a concise auto-loaded **CLAUDE.md** pointing to it, and
+**docs/33-architecture-realignment.md** — a staged plan to realign the architecture to Integrity's
+principles (Robin's three framings: material physics scalable · calculations tiered on energy scale ·
+everything a natural product of the real physics).
+
+**Key finding.** The physics *laws* are already unified and scale-invariant (`granular::Contact`, the SPH
+kernel, `Furrow` excavation, `plough_loft`, `Body`, `LayeredBody`); the *solvers and containers* are FORKED
+— two container universes (CPU `Aggregate` f64 vs voxel-`World`/GPU f32), four integrators over one law, the
+rigid-boundary fork (Earth is a penalty sphere, not particles — docs/28 #1), and **no condensed-matter EOS**
+(solids resist via a linear-elastic contact penalty; planet densities are declared constants). A
+self-gravitating EOS planet turns out to be a MERGE, not new machinery: `atmosphere.rs`'s verified SPH
+pressure kernel + `bhtree.rs` self-gravity + `aggregate.rs::apply_thermo` energy equation, with the ideal-gas
+EOS swapped for a Tillotson EOS — only the EOS is genuinely new.
+
+**The realignment (docs/33).** One particle/material engine every scene drives: one container (bulk forms
+are the coarse *energy tier* of the same particles, not a separate universe), one pressure law (Tillotson EOS
+spanning solid→liquid→vapor, replacing the ideal-gas + linear-elastic + declared-density patchwork), one
+energy-tiered stepper (fidelity T0 bulk → T1 quasi-static → T2 granular+thermal → T3 full EOS shock/vapor,
+selected by energy density vs the material's own thresholds — generalizing docs/08/13 spatial LOD to
+energy-tiered physics via the docs/16 awake-set). Staged correctness-first: (1) Tillotson EOS module +
+tests, (2) self-gravitating EOS planet vs planet.rs's analytic hydrostatic profile, (3) two-body impact both
+bodies as particles → re-measure the isotopic crisis, (4) GPU-resident unified stepper at N~10⁵, (5) unify
+the containers, (6) formalize the energy-tiered awake-set. Full-particle-Earth is milestones 2–3.
+
+**Why.** Robin's directives: all particle physics in ONE scale-invariant module; build the hard correct
+physics first (GPU/full-res if needed), optimize physics-faithfully later; everything a natural product of
+the real physics. The map stops the rediscovery; the plan makes the full-particle-Earth build the forcing
+function of the realignment rather than a side quest.
+
+**Verified.** Docs only — no code change. Existing suite unaffected.
+
+---
+
 ## 2026-07-16 — The isotopic crisis: physics says proto-Earth spin is NOT the lever (docs/31)
 
 **What.** Opened the isotopic crisis (docs/31, "Option C"): the canonical impact makes a **Theia-dominated**
