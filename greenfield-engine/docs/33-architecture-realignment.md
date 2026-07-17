@@ -5,6 +5,26 @@ A reexamination of Integrity's principles and a staged plan to realign the archi
 green-lit a **large, staged refactor**; the discipline is correctness-first, each increment verified against
 an exact/analytic reference before the next (never a big-bang commit).
 
+## Status (2026-07-17) — stages 1–3 DONE
+
+The physics core of the realignment is built and verified (all in `eos.rs` + `hydrostatic.rs`, `#[ignore]`
+measurement tests; see JOURNAL for numbers):
+- **1 — Tillotson EOS** ✅ (basalt verified vs Benz & Asphaug 1999; iron compressed branch vs Wissing &
+  Hobbs 2020; granite/dunite vapor branch flagged provisional).
+- **2a — self-gravitating single-material body** ✅ (holds hydrostatic balance, dP/dr=−ρg to rel 0.00–0.01).
+- **2b — differentiated iron-core + basalt-mantle Earth** ✅ (equal-mass + adaptive-h SPH, the Genda fix;
+  compresses, stratifies, central P 572 GPa ≈ Earth's 364).
+- **3a — dynamical SPH** ✅ (internal-energy equation + Monaghan artificial viscosity + KDK leapfrog +
+  adaptive Courant dt; a relaxed collision conserves energy to ~3% and shock-heats).
+- **3c — the deformable-Earth impact** ✅ → **orbiting disk 58% Earth-derived**, vs the rigid-boundary
+  7–12% ceiling (docs/31). docs/28 root-cause #1 dissolved: Earth sheds its own mantle into the disk.
+  (Sub-Earth scale + coarse N — the DIRECTION, not a converged number.)
+
+**Remaining:** 4 (GPU-resident stepper at N~10⁵ — the converged isotopic number), 5 (unify containers —
+fold `hydrostatic`/`AirField` into `Aggregate`), 6 (energy-tiered just-in-time particalization). The
+capability currently lives in the standalone `hydrostatic.rs`; it is NOT yet wired into the wasm scene
+(stage 4/5 work) — the deployed birth scene is still the pre-realignment `OrbitDemo`.
+
 ## 1. The principles (restated)
 
 From the existing design record (docs/13/15/16/17/23/24) and Robin's three framings (2026-07-16/17):
