@@ -5,6 +5,33 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-17 — Realignment stage 3a: dynamical SPH — energy equation + artificial viscosity (docs/33)
+
+**What.** Turned the isothermal planet into a full thermodynamic SPH body for the impact: added to
+`hydrostatic.rs` (1) the **SPH internal-energy equation** `du_i/dt = ½ Σ_j m_j (P_i/ρ_i²+P_j/ρ_j²+Π_ij)
+(v_i−v_j)·∇W` — the thermodynamically consistent partner of the momentum equation, so compression does PdV
+work → heat; (2) **Monaghan artificial viscosity** Π_ij (α=1, β=2) for shock capture (without it SPH
+particles interpenetrate at a shock and the impact heating is wrong); (3) an **energy-conserving KDK
+leapfrog** `step(dt)` evolving position, velocity, AND internal energy (vs the damped `relax_step`); and (4)
+an **adaptive Courant timestep** `courant_dt` from the live compressed sound speed.
+
+**Verified (native, #[ignore], ~67 s).** `a_head_on_collision_conserves_energy_and_shock_heats`: two 400 km
+basalt bodies, **relaxed to equilibrium first**, collide head-on at ±1.5 km/s —
+- **Total energy (KE+IE+PE) conserved to ~3%** (a one-time injection at the shock front, then flat — the
+  known SPH internal-energy-formulation shock error; 5% asserted bound).
+- **Shock heating:** internal energy rose **4.9×** (bulk KE → heat), KE fell — the physics that vaporizes
+  material and drives the disk.
+
+**KEY LESSON (measured).** Colliding UNRELAXED spheres at 3 km/s TRIPLED the total energy (ΔE/E≈2) — the
+startup non-equilibrium dumped into the shock; adaptive dt barely helped (so it wasn't CFL). Relaxing each
+body first (Genda: "vibrations until v<100 m/s") + a moderate speed → 3% conservation. Real giant-impact
+SPH always relaxes the bodies first; now we do too. Full fast suite 151/151; wasm builds.
+
+**Why.** docs/33 stage 3: the two-body impact needs real shock thermodynamics (heating → vaporization → the
+disk), not just contact. This is the integrator the deformable-Earth impact (3b/3c) runs on.
+
+---
+
 ## 2026-07-17 — Realignment stage 2b: a differentiated iron-core Earth holds itself up (docs/33)
 
 **What.** Built the layered/differentiated planet — an **Earth-mass iron-core + basalt-mantle** particle body

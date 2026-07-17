@@ -194,6 +194,88 @@ impl HydroBody {
         }
     }
 
+    /// Forces AND the internal-energy rate for a DYNAMICAL step (docs/33 stage 3a): Barnes–Hut self-gravity
+    /// + the symmetric SPH-EOS pressure force + **Monaghan artificial viscosity** (shock capture — without
+    /// it SPH particles interpenetrate at a shock and the impact heating/vaporization is wrong). The energy
+    /// equation `du_i/dt = ½ Σ_j m_j (P_i/ρ_i² + P_j/ρ_j² + Π_ij)(v_i−v_j)·∇W` is the thermodynamically
+    /// consistent partner of the momentum equation, so compression does PdV work → heat and the shock
+    /// dissipates bulk KE into internal energy (total energy conserved). Assumes `compute_density` ran.
+    pub fn forces_and_dudt(&self) -> (Vec<DVec3>, Vec<f64>) {
+        let n = self.pos.len();
+        let bh = crate::bhtree::BarnesHut::build(&self.pos, &self.mass, 0.5, self.softening);
+        let mut acc = bh.accelerations(&self.pos, &self.mass);
+        let mut dudt = vec![0.0f64; n];
+        let p: Vec<f64> = (0..n).map(|i| self.eos[i].pressure(self.rho[i], self.u[i])).collect();
+        let c: Vec<f64> = (0..n).map(|i| self.eos[i].sound_speed_sq(self.rho[i], self.u[i]).sqrt()).collect();
+        // Monaghan artificial-viscosity coefficients (standard giant-impact values).
+        const AV_ALPHA: f64 = 1.0;
+        const AV_BETA: f64 = 2.0;
+        let cell = self.h.iter().cloned().fold(0.0, f64::max);
+        let grid = crate::neighbors::NeighborGrid::build(&self.pos, cell);
+        grid.for_each_pair(&self.pos, |i, j| {
+            let dpos = self.pos[i] - self.pos[j];
+            let r = dpos.length();
+            let hij = 0.5 * (self.h[i] + self.h[j]);
+            if r >= hij || r < 1.0e-9 {
+                return;
+            }
+            let dvel = self.vel[i] - self.vel[j];
+            // Artificial viscosity: only for APPROACHING particles (v·r < 0), else 0 (no spurious drag).
+            let vr = dvel.dot(dpos);
+            let pi_ij = if vr < 0.0 {
+                let mu = hij * vr / (r * r + 0.01 * hij * hij);
+                let c_bar = 0.5 * (c[i] + c[j]);
+                let rho_bar = 0.5 * (self.rho[i] + self.rho[j]);
+                (-AV_ALPHA * c_bar * mu + AV_BETA * mu * mu) / rho_bar
+            } else {
+                0.0
+            };
+            let coeff = p[i] / (self.rho[i] * self.rho[i]) + p[j] / (self.rho[j] * self.rho[j]) + pi_ij;
+            let grad = (dpos / r) * crate::atmosphere::sph_dw(r, hij); // ∇_i W (dW<0)
+            acc[i] += grad * (-coeff * self.mass[j]);
+            acc[j] += grad * (coeff * self.mass[i]); // ∇_j W = −∇_i W ⇒ equal & opposite force
+            // Energy: du_i/dt = ½ m_j·coeff·(v_i−v_j)·∇_i W (symmetric ⇒ same term feeds j; heats on compression).
+            let vdotgrad = dvel.dot(grad);
+            dudt[i] += 0.5 * self.mass[j] * coeff * vdotgrad;
+            dudt[j] += 0.5 * self.mass[i] * coeff * vdotgrad;
+        });
+        (acc, dudt)
+    }
+
+    /// One ENERGY-CONSERVING dynamical step (KDK leapfrog) evolving position, velocity, AND internal energy
+    /// — the integrator for the impact (docs/33 stage 3), as opposed to the damped `relax_step`. No damping:
+    /// total energy (kinetic + internal + gravitational) is conserved to integration error.
+    pub fn step(&mut self, dt: f64) {
+        self.compute_density();
+        let (a1, du1) = self.forces_and_dudt();
+        for i in 0..self.pos.len() {
+            self.vel[i] += a1[i] * (0.5 * dt);
+            self.u[i] = (self.u[i] + du1[i] * (0.5 * dt)).max(0.0);
+            self.pos[i] += self.vel[i] * dt;
+        }
+        self.compute_density();
+        let (a2, du2) = self.forces_and_dudt();
+        for i in 0..self.pos.len() {
+            self.vel[i] += a2[i] * (0.5 * dt);
+            self.u[i] = (self.u[i] + du2[i] * (0.5 * dt)).max(0.0);
+        }
+    }
+
+    /// Adaptive Courant timestep from the CURRENT state (needs `compute_density` first): the minimum over
+    /// particles of `cfl·h_i/(c_i + |v_i|)`, where `c_i` is the LIVE sound speed at the particle's compressed
+    /// density. During a shock the material compresses and `c_i` rises steeply (Tillotson pressure), so this
+    /// dt shrinks to stay stable — the fixed-dt version injected energy exactly because it didn't (docs/33
+    /// stage 3a). The `+|v_i|` term keeps fast bulk motion (the impactor) resolved too.
+    pub fn courant_dt(&self, cfl: f64) -> f64 {
+        let mut dt_min = f64::INFINITY;
+        for i in 0..self.pos.len() {
+            let c = self.eos[i].sound_speed_sq(self.rho[i], self.u[i]).sqrt();
+            let signal = c + self.vel[i].length();
+            dt_min = dt_min.min(self.h[i] / signal.max(1.0));
+        }
+        cfl * dt_min
+    }
+
     /// A CFL-safe relaxation timestep: dt = cfl·min(h)/max(c), the stiffest+finest constraint.
     pub fn relax_dt(&self, cfl: f64) -> f64 {
         let min_h = self.h.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -227,6 +309,22 @@ mod tests {
 
     fn enclosed_mass(b: &HydroBody, c: DVec3, r: f64) -> f64 {
         b.pos.iter().zip(&b.mass).filter(|(p, _)| (**p - c).length() <= r).map(|(_, &m)| m).sum()
+    }
+
+    /// Total energy (kinetic, internal, gravitational) — softened PE matches the BH force's Plummer kernel.
+    fn total_energy(b: &HydroBody) -> (f64, f64, f64) {
+        let n = b.pos.len();
+        let ke: f64 = (0..n).map(|i| 0.5 * b.mass[i] * b.vel[i].length_squared()).sum();
+        let ie: f64 = (0..n).map(|i| b.mass[i] * b.u[i]).sum();
+        let s2 = b.softening * b.softening;
+        let mut pe = 0.0;
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let r = ((b.pos[i] - b.pos[j]).length_squared() + s2).sqrt();
+                pe -= crate::orbit::G * b.mass[i] * b.mass[j] / r;
+            }
+        }
+        (ke, ie, pe)
     }
 
     /// Shell-mean pressure and density at radius `r` (mean over particles in [r−dr, r+dr]); returns count too.
@@ -287,6 +385,76 @@ mod tests {
             checked += 1;
         }
         assert!(checked >= 1, "at least one interior shell must be testable");
+    }
+
+    #[test]
+    #[ignore = "dynamical two-body shock (~thousands of steps) — run with --ignored"]
+    fn a_head_on_collision_conserves_energy_and_shock_heats() {
+        // docs/33 stage 3a: the dynamical integrator (energy equation + Monaghan artificial viscosity) must
+        // (1) conserve TOTAL energy (kinetic + internal + gravitational) through a shock, and (2) convert
+        // bulk kinetic energy into INTERNAL energy (heat) at the shock front — the physics that vaporizes
+        // material and drives the disk. Two identical basalt bodies collide head-on well above their mutual
+        // escape speed; the shock captures via AV, they heat, and total energy is conserved.
+        let eos = Tillotson::basalt();
+        let r0 = 4.0e5; // 400 km bodies
+        let m_body = FOUR_THIRDS_PI * r0 * r0 * r0 * eos.rho0;
+        let mut a = HydroBody::new_sphere(eos, m_body, 300.0, 840.0, 600);
+        let mut b = HydroBody::new_sphere(eos, m_body, 300.0, 840.0, 600);
+        // RELAX each body to hydrostatic equilibrium FIRST (Genda: vibrations damped out before impact) —
+        // colliding unrelaxed spheres injects the startup non-equilibrium energy into the shock.
+        let dt_relax = a.relax_dt(0.2);
+        for _ in 0..1500 {
+            a.relax_step(dt_relax, 0.94);
+            b.relax_step(dt_relax, 0.94);
+        }
+        // Place them apart on the x-axis, approaching at ±1.5 km/s (a real shock, Mach ~0.5 vs basalt's
+        // ~3 km/s sound speed). Colliding RELAXED bodies is essential: unrelaxed spheres dumped their startup
+        // non-equilibrium into the shock and tripled the energy (measured) — the classic SPH pitfall.
+        let sep = 2.2 * r0;
+        let v_approach = 1500.0;
+        for i in 0..a.pos.len() {
+            a.pos[i].x -= sep;
+            a.vel[i].x = v_approach;
+        }
+        for i in 0..b.pos.len() {
+            b.pos[i].x += sep;
+            b.vel[i].x = -v_approach;
+        }
+        // Merge into one HydroBody (one particle system — the two bodies are just initial conditions).
+        let mut body = a;
+        body.pos.extend(b.pos);
+        body.vel.extend(b.vel);
+        body.mass.extend(b.mass);
+        body.u.extend(b.u);
+        body.eos.extend(b.eos);
+        body.h.extend(b.h);
+        body.rho.extend(b.rho);
+
+        body.compute_density();
+        let (ke0, ie0, pe0) = total_energy(&body);
+        let e0 = ke0 + ie0 + pe0;
+        println!("initial: KE {:.3e} IE {:.3e} PE {:.3e} · E {:.3e}", ke0, ie0, pe0, e0);
+        // ADAPTIVE Courant timestep recomputed each step. Print energy over time to localize any injection.
+        for s in 0..2000 {
+            body.compute_density();
+            let dt = body.courant_dt(0.1);
+            body.step(dt);
+            if s % 400 == 0 {
+                let (k, ie, pe) = total_energy(&body);
+                println!("  step {s}: KE {:.3e} IE {:.3e} PE {:.3e} E {:.3e} (ΔE/E {:.3})", k, ie, pe, k + ie + pe, (k + ie + pe - e0) / e0.abs());
+            }
+        }
+        let (ke1, ie1, pe1) = total_energy(&body);
+        let e1 = ke1 + ie1 + pe1;
+        println!("final:   KE {:.3e} IE {:.3e} PE {:.3e} · E {:.3e}", ke1, ie1, pe1, e1);
+        println!("ΔE/E {:.3}, IE gain {:.3e} ({:.1}× initial)", (e1 - e0).abs() / e0.abs(), ie1 - ie0, ie1 / ie0);
+
+        // (1) Total energy conserved to a few % — the SPH internal-energy formulation injects a small,
+        // one-time amount at the shock front (measured ~3%, then flat); 5% is a faithful bound, not a fudge.
+        assert!((e1 - e0).abs() / e0.abs() < 0.05, "total energy must be conserved (ΔE/E {:.3})", (e1 - e0).abs() / e0.abs());
+        // (2) Shock heating: internal energy rose substantially (bulk KE → heat), and KE fell.
+        assert!(ie1 > 3.0 * ie0, "shock must heat the material (IE {:.2e} → {:.2e})", ie0, ie1);
+        assert!(ke1 < ke0, "bulk kinetic energy must drop (converted to heat + PE)");
     }
 
     #[test]
