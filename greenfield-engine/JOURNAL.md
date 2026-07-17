@@ -5,6 +5,34 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-17 — Render-truth: the crater and continents CO-ROTATE with the crust (birth scene)
+
+**What.** Fixed a render-frame mismatch Robin caught while watching the deployed birth scene (he read
+Theia's approach as "curving to hit a fixed point"). Investigation verdict: **the approach trajectory is
+HONEST** — pure N-body gravity (`orbit::verlet_step`, no steering), the impact site is an OUTPUT discovered
+by swept CCD at contact (`impact_site_rel` is `None` through the whole approach), and the inward curve is
+genuine gravitational focusing of a hyperbolic impactor in an Earth-centred frame. The "fixed impact point"
+he reacted to is the **declared-zero proto-Earth spin** (`lib.rs:2915`, flagged unknown IC): with `spin_l=0`
+the surface simply isn't rotating.
+
+BUT the trace surfaced a genuine no-fudge bug: post-impact, once the collision spins Earth up, the crater
+(`impact_site_rel`) was rendered as an INERTIAL vector (`earth_center + rel`) while the shell grains rotate
+by `spin_rot` — so the hole slid through the rotating crust. And the landmask was sampled at the WORLD
+direction (`earth_surface_material(spin_rot·fib_dir)`), painting continents world-fixed while grains rotate
+underneath. Both fixed: the crater now co-rotates (`earth_center + spin_rot·rel`) and continents are sampled
+at the fixed BODY direction (`earth_surface_material(fib_dir)`) — so grains, continents, and crater share
+ONE crust frame that rotates honestly. (Invisible during the birth approach — `spin_l=0` ⇒ `spin_rot` is
+identity — so the honest approach is unchanged; the fix bites post-impact when Earth spins up.)
+
+**Verified.** Native + wasm build; full fast suite 151/151. Deployed.
+
+**Flagged for Robin's call (physics IC, not a bug).** The birth scene's proto-Earth spin is deliberately
+zero so the post-impact day EMERGES. If we'd rather the surface visibly rotate under the incoming impactor
+(more physical — planets rotate), we give proto-Earth a primordial spin IC; the tradeoff is the day becomes
+primordial + impact rather than purely emergent. Left as-is pending his decision.
+
+---
+
 ## 2026-07-17 — Realignment stage 3c: a DEFORMABLE Earth resolves the isotopic-crisis DIRECTION (docs/33)
 
 **What.** The scientific payoff of the whole realignment: collided a differentiated Theia into a

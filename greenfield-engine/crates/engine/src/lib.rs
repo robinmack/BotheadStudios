@@ -3648,12 +3648,6 @@ mod app {
             let earth_center = r_bodies[1];
             let shell_spacing = EARTH_RADIUS_M * (4.0 * std::f64::consts::PI / SHELL_N as f64).sqrt();
             let shell_grain_r = ((0.62 * shell_spacing) * DISPLAY_SCALE) as f32;
-            // The crater opens only once the RENDERED clock reaches the shatter (not the physics clock).
-            let crater_site = if r_shattered {
-                self.impact_site_rel.map(|rel| earth_center + rel)
-            } else {
-                None
-            };
             let crater_r = 1.1 * self.hole_radius(); // the crater as it stands — healing shrinks it
             // Camera eye in display coordinates (relative to the focus body) — the same construction
             // as view_proj, needed for the per-grain Rayleigh view path.
@@ -3669,6 +3663,17 @@ mod app {
                 spin_axis,
                 self.spin_angle % (2.0 * std::f64::consts::PI),
             );
+            // The crater opens once the RENDERED clock reaches the shatter. It is punched into the CRUST, so
+            // it must CO-ROTATE with the surface — apply `spin_rot`, exactly like the shell grains below.
+            // Leaving it as the inertial `earth_center + rel` let the hole slide through the rotating
+            // material once the impact spun Earth up — a render-truth frame mismatch (the crater and the
+            // matter it's cut from must share one frame). `impact_site_rel` was captured at spin_angle≈0, so
+            // `spin_rot·rel` carries it forward with the crust.
+            let crater_site = if r_shattered {
+                self.impact_site_rel.map(|rel| earth_center + spin_rot * rel)
+            } else {
+                None
+            };
             // OBLATE figure: the spin flattens the planet (Radau–Darwin) — equator bulges (+f/3),
             // poles sink (−2f/3), volume-preserving to first order. At today's day it's 1/298
             // (imperceptible); at the post-impact 3.8-h day it's ~13% — a visibly squashed world.
@@ -3678,7 +3683,8 @@ mod app {
                 spin_omega_r, self.bodies[1].mass, EARTH_RADIUS_M,
             );
             for (i, uni) in self.shell_unis.iter().enumerate() {
-                let dir = spin_rot * crate::impact::fib_dir(i, SHELL_N);
+                let body_dir = crate::impact::fib_dir(i, SHELL_N); // this grain's fixed BODY direction
+                let dir = spin_rot * body_dir; // its current WORLD direction (rotated by the spin)
                 let u = dir.dot(spin_axis);
                 let r_oblate = (EARTH_RADIUS_M - 0.62 * shell_spacing)
                     * (1.0 + flat * (1.0 / 3.0 - u * u)); // +f/3 equator, −2f/3 poles
@@ -3686,10 +3692,11 @@ mod app {
                 let hidden = crater_site.map_or(false, |s| (pos_w - s).length() < crater_r);
                 let scale = if hidden { 0.0 } else { shell_grain_r }; // zero-scale ⇒ not drawn
                 let spos = ((pos_w - focus) * DISPLAY_SCALE).as_vec3();
-                // Continents & oceans (docs/25): each grain samples the landmask for its direction and
-                // wears the REAL surface material's reflectance — granite land, water ocean. "Average
+                // Continents & oceans (docs/25): each grain samples the landmask at its fixed BODY direction
+                // — so a continent is a property of the CRUST and CO-ROTATES with the planet (and with the
+                // crater), rather than being painted world-fixed while the grains slide underneath. "Average
                 // area particles": the grain is the mean of its ~10°×10° patch, nothing painted.
-                let surf = crate::planet::earth_surface_material(dir);
+                let surf = crate::planet::earth_surface_material(body_dir);
                 let m = &self.mats[materials::index_of(&self.mats, surf)];
                 // RAYLEIGH (docs/26): the declared air scatters sunlight over this patch — a blue
                 // veil (into the emissive channel: it IS added light) whose ground shows through
