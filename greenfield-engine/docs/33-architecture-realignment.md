@@ -27,7 +27,7 @@ grid** for the short-range SPH (O(N) not O(N²)), verified exact via a cell-memb
 hash-collision double-counting). Gravity stays direct O(N²) (a GPU tree is a later opt). Ahead: 4c (KDK loop
 + adaptive dt on-GPU + scene wiring, with the accretion operator).
 
-**Remaining:** 4b/4c (as above), 5 (unify containers —
+**Remaining:** 4c (KDK loop + adaptive dt on-GPU + scene wiring), 5 (unify containers —
 fold `hydrostatic`/`AirField` into `Aggregate`), 6 (energy-tiered just-in-time particalization). The
 capability currently lives in the standalone `hydrostatic.rs`; it is NOT yet wired into the wasm scene
 (stage 4/5 work) — the deployed birth scene is still the pre-realignment `OrbitDemo`.
