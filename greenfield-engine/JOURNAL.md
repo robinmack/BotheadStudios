@@ -5,6 +5,34 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-17 — Realignment stage 1: the Tillotson condensed-matter EOS (docs/33)
+
+**What.** Added `eos.rs` — the **Tillotson equation of state**, `P(ρ, u)` for condensed matter across cold /
+shock-compressed / decompressed / vapor states in one closure (the giant-impact standard: Tillotson 1962;
+Melosh 1989 App. II; Benz, Cameron & Melosh 1989). This is the missing physics docs/32 §5 flagged: solids
+previously resisted compression only via a linear-elastic contact penalty (E·r/m) and planet densities were
+declared constants, so shock-compressed rock had no way to develop pressure from its density. `Tillotson`
+carries the cited parameters for **granite, basalt, peridotite (dunite/olivine analog), and iron**;
+`pressure(ρ,u)`, `sound_speed_sq(ρ,u)` (central-difference, for CFL + bulk-modulus readout), and
+`for_material(name)` lookup. Params live in `eos.rs` for now; migrating them into `data/materials.json` (a
+`tillotson` block beside `thermal`) is the flagged source-of-truth follow-up (docs/04).
+
+**Why.** The keystone of the realignment (docs/33): ONE pressure law spanning solid→liquid→vapor, replacing
+the ideal-gas-vapor + linear-elastic-penalty + declared-density patchwork. The SPH pressure-force machinery
+(`aggregate`/`atmosphere`, `a=−Σm(P_i/ρ_i²+P_j/ρ_j²)∇W`) is untouched — only the `P(ρ,u)` it evaluates
+changes — which is why a self-gravitating condensed-matter planet (stage 2) is a merge, not new machinery.
+
+**Verified (native, TDD — 6 tests).** `cold_reference_state_has_zero_pressure` (P(ρ₀,0)≈0);
+`cold_compression_gives_the_bulk_modulus` (K=ρ·dP/dρ at ρ₀ matches each material's A within 2% — a REAL
+bulk modulus, not a contact-spring surrogate); `compression_monotonically_raises_pressure` (stiffens to GPa
+scale — the impact regime); `hot_expansion_relaxes_toward_vanishing_pressure` (fully-vaporized expanded
+parcel → the ideal-gas limit a·ρu); `pressure_is_continuous_across_the_vaporization_boundaries` (no jump at
+E_iv/E_cv); `sound_speed_is_real_and_of_the_expected_order` (c≈√(A/ρ₀), km/s). Full fast suite 151/151; wasm
+builds. Not yet wired into any scene (stage 2 builds the self-gravitating planet on it) — nothing to
+rig-watch/deploy yet.
+
+---
+
 ## 2026-07-17 — Architecture map + first-principles realignment plan (docs/32, docs/33, CLAUDE.md)
 
 **What.** Mapped the whole engine and wrote it up for future Claude sessions (Robin: too many "surprises"

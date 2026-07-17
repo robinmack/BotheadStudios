@@ -26,6 +26,7 @@ mod bhtree;
 mod body;
 mod damage;
 mod emission;
+mod eos;
 mod granular;
 mod gravity;
 mod impact;

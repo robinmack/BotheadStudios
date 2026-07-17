@@ -10,6 +10,14 @@ because **we are our own first customers** and pin exact engine versions in our 
 ## [Unreleased]
 
 ### Added
+- **Tillotson condensed-matter EOS** (`eos.rs`, `docs/33` stage 1) — `P(ρ, u)` across cold / shock-
+  compressed / decompressed / vapor states in one closure (Tillotson 1962; Melosh 1989; Benz et al. 1989),
+  with cited parameters for granite, basalt, peridotite (dunite/olivine), and iron. `pressure`,
+  `sound_speed_sq`, `for_material`. The missing "matter under its own pressure" law — solids previously
+  resisted compression only via a linear-elastic contact penalty and planet densities were declared
+  constants. Verified: cold reference P≈0, cold compression yields the real bulk modulus A, monotonic
+  stiffening to GPa scale, hot expansion → the ideal-gas limit, continuity across vaporization, km/s sound
+  speed. Not yet wired into a scene (stage 2 builds the self-gravitating planet on it).
 - **Architecture map, CLAUDE.md, and realignment plan** (`docs/32`, `docs/33`, `CLAUDE.md`) — a durable
   orientation for future sessions (module-by-module with `file:line` anchors; the shared-laws-vs-forked-
   solvers map; the EOS inventory confirming NO condensed-matter EOS exists) plus a staged plan to realign
