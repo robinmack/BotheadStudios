@@ -59,14 +59,39 @@ all three principles in specific, nameable ways:
 **The energy tiers** (a region sits in the lowest tier its energy density permits, promotes when excited,
 demotes when it settles — matter/momentum/energy conserved across every transition):
 
-- **T0 — Bulk summary.** Undisturbed matter: heightfield surface, monopole/Gauss gravity, analytic
-  hydrostatic body. Cheapest. (Earth far from the impact; resting terrain far from a dig.)
+- **T0 — Bulk summary, rendered as texture/bumpmap.** Undisturbed matter: a heightfield/**displacement +
+  normal (bump) map** surface, monopole/Gauss gravity, analytic hydrostatic body. Cheapest AND best-looking
+  — textures are a legitimate, *visually rich* summary of settled matter (they speed us up and look great),
+  and are honest **as long as the displacement/normal they encode is the real settled height/deformation,
+  not a painted-on decal**. (Earth far from the impact; resting terrain far from a dig; a crater floor after
+  the debris has come to rest.)
 - **T1 — Quasi-static contact.** Low energy: grains at rest, a tire, talus, a settled disk. Granular contact
   + self-gravity; no shock/EOS heat term active.
 - **T2 — Dynamic granular + thermal.** Medium energy: cratering, ejecta curtains, meteor impacts. Contact +
   energy routing + phase classification.
 - **T3 — Full EOS shock + vapor.** High energy: giant impacts. Condensed-matter EOS pressure, SPH, PdV
   vaporization, shock heating — the whole thermodynamic engine, only where the energy is.
+
+**Just-in-time particalization (the promote/demote mechanism, docs/16 awake-set made concrete).** We do NOT
+simulate full particles everywhere — that is both unaffordable and looks like Minecraft. Instead matter
+lives at T0 (textured/bumpmapped bulk) until an *event* demands more, then **particalizes just-in-time**:
+
+- **Predictive promotion.** On an impact/event, spawn real particles *before* contact (look ahead — the
+  space band already has `orbit::swept_first_contact` + an impact countdown; the terrain band raycasts the
+  meteor aim), so the shock is resolved from first contact, not a frame late.
+- **Energy-scaled resolution.** The particle resolution (grain size / count / tier T1–T3) is chosen by the
+  **energy, mass, and size** of the interaction — fidelity to the physics of *that* event, not a fixed N.
+- **Bake-back on settle.** When particles quiesce they demote back into the T0 field, writing their real
+  settled state into the **displacement + normal map** (matter/momentum/energy conserved, via the existing
+  `matter::deposit_resting_grain` discipline — one grain → its real resting height, zero injected energy).
+  The crater/deformation persists as texture; the particles are freed.
+
+This is the particle↔field duality of an MPM-style scheme (docs/08 names MLS-MPM as the Phase-3 target): the
+resting state is the field, matter particalizes where energy/deformation is high, and returns to the field
+when quiescent. It is how we get *both* great visuals and real physics without computing everything all the
+time — and it is faithful precisely because the field is a real record of settled matter and the
+particalization resolution is set by the event's physics. (If research surfaces a closure that is *more*
+faithful at equal cost, it supersedes this — the commitment is to the physics, not to this mechanism.)
 
 The declared IOUs (`Furrow::ejection`, `plough_loft`) are today's stand-in for T3 at low N; as the
 energy-tiered engine resolves the shock where it matters, those IOUs retire exactly as docs/28 promised.
@@ -98,9 +123,15 @@ Physics-faithful ordering: get the hard physics right at tractable N on CPU with
 5. **Unify the containers.** Both `Engine` (terrain) and `OrbitDemo` (space) drive the one module; retire the
    forks — fold `AirField` into the shared SPH, give the CPU grain path real contact or retire it for the GPU
    path, collapse `body::Sphere` into a small-N aggregate. Generate or verify the WGSL law from the Rust one.
-6. **Energy-tiered LOD, formalized.** Make T0–T3 promotion/demotion a first-class, energy-density-driven
-   awake-set spanning every band (generalizing `matter.rs`'s promote-on-excitement + `damage::classify`
-   thresholds). Retire the declared IOUs as N resolves the shock where it matters.
+6. **Energy-tiered just-in-time particalization, formalized.** Make T0–T3 promotion/demotion a first-class,
+   energy-density-driven awake-set spanning every band (generalizing `matter.rs`'s promote-on-excitement +
+   `damage::classify` thresholds): **predictive** promotion on events (look-ahead via `swept_first_contact`
+   / aim raycast), particle **resolution scaled by event energy/mass/size**, and **bake-back into a
+   displacement + normal (bump) map** on settle (extending `texture.rs` and `deposit_resting_grain` so the
+   resting tier is a real, persistent, textured record of the deformed matter). Retire the declared IOUs as
+   the resolved shock replaces them where it matters. (Sub-stage: give T0 a real per-surface displacement/bump
+   field the settle writes into — today the terrain de-resolves grains into voxel tops; the crater should
+   persist as texture, not only as voxels.)
 
 ## 5. Non-goals / honest caveats
 
