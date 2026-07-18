@@ -5,6 +5,28 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-17 — Stage 5 migration, increment 2b: the Birth-of-the-Moon scene runs on GpuSph (docs/35)
+
+**What.** The "Birth of the Moon" scene now runs the **GPU SPH deformable-Earth impact** instead of the CPU
+rigid-Earth `Aggregate` — two differentiated EOS bodies colliding, stepped by `sph_step.wgsl` in-browser.
+Fixed the load-freeze blocker (2a) by making the build **non-blocking**: `build_impact_bodies` returns the two
+bodies UNRELAXED; `advance` relaxes them in small CPU chunks (20 steps/frame, ~32 frames) via a new
+`sph_relax` phase, re-uploading the settling bodies each frame, then `assemble_impact(…, infall=true)`
+launches the collision (Theia inbound) and hands off to the GPU KDK dynamics + read-back. Refactored
+`gpu_sph.rs` into `build_impact_bodies` / `relax_chunk` / `assemble_impact` (the last is pure — offsets in the
+emitted particles, no body mutation, so it can be called every relax frame). `birth.html`/`orbit.ts`
+auto-start it; Replay restarts it.
+
+**Verified.** Native + wasm build clean. Rig-watch `birth.html` in the **dev** build (previously the freeze):
+loads, the two bodies settle (~1 s, disk "null" during relax), then collide into a mixed remnant + spreading
+debris — **no hang, 27 fps**, the birth HUD shows the live GPU disk line. Release build also confirmed. Honest
+status: this **changes the deployed birth scene's character** (the Theia-approach narrative + the Aggregate
+disk/geologic controls are bypassed — `moon_debris` is now dormant, and the Geologic button no-ops in GPU
+mode); it's committed on the branch, not deployed. Remaining for increment 2: retire `moon_debris`
+`Aggregate` and rewire the geologic hand-off from the GPU disk (via `accretion.rs`). Then 5c (Sphere), 5d.
+
+---
+
 ## 2026-07-17 — Stage 5 migration, increment 2a: GPU impact scene framing (+ a blocker found) (docs/35)
 
 **What.** Toward "the birth scene runs on GpuSph" (docs/35 step 2). The GPU impact rendered as a speck at the

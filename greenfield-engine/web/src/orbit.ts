@@ -106,7 +106,10 @@ async function main(): Promise<void> {
     // physics is identical machinery; only the declared impactor changes. (The GPU SPH deformable impact
     // — docs/33 stage 5 — is available via the "🌋 GPU Impact" button; auto-starting it on load blocks the
     // main thread on the CPU relax, so it stays a deliberate trigger until that build is made non-blocking.)
-    if (birthScene) demo.start_birth();
+    // Birth of the Moon (docs/33 stage 5): the scene runs the GPU SPH deformable-Earth impact — two
+    // differentiated EOS bodies colliding, stepped by sph_step.wgsl in-browser (the faithful physics). The
+    // bodies relax over the first ~1 s (chunked, non-blocking) then collide.
+    if (birthScene) demo.start_gpu_impact();
     hideStatus();
     const stats = document.getElementById("stats");
     if (stats) stats.hidden = false;
@@ -200,8 +203,12 @@ async function main(): Promise<void> {
       mkBtn("⏭ Geologic", () => demo.enter_geologic_time());
     }
     mkBtn(birthScene ? "Replay" : "Reset", () => {
-      demo.reset_moon();
-      followMoon = true;
+      if (birthScene) {
+        demo.start_gpu_impact(); // re-run the GPU SPH impact from fresh proto-bodies
+      } else {
+        demo.reset_moon();
+        followMoon = true;
+      }
     });
 
     // Variable time multiplier. Before an impact this scales the orbital fast-forward; AFTER an

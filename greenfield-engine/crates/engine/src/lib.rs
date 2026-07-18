@@ -2495,6 +2495,10 @@ mod app {
         /// Latest async read-back of the GPU SPH particles (one frame behind) — for the HUD/disk-stats and
         /// (later) the momentum mirror. Empty until the first read-back completes.
         sph_snapshot: Vec<crate::gpu_sph::SphParticle>,
+        /// The CPU relax phase of the GPU impact: (Earth, Theia, steps-done). Present only while relaxing —
+        /// each frame advances a small chunk (non-blocking) and re-uploads the settling bodies; on completion
+        /// it launches the collision and clears to `None` (→ the GPU dynamics phase).
+        sph_relax: Option<(crate::hydrostatic::HydroBody, crate::hydrostatic::HydroBody, u32)>,
     }
 
     // Moon-shot Stage A constants.
@@ -2765,6 +2769,7 @@ mod app {
                 sph_active: false,
                 sph_dt: 0.0,
                 sph_snapshot: Vec::new(),
+                sph_relax: None,
             })
         }
 
@@ -3225,9 +3230,12 @@ mod app {
         /// `tools/impact-run`). The scene then renders the live particle field instead of the rigid-Earth
         /// debris model. Call from JS on the `OrbitDemo` handle, like `drop_moon()`.
         pub fn start_gpu_impact(&mut self) {
-            // Modest N for the browser (per-frame GPU stepping is trivial at this size; the CPU relax is the
-            // one-time cost). The offline tool is where the converged high-N number lives.
-            let (particles, eos, softening, dt) = crate::gpu_sph::build_deformable_impact(900, 150, 900);
+            // Modest N for the browser (per-frame GPU stepping is trivial at this size). Build the two bodies
+            // UNRELAXED and enter the relax phase: `advance` settles them in small CPU chunks over the next
+            // frames (non-blocking — a synchronous full relax freezes the wasm main thread on load), then
+            // launches the collision. Show the (unrelaxed) bodies at their collision positions immediately.
+            let (earth, theia) = crate::gpu_sph::build_impact_bodies(600, 100);
+            let (particles, eos, softening, dt) = crate::gpu_sph::assemble_impact(&earth, &theia, false);
             let cap = particles.len() as u32;
             let mut sph = crate::gpu_sph::GpuSph::new(&self.device, cap);
             sph.upload(&self.queue, &particles, &eos, softening);
@@ -3236,6 +3244,7 @@ mod app {
             self.sph_dt = dt;
             self.sph_active = true;
             self.sph_snapshot.clear();
+            self.sph_relax = Some((earth, theia, 0));
             self.focus = 1; // centre on Earth (the particle system sits at the display origin)
             self.camera.zoom = 0.4; // frame the impact (the Earth–Moon default zoom shows it as a speck)
         }
@@ -3262,12 +3271,39 @@ mod app {
             // of KDK substeps on the GPU and skip the CPU orbital physics. Fixed dt (WebGPU forbids the
             // adaptive read-back); ~8 substeps/frame plays the ~10 h aftermath out over a few seconds.
             if self.sph_active {
+                // RELAX PHASE (chunked, non-blocking): settle the two bodies a little each frame, re-upload
+                // the settling state, and on completion launch the collision (infall velocity + dynamics dt).
+                let relaxing = if let Some((earth, theia, steps)) = self.sph_relax.as_mut() {
+                    const CHUNK: u32 = 20;
+                    const TARGET: u32 = 640;
+                    crate::gpu_sph::relax_chunk(earth, CHUNK as usize);
+                    crate::gpu_sph::relax_chunk(theia, CHUNK as usize);
+                    *steps += CHUNK;
+                    let done = *steps >= TARGET;
+                    let (particles, eos, softening, dt) = crate::gpu_sph::assemble_impact(earth, theia, done);
+                    if let Some(sph) = self.gpu_sph.as_mut() {
+                        sph.upload(&self.queue, &particles, &eos, softening);
+                        if done {
+                            sph.set_dt(&self.queue, dt, 1.0);
+                            self.sph_dt = dt;
+                        }
+                    }
+                    Some(done)
+                } else {
+                    None
+                };
+                if relaxing == Some(true) {
+                    self.sph_relax = None; // relax finished this frame → collision launched; dynamics next frame
+                }
+                if relaxing.is_some() {
+                    return; // still building — no dynamics/read-back this frame
+                }
+                // DYNAMICS PHASE: KDK substeps on the GPU + async read-back for the HUD/disk-stats.
                 const SPH_SUBSTEPS: u32 = 8;
                 if let Some(sph) = self.gpu_sph.as_mut() {
                     let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sph-step") });
                     sph.encode_kdk(&mut enc, SPH_SUBSTEPS);
                     self.queue.submit(std::iter::once(enc.finish()));
-                    // Read back the particle state (one frame behind) for the HUD / disk-stats.
                     if let Some(snap) = sph.take_readback() {
                         self.sph_snapshot = snap;
                     }

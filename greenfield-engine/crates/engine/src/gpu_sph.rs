@@ -102,43 +102,51 @@ pub struct SphCam {
 /// (fewer = a snappier trigger but a slightly hotter start — the offline `tools/impact-run` is the faithful
 /// converged run; this is the in-browser visualization).
 pub fn build_deformable_impact(n_earth: usize, n_theia: usize, relax_steps: usize) -> (Vec<SphParticle>, [SphEos; 2], f32, f32) {
+    let (mut earth, mut theia) = build_impact_bodies(n_earth, n_theia);
+    relax_chunk(&mut earth, relax_steps);
+    relax_chunk(&mut theia, relax_steps);
+    assemble_impact(&earth, &theia, true)
+}
+
+/// Build the two differentiated proto-bodies UNRELAXED (Earth 5000 km, Theia 2700 km ~1/7 mass — sub-Earth,
+/// tractable, same as `tools/impact-run`). The caller relaxes them (`relax_chunk`, split across frames so the
+/// wasm main thread never blocks) then places them on the collision geometry with [`assemble_impact`].
+pub fn build_impact_bodies(n_earth: usize, n_theia: usize) -> (crate::hydrostatic::HydroBody, crate::hydrostatic::HydroBody) {
     use crate::hydrostatic::HydroBody;
     let (core, mantle) = (crate::eos::Tillotson::iron(), crate::eos::Tillotson::basalt());
-    // Sub-Earth proto-bodies (tractable, same as tools/impact-run): Earth 5000 km, Theia 2700 km (~1/7 mass).
-    let mut earth = HydroBody::new_differentiated(core, mantle, 0.5 * 5.0e6, 5.0e6, 1.0e6, n_earth);
-    let mut theia = HydroBody::new_differentiated(core, mantle, 0.5 * 2.7e6, 2.7e6, 1.0e6, n_theia);
-    relax_body(&mut earth, relax_steps);
-    relax_body(&mut theia, relax_steps.min(relax_steps));
+    let earth = HydroBody::new_differentiated(core, mantle, 0.5 * 5.0e6, 5.0e6, 1.0e6, n_earth);
+    let theia = HydroBody::new_differentiated(core, mantle, 0.5 * 2.7e6, 2.7e6, 1.0e6, n_theia);
+    (earth, theia)
+}
 
+/// Advance a body `steps` damped-relaxation steps toward hydrostatic equilibrium (in place). Called in small
+/// chunks per frame so the relax never blocks the browser main thread.
+pub fn relax_chunk(b: &mut crate::hydrostatic::HydroBody, steps: usize) {
+    relax_body(b, steps);
+}
+
+/// Place the two (relaxed) bodies on the oblique giant-impact geometry and return the SPH particle set (Earth
+/// COM at the origin at rest; Theia offset by 1.6·contact with impact parameter b≈R_e). `infall` sets Theia's
+/// inbound velocity (1.15·v_esc) — pass `false` while relaxing (bodies shown at rest, settling) and `true` to
+/// launch the collision. Does NOT mutate the bodies (positions are offset only in the emitted particles).
+pub fn assemble_impact(earth: &crate::hydrostatic::HydroBody, theia: &crate::hydrostatic::HydroBody, infall: bool) -> (Vec<SphParticle>, [SphEos; 2], f32, f32) {
     let m_earth: f64 = earth.mass.iter().sum();
     let m_theia: f64 = theia.mass.iter().sum();
-    let r_e = body_radius(&earth);
-    let r_t = body_radius(&theia);
+    let (r_e, r_t) = (body_radius(earth), body_radius(theia));
     let contact = r_e + r_t;
     let v_esc = 1.15 * (2.0 * crate::orbit::G * (m_earth + m_theia) / contact).sqrt();
-    let d0 = 1.6 * contact;
-    let b_param = 1.0 * r_e;
-
-    // Centre Earth at the origin, at rest; Theia offset + inbound (−x) with the impact parameter in +y.
-    let ec = com(&earth);
-    for i in 0..earth.pos.len() {
-        earth.pos[i] -= ec;
-        earth.vel[i] = glam::DVec3::ZERO;
-    }
-    let tc = com(&theia);
-    for i in 0..theia.pos.len() {
-        theia.pos[i] = theia.pos[i] - tc + glam::DVec3::new(d0, b_param, 0.0);
-        theia.vel[i] = glam::DVec3::new(-v_esc, 0.0, 0.0);
-    }
-
+    let (d0, b_param) = (1.6 * contact, r_e);
+    let ec = com(earth);
+    let tc = com(theia);
     let mut out = Vec::with_capacity(earth.pos.len() + theia.pos.len());
-    push_body(&mut out, &earth, 0);
-    push_body(&mut out, &theia, 1);
-
+    push_body(&mut out, earth, 0, -ec, glam::DVec3::ZERO);
+    let theia_off = -tc + glam::DVec3::new(d0, b_param, 0.0);
+    let theia_vel = if infall { glam::DVec3::new(-v_esc, 0.0, 0.0) } else { glam::DVec3::ZERO };
+    push_body(&mut out, theia, 1, theia_off, theia_vel);
     let softening = earth.softening.min(theia.softening) as f32;
     let min_h = out.iter().map(|p| p.h).fold(f32::INFINITY, f32::min);
-    // Conservative FIXED dt: resolve the sound speed (~5 km/s) AND the inbound impactor. Small enough to stay
-    // stable through the shock without the adaptive read-back WebGPU forbids.
+    // Conservative FIXED dt: resolve the sound speed (~5 km/s) AND the inbound impactor (WebGPU forbids the
+    // adaptive read-back, so it stays fixed and small enough to hold through the shock).
     let dt = (0.05 * min_h as f64 / (5000.0 + v_esc)) as f32;
     (out, [SphEos::basalt(), SphEos::iron()], softening, dt)
 }
@@ -233,13 +241,16 @@ fn body_radius(b: &crate::hydrostatic::HydroBody) -> f64 {
     let c = com(b);
     b.pos.iter().map(|p| (*p - c).length()).fold(0.0, f64::max)
 }
-fn push_body(out: &mut Vec<SphParticle>, b: &crate::hydrostatic::HydroBody, prov: u32) {
+// Emit `b`'s particles translated by `offset` with a uniform bulk `vel` (the body's own relax velocities are
+// internal settling motion, not shown — the collision IC is Earth-at-rest / Theia-infall).
+fn push_body(out: &mut Vec<SphParticle>, b: &crate::hydrostatic::HydroBody, prov: u32, offset: glam::DVec3, vel: glam::DVec3) {
     for i in 0..b.pos.len() {
         let mat = if b.eos[i].rho0() > 5000.0 { MAT_IRON } else { MAT_BASALT };
+        let p = b.pos[i] + offset;
         out.push(SphParticle {
-            pos: [b.pos[i].x as f32, b.pos[i].y as f32, b.pos[i].z as f32],
+            pos: [p.x as f32, p.y as f32, p.z as f32],
             h: b.h[i] as f32,
-            vel: [b.vel[i].x as f32, b.vel[i].y as f32, b.vel[i].z as f32],
+            vel: [vel.x as f32, vel.y as f32, vel.z as f32],
             u: b.u[i] as f32,
             mass: b.mass[i] as f32,
             mat,
