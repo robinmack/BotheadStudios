@@ -2347,6 +2347,11 @@ mod app {
     const EARTH_HELIO_SPEED: f64 = 29_780.0; // m/s (Earth's mean heliocentric speed = sqrt(G·M_sun/AU))
                                              // Metres -> display units: Earth's radius becomes 1.0, so the Moon sits ~60 units out.
     const DISPLAY_SCALE: f64 = 1.0 / EARTH_RADIUS_M;
+    /// Visual scale for the GPU SPH impact particles (docs/33 stage 5): the sub-Earth proto-bodies (~5000 km)
+    /// are much smaller than the Earth–Moon frame, so the particle field is drawn at an enlarged scale (Earth's
+    /// ~5000 km radius → a few display units) and the camera zooms in — a scene-framing choice, the physics is
+    /// unchanged (positions stay Earth-relative metres; only this render multiplier differs from DISPLAY_SCALE).
+    const SPH_VIS_SCALE: f64 = 7.0e-7;
     // Fast-forward so a full ~27.3-day orbit plays in ~20 s. Symplectic Verlet stays stable with many
     // substeps per frame (dt ~= 125 s at this scale => thousands of steps per orbit).
     const ORBIT_TIME_SCALE: f64 = 118_000.0; // sim-seconds per real-second
@@ -3232,6 +3237,7 @@ mod app {
             self.sph_active = true;
             self.sph_snapshot.clear();
             self.focus = 1; // centre on Earth (the particle system sits at the display origin)
+            self.camera.zoom = 0.4; // frame the impact (the Earth–Moon default zoom shows it as a speck)
         }
 
         /// Disk-provenance stats of the live GPU SPH impact (docs/33 stage 5), computed from the latest
@@ -3728,11 +3734,11 @@ mod app {
             // system lives in an Earth-relative f32 frame, so its display origin is Earth's position in the
             // focused frame; the shader maps each Earth-relative position through DISPLAY_SCALE and view_proj.
             if self.sph_active {
-                let origin = ((r_bodies[1] - focus) * DISPLAY_SCALE).as_vec3();
+                let origin = ((r_bodies[1] - focus) * SPH_VIS_SCALE).as_vec3();
                 let cam = crate::gpu_sph::SphCam {
                     view_proj: view_proj.to_cols_array_2d(),
                     origin: [origin.x, origin.y, origin.z, 0.0],
-                    params: [DISPLAY_SCALE as f32, 0.006, 0.0, 0.0], // (m→display scale, billboard half-size)
+                    params: [SPH_VIS_SCALE as f32, 0.013, 0.0, 0.0], // (m→display scale, billboard half-size)
                 };
                 self.queue.write_buffer(&self.sph_cam.buf, 0, bytemuck::bytes_of(&cam));
             }

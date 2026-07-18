@@ -103,7 +103,9 @@ async function main(): Promise<void> {
     // this one script via <body data-moons>/<body data-scene>).
     const demo = await OrbitDemo.create(canvas, numMoons);
     // Birth of the Moon (docs/27): body 2 becomes Theia, inbound ~5 real seconds from impact — the
-    // physics is identical machinery; only the declared impactor changes.
+    // physics is identical machinery; only the declared impactor changes. (The GPU SPH deformable impact
+    // — docs/33 stage 5 — is available via the "🌋 GPU Impact" button; auto-starting it on load blocks the
+    // main thread on the CPU relax, so it stays a deliberate trigger until that build is made non-blocking.)
     if (birthScene) demo.start_birth();
     hideStatus();
     const stats = document.getElementById("stats");

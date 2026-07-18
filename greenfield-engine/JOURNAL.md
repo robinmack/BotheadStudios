@@ -5,6 +5,24 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-17 — Stage 5 migration, increment 2a: GPU impact scene framing (+ a blocker found) (docs/35)
+
+**What.** Toward "the birth scene runs on GpuSph" (docs/35 step 2). The GPU impact rendered as a speck at the
+Earth–Moon default zoom; added a dedicated visual scale (`SPH_VIS_SCALE`, Earth's ~5000 km → a few display
+units) and a camera zoom-in on trigger, so the impact is legible — a clear central remnant plus a spread
+two-provenance debris disk of individual shaded particles. Rig-watch verified on the space scene (HUD: "disk
+0.35 M☾, 15% Earth, moon 0.15 M☾").
+
+**Blocker found (honest).** Auto-starting the GPU impact on `birth.html` load **froze the page** — the
+one-time CPU relax (`build_deformable_impact`, ~900 particles × ~900 damped steps) runs synchronously on the
+wasm main thread and, in the unoptimized dev build, blocks long enough that the scene never paints (rig
+screenshot timed out). So `birth.html` stays on the existing `start_birth` (Aggregate) for now; the GPU impact
+is the deliberate "🌋 GPU Impact" button. Making the birth scene *default* to GpuSph needs a non-blocking
+build first — a GPU relax (`cs_relax` already exists) driven over a few frames, or a lighter/deferred CPU
+relax — which is the real next step (docs/35 step 2, revised). Reverted the auto-start; nothing left broken.
+
+---
+
 ## 2026-07-17 — Stage 5 migration, increment 1: GPU→CPU read-back + live disk stats (docs/35)
 
 **What.** Robin chose to unify the scenes onto the **GPU SPH path** (retire the CPU `Aggregate` from the live

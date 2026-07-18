@@ -34,6 +34,12 @@ increment 4 (terrain probe) forces it. Recommendation: (b) — keep both laws on
    and retire `moon_debris: Aggregate` from `OrbitDemo`. Keep the accretion operator (`accretion.rs`) for the
    geologic hand-off. *Verify:* rig-watch the whole birth→disk→(geologic) flow; disk provenance matches the
    offline `impact-run` ballpark.
+   - **DONE 2a (scene framing):** `SPH_VIS_SCALE` + camera zoom so the impact is legible; rig-verified.
+   - **BLOCKER (found 2a):** the CPU relax in `build_deformable_impact` runs synchronously on the wasm main
+     thread and freezes page load if auto-started — so the birth scene can't yet DEFAULT to GpuSph. **Revised
+     2b:** relax on the GPU (`cs_relax` exists — a few frames of damped stepping, no main-thread block) or a
+     lighter/deferred CPU relax, THEN the birth scene can auto-start GpuSph. Also rewire the birth controls
+     (Geologic hand-off via `accretion`, Replay → restart) before retiring `moon_debris`.
 3. **Retire `body::Sphere`** (5c) — the tiny fork: the one live site (`lib.rs:1098`, the Engine probe's debris
    collision proxy) collides against the probe's actual particles, not a synthesized bounding sphere.
 4. **Engine terrain probe/debris on the unified GPU path** (needs the design decision above). Merge the SPH-EOS
