@@ -5,6 +5,24 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-17 — Direct-sum gravity ceiling measured → GPU Barnes–Hut spec'd for a fresh session (docs/36)
+
+**What.** Measured how far the browser GPU impact's DIRECT O(N²) gravity scales before spec'ing the
+Barnes–Hut. On the RTX 2070: N=2800 → ~11 fps (the button default), **N=8200 → 4 fps** (a gorgeous remnant +
+spiral-disk, energy still conserved ΔE≈0.08 %, but choppy). The O(N²) dynamics (20 substeps × 2 evals × N²)
+is the wall; the offline converged disk (N≈35 000) is unreachable in-browser with direct sum. So a **GPU
+Barnes–Hut (O(N log N))** is the agreed next lever — restores fps at 8 k, unlocks N ≳ 20 k for a sharp disk.
+
+**Handover.** Wrote **`docs/36-gpu-barnes-hut-spec.md`** — a self-contained build spec for the next session:
+the staged LBVH plan (adaptive bbox reduction → Morton → GPU radix sort → Karras tree → atomic-free bottom-up
+COM → θ-traversal), verified GPU-BH-vs-GPU-direct in a new standalone `tools/gpu-bh-verify` (matching the CPU
+`bhtree.rs` opening criterion) before wiring into `sph_step.wgsl`/`GpuSph`, then bump N in the browser. Includes
+the WGSL gotchas (no float atomics → the atomic-free COM; the mandatory tight bbox) and the hard-won impact
+settings the swap must NOT regress (AV-zeroed relax, far-apart relax, the energy-conserving fixed dt). Button
+left at the playable N=2800. Nothing deployed.
+
+---
+
 ## 2026-07-17 — SOLVED: the in-browser GPU impact forms an orbiting disk (GPU relax + energy-conserving dt) (docs/35)
 
 **Result.** The GPU SPH deformable-Earth impact now runs in the browser at **N≈2800**, conserving energy to
