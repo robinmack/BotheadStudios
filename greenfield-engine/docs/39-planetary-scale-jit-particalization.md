@@ -148,6 +148,18 @@ tractable cost); 39e closes birth-of-the-Moon. Only 39a–39b need land before w
   entangled. The test asserts only the robust mechanism (both deformable variants shed Earth); the comparison
   is reported, not asserted. NOTE (setup lesson): a DIFFERENTIATED Theia (dense iron core ploughs in) is
   essential — a basalt-sphere Theia sheds ~0% Earth (docs/28 plough mechanism).
+- **#2 (39e bake-back) DONE; accretion→Moon already exists; a resolved Moon gates on #3.** The JIT RETURN
+  path — `bake_back` (`hydrostatic.rs` test `bake_back_conserves_mass_momentum_and_com`, fast, not ignored):
+  settled particles demote into the coarse bulk (mass + momentum absorbed, radius grows at constant density),
+  conserving total mass/momentum/COM to **<1e-12**. So the full cycle **field → particalize (39d) → simulate
+  → bake-back (39e)** is closed and verified. The disk→Moon ACCRETION was already built + demonstrated
+  (`accretion.rs` + the GPU 35k disk: 16 clumps, a 0.023 M☾ seed) — a *resolved* Moon from the capped case is
+  a resolution/N question that gates on **#3**.
+- **Where 1–4 stand (2026-07-18):** #1 direction + #2 bake-back landed; the whole JIT cycle is validated at
+  coarse N. **The critical path now collapses to #3** — a GPU/high-N + ENSEMBLE run with a deterministic
+  reduction — which is what converges BOTH the Earth fraction (#1) and a resolved Moon (#2) out of the docs/28
+  chaos scatter. #3 is a major (multi-session) GPU build. **#4 (terrain)** is the separate low-energy instance
+  of the same primitive, after planetary scale.
 
 ## Open decisions to pressure-test (before building)
 

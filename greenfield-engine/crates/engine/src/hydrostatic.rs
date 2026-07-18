@@ -592,6 +592,62 @@ mod tests {
         body.vel.iter().zip(&body.mass).map(|(v, &m)| *v * m).sum::<DVec3>() + bulk.vel * bulk.mass
     }
 
+    /// docs/39 39e — BAKE-BACK: demote settled particles (fallen back within `r_settle` of the bulk) into the
+    /// coarse bulk — the JIT return path (field→particalize→simulate→BAKE-BACK). The bulk absorbs each
+    /// particle's mass + momentum (COM-consistent) and grows its radius at constant density; the particle is
+    /// removed. Total mass, momentum, and centre of mass are conserved exactly. Returns how many were baked.
+    fn bake_back(body: &mut HydroBody, bulk: &mut Bulk, r_settle: f64) -> usize {
+        let mut i = 0;
+        let mut baked = 0;
+        while i < body.pos.len() {
+            if (body.pos[i] - bulk.pos).length() < r_settle {
+                let mi = body.mass[i];
+                let new_mass = bulk.mass + mi;
+                bulk.vel = (bulk.vel * bulk.mass + body.vel[i] * mi) / new_mass; // momentum-conserving
+                bulk.pos = (bulk.pos * bulk.mass + body.pos[i] * mi) / new_mass; // COM-consistent
+                bulk.r_base *= (new_mass / bulk.mass).cbrt(); // grow at constant density (r ∝ m^⅓)
+                bulk.mass = new_mass;
+                body.pos.swap_remove(i);
+                body.vel.swap_remove(i);
+                body.mass.swap_remove(i);
+                body.u.swap_remove(i);
+                body.eos.swap_remove(i);
+                body.h.swap_remove(i);
+                body.rho.swap_remove(i);
+                baked += 1;
+            } else {
+                i += 1;
+            }
+        }
+        baked
+    }
+
+    #[test]
+    fn bake_back_conserves_mass_momentum_and_com() {
+        // docs/39 39e: the bake-back (particles → coarse bulk) is the JIT return path and MUST be exactly
+        // conservative — the settled matter demotes into the field losing nothing. Build a bulk + a particle
+        // cloud (some settled near the bulk, some aloft), bake back, and check total mass/Σp/COM unchanged.
+        let eos = Tillotson::basalt();
+        let mut cap = build_mantle_cap(eos, 0.6e6, 1.2e6, 400);
+        for (k, v) in cap.vel.iter_mut().enumerate() {
+            *v = DVec3::new(50.0 * (k as f64).sin(), -30.0, 20.0 * (k as f64).cos()); // arbitrary motion
+        }
+        let mut bulk = Bulk { pos: DVec3::new(1.0e5, -2.0e5, 3.0e5), vel: DVec3::new(10.0, 0.0, -5.0), mass: 5.0e21, r_base: 0.6e6 };
+        let mass_before = bulk.mass + cap.mass.iter().sum::<f64>();
+        let p_before = total_momentum(&cap, &bulk);
+        let com_before = (bulk.pos * bulk.mass + cap.pos.iter().zip(&cap.mass).map(|(p, &m)| *p * m).sum::<DVec3>()) / mass_before;
+        let n0 = cap.pos.len();
+        let baked = bake_back(&mut cap, &mut bulk, 0.9e6); // settle radius above R_core → absorbs the inner cap
+        let mass_after = bulk.mass + cap.mass.iter().sum::<f64>();
+        let p_after = total_momentum(&cap, &bulk);
+        let com_after = (bulk.pos * bulk.mass + cap.pos.iter().zip(&cap.mass).map(|(p, &m)| *p * m).sum::<DVec3>()) / mass_after;
+        println!("39e bake-back: {baked}/{n0} particles demoted into the bulk (bulk mass {:.3e} → {:.3e})", 5.0e21, bulk.mass);
+        assert!(baked > 0 && cap.pos.len() == n0 - baked, "some particles baked back and were removed");
+        assert!((mass_after - mass_before).abs() / mass_before < 1e-12, "mass conserved");
+        assert!((p_after - p_before).length() / p_before.length().max(1.0) < 1e-12, "momentum conserved");
+        assert!((com_after - com_before).length() / com_before.length().max(1.0) < 1e-12, "COM conserved");
+    }
+
     /// Build a mantle shell [r_core, r_surf] of `n` basalt SPH particles at ρ₀ number density (docs/39 cap).
     fn build_mantle_cap(eos: Tillotson, r_core: f64, r_surf: f64, n: usize) -> HydroBody {
         let m_i = eos.rho0 * FOUR_THIRDS_PI * (r_surf.powi(3) - r_core.powi(3)) / n as f64;
