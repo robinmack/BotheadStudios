@@ -246,6 +246,25 @@ impl Gpu {
         self.dispatch(enc, b, &self.p_density, b.n);
         self.dispatch(enc, b, &self.p_forces, b.n);
     }
+    // Bench helper: run `setup` passes once (to leave the grid/density in a valid state), then time `target`
+    // over `iters` back-to-back dispatches (a warmup submit primes the driver). Returns ms/eval — coarse GPU
+    // wall time, enough to break the frame into per-pass scaling (docs/37 follow-up).
+    fn time_pass(&self, b: &Buffers, setup: &[(&wgpu::ComputePipeline, u32)], target: &wgpu::ComputePipeline, tthreads: u32, iters: u32) -> f64 {
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        for (p, t) in setup { self.dispatch(&mut enc, b, p, *t); }
+        self.queue.submit(Some(enc.finish()));
+        self.device.poll(wgpu::Maintain::Wait);
+        let record = |iters: u32| {
+            let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            for _ in 0..iters { self.dispatch(&mut enc, b, target, tthreads); }
+            self.queue.submit(Some(enc.finish()));
+            self.device.poll(wgpu::Maintain::Wait);
+        };
+        record(3); // warmup
+        let t0 = std::time::Instant::now();
+        record(iters);
+        t0.elapsed().as_secs_f64() * 1000.0 / iters as f64
+    }
     fn read_particles(&self, b: &Buffers) -> Vec<Particle> {
         let size = (b.n as u64) * std::mem::size_of::<Particle>() as u64;
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
@@ -369,8 +388,48 @@ fn total_energy(ps: &[Particle], soft: f64, with_pe: bool) -> (f64, f64, f64) {
     (ke, ie, pe)
 }
 
+// Per-pass frame-cost sweep (docs/37 follow-up): for a range of N, time each GPU pass of one force evaluation
+// so we can see where the frame goes and how it scales. cs_density is pure O(N) grid work; cs_forces fuses the
+// O(N²) gravity with the O(N) grid pressure — so (forces − density) attributes the gravity component, and its
+// share of the force-eval reveals when O(N²) takes over. "physics ms/frame" assumes the browser's ~8 KDK
+// substeps × 2 force evals = 16 evals/frame (start_gpu_impact) — render + read-back are ON TOP and not timed.
+fn bench_sweep(gpu: &Gpu, eos: &[Eos]) {
+    let ns = [2_000usize, 4_000, 8_000, 16_000, 32_000, 64_000, 128_000, 256_000];
+    println!("\nper-pass GPU time (ms/eval), θ-free direct gravity, differentiated body:");
+    println!("      N |  clear insert density forces  kick || force_eval  gravity≈  grid+ρ≈  grav% || phys ms/frame  ~fps");
+    for &n in &ns {
+        let (body, m_i) = build_differentiated(0.5 * 5.0e6, 5.0e6, 1.0e6, n, 0);
+        let cell_size = body.iter().map(|p| p.h).fold(0.0f32, f32::max);
+        let soft = 0.5 * (m_i / 7850.0).cbrt();
+        let params = Params { n: body.len() as u32, softening: soft as f32, av_alpha: AV_ALPHA, av_beta: AV_BETA, cell_size, table_mask: TABLE_SIZE - 1, bucket_k: BUCKET_K, dt: 1.0, damp: 1.0, _p0: 0.0, _p1: 0.0, _p2: 0.0 };
+        let b = gpu.make_buffers(&body, eos, &params);
+        let nn = b.n;
+        let it = if n > 100_000 { 5 } else { 20 };
+        let clear = gpu.time_pass(&b, &[], &gpu.p_clear, TABLE_SIZE, 20);
+        let insert = gpu.time_pass(&b, &[(&gpu.p_clear, TABLE_SIZE)], &gpu.p_insert, nn, 20);
+        let density = gpu.time_pass(&b, &[(&gpu.p_clear, TABLE_SIZE), (&gpu.p_insert, nn)], &gpu.p_density, nn, it);
+        let forces = gpu.time_pass(&b, &[(&gpu.p_clear, TABLE_SIZE), (&gpu.p_insert, nn), (&gpu.p_density, nn)], &gpu.p_forces, nn, it);
+        let kick = gpu.time_pass(&b, &[], &gpu.p_kd, nn, 20);
+        let force_eval = clear + insert + density + forces;
+        let gravity = (forces - density).max(0.0); // forces = gravity O(N²) + pressure (~ a density-cost grid pass)
+        let grid = force_eval - gravity; // all the O(N) grid + pressure work
+        let share = 100.0 * gravity / force_eval.max(1e-9);
+        let frame = 16.0 * force_eval + 16.0 * kick; // 8 KDK substeps × (2 force evals + 2 kicks)
+        println!(
+            "{n:>7} | {clear:>6.3} {insert:>6.3} {density:>6.3} {forces:>6.3} {kick:>6.3} || {force_eval:>9.3}  {gravity:>7.3}  {grid:>7.3}  {share:>4.0}% || {frame:>11.1}  {:>5.1}",
+            1000.0 / frame
+        );
+    }
+    println!("(gravity O(N²): 4×N ⇒ ~16× once compute-bound; grid+ρ O(N): 4×N ⇒ ~4×. Crossover in 'grav%'.)");
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|s| s == "bench").unwrap_or(false) {
+        let gpu = Gpu::new();
+        bench_sweep(&gpu, &[eos_basalt(), eos_iron()]);
+        return;
+    }
     let earth_n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1800);
     let steps: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(4000);
     let theia_n = (earth_n / 6).max(50); // ~mass ratio 6:1 ⇒ equal particle mass (as the CPU 3c test)
