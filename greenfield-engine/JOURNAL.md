@@ -5,6 +5,38 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-18 — Frame-cost breakdown + hardware analysis → DECISION: defer GPU Barnes–Hut (option B, docs/37)
+
+**What.** Followed the docs/37 GPU-BH finding with the measurement it was missing — a per-pass frame breakdown
+(`tools/impact-run bench`, `cargo run --release -- bench`) across N=2k…256k, so the A-vs-B call is quantitative.
+Timed each GPU pass of a force eval (`cs_density` is pure O(N) grid; `cs_forces` fuses O(N²) gravity + O(N)
+pressure) and calibrated a real-fps model against the two observed browser points.
+
+**Verified / measured (RTX 2070).** force_eval 2.2 ms @2k → 4.6 @8k → 16 @32k → 196 @128k → 700 @256k.
+Physics-only fps (16 evals/frame): 28 @2k, 13 @8k, 3.9 @32k, 0.3 @128k. real-fps = ~0.3× physics (render + the
+per-frame HUD read-back) — lands on the observed 2.8k→11 fps and 8.2k→4 fps. **Corrections to the earlier
+inference:** gravity is ~35 % of the frame at 8k rising to ~50 % by 32k (not the ~25 % I'd guessed), so it IS
+about half the physics cost — but the SPH grid+pressure is the co-equal other half, and the grid ALSO goes
+super-linear past 64k (fixed `TABLE_SIZE=65536` saturates). So even free gravity ~doubles fps at most, and BH
+still doesn't win below 128k. Interactive ceiling on the 2070 ≈ 12–15k; quadrupling the N=2.8k button → ~11k
+lands ~3–4 fps.
+
+**Hardware caveat (Robin's point — recorded for the revisit).** The 2070 is the *worst* case: (1) **unified
+memory** (M4/A18/Snapdragon) makes a CPU-`bhtree.rs` + GPU-SPH realtime hybrid viable with zero new GPU code
+(the CPU↔GPU copy is free; on our discrete PCIe-3 card it isn't → offline-only); (2) the BH crossover likely
+drops to ~30–60k on cache-rich / lower-FLOPS GPUs (unmeasured). Cheaper levers for more particles NOW (no GPU
+sort): fewer KDK substeps, grow `TABLE_SIZE` with N, lighter HUD read-back.
+
+**DECISION (Robin, 2026-07-18): option B — defer.** Keep direct O(N²) gravity everywhere; do NOT wire BH or
+build the GPU radix sort. Direct-sum is correct for every N we target; the sort is the most expensive remaining
+kernel with no near-term payoff. The verified BH crate is banked + re-verifiable. **docs/37 now carries the full
+write-up: frame table, hardware analysis, revisit triggers (high-N campaign OR Apple/mobile target), and a
+resume plan (build the GPU sort as a *reusable* primitive — it also unblocks GPU accretion + grid reorder).**
+`impact-run bench` mode committed. On branch `gpu-barnes-hut-verify` off `orbit-diagnostic`; nothing wired or
+deployed.
+
+---
+
 ## 2026-07-17 — GPU Barnes–Hut built + verified; direct-sum wins below N≈128k → do NOT wire it in-browser (docs/37)
 
 **What.** Built the full GPU Barnes–Hut (LBVH) self-gravity solver spec'd in docs/36 — a standalone native-

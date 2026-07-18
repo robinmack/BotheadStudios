@@ -16,9 +16,13 @@ because **we are our own first customers** and pin exact engine versions in our 
   structural, COM <1e-6, θ=0.5 RMS 0.70 %, θ→0 recovers the exact direct sum). **Finding:** on the RTX 2070 GPU
   direct-sum beats Barnes–Hut until **N≈128k** (BH is 0.6–0.9× at N≤32k); asymptotics are correct (direct
   O(N²), BH O(N log N)) but the crossover sits far above the browser (N≤20k) and offline (N≈35k) regimes, so BH
-  would *reduce* in-browser fps. Recommendation: keep direct-sum for N≤~100k; BH's niche is high-N offline
-  convergence (N≳128k). No engine code changed; the GPU radix sort (docs/36 stage 3) is deferred pending the
-  high-N decision. See `docs/37`.
+  would *reduce* in-browser fps. **Decision (2026-07-18): defer (option B)** — keep direct O(N²) gravity
+  everywhere; do not wire BH or build the GPU radix sort. A per-pass frame breakdown (`impact-run bench`, new)
+  quantified it: on the 2070 gravity is ~35–50 % of the frame across the browser range but SPH grid+pressure is
+  the co-equal half (and the grid saturates past 64k), interactive ceiling ~12–15k, all far below the 128k BH
+  crossover. Hardware caveat recorded: on unified-memory parts (M4/A18/Snapdragon) a CPU-`bhtree`+GPU-SPH
+  realtime hybrid needs zero new GPU code and the crossover likely drops. No engine physics changed; the
+  verified BH crate is banked. Full write-up + revisit triggers + resume plan in `docs/37`.
 - **GPU impact read-back + live disk stats** (`gpu_sph.rs`, `docs/35` — the GPU-path migration) — `GpuSph`
   gained two-phase async GPU→CPU read-back, and the browser birth scene now shows the live orbiting-disk
   provenance (mass, Earth %, remnant radius, largest self-bound clump) from the read-back particle field. The
