@@ -193,6 +193,51 @@ impl Tillotson {
     }
 }
 
+/// A pluggable equation of state for the shared SPH machinery (docs/33 stage 5 — unify the containers). The
+/// SPH density and symmetric pressure-force loops (`a = −Σ m (P_i/ρ_i² + P_j/ρ_j²) ∇W`) are IDENTICAL whether
+/// the parcel is air or rock — only `P(ρ, u)` differs. Carrying an `Eos` on each particle is the seam that
+/// lets ONE SPH container (`hydrostatic::HydroBody`) serve both an ideal-gas atmosphere and a condensed-matter
+/// planet, folding the duplicated `atmosphere::AirField` / `aggregate` vapor loops onto the same code path.
+#[derive(Clone, Copy, Debug)]
+pub enum Eos {
+    /// Condensed matter (rock, iron): the Tillotson closure `P(ρ, u)`.
+    Tillotson(Tillotson),
+    /// Isothermal ideal gas `P = ρ·R_s·T` (air). `rs_t` = R_s·T (J/kg); `u` is ignored (isothermal), matching
+    /// `atmosphere::AirField`'s `rho·rs_t`.
+    IdealGas { rs_t: f64 },
+}
+
+impl Eos {
+    /// Pressure `P(ρ, u)` in Pa — the only thing the SPH force loop needs from the EOS.
+    pub fn pressure(&self, rho: f64, u: f64) -> f64 {
+        match self {
+            Eos::Tillotson(t) => t.pressure(rho, u),
+            Eos::IdealGas { rs_t } => rho.max(1.0e-9) * rs_t,
+        }
+    }
+    /// Sound speed squared (m²/s²) — for the CFL/Courant timestep. Isothermal ideal gas: `c² = ∂P/∂ρ = R_s·T`.
+    pub fn sound_speed_sq(&self, rho: f64, u: f64) -> f64 {
+        match self {
+            Eos::Tillotson(t) => t.sound_speed_sq(rho, u),
+            Eos::IdealGas { rs_t } => *rs_t,
+        }
+    }
+    /// Reference (cold, zero-pressure) density ρ₀ (kg/m³) — for material identification / init. An ideal gas
+    /// has no reference density, so returns 0.
+    pub fn rho0(&self) -> f64 {
+        match self {
+            Eos::Tillotson(t) => t.rho0,
+            Eos::IdealGas { .. } => 0.0,
+        }
+    }
+}
+
+impl From<Tillotson> for Eos {
+    fn from(t: Tillotson) -> Self {
+        Eos::Tillotson(t)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,5 +347,27 @@ mod tests {
             let rel = (c - c_bulk).abs() / c_bulk;
             assert!(rel < 0.1, "{name}: c {c:.0} must match √(A/ρ₀) {c_bulk:.0} (rel {rel:.2})");
         }
+    }
+
+    #[test]
+    fn eos_enum_dispatches_ideal_gas_and_delegates_tillotson() {
+        // Ideal gas: P = ρ·rs_t, independent of u (isothermal), and c² = rs_t.
+        let rs_t = 287.0 * 288.0; // dry-air R_s · 288 K ≈ 82.7 kJ/kg
+        let air = Eos::IdealGas { rs_t };
+        for &rho in &[0.5, 1.2, 5.0] {
+            for &u in &[0.0, 1.0e5, 1.0e7] {
+                assert!((air.pressure(rho, u) - rho * rs_t).abs() < 1e-6, "ideal-gas P = ρ·rs_t");
+            }
+        }
+        assert_eq!(air.sound_speed_sq(1.2, 0.0), rs_t);
+        assert_eq!(air.rho0(), 0.0);
+        // Tillotson wrapped in the enum must be byte-identical to calling the material directly.
+        let t = Tillotson::basalt();
+        let e: Eos = t.into();
+        for &(rho, u) in &[(2700.0, 1.0e6), (3200.0, 4.0e6), (2000.0, 2.0e7)] {
+            assert_eq!(e.pressure(rho, u), t.pressure(rho, u));
+            assert_eq!(e.sound_speed_sq(rho, u), t.sound_speed_sq(rho, u));
+        }
+        assert_eq!(e.rho0(), t.rho0);
     }
 }

@@ -22,7 +22,7 @@
 //! with `g(r) = G·M(<r)/r²` from the enclosed particle mass. Isothermal this stage (u fixed) — the adiabatic
 //! energy equation under compression is the stage-3 refinement.
 
-use crate::eos::Tillotson;
+use crate::eos::{Eos, Tillotson};
 use glam::DVec3;
 
 const FOUR_THIRDS_PI: f64 = 4.0 / 3.0 * std::f64::consts::PI;
@@ -46,7 +46,7 @@ pub struct HydroBody {
     /// Specific internal energy per particle (J/kg). Fixed in stage 2 (isothermal relaxation).
     pub u: Vec<f64>,
     /// The condensed-matter EOS for each particle.
-    pub eos: Vec<Tillotson>,
+    pub eos: Vec<Eos>,
     /// Per-particle SPH smoothing length (m) — `∝ (m/ρ₀)^⅓`, so denser material is sampled more finely.
     pub h: Vec<f64>,
     /// Gravitational softening (m) — at half the FINEST particle spacing so gravity is honest to touching.
@@ -80,7 +80,7 @@ impl HydroBody {
             vel: vec![DVec3::ZERO; n],
             mass: vec![m_i; n],
             u: vec![specific_heat * temp_k; n],
-            eos: vec![eos; n],
+            eos: vec![Eos::Tillotson(eos); n],
             h: vec![h_i; n],
             softening: 0.5 * (m_i / eos.rho0).cbrt(),
             rho: vec![eos.rho0; n],
@@ -115,7 +115,7 @@ impl HydroBody {
         for i in 0..n_core {
             let rr = core_radius * ((i as f64 + 0.5) / n_core as f64).cbrt();
             pos.push(fib_dir(i, n_core, 0.0) * rr);
-            eos.push(core);
+            eos.push(Eos::Tillotson(core));
             h.push(smoothing_for(m_i, core.rho0));
         }
         // Mantle: uniform in the shell [core_radius, total_radius] (equal-volume radii).
@@ -123,7 +123,7 @@ impl HydroBody {
         for i in 0..n_mantle {
             let rr = (rc3 + (rt3 - rc3) * (i as f64 + 0.5) / n_mantle as f64).cbrt();
             pos.push(fib_dir(i, n_mantle, 1.7) * rr);
-            eos.push(mantle);
+            eos.push(Eos::Tillotson(mantle));
             h.push(smoothing_for(m_i, mantle.rho0));
         }
         let n = pos.len();
@@ -131,7 +131,7 @@ impl HydroBody {
             vel: vec![DVec3::ZERO; n],
             mass: vec![m_i; n],
             u: vec![u_specific; n],
-            rho: (0..n).map(|i| eos[i].rho0).collect(),
+            rho: (0..n).map(|i| eos[i].rho0()).collect(),
             softening: 0.5 * (m_i / core.rho0).cbrt(), // finest (core) spacing
             eos,
             h,
@@ -283,7 +283,7 @@ impl HydroBody {
         let c_max = self
             .eos
             .iter()
-            .map(|e| e.sound_speed_sq(e.rho0, u0).sqrt())
+            .map(|e| e.sound_speed_sq(e.rho0(), u0).sqrt())
             .fold(1.0_f64, f64::max);
         cfl * min_h / c_max.max(1.0)
     }
@@ -654,7 +654,7 @@ mod tests {
         let total_r = 7.37e6;
         let core_r = 0.55 * total_r;
         let mut b = HydroBody::new_differentiated(core, mantle, core_r, total_r, 1.0e6, 3000);
-        let is_core: Vec<bool> = b.eos.iter().map(|e| e.rho0 == core.rho0).collect();
+        let is_core: Vec<bool> = b.eos.iter().map(|e| e.rho0() == core.rho0).collect();
         let m_total: f64 = b.mass.iter().sum();
         println!("differentiated: N={}, M={:.2e} kg (Earth 5.97e24), initial R≈{:.0} km", b.pos.len(), m_total, total_r / 1e3);
 

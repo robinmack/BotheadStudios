@@ -5,6 +5,34 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-17 — Stage 5 (begin): the EOS seam — one pressure abstraction across air and rock (docs/33 §4.5)
+
+**What.** Stage 5 is "retire the forks — unify the particle containers." The blocker the fork map surfaced:
+the symmetric SPH pressure-force loop `a = −Σ m (P_i/ρ_i² + P_j/ρ_j²) ∇W` is written THREE times (`AirField`,
+`HydroBody`, `aggregate` vapor) differing only in the `P(ρ,u)` call — because there is **no EOS abstraction**
+(Tillotson and the inline ideal-gas `ρ·R_s·T` are unrelated). Added one: `eos::Eos` — an enum
+`{ Tillotson(Tillotson), IdealGas { rs_t } }` with `pressure`/`sound_speed_sq`/`rho0`, plus `From<Tillotson>`.
+Migrated `HydroBody` to carry `Vec<Eos>` instead of `Vec<Tillotson>`, so the one verified SPH container is now
+**EOS-agnostic** — it can hold ideal-gas parcels (air) or Tillotson parcels (rock/iron) on the same code
+path. This is the seam that lets `AirField` fold into `HydroBody` (next increment) rather than duplicate the
+density/force/relax loops.
+
+**Why.** `HydroBody` is the convergence target (it's the CPU reference the stage-4 GPU kernel is verified
+against, and it's wired into `gpu_sph.rs`); `AirField`/`Sphere` are legacies to fold toward it. The EOS trait
+is the documented precursor (eos.rs's own module doc already claimed "only the `P(ρ,u)` call changes" — this
+makes that literally true).
+
+**Verified.** New fast test `eos_enum_dispatches_ideal_gas_and_delegates_tillotson`: ideal gas gives
+`P = ρ·rs_t` independent of u and `c² = rs_t`; Tillotson wrapped in the enum is **byte-identical** to calling
+the material directly (asserted with `==`). The migration is pure type-wrapping (Eos::Tillotson delegates
+exactly), so the Tillotson SPH physics is unchanged — confirmed by re-running the full differentiated-planet
+settle: **central P 5.723e11 Pa, core 15591 / mantle 5534 kg/m³** (identical to before). Fast suite 156/156.
+Next: fold `AirField`'s SPH into `HydroBody` (needs an optional planar-ghost boundary + external-gravity
+option — the one thing AirField does that HydroBody can't yet); then the CPU grain-path decision (5b),
+`Sphere` collapse (5c), WGSL-from-Rust (5d).
+
+---
+
 ## 2026-07-17 — Stage 4c.4: the GPU SPH deformable-Earth impact runs IN THE BROWSER (docs/33/34)
 
 **What.** Wired the verified GPU SPH stepper into the birth scene so the deformable-Earth giant impact runs

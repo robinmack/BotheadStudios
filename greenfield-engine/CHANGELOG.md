@@ -9,6 +9,12 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **EOS abstraction — one pressure law across air and rock** (`eos.rs`, `docs/33` stage 5) — a new `Eos` enum
+  (`Tillotson` | `IdealGas`) with `pressure`/`sound_speed_sq`, so the shared SPH machinery is parameterized by
+  the equation of state instead of hardcoding it. `hydrostatic::HydroBody` now carries `Vec<Eos>` (was
+  `Vec<Tillotson>`) — EOS-agnostic, the seam to fold the duplicated `AirField`/vapor SPH loops onto one code
+  path. Byte-identical to the old Tillotson path (verified: differentiated planet settles to the same central
+  pressure; new ideal-gas dispatch test).
 - **GPU SPH-EOS-gravity kernel, verified** (`shaders/sph_step.wgsl` + `tools/sph-verify`, `docs/33` stage 4a)
   — the space-band self-gravitating condensed-matter force step (SPH density + Tillotson pressure + Monaghan
   artificial viscosity + direct self-gravity + du/dt) ported to WGSL compute, for the giant impact at N~10⁵.

@@ -163,7 +163,7 @@ fn body_radius(b: &crate::hydrostatic::HydroBody) -> f64 {
 }
 fn push_body(out: &mut Vec<SphParticle>, b: &crate::hydrostatic::HydroBody, prov: u32) {
     for i in 0..b.pos.len() {
-        let mat = if b.eos[i].rho0 > 5000.0 { MAT_IRON } else { MAT_BASALT };
+        let mat = if b.eos[i].rho0() > 5000.0 { MAT_IRON } else { MAT_BASALT };
         out.push(SphParticle {
             pos: [b.pos[i].x as f32, b.pos[i].y as f32, b.pos[i].z as f32],
             h: b.h[i] as f32,
@@ -171,7 +171,7 @@ fn push_body(out: &mut Vec<SphParticle>, b: &crate::hydrostatic::HydroBody, prov
             u: b.u[i] as f32,
             mass: b.mass[i] as f32,
             mat,
-            rho: b.rho.get(i).copied().unwrap_or(b.eos[i].rho0) as f32,
+            rho: b.rho.get(i).copied().unwrap_or(b.eos[i].rho0()) as f32,
             prov,
         });
     }
