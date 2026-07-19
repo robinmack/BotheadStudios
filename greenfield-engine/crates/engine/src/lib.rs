@@ -4082,6 +4082,29 @@ mod app {
                     );
                 }
             }
+            // docs/42 Phase 4 — accreting MOONLET spheres: self-bound disk clumps resolve out of the ejecta into
+            // growing rock spheres (borrowing the debris uni pool, unused while the GPU impact runs). Warm-tinted
+            // — freshly accreted, still cooling. They grow as the clump gathers mass; the largest is the Moon.
+            let n_moonlets = if self.sph_active && pretty_fade > 0.0 && !self.sph_snapshot.is_empty() {
+                let bodies = crate::gpu_sph::moonlet_bodies(&self.sph_snapshot);
+                let n = bodies.len().min(self.debris_unis.len());
+                for (uni, &(com_pos, radius, _mass)) in self.debris_unis.iter().zip(bodies.iter()).take(n) {
+                    let spos = ((earth_center + com_pos - focus) * pretty_scale).as_vec3();
+                    let r_disp = (radius * pretty_scale * 1.6) as f32 * pretty_fade;
+                    write_space_uniform(
+                        &self.queue,
+                        uni,
+                        view_proj,
+                        Mat4::from_translation(spos) * Mat4::from_scale(Vec3::splat(r_disp)),
+                        earth_light,
+                        [0.45, 0.34, 0.28, 1.0], // cooling rock
+                        [1.0, 0.55, 0.25, 0.5],  // a faint warm glow — recently molten
+                    );
+                }
+                n
+            } else {
+                0
+            };
             // MOONS AS MATTER: each intact moon is a grain shell (like Earth) — its basalt crust at
             // its real reflectance, no smooth-sphere summary. A shattered moon is its debris instead.
             let mshell_spacing =
@@ -4258,6 +4281,10 @@ mod app {
                     draw(&mut pass, &self.interior_uni, &self.sphere_gpu);
                     for uni in self.shell_unis.iter() {
                         draw(&mut pass, uni, &self.sphere_gpu); // Earth: a shell of coarse grains
+                    }
+                    // accreting moonlet spheres (docs/42 Phase 4), from the disk's self-bound clumps
+                    for uni in self.debris_unis.iter().take(n_moonlets) {
+                        draw(&mut pass, uni, &self.sphere_gpu);
                     }
                 }
                 // GPU SPH particles: instanced billboards straight from the physics buffer (zero-copy).

@@ -267,6 +267,46 @@ pub fn disk_stats_json(particles: &[SphParticle]) -> String {
 /// just outside the Roche limit (~3.8 R⊕, the real Moon's formation distance), carrying the clump's actual
 /// mass. The secular tidal law then migrates/merges them. This is the GPU-path replacement for the
 /// `Aggregate`-based `enter_geologic_time` hand-off. Returns an empty vec if there's no bound disk yet.
+/// docs/42 Phase 4: the accreting disk clumps as (Earth-relative COM position, sphere radius, mass) — so the
+/// pretty render can draw growing moonlet SPHERES that resolve out of the ejecta. Same disk + friends-of-friends
+/// clump detection as [`disk_moonlets`], but keeps the geometry instead of collapsing to a Moonlet {a, mass}.
+pub fn moonlet_bodies(particles: &[SphParticle]) -> Vec<(glam::DVec3, f64, f64)> {
+    use glam::DVec3;
+    if particles.len() < 2 {
+        return Vec::new();
+    }
+    let m_total: f64 = particles.iter().map(|p| p.mass as f64).sum();
+    let pos = |p: &SphParticle| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
+    let vel = |p: &SphParticle| DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64);
+    let com: DVec3 = particles.iter().map(|p| pos(p) * p.mass as f64).sum::<DVec3>() / m_total;
+    let v_com: DVec3 = particles.iter().map(|p| vel(p) * p.mass as f64).sum::<DVec3>() / m_total;
+    let mut radii: Vec<(f64, f64)> = particles.iter().map(|p| ((pos(p) - com).length(), p.mass as f64)).collect();
+    radii.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    let (mut cum, mut r_remnant, mut m_remnant) = (0.0, radii.last().map_or(0.0, |x| x.0), m_total);
+    for &(r, m) in &radii {
+        cum += m;
+        if cum >= 0.85 * m_total { r_remnant = r; m_remnant = cum; break; }
+    }
+    let mu = crate::orbit::G * m_remnant;
+    let (mut dp, mut dv, mut dm, mut dr) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for pt in particles {
+        if matches!(crate::orbit::perigee(pos(pt) - com, vel(pt) - v_com, mu), Some(pg) if pg > r_remnant) {
+            dp.push(pos(pt)); dv.push(vel(pt)); dm.push(pt.mass as f64); dr.push(pt.rho.max(1.0) as f64);
+        }
+    }
+    if dp.len() < 2 {
+        return Vec::new();
+    }
+    let mean_h: f64 = particles.iter().map(|p| p.h as f64).sum::<f64>() / particles.len() as f64;
+    let clumps = crate::accretion::find_clumps(&dp, &dv, &dm, &dr, 2.0 * mean_h, crate::orbit::G, 1.0e4, com, m_remnant, r_remnant);
+    // Self-bound clumps of ≥3 members: the moonlets forming in the disk (COM position kept Earth-relative).
+    clumps
+        .iter()
+        .filter(|c| c.members.len() >= 3 && c.bound)
+        .map(|c| (c.com_pos, c.radius, c.mass))
+        .collect()
+}
+
 pub fn disk_moonlets(particles: &[SphParticle], earth_radius: f64) -> Vec<crate::tides::Moonlet> {
     use glam::DVec3;
     if particles.len() < 2 {
