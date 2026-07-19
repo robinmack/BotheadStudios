@@ -326,7 +326,7 @@ pub fn moonlet_bodies(particles: &[SphParticle]) -> Vec<(glam::DVec3, f64, f64)>
 /// docs/42 escape-check: the LARGEST self-bound disk clump's orbit about the remnant — distance, speed, specific
 /// orbital energy (bound iff < 0), semi-major axis, mass. Returns None if there is no clump. This tracks the
 /// actual proto-Moon's trajectory (is it receding / unbinding?) rather than aggregate disk mass.
-pub fn largest_moonlet_orbit(particles: &[SphParticle]) -> Option<(f64, f64, f64, f64, f64)> {
+pub fn largest_moonlet_orbit(particles: &[SphParticle]) -> Option<(f64, f64, f64, f64, f64, f64, f64)> {
     use glam::DVec3;
     if particles.len() < 2 {
         return None;
@@ -365,7 +365,12 @@ pub fn largest_moonlet_orbit(particles: &[SphParticle]) -> Option<(f64, f64, f64
     let v = rel_v.length();
     let energy = 0.5 * v * v - mu / r.max(1.0); // specific orbital energy: bound iff < 0
     let a = if energy < 0.0 { -mu / (2.0 * energy) } else { f64::INFINITY };
-    Some((r, v, energy, a, biggest.mass))
+    // Angular momentum & eccentricity — does it actually ORBIT, or plunge/escape near-radially? e→1 = radial
+    // (goes straight out, barely returns); e well below 1 = a real ellipse. h = |rel_p × rel_v|.
+    let h = rel_p.cross(rel_v).length();
+    let ecc = (1.0 + 2.0 * energy * h * h / (mu * mu)).max(0.0).sqrt();
+    let theta = rel_p.y.atan2(rel_p.x); // angle in the orbital plane (radians) — sweeps if it orbits
+    Some((r, v, energy, a, biggest.mass, ecc, theta))
 }
 
 pub fn disk_moonlets(particles: &[SphParticle], earth_radius: f64) -> Vec<crate::tides::Moonlet> {

@@ -3327,11 +3327,11 @@ mod app {
                 return String::from("null");
             }
             match crate::gpu_sph::largest_moonlet_orbit(&self.sph_snapshot) {
-                Some((r, v, e, a, mass)) => format!(
-                    "{{\"dist_km\":{:.0},\"v_kms\":{:.3},\"bound\":{},\"a_km\":{},\"mass_moon\":{:.3}}}",
+                Some((r, v, e, a, mass, ecc, theta)) => format!(
+                    "{{\"dist_km\":{:.0},\"v_kms\":{:.3},\"bound\":{},\"a_km\":{},\"ecc\":{:.3},\"theta_deg\":{:.0},\"mass_moon\":{:.3}}}",
                     r / 1e3, v / 1e3, e < 0.0,
                     if a.is_finite() { format!("{:.0}", a / 1e3) } else { "\"unbound\"".to_string() },
-                    mass / 7.342e22,
+                    ecc, theta.to_degrees(), mass / 7.342e22,
                 ),
                 None => String::from("null"),
             }
