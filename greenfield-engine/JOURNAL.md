@@ -5,6 +5,38 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-19 — Terra Phase 5: the fine ground cap (real-ratio terrain, true horizon, camera-relative)
+
+**What.** New pure module `terra/ground_cap.rs` — a high-resolution local patch of the surface rebuilt under the
+camera each frame (`fill_ground_cap`, 192² grid, denser toward the centre), sampling the SAME surface as the globe
+(real elevation, biome albedo) and curving to a true horizon. It is emitted CAMERA-RELATIVE (`surface − eye` in
+display units, in f64 then cast to f32), so ground detail survives the radius-1 globe — the precision fix the plan
+called for. `FlyCamera::view` now returns both the absolute view·projection (globe) and a camera-relative one
+(eye-at-origin, for the cap) plus the tangent frame + horizon distance. `Terra` builds the cap into a persistent
+writable vertex buffer and cross-fades it over the globe (alpha-blended, `tint.a`) as altitude drops (`cap_fade`:
+0 above 40 km → 1 below 15 km). The cap covers ~1.3× the horizon angle so its far edge sits below the horizon (no
+visible boundary), lifted a few metres so the fine cap sits in front of the coarse globe.
+
+**Exaggeration unified + made a declared dial.** The globe, cap, and camera floor now share one relief factor,
+read from `surface.relief_exaggeration` (default 1.0 = true scale) — an honest visualization dial, not a physics
+fudge. Set Earth's to **1.0**: real-ratio relief. This retires the ×30 hack that made ground flight impossible
+(Phase 4's buried-black), at the cost of a flatter — but photorealistic — orbital globe. The camera floor
+neighbourhood tightened to ±0.2° (~22 km) now that terrain is real-scale.
+
+**Verified (rig `terra_ground`, xvfb).** A full orbit→ground descent over the Himalaya + a coastline: orbital =
+a realistic smooth Earth (continents, biomes, terminator, limb); 35 km = the curved limb with terrain fading in
+cleanly (no seam / z-fight ghosting); 6 km / 1.5 km / 300 m = a real ground-level horizon — tan foreground, green
+foothills, snow peaks at the true horizon, black sky — **no burying**; the coast shows land meeting a blue ocean
+wedge. Full fast suite **173/173 green** (+2 ground_cap tests: counts/index bounds; centre vertex sits directly
+below the eye at the camera height).
+
+**Honest limits (the plan's noted follow-ons).** Terrain is smooth — detail is capped by the 2048×1024 ETOPO
+raster (~20 km/texel); no sub-raster fbm micro-detail yet. The cap is a single tangent patch, not yet a
+screen-space-error quadtree with geomorphing + edge skirts. Relief is real-ratio (dial = 1.0); a normal-only
+exaggeration could add orbital relief pop without breaking ground.
+
+---
+
 ## 2026-07-19 — Terra Phase 4: the continuous fly camera (orbit ⇄ ground), physics-floored on terrain
 
 **What.** New pure module `terra/fly_camera.rs` — ONE camera that blends orbit⇄ground by altitude (no mode

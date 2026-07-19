@@ -11,6 +11,7 @@
     "landmask_url": "landmask.png",
     "elevation_url": "elevation.png",
     "elevation_range_m": [-11000, 9000],
+    "relief_exaggeration": 1.0,
     "landcover_url": "landcover.png",
     "sea_level_m": 0,
     "biomes": {

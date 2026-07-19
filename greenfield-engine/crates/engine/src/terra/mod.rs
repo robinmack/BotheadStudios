@@ -4,5 +4,6 @@
 
 pub mod fly_camera;
 pub mod globe_mesh;
+pub mod ground_cap;
 pub mod raster;
 pub mod world_def;

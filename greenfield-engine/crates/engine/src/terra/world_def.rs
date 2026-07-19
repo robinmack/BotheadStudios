@@ -43,6 +43,10 @@ pub struct Surface {
     /// [min, max] metres the elevation raster decodes to (incl. bathymetry, e.g. [-11000, 9000]).
     #[serde(default)]
     pub elevation_range_m: Option<[f64; 2]>,
+    /// Declared relief exaggeration (a visualization dial, honest — not a physics fudge). 1.0 = true scale. The
+    /// globe mesh, ground cap, and camera floor all use it consistently so they stay one surface.
+    #[serde(default)]
+    pub relief_exaggeration: Option<f64>,
     #[serde(default)]
     pub landcover_url: Option<String>,
     #[serde(default)]

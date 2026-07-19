@@ -9,6 +9,12 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Terra ground LOD — the fine ground cap (docs/43 Phase 5)** — new `terra/ground_cap.rs`: a high-res patch
+  rebuilt under the camera each frame (camera-relative f64→f32 for ground-scale precision), sampling real
+  elevation + biome and curving to a true horizon, alpha cross-faded over the coarse globe as you descend (fully
+  in below 15 km). Relief exaggeration is now one **declared dial** (`surface.relief_exaggeration`, default 1.0 =
+  true scale) shared by the globe, cap, and camera floor — Earth set to real-ratio, retiring the ×30 hack so you
+  can fly to a real ground-level horizon (no more burying). Orbital Earth is now photorealistically smooth.
 - **Terra fly camera — continuous orbit ⇄ ground (docs/43 Phase 4)** — new `terra/fly_camera.rs`: one
   altitude-blended camera (drag orbits high up, free-looks near the ground; smoothstep transition) with a new
   `Terra` API (`set_fly` · `move_tangent` WASD · `zoom_alt` wheel · `drag_look` · `altitude_m/latitude/longitude`

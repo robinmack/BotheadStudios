@@ -46,5 +46,8 @@ fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     let rim = pow(1.0 - max(dot(n, view), 0.0), 3.0);
     radiance += vec3<f32>(0.35, 0.55, 1.0) * (rim * u.emissive.w * (0.15 + ndl));
     let mapped = radiance / (vec3<f32>(1.0) + radiance); // Reinhard tone-map
-    return vec4<f32>(mapped, 1.0);
+    // Alpha = tint.a: 1.0 for the opaque globe, the cross-fade factor for the ground cap (which is drawn with
+    // alpha blending on top of the globe as the camera descends). `emissive.xyz` is the eye for the globe (world
+    // space) and the ORIGIN for the camera-relative cap, so `view` is correct in both.
+    return vec4<f32>(mapped, u.tint.a);
 }

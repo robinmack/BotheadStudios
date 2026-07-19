@@ -4514,10 +4514,12 @@ mod app {
 
     /// docs/43 Phase 3 — the Terra globe pipeline: the same vertex layout + bind layout as the space pipeline,
     /// but `globe.wgsl` (per-vertex biome colour + a cheap atmospheric limb) instead of the flat-tint shader.
+    /// `blend` is REPLACE for the opaque globe and alpha-blending for the ground cap's cross-fade (Phase 5).
     fn build_globe_pipeline(
         device: &wgpu::Device,
         bind_layout: &wgpu::BindGroupLayout,
         format: wgpu::TextureFormat,
+        blend: wgpu::BlendState,
     ) -> wgpu::RenderPipeline {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("globe-shader"),
@@ -4567,13 +4569,27 @@ mod app {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    blend: Some(wgpu::BlendState::REPLACE),
+                    blend: Some(blend),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
             multiview: None,
             cache: None,
         })
+    }
+
+    /// A GpuMesh whose vertex buffer is writable (VERTEX | COPY_DST) and pre-sized for `vert_capacity` vertices,
+    /// with a fixed index buffer. For geometry rebuilt every frame (the ground cap) — write vertices, don't
+    /// reallocate.
+    fn make_dynamic_mesh(device: &wgpu::Device, label: &str, vert_capacity: usize, indices: &[u32]) -> GpuMesh {
+        let vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: (vert_capacity * std::mem::size_of::<Vertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let index_buf = make_buffer(device, label, bytemuck::cast_slice(indices), wgpu::BufferUsages::INDEX);
+        GpuMesh { vertex_buf, index_buf, index_count: indices.len() as u32 }
     }
 
     /// The instanced particle pipeline for the GPU SPH impact (docs/33 stage 4c.4). One camera-facing
@@ -4650,10 +4666,12 @@ mod app {
     // Phase 1 renders the Earth as the reused grain shell, recolored by the loaded world + its declared
     // atmosphere; later phases add the raster surface sampler, the displaced globe mesh, and the fly camera.
     // ---------------------------------------------------------------------------------------------
-    /// Relief exaggeration for the globe: real elevation × this, so terrain reads on a radius-1 globe (Everest is
-    /// only ~0.05% of Earth's radius). Shared by the mesh build, the ground-height query, and the grain fallback
-    /// so they never drift. The true 1:1 ratio returns with the ground LOD (Phase 5).
-    const TERRA_RELIEF_EXAG: f64 = 30.0;
+    /// Default relief exaggeration if a world doesn't declare one (`surface.relief_exaggeration`). 1.0 = true
+    /// scale. The globe mesh, ground cap, and camera floor all read the world's value so they stay one surface.
+    const TERRA_RELIEF_EXAG: f64 = 1.0;
+    /// Ground-cap grid resolution per side (Phase 5). The vertex buffer is rebuilt each frame; the index buffer
+    /// (fixed topology) is built once.
+    const TERRA_CAP_RES: usize = 192;
 
     #[wasm_bindgen]
     pub struct Terra {
@@ -4672,6 +4690,13 @@ mod app {
         globe_pipeline: wgpu::RenderPipeline,
         globe_mesh: Option<GpuMesh>,
         globe_uni: UniformSlot,
+        // docs/43 Phase 5 — the fine, camera-relative ground cap (rebuilt each frame under the camera) + its
+        // alpha-blend pipeline, and a reused CPU vertex scratch buffer. Cross-faded with the globe by altitude.
+        cap_pipeline: wgpu::RenderPipeline,
+        cap_gpu: GpuMesh,
+        cap_uni: UniformSlot,
+        cap_verts: Vec<Vertex>,
+        relief_exag: f64,
         mats: Vec<materials::Material>,
         fly: crate::terra::fly_camera::FlyCamera,
         planet_radius: f64,
@@ -4746,8 +4771,20 @@ mod app {
                 entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT)],
             });
             let pipeline = build_space_pipeline(&device, &bind_layout, config.format);
-            let globe_pipeline = build_globe_pipeline(&device, &bind_layout, config.format);
+            let globe_pipeline =
+                build_globe_pipeline(&device, &bind_layout, config.format, wgpu::BlendState::REPLACE);
             let globe_uni = make_space_uniform(&device, &bind_layout);
+            // The ground cap: same shader, alpha-blended for the cross-fade; a writable vertex buffer rebuilt each
+            // frame, fixed index topology.
+            let cap_pipeline =
+                build_globe_pipeline(&device, &bind_layout, config.format, wgpu::BlendState::ALPHA_BLENDING);
+            let cap_gpu = make_dynamic_mesh(
+                &device,
+                "terra-cap",
+                TERRA_CAP_RES * TERRA_CAP_RES,
+                &crate::terra::ground_cap::cap_indices(TERRA_CAP_RES),
+            );
+            let cap_uni = make_space_uniform(&device, &bind_layout);
             let shell_count = 4096; // ~2.8° grain spacing — resolves continents/biomes (Phase 2, grain shell)
             let shell_unis: Vec<UniformSlot> =
                 (0..shell_count).map(|_| make_space_uniform(&device, &bind_layout)).collect();
@@ -4770,6 +4807,11 @@ mod app {
                 globe_pipeline,
                 globe_mesh: None,
                 globe_uni,
+                cap_pipeline,
+                cap_gpu,
+                cap_uni,
+                cap_verts: Vec::new(),
+                relief_exag: TERRA_RELIEF_EXAG,
                 mats,
                 fly,
                 planet_radius: EARTH_RADIUS_M,
@@ -4839,9 +4881,13 @@ mod app {
             // Biome index → material index. `biomes` maps a string index → material id in data/materials.json.
             self.biome_mats.clear();
             self.elev_range = [-11000.0, 9000.0];
+            self.relief_exag = TERRA_RELIEF_EXAG;
             if let Some(s) = w.surface.as_ref() {
                 if let Some(r) = s.elevation_range_m {
                     self.elev_range = r;
+                }
+                if let Some(x) = s.relief_exaggeration {
+                    self.relief_exag = x.max(0.0);
                 }
                 let max_idx = s.biomes.keys().filter_map(|k| k.parse::<usize>().ok()).max().unwrap_or(0);
                 self.biome_mats = (0..=max_idx)
@@ -4927,14 +4973,31 @@ mod app {
 
         pub fn render(&mut self) -> Result<(), JsValue> {
             let r_disp = self.planet_radius * DISPLAY_SCALE; // = 1.0 for Earth
-            // docs/43 Phase 4 — the fly camera builds the view·projection (in f64) and gives back the f64 eye.
-            // The terrain height under the camera keeps "altitude" above the local ground (not sea level).
+            // docs/43 Phase 4/5 — the fly camera builds the frame (absolute + camera-relative view·projection, the
+            // f64 eye, and the tangent frame). The terrain height under the camera keeps "altitude" above the
+            // local ground (not sea level).
             let aspect = self.config.width as f64 / self.config.height.max(1) as f64;
             let ground_disp = self.ground_disp_at(self.fly.lat, self.fly.lon);
-            let (view_proj, eye) = self.fly.view_proj(r_disp, DISPLAY_SCALE, aspect, ground_disp);
+            let view = self.fly.view(r_disp, DISPLAY_SCALE, aspect, ground_disp);
+            let view_proj = view.vp_abs;
+            let eye = view.eye;
             // Fixed direction TO the sun → a pleasant ¾ lighting; the day/night terminator is emergent.
             let sun_dir = glam::DVec3::new(1.0, 0.45, 0.6).normalize();
             let sun_light = Vec3::new(sun_dir.x as f32, sun_dir.y as f32, sun_dir.z as f32);
+
+            // docs/43 Phase 5 — build the fine ground cap under the camera and cross-fade it in as we descend.
+            // `cap_fade`: 0 above ~40 km, 1 below ~15 km (smoothstep). Only build when it will show and a surface
+            // is loaded.
+            let alt_m = self.fly.alt_m;
+            let cap_fade = {
+                let (hi, lo) = (40_000.0, 15_000.0);
+                let t = ((alt_m - lo) / (hi - lo)).clamp(0.0, 1.0);
+                (1.0 - t * t * (3.0 - 2.0 * t)) as f32
+            };
+            if cap_fade > 0.0 && self.globe_mesh.is_some() {
+                self.build_cap(&view, sun_light, cap_fade);
+            }
+
             if self.globe_mesh.is_some() {
                 // docs/43 Phase 3 — the displaced globe: one draw. Identity model (the mesh is already in
                 // display units, Earth-centred at the origin); white tint (the mesh carries the per-vertex biome
@@ -5031,6 +5094,12 @@ mod app {
                 if let Some(globe) = &self.globe_mesh {
                     pass.set_pipeline(&self.globe_pipeline);
                     draw(&mut pass, &self.globe_uni, globe);
+                    // docs/43 Phase 5 — the fine ground cap over the globe (alpha-blended cross-fade). Drawn only
+                    // when it was built this frame (cap_fade > 0); it covers the foreground out past the horizon.
+                    if cap_fade > 0.0 {
+                        pass.set_pipeline(&self.cap_pipeline);
+                        draw(&mut pass, &self.cap_uni, &self.cap_gpu);
+                    }
                 } else {
                     pass.set_pipeline(&self.pipeline);
                     for uni in self.shell_unis.iter() {
@@ -5063,10 +5132,12 @@ mod app {
         fn ground_disp_at(&self, lat: f64, lon: f64) -> f64 {
             let Some(elev) = self.elevation.as_ref() else { return 0.0 };
             let land = self.landmask.as_ref();
-            // ±~0.5° covers one coarse cube-sphere cell (256²/face ≈ 0.35°). 3×3 max = local terrain envelope.
+            // ±0.2° (~22 km) 3×3 max = the local terrain envelope: enough to clear any terrain the camera could
+            // reach before the floor rises (forced-up look-ahead), without floating far above a plain that merely
+            // has a distant peak. The whole visible ground cap at low altitude fits inside this radius.
             let mut peak = 0.0f64;
-            for dlat in [-0.5, 0.0, 0.5] {
-                for dlon in [-0.5, 0.0, 0.5] {
+            for dlat in [-0.2, 0.0, 0.2] {
+                for dlon in [-0.2, 0.0, 0.2] {
                     let (la, lo) = (lat + dlat, lon + dlon);
                     let is_land = land.map(|r| r.land_at(la, lo)).unwrap_or(false);
                     if !is_land {
@@ -5076,12 +5147,12 @@ mod app {
                     peak = peak.max(e);
                 }
             }
-            peak * DISPLAY_SCALE * TERRA_RELIEF_EXAG
+            peak * DISPLAY_SCALE * self.relief_exag
         }
 
         fn build_surface_mesh(&self) -> Mesh {
             let r_disp = self.planet_radius * DISPLAY_SCALE; // = 1.0 for Earth
-            const EXAG: f64 = TERRA_RELIEF_EXAG;
+            let exag = self.relief_exag;
             let ds = DISPLAY_SCALE;
             let water_idx = materials::index_of(&self.mats, "water");
             let water_alb = self.mats[water_idx].albedo;
@@ -5101,12 +5172,69 @@ mod app {
                         .as_ref()
                         .map_or(0.0, |r| r.elevation_m_at(lat, lon, self.elev_range[0], self.elev_range[1]));
                     // Land above sea level; below-sea-level land (Dead Sea etc.) clamps to the shore.
-                    (self.mats[mi].albedo, e.max(0.0) * ds * EXAG)
+                    (self.mats[mi].albedo, e.max(0.0) * ds * exag)
                 } else {
                     // Ocean surface: flat at sea level with the water albedo (bathymetry is hidden, so unused).
                     (water_alb, 0.0)
                 }
             })
+        }
+
+        /// docs/43 Phase 5 — rebuild the camera-relative ground cap under the camera and upload it (vertices only;
+        /// the index topology is fixed). It samples the SAME surface as the globe (real elevation × the world's
+        /// declared exaggeration, biome albedo) at high resolution, curving to a true horizon, emitted relative to
+        /// the eye for ground-scale precision. `cap_fade` is the cross-fade alpha, carried in tint.a.
+        fn build_cap(&mut self, view: &crate::terra::fly_camera::View, sun_light: Vec3, cap_fade: f32) {
+            let r_disp = self.planet_radius * DISPLAY_SCALE;
+            let exag = self.relief_exag;
+            let ds = DISPLAY_SCALE;
+            let res = TERRA_CAP_RES;
+            // Cover ~1.3× the horizon angle so the patch reaches past the visible horizon (its far edge then sits
+            // below the horizon / is occluded — no visible cap boundary).
+            let cap_angle = (1.3 * view.horizon / r_disp).clamp(1e-4, 0.6);
+            let lift = 20.0 * ds; // a few metres toward the camera so the fine cap sits in front of the coarse globe
+            let water_idx = materials::index_of(&self.mats, "water");
+            let water_alb = self.mats[water_idx].albedo;
+
+            let mut verts = std::mem::take(&mut self.cap_verts);
+            {
+                let sample = |dir: glam::DVec3| -> ([f32; 3], f64) {
+                    let lat = dir.y.asin().to_degrees();
+                    let lon = dir.z.atan2(dir.x).to_degrees();
+                    let is_land = self
+                        .landmask
+                        .as_ref()
+                        .map(|r| r.land_at(lat, lon))
+                        .unwrap_or_else(|| crate::planet::earth_surface_material(dir) == "granite");
+                    if is_land {
+                        let biome = self.landcover.as_ref().map_or(1, |r| r.biome_at(lat, lon) as usize);
+                        let mi = self.biome_mats.get(biome).copied().unwrap_or(water_idx);
+                        let e = self
+                            .elevation
+                            .as_ref()
+                            .map_or(0.0, |r| r.elevation_m_at(lat, lon, self.elev_range[0], self.elev_range[1]));
+                        (self.mats[mi].albedo, e.max(0.0) * ds * exag + lift)
+                    } else {
+                        (water_alb, lift)
+                    }
+                };
+                crate::terra::ground_cap::fill_ground_cap(
+                    &mut verts, view.up, view.east, view.north, view.eye, r_disp, cap_angle, res, sample,
+                );
+            }
+            self.queue.write_buffer(&self.cap_gpu.vertex_buf, 0, bytemuck::cast_slice(&verts));
+            self.cap_verts = verts;
+            // Camera-relative draw: identity model, eye at the ORIGIN (emissive.xyz = 0 → globe.wgsl's view = the
+            // direction from the surface back to the eye). tint.a = the cross-fade alpha.
+            write_space_uniform(
+                &self.queue,
+                &self.cap_uni,
+                view.vp_rel,
+                Mat4::IDENTITY,
+                sun_light,
+                [1.0, 1.0, 1.0, cap_fade],
+                [0.0, 0.0, 0.0, 0.8],
+            );
         }
 
     }

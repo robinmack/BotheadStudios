@@ -13,6 +13,19 @@
 
 use glam::{DMat4, DVec3, Mat4};
 
+/// One frame's camera outputs (see `FlyCamera::view`).
+#[derive(Clone, Copy, Debug)]
+pub struct View {
+    pub vp_abs: Mat4,
+    pub vp_rel: Mat4,
+    pub eye: DVec3,
+    pub up: DVec3,
+    pub north: DVec3,
+    pub east: DVec3,
+    pub alt_disp: f64,
+    pub horizon: f64,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct FlyCamera {
     pub lat: f64,
@@ -72,23 +85,25 @@ impl FlyCamera {
         (eye, fwd, up_view)
     }
 
-    /// The combined view·projection (as f32) and the f64 eye position (display units). Near/far planes scale with
-    /// altitude: `far` is just past the horizon (the farthest visible surface), `near` shrinks toward the ground.
-    pub fn view_proj(&self, r_disp: f64, ds: f64, aspect: f64, ground_disp: f64) -> (Mat4, DVec3) {
+    /// Everything the renderer needs for one frame. `vp_abs` is the view·projection with the eye in world space
+    /// (for the globe); `vp_rel` is the same projection with the eye at the ORIGIN (for camera-relative geometry
+    /// like the ground cap — subtract the eye from positions in f64, then this maps them). `eye` is the f64 eye
+    /// (display units); `up/north/east` is the tangent frame under the camera; `horizon` is the display-unit
+    /// distance to the horizon (for sizing the cap). Near/far scale with altitude.
+    pub fn view(&self, r_disp: f64, ds: f64, aspect: f64, ground_disp: f64) -> View {
         let (eye, fwd, up_view) = self.view_basis(r_disp, ds, ground_disp);
+        let (up, north, east) = self.frame();
         // NEAR keys off altitude ABOVE THE LOCAL GROUND (not total height): the nearest thing the camera can see
-        // is roughly `alt` below/ahead of it, so `near ∝ alt`. (Using total height would push `near` out to tens
-        // of km wherever the ×30-exaggerated terrain is tall, clipping all the foreground.)
+        // is roughly `alt` below/ahead of it, so `near ∝ alt`. FAR reaches just past the horizon.
         let alt_disp = (self.alt_m * ds).max(1e-9);
         let near = (alt_disp * 0.05).clamp(1e-6, 0.05);
-        // FAR reaches just past the horizon (the farthest visible surface), from the eye's total height above the
-        // sea-level sphere.
         let h = (ground_disp + alt_disp).max(1e-9);
         let horizon = (h * (h + 2.0 * r_disp)).sqrt();
         let far = (horizon * 1.4).max(near * 1000.0);
         let proj = DMat4::perspective_rh(0.9, aspect.max(1e-3), near, far);
-        let view = DMat4::look_at_rh(eye, eye + fwd, up_view);
-        ((proj * view).as_mat4(), eye)
+        let vp_abs = (proj * DMat4::look_at_rh(eye, eye + fwd, up_view)).as_mat4();
+        let vp_rel = (proj * DMat4::look_at_rh(DVec3::ZERO, fwd, up_view)).as_mat4();
+        View { vp_abs, vp_rel, eye, up, north, east, alt_disp, horizon }
     }
 
     // --- input deltas ---
