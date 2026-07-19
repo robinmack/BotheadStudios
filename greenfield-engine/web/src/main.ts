@@ -5,6 +5,8 @@
 // be debugged, and shows a big on-screen status/error banner.
 
 import init, { Engine } from "./wasm/engine.js";
+import "./scene-nav";
+import { createSimHud } from "./sim-hud";
 
 // --- Log relay: mirror console + global errors to the dev server ---
 function report(level: string, msg: string): void {
@@ -82,13 +84,71 @@ async function main(): Promise<void> {
 
   try {
     setStatus("Loading engine… (compiling WASM)");
-    await init();
+    // DEV wasm has a stable url Safari caches forever; bust it with the build stamp. BUILD is hashed.
+    await init(
+      import.meta.env.DEV
+        ? new URL(`./wasm/engine_bg.wasm?v=${__BUILD_ID__}`, import.meta.url)
+        : undefined,
+    );
     setStatus("Requesting GPU device…");
     const engine = await Engine.create(canvas);
+    // Expose the engine for the headless watch rig (docs/28 ejecta-blanket diagnostics). Harmless in prod.
+    (window as unknown as { __sim?: unknown }).__sim = engine;
     hideStatus();
     const stats = document.getElementById("stats");
     if (stats) stats.hidden = false;
     report("info", "engine created OK");
+
+    // Meteor button: fire a high-energy impact at screen centre — carves a crater and throws
+    // incandescent (glowing) molten ejecta from the hot core (docs/20). Same operator as dig, more
+    // energy. (Also bound to the "m" key.)
+    const meteorBtn = document.createElement("button");
+    meteorBtn.textContent = "☄ Meteor";
+    Object.assign(meteorBtn.style, {
+      position: "fixed",
+      right: "12px",
+      bottom: "12px",
+      zIndex: "10",
+      padding: "10px 14px",
+      font: "600 15px/1 system-ui, sans-serif",
+      color: "#fff",
+      background: "rgba(40,20,16,0.78)",
+      border: "1px solid rgba(255,180,120,0.4)",
+      borderRadius: "10px",
+      backdropFilter: "blur(6px)",
+      cursor: "pointer",
+      touchAction: "manipulation",
+    });
+    meteorBtn.addEventListener("click", () => engine.meteor(0, 0));
+    document.body.appendChild(meteorBtn);
+
+    // Screenshot: capture the canvas and upload it to the dev server (web/shots/), so on-device visual
+    // bugs (e.g. levitating particles) can be shown. The actual grab happens in the frame loop right
+    // after render() presents, so the WebGPU drawing buffer is still current.
+    let wantShot = false;
+    const shotBtn = document.createElement("button");
+    shotBtn.textContent = "📷 Shot";
+    Object.assign(shotBtn.style, {
+      position: "fixed",
+      right: "12px",
+      bottom: "58px",
+      zIndex: "10",
+      padding: "10px 14px",
+      font: "600 15px/1 system-ui, sans-serif",
+      color: "#fff",
+      background: "rgba(16,28,40,0.78)",
+      border: "1px solid rgba(120,180,255,0.4)",
+      borderRadius: "10px",
+      backdropFilter: "blur(6px)",
+      cursor: "pointer",
+      touchAction: "manipulation",
+    });
+    shotBtn.addEventListener("click", () => {
+      wantShot = true;
+      setStatus("capturing screenshot…");
+      window.setTimeout(hideStatus, 1200);
+    });
+    document.body.appendChild(shotBtn);
     report(
       "info",
       `canvas ${canvas.width}x${canvas.height} client ${canvas.clientWidth}x${canvas.clientHeight} dpr ${window.devicePixelRatio}`,
@@ -199,21 +259,33 @@ async function main(): Promise<void> {
         engine.set_time_scale(engine.time_scale() / 1.5);
       } else if (e.code === "BracketRight") {
         engine.set_time_scale(engine.time_scale() * 1.5);
+      } else if (e.code === "KeyM") {
+        engine.meteor(0, 0); // fire a meteor at screen centre
       }
     });
 
-    // --- Live HUD ---
+    // --- Live HUD (the canonical shared Sim HUD — same banner/frame/sim-line as every scene) ---
+    const hud = createSimHud("terrain");
     const fmt = (x: number) => x.toExponential(2);
     let fps = 0;
     let framesSinceFps = 0;
     let lastFpsTime = performance.now();
     const updateStats = () => {
       if (!stats) return;
-      stats.innerHTML =
-        `world mass <b>${fmt(engine.total_mass())}</b> kg · g <b>${fmt(engine.surface_gravity())}</b> m/s² (micro-g)<br>` +
-        `probe: alt <b>${engine.sphere_altitude().toFixed(1)}</b> m · ${engine.is_resting() ? "at rest ✔" : "falling…"}<br>` +
-        `debris <b>${engine.particle_count()}</b> · time ×<b>${engine.time_scale().toFixed(0)}</b> · <b>${fps}</b> fps<br>` +
-        `tap dig · long-press blast · drag orbit · pinch zoom`;
+      // Scene-specific physics: the planet it's a patch of, and the falling iron probe. The universal
+      // time/fps/build/scale line and the banner are supplied by the shared HUD.
+      hud.update({
+        title: `<b>Terrain</b> · Earth`,
+        physics: [
+          `mass <b>${fmt(engine.planet_mass())}</b> kg · r <b>${engine.planet_radius_km().toLocaleString(undefined, { maximumFractionDigits: 0 })}</b> km · surface g <b>${engine.surface_gravity().toFixed(2)}</b> m/s²`,
+          `probe (iron ball): alt <b>${engine.sphere_altitude().toFixed(1)}</b> m · integrity <b>${(engine.probe_integrity() * 100).toFixed(0)}%</b>`,
+          `debris <b>${engine.particle_count()}</b>`,
+        ],
+        timeScale: engine.time_scale(),
+        fps,
+        metersPerPixel: engine.meters_per_pixel(),
+        controls: `tap dig · long-press blast · ☄/m meteor · drag orbit · pinch zoom`,
+      });
     };
 
     let firstFrame = true;
@@ -232,6 +304,23 @@ async function main(): Promise<void> {
       } catch (err) {
         setStatus(`render error: ${String(err)}`, true);
         return;
+      }
+      // Grab the screenshot HERE — immediately after render() presented, while the WebGPU drawing
+      // buffer is current — then upload it to the dev server.
+      if (wantShot) {
+        wantShot = false;
+        try {
+          const url = canvas.toDataURL("image/png");
+          void fetch("/__shot", {
+            method: "POST",
+            headers: { "content-type": "text/plain" },
+            body: url,
+          })
+            .then(() => report("info", `screenshot posted (${url.length} chars)`))
+            .catch((e) => report("error", `screenshot upload failed: ${String(e)}`));
+        } catch (e) {
+          report("error", `screenshot capture failed: ${String(e)} (WebGPU canvas may need readback)`);
+        }
       }
       if (firstFrame) {
         report("info", "first frame rendered OK");

@@ -1,0 +1,19 @@
+# Standalone (NOT a workspace member — its own [workspace] table) so the native Vulkan wgpu build
+# never leaks into the engine's browser (webgpu-only) wasm build via feature unification. This runs
+# shaders/particle_step.wgsl on a real GPU (the box's RTX 2070) to VERIFY the granular sim headlessly.
+[package]
+name = "gpu-verify"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+wgpu = "24"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+
+[[bin]]
+name = "gpu-verify"
+path = "src/main.rs"

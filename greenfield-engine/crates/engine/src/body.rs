@@ -138,6 +138,7 @@ mod tests {
             d,
             voxels,
             max_top: 4,
+            water_mat: None,
         }
     }
 
@@ -158,6 +159,7 @@ mod tests {
             d,
             voxels,
             max_top: 8,
+            water_mat: None,
         }
     }
 
@@ -226,6 +228,38 @@ mod tests {
             (s.pos.y - (2.0 + s.radius)).abs() < 0.4,
             "rests on the surface"
         );
+    }
+
+    #[test]
+    fn wakes_and_falls_when_support_is_removed() {
+        // Physical honesty: a body sleeps only while something holds it up. Remove its support and it
+        // must wake and fall on the very next step — "leave it unsupported and it falls" is structural,
+        // not scripted. (Falls through vacuum: no atmosphere is modelled, so no drag.)
+        let mut w = slab_world();
+        let mut s = Sphere::new(Vec3::new(0.0, 5.0, 0.0), 5.0, 1.0);
+        let g = Vec3::new(0.0, -9.81, 0.0);
+        let dt = 0.01;
+        for _ in 0..100_000 {
+            s.integrate(g, dt);
+            s.collide(&w, g, dt);
+            if s.resting {
+                break;
+            }
+        }
+        assert!(s.resting, "sphere first comes to rest on the slab");
+
+        // Dig the slab out from under it.
+        for y in 0..4 {
+            for z in 0..w.d {
+                for x in 0..w.w {
+                    w.set_voxel(x as i32, y, z as i32, None);
+                }
+            }
+        }
+        s.integrate(g, dt);
+        s.collide(&w, g, dt);
+        assert!(!s.resting, "removing the support wakes the body");
+        assert!(s.vel.y < 0.0, "it accelerates downward under gravity");
     }
 
     #[test]

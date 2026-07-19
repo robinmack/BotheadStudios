@@ -2,19 +2,55 @@
 //!
 //! Each voxel holds a material index (0 = empty/air, else `material_index + 1`). This is the
 //! authoritative "matter store" — later phases attach per-voxel density = material.density (so
-//! summed mass drives gravity) and activate voxels into MPM particles under stress. For Phase 1 we
-//! generate a layered plateau — rock, ~10 m of dirt, a skin of grass — and render it.
+//! summed mass drives gravity) and activate voxels into MPM particles under stress. The generator
+//! lays a surface patch of the REAL layered Earth — grass skin, basalt crust, peridotite mantle, iron
+//! core — as a declared vertical LOD (real materials/order, compressed depths; docs/25/28).
 
 use crate::materials::{index_of, Material};
 use glam::{IVec3, Vec3};
+use std::collections::VecDeque;
 
 /// Width (X), height (Y, up), depth (Z) of the world in voxels. 1 voxel = 1 metre.
 pub const W: usize = 96;
-pub const H: usize = 56;
+pub const H: usize = 96;
 pub const D: usize = 96;
 
-const DIRT_THICKNESS: usize = 10; // "10 m of dirt", per the project brief
-const GRASS_THICKNESS: usize = 1; // thin fragile skin
+const GRASS_THICKNESS: usize = 1; // thin fragile biosphere skin over the crust
+
+/// Highest possible surface top (voxel-y ≈ metres): leaves 8 voxels of headroom above the terrain.
+const BASE_TOP: f32 = (H - 8) as f32;
+/// Peak-to-valley relief of the procedural heightfield (voxels ≈ metres): real rolling hills, not a slab.
+const AMPLITUDE: f32 = 34.0;
+
+/// Sea-level datum (voxel-y, metres in the patch's own frame): the reference height the oceans fill
+/// water BELOW (real `water` matter above the seabed, up to this level; land is ABOVE it). This is the
+/// waterline where the ONE continuous hydrostatic column switches from air (pressure decreasing upward,
+/// the declared atmosphere) to water (pressure increasing downward, [`ocean_pressure`]) — exactly
+/// parallel to the atmosphere, P = P_atm at depth 0.
+///
+/// DEMONSTRATION SEA LEVEL (flagged): the coarse 10° landmask calls this cell all-land, so there is no
+/// real bathymetry to pin the datum yet. It is chosen to sit WITHIN the terrain's relief band
+/// (`BASE_TOP - AMPLITUDE` = 54 .. `BASE_TOP` = 88, procedural tops ~54..81) so the low basins are
+/// genuinely submerged and the sea is visible, while hills stay dry. When real elevation/bathymetry
+/// (ETOPO) drops into `terrain_height`, the true 0 m geoid replaces this demonstration value.
+pub const SEA_LEVEL_Y: f32 = 64.0;
+
+/// Hydrostatic pressure (Pa) in the ocean at `depth_below_sea` metres beneath [`SEA_LEVEL_Y`], for a
+/// surface gravity `g` (m/s²). This is the SAME hydrostatic law the air column obeys, continued
+/// DOWNWARD through the water: `P(depth) = P_atm + ρ_water · g · depth`. It is continuous with the
+/// atmosphere at the waterline — at `depth = 0` it returns exactly `P_atm`, the declared atmosphere's
+/// weight (`planet::earth().surface_pressure()`) — so air-above and water-below are ONE column, not two.
+///
+/// DERIVED, not dialed: `ρ_water` is the DB `water` material's density and `P_atm` is the emergent
+/// surface pressure of the declared atmosphere. Above the waterline (`depth_below_sea < 0`) there is no
+/// water, so it clamps to `P_atm` (the atmosphere takes over there). Approximation (flagged): constant
+/// ρ (water's ~0.05%/km compressibility is ignored) and constant g over the shallow column.
+pub fn ocean_pressure(depth_below_sea: f64, g: f64) -> f64 {
+    let p_atm = crate::planet::earth().surface_pressure();
+    let mats = crate::materials::load();
+    let rho_water = mats[index_of(&mats, "water")].density as f64;
+    p_atm + rho_water * g * depth_below_sea.max(0.0)
+}
 
 pub struct World {
     pub w: usize,
@@ -24,6 +60,12 @@ pub struct World {
     pub voxels: Vec<u16>,
     /// Tallest column, for centering the camera on the terrain.
     pub max_top: usize,
+    /// Material index treated as LIQUID water (the sea), if the world has one. Water voxels are real
+    /// matter (they carry mass — see gravity — and render), but they are NOT load-bearing SOLID: they
+    /// are excluded from [`Self::is_solid`], so the structural-support model, the camera/land-surface
+    /// queries, and the terrain strata all continue to mean the solid ground beneath the sea. `None`
+    /// for hand-built worlds (tests) and any world without an ocean.
+    pub water_mat: Option<usize>,
 }
 
 impl World {
@@ -52,9 +94,22 @@ impl World {
         }
     }
 
+    /// Is this voxel LIQUID water (the sea)? Water is matter but not solid ground.
+    #[inline]
+    pub fn is_water(&self, x: i32, y: i32, z: i32) -> bool {
+        self.water_mat.is_some() && self.material_at(x, y, z) == self.water_mat
+    }
+
+    /// Is this voxel SOLID (load-bearing) ground — matter that is NOT liquid water? The structural
+    /// support model, the land-surface/camera queries, and the strata all key off this, so the sea does
+    /// not masquerade as ground. Use [`Self::material_at`] (`is_some()`) when you want "any matter
+    /// present" (e.g. gravity mass, rendering), which INCLUDES the water.
     #[inline]
     pub fn is_solid(&self, x: i32, y: i32, z: i32) -> bool {
-        self.material_at(x, y, z).is_some()
+        match self.material_at(x, y, z) {
+            Some(m) => Some(m) != self.water_mat,
+            None => false,
+        }
     }
 
     /// The offset used to center the world on the origin (shared by the mesher, gravity, and
@@ -79,6 +134,141 @@ impl World {
             }
         }
         None
+    }
+
+    /// The smooth (bilinear) terrain surface height at a world position, returned in CENTERED coords —
+    /// the SAME surface the GPU debris step collides grains against (`particle_step.wgsl::terrain_h`):
+    /// the four surrounding column tops (edge-clamped to the patch, `-1` for an empty column, then
+    /// `-0.5` for the mesh iso-surface) bilinearly interpolated. Debris comes to rest ON this bilinear
+    /// surface, NOT on a single column's top. The CPU de-resolution readback must judge "grounded"
+    /// against this SAME surface — otherwise a grain resting on a SLOPE (binned into the lower column of
+    /// its cell, but physically held up by the higher corner) reads as airborne against the single lower
+    /// column top and never de-resolves, so the pile stacked on it can never peel down to voxels either
+    /// (the "rubble that never returns to the grid" stall). Mirrors the shader by construction.
+    pub fn surface_height_bilinear(&self, pos: Vec3) -> f32 {
+        let c = self.center();
+        let vx = pos.x + c.x;
+        let vz = pos.z + c.z;
+        let cx = vx.floor() as i32;
+        let cz = vz.floor() as i32;
+        let top = |x: i32, z: i32| -> f32 {
+            let xc = x.clamp(0, self.w as i32 - 1);
+            let zc = z.clamp(0, self.d as i32 - 1);
+            self.surface_top_voxel(xc, zc).unwrap_or(-1) as f32
+        };
+        let h00 = top(cx, cz);
+        let h10 = top(cx + 1, cz);
+        let h01 = top(cx, cz + 1);
+        let h11 = top(cx + 1, cz + 1);
+        let fx = vx - cx as f32;
+        let fz = vz - cz as f32;
+        let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+        let h = lerp(lerp(h00, h10, fx), lerp(h01, h11, fx), fz);
+        h - c.y - 0.5
+    }
+
+    /// The BULK terrain surface height (centered coords) at horizontal `(x, z)` — the DEFAULT ground
+    /// everywhere, resolved or not (Robin: "the default terrain is the bulk heightmap everywhere"). It is
+    /// the shared continuous [`terrain_height`] (the SAME field the distant Earth cap and the resolved
+    /// voxels sample), converted from the patch's voxel frame into centered coords. Unlike
+    /// [`Self::surface_top_voxel`] it is defined over the WHOLE plane — off the finite voxel footprint the
+    /// bulk ground continues, so a probe or grain out there rests on real terrain instead of falling into
+    /// the void. Smooth (no voxel rounding); the on-demand voxels only refine it locally around an impact.
+    pub fn bulk_height(&self, x: f32, z: f32) -> f32 {
+        let c = self.center();
+        terrain_height(x + c.x, z + c.z) - c.y
+    }
+
+    /// Is a camera `eye` (in CENTERED coordinates, the frame `center()` maps to voxel space) in free
+    /// air, at least `clearance` metres above the ground beneath it? "Free" means the voxel the eye sits
+    /// in is not solid AND, where a ground column exists under the eye, the eye is `clearance` above that
+    /// column's surface top. Off the terrain footprint (out-of-bounds column) there is no ground beneath,
+    /// so the eye is free — the patch is a finite chunk of matter in vacuum, not walled in.
+    pub fn eye_is_free(&self, eye: Vec3, clearance: f32) -> bool {
+        let p = eye + self.center();
+        let (xi, yi, zi) = (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32);
+        if self.is_solid(xi, yi, zi) {
+            return false;
+        }
+        match self.surface_top_voxel(xi, zi) {
+            Some(top) => p.y >= top as f32 + clearance,
+            None => true, // no ground column here (beside/beyond the patch)
+        }
+    }
+
+    /// Clamp a third-person orbit camera eye (CENTERED coords) so it never sits inside solid matter or
+    /// below the terrain surface. If the requested eye is already free air a `clearance` above the
+    /// ground, it is returned UNCHANGED (normal orbit/zoom stays smooth). Otherwise the eye is pulled
+    /// back along its own radial direction (a third-person "boom", preserving yaw/pitch) in half-voxel
+    /// steps until it reaches free air — the honest fix for zoom-into-the-ground. For a degenerate
+    /// near-straight-down aim (little horizontal spread, or a radial pull-back that can only burrow
+    /// deeper), it falls back to lifting the eye straight up until it clears the surface.
+    pub fn clamp_eye_outside(&self, eye: Vec3, clearance: f32) -> Vec3 {
+        if self.eye_is_free(eye, clearance) {
+            return eye;
+        }
+        let dir = eye.normalize_or_zero();
+        let horiz = (dir.x * dir.x + dir.z * dir.z).sqrt();
+        // World bounding-sphere radius (centered): any point past it is guaranteed outside the matter.
+        let bound = ((self.w * self.w + self.h * self.h + self.d * self.d) as f32).sqrt()
+            + clearance
+            + 4.0;
+
+        // Radial boom pull-back: only meaningful when the ray has real horizontal spread AND is not
+        // aimed down into the ground (a down-pointing ray only burrows deeper as it lengthens).
+        if dir != Vec3::ZERO && horiz >= 0.1 && dir.y >= -0.05 {
+            let mut d = eye.length();
+            while d <= bound {
+                let e = dir * d;
+                if self.eye_is_free(e, clearance) {
+                    return e;
+                }
+                d += 0.5;
+            }
+        }
+
+        // Vertical-lift fallback: raise the eye straight up until it clears the surface above it.
+        let mut e = eye;
+        let ceiling = self.h as f32 - self.center().y + clearance + 1.0;
+        while e.y <= ceiling {
+            if self.eye_is_free(e, clearance) {
+                return e;
+            }
+            e.y += 0.5;
+        }
+        e
+    }
+
+    /// Clamp a terrain camera eye (CENTERED coords) so it can NEVER go below the real Earth surface —
+    /// anywhere, not just over the resolved 96 m voxel patch. The bulk planet is a sphere of `radius`
+    /// centred at `earth_center` (in the same centered frame; ≈ a full Earth radius straight down under
+    /// the uniform surface gravity). Two constraints, both enforced:
+    ///   1. The eye stays at least `clearance` ABOVE the Earth sphere: its distance from `earth_center`
+    ///      is ≥ `radius + clearance`. If it dips inside, it is pushed radially back out from the centre
+    ///      (so off the patch, over the summarized bulk surface, the horizon still walls the eye in —
+    ///      closing the old "off-footprint is free" hole that only the fake flat plane made safe).
+    ///   2. The eye stays out of the resolved voxel hills (the existing local clamp), which can rise
+    ///      ABOVE the smooth sphere where the patch relief pokes up.
+    /// Computed in f64: `radius` is ~6.4e6 m, so the metre-scale curvature drop is below f32 precision.
+    pub fn clamp_eye_above_earth(
+        &self,
+        eye: Vec3,
+        earth_center: Vec3,
+        radius: f32,
+        clearance: f32,
+    ) -> Vec3 {
+        let c = earth_center.as_dvec3();
+        let rel = eye.as_dvec3() - c;
+        let d = rel.length();
+        let min_d = radius as f64 + clearance as f64;
+        let lifted = if d > 1e-9 && d < min_d {
+            (c + rel * (min_d / d)).as_vec3()
+        } else {
+            eye
+        };
+        // Then keep it clear of the resolved voxel patch (lifting only ever increases the distance from
+        // the Earth centre, so the sphere constraint from above still holds).
+        self.clamp_eye_outside(lifted, clearance)
     }
 
     /// Set a voxel's material (`None` = air). Out-of-bounds writes are ignored.
@@ -228,6 +418,121 @@ impl World {
         }
         out
     }
+
+    /// Solid voxels that gravity cannot hold up — the honest structural-support model (`docs/28`).
+    ///
+    /// The old [`Self::find_unsupported`] called a voxel "supported" if ANY 6-connected path of solid
+    /// reached the base, so an overhanging crater lip attached SIDEWAYS to the rim counted as supported
+    /// even with nothing beneath it. That is unphysical: matter is held against gravity by support FROM
+    /// BELOW. Here support propagates from the base UPWARD, with a material-strength-limited cantilever:
+    ///
+    /// 1. **DIRECTLY SUPPORTED** — a column to the base: `(x, y, z)` is directly supported iff it is
+    ///    solid AND (`y == 0` OR the voxel directly below `(x, y-1, z)` is directly supported). A single
+    ///    bottom-up sweep resolves the whole column.
+    /// 2. **BRACED** (cantilever) — a solid voxel that is NOT directly supported is still held if it lies
+    ///    within its material's CANTILEVER REACH, laterally at its own `y`-level (through solid), of a
+    ///    directly-supported voxel. The reach is DERIVED from the material, not tuned: a ~1-voxel-thick
+    ///    cantilever beam of length `L` carrying its own weight develops a root bending stress that grows
+    ///    as `σ ≈ ρ·g·L² / t` (Euler–Bernoulli beam under a uniform self-weight load). It fails when that
+    ///    reaches the material's tensile strength `σ_t`, giving
+    ///        `L_max ≈ sqrt(σ_t · t / (ρ · g))`     (`t` = voxel size = 1 m)
+    ///    FLAGGED as a first-order STRUCTURAL APPROXIMATION — a declared model, derived from real material
+    ///    properties (an order-1 geometric constant is dropped). With the real DB values it gives basalt
+    ///    σ_t≈1.45e7 → L≈22 m (competent rock holds a real crater lip) and grass/soil σ_t≈1.5e4 → L≈1 m
+    ///    (loose soil barely overhangs) — physically right. Lateral graph distance (unit steps through
+    ///    solid) stands in for the beam's arc length.
+    /// 3. **UNSUPPORTED** — solid AND neither directly supported nor braced. These collapse (see
+    ///    [`crate::matter::MatterSim::collapse`]): an undercut overhang past its material's reach falls.
+    ///
+    /// `g` is the terrain's surface gravity (m/s²; the emergent ~9.88, the Engine's `surface_g`). This
+    /// also subsumes pure disconnection — a floating chunk has no directly-supported voxel to brace from,
+    /// so it is returned too. O(voxels).
+    pub fn find_structurally_unsupported(&self, materials: &[Material], g: f32) -> Vec<(i32, i32, i32)> {
+        let n = self.w * self.h * self.d;
+        // Cantilever reach per material, in voxels (≈ metres): L_max = sqrt(σ_t · t / (ρ · g)), t = 1 m.
+        let reach: Vec<f32> = materials
+            .iter()
+            .map(|m| {
+                let rho = m.density.max(1.0);
+                let gg = g.max(1.0e-6);
+                (m.fracture_strength / (rho * gg)).max(0.0).sqrt()
+            })
+            .collect();
+
+        // 1. Directly supported: bottom-up per-column sweep (a voxel stands on a directly-supported one).
+        let mut directly = vec![false; n];
+        for z in 0..self.d {
+            for x in 0..self.w {
+                for y in 0..self.h {
+                    if !self.is_solid(x as i32, y as i32, z as i32) {
+                        continue;
+                    }
+                    let i = self.idx(x, y, z);
+                    directly[i] = y == 0 || directly[self.idx(x, y - 1, z)];
+                }
+            }
+        }
+
+        // 2. Braced: per y-level multi-source BFS from the directly-supported voxels, flooding laterally
+        //    (4-connectivity in x,z) through solid. Each solid voxel's shortest lateral distance to a
+        //    directly-supported voxel is its cantilever length; it is braced iff that ≤ its material reach.
+        let mut dist = vec![-1i32; self.w * self.d]; // reused per level
+        let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
+        let mut out = Vec::new();
+        for y in 0..self.h {
+            dist.iter_mut().for_each(|d| *d = -1);
+            queue.clear();
+            for z in 0..self.d {
+                for x in 0..self.w {
+                    if directly[self.idx(x, y, z)] {
+                        dist[z * self.w + x] = 0;
+                        queue.push_back((x, z));
+                    }
+                }
+            }
+            while let Some((x, z)) = queue.pop_front() {
+                let d0 = dist[z * self.w + x];
+                for (dx, dz) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                    let (nx, nz) = (x as i32 + dx, z as i32 + dz);
+                    if nx < 0 || nz < 0 || nx as usize >= self.w || nz as usize >= self.d {
+                        continue;
+                    }
+                    let (nx, nz) = (nx as usize, nz as usize);
+                    if dist[nz * self.w + nx] >= 0 {
+                        continue; // already reached at an equal-or-shorter distance
+                    }
+                    if self.is_solid(nx as i32, y as i32, nz as i32) {
+                        dist[nz * self.w + nx] = d0 + 1;
+                        queue.push_back((nx, nz));
+                    }
+                }
+            }
+            for z in 0..self.d {
+                for x in 0..self.w {
+                    let i = self.idx(x, y, z);
+                    if directly[i] {
+                        continue; // supported from below already
+                    }
+                    // Only SOLID ground is subject to structural (cantilever) support. Liquid water is
+                    // matter but not load-bearing — it is held by hydrostatic pressure, not by bracing —
+                    // so it is never "collapsed" by this model (excluding it here stops the whole sea from
+                    // being flagged unsupported and shattering into debris). Air is skipped too.
+                    if !self.is_solid(x as i32, y as i32, z as i32) {
+                        continue;
+                    }
+                    let mat = self
+                        .material_at(x as i32, y as i32, z as i32)
+                        .expect("is_solid ⇒ material present");
+                    let d = dist[z * self.w + x];
+                    let braced = d >= 0 && (d as f32) <= reach[mat];
+                    if !braced {
+                        out.push((x as i32, y as i32, z as i32));
+                    }
+                }
+            }
+        }
+        out
+    }
 }
 
 fn sign(x: f32) -> i32 {
@@ -240,42 +545,99 @@ fn sign(x: f32) -> i32 {
     }
 }
 
-/// Generate the layered Phase 1 world using materials resolved from the seed database.
-/// Rock forms the bulk; `dirt` sits on top; `grass` is the surface skin. A gentle value-noise
-/// heightfield makes the surface undulate a few metres so it reads as terrain, not a slab — and
-/// the layers follow the terrain, visible on the exposed side walls.
+/// Continuous surface elevation of the Earth at patch coordinates `(world_x, world_z)` — the SINGLE
+/// heightfield that BOTH the resolved voxel patch and the distant curved cap sample, so they are ONE
+/// surface (killing the old flat-cap-above-a-valley step where rubble read as hovering). Coordinates and
+/// the returned height are in the patch's own frame (voxel units; 1 voxel = 1 m). It is deterministic and
+/// seedless (multi-octave value noise) and defined over the WHOLE plane, so the cap can sample it
+/// arbitrarily far out — near the patch it equals the patch surface; far out it is the same field, just
+/// sampled coarsely by the cap's ring spacing (that coarse far sampling is OPTIMIZATION, not a fudge).
+///
+/// TODO(ETOPO): this is procedural relief only. A real Earth elevation map drops in HERE, behind this
+/// exact interface — add the map's elevation at the (lat, lon) for `(world_x, world_z)` to (or in place
+/// of) the procedural term. At the 96 m patch scale `planet::is_land`'s 10° cell is uniform, so
+/// map-driven land/ocean contrast isn't visible locally until that finer dataset arrives (docs/28). Do
+/// not fake continents in the meantime.
+pub fn terrain_height(world_x: f32, world_z: f32) -> f32 {
+    let n = fbm(world_x, world_z); // 0..1 procedural relief
+    let top = BASE_TOP - AMPLITUDE * (1.0 - n);
+    top.clamp(GRASS_THICKNESS as f32 + 1.0, (H - 1) as f32)
+}
+
+/// Generate the world as a surface patch of the REAL layered Earth (planet::earth()): a grass skin over
+/// basalt crust, peridotite mantle, iron core — Earth's true radial column as a declared VERTICAL LOD
+/// (material order real; layer thicknesses compressed into the patch so the strata are visible when a
+/// dig or impact excavates). The grassy surface top follows [`terrain_height`] — the SAME continuous
+/// heightfield the distant Earth cap samples — giving real rolling relief (hills and valleys) that joins
+/// the cap without a step.
 pub fn generate(materials: &[Material]) -> World {
-    let rock = index_of(materials, "granite") as u16 + 1;
-    let dirt = index_of(materials, "dirt") as u16 + 1;
+    // Real Earth column (planet::earth(), docs/25/28): a biosphere skin over basalt CRUST, peridotite
+    // MANTLE, iron CORE. This is a DECLARED VERTICAL LOD: the material order is Earth's real radial
+    // structure, but the layer THICKNESSES are rebalanced into the ~88-voxel patch (real crust is 0.4%
+    // of the radius — invisible at true scale), so a dig or a giant impact exposes honest strata from
+    // this surface frame (Robin: "see Theia impact from this perspective"). Depths are compressed —
+    // flagged; 1 voxel = 1 m holds only for the near-surface probe/dig physics.
     let grass = index_of(materials, "grass") as u16 + 1;
+    let crust = index_of(materials, "basalt") as u16 + 1;
+    let mantle = index_of(materials, "peridotite") as u16 + 1;
+    let core = index_of(materials, "iron") as u16 + 1;
+    let water_idx = index_of(materials, "water");
+    let water = water_idx as u16 + 1;
 
     let mut voxels = vec![0u16; W * H * D];
-    let base_top = H as i32 - 8; // leave headroom above the terrain
-    let amplitude = 6.0f32;
+    let base_top = BASE_TOP as i32; // highest possible surface; leaves headroom above the terrain
+    let valley_floor = base_top - AMPLITUDE as i32; // the LOWEST any surface top can reach
+
+    // Flat strata boundaries (real geology is horizontal), anchored BENEATH the deepest valley so every
+    // column — hilltop or valley bottom — carries the full grass → crust → mantle → core column. The
+    // grass skin follows the undulating terrain top; the crust/mantle/core boundaries are level planes,
+    // so a dig anywhere hits the same deep layer at the same absolute depth.
+    const CRUST_VOX: i32 = 12; // basalt crust band (LOD-inflated from ~25 km)
+    const MANTLE_VOX: i32 = 22; // peridotite mantle band
+    let crust_bottom = valley_floor - CRUST_VOX;
+    let mantle_bottom = crust_bottom - MANTLE_VOX;
 
     let mut max_top = 0usize;
     for z in 0..D {
         for x in 0..W {
-            let n = fbm(x as f32, z as f32); // 0..1
-            let top = (base_top as f32 - amplitude * (1.0 - n)).round() as i32;
-            let top = top.clamp(
-                DIRT_THICKNESS as i32 + GRASS_THICKNESS as i32 + 1,
-                H as i32 - 1,
-            );
+            // Fill up to the SHARED continuous heightfield (the same function the Earth cap samples).
+            let top = (terrain_height(x as f32, z as f32).round() as i32)
+                .clamp(GRASS_THICKNESS as i32 + 1, H as i32 - 1);
             let grass_start = top - GRASS_THICKNESS as i32;
-            let dirt_start = grass_start - DIRT_THICKNESS as i32;
             for y in 0..top {
                 let v = if y >= grass_start {
                     grass
-                } else if y >= dirt_start {
-                    dirt
+                } else if y >= crust_bottom {
+                    crust
+                } else if y >= mantle_bottom {
+                    mantle
                 } else {
-                    rock
+                    core
                 };
                 let i = (y as usize * D + z) * W + x;
                 voxels[i] = v;
             }
             max_top = max_top.max(top as usize);
+        }
+    }
+
+    // OCEAN PASS — water as real matter (docs/28; the sea, parallel to the atmosphere). Fill every AIR
+    // voxel that lies below the sea-level datum and ABOVE the solid land top with the DB `water`
+    // material, so the terrain's below-sea-level basins become genuine water bodies (filled voxels that
+    // carry mass and render), never a decorative plane. The solid strata beneath the seabed are left
+    // untouched — water sits in the air space above the grass, up to SEA_LEVEL_Y. STATIC filled sea for
+    // now: no flow/waves/splash yet (that dynamic step — water resolving into flowing particles when a
+    // meteor/dig disturbs it — is deferred and must NOT be faked). The hydrostatic pressure of this
+    // column is [`ocean_pressure`], continuous with the atmosphere at the waterline.
+    let sea_level = SEA_LEVEL_Y.round() as i32;
+    for z in 0..D {
+        for x in 0..W {
+            for y in 0..sea_level.min(H as i32) {
+                let i = (y as usize * D + z) * W + x;
+                if voxels[i] == 0 {
+                    voxels[i] = water; // air below the datum, above the land → sea
+                }
+            }
         }
     }
 
@@ -285,6 +647,7 @@ pub fn generate(materials: &[Material]) -> World {
         d: D,
         voxels,
         max_top,
+        water_mat: Some(water_idx),
     }
 }
 
@@ -317,8 +680,681 @@ fn value_noise(x: f32, z: f32, freq: f32) -> f32 {
     top + (bot - top) * tz
 }
 
-/// Two-octave fractal noise in 0..1.
+/// Three-octave fractal noise in 0..1 (deterministic; no RNG, stable across runs/clients).
+///
+/// A broad low-frequency octave carries the large rolling hills and valleys across the map, a mid band
+/// shapes individual slopes, and a fine octave adds surface texture. The weights sum to 1.0 so the
+/// result stays in 0..1; the low-frequency term is weighted heaviest to give genuine map-wide relief
+/// (not a flat plateau) rather than only local bumps.
 fn fbm(x: f32, z: f32) -> f32 {
-    let n = 0.65 * value_noise(x, z, 0.045) + 0.35 * value_noise(x, z, 0.11);
+    let n = 0.55 * value_noise(x, z, 0.026)
+        + 0.30 * value_noise(x, z, 0.062)
+        + 0.15 * value_noise(x, z, 0.13);
     n.clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::materials;
+
+    /// The declared cantilever reach for a material at gravity `g` (voxels ≈ m): the SAME derivation the
+    /// support model uses, so the tests assert against the real physics, not a copied literal.
+    fn reach_of(m: &Material, g: f32) -> f32 {
+        (m.fracture_strength / (m.density.max(1.0) * g)).sqrt()
+    }
+
+    /// Build a bare world with a vertical support wall (column to the base at x=0, z=`z0`) and a
+    /// horizontal cantilever beam of `mat`, `len` voxels long, jutting in +x at height `y0` over air.
+    fn overhang_world(mat: usize, len: i32, y0: i32) -> World {
+        let (w, h, d) = (48usize, 24usize, 8usize);
+        let mut world = World {
+            w,
+            h,
+            d,
+            voxels: vec![0u16; w * h * d],
+            max_top: y0 as usize + 1,
+            water_mat: None,
+        };
+        let z0 = (d / 2) as i32;
+        // Support wall: a full column to the base at x=0, so its top voxel at y0 is DIRECTLY supported.
+        for y in 0..=y0 {
+            world.set_voxel(0, y, z0, Some(mat));
+        }
+        // Cantilever beam at y0, x = 1..=len, with nothing beneath it (air below) — a pure overhang.
+        for x in 1..=len {
+            world.set_voxel(x, y0, z0, Some(mat));
+        }
+        world
+    }
+
+    #[test]
+    fn overhang_longer_than_material_reach_collapses() {
+        // docs/28 (a): a soil/grass overhang LONGER than its cantilever reach must fail. Grass σ_t≈1.5e4,
+        // ρ≈1400 → reach ≈ 1 m at surface g, so only the first voxel off the wall can hold; everything
+        // past ~1 voxel is unsupported and returned to collapse.
+        let mats = materials::load();
+        let g = 9.88; // emergent surface gravity (Engine::surface_g); pass g, don't hardcode a reach
+        let grass = materials::index_of(&mats, "grass");
+        let reach = reach_of(&mats[grass], g);
+        assert!(reach < 1.5, "grass barely overhangs (reach {reach:.2} m)");
+
+        let len = 6;
+        let y0 = 15;
+        let w = overhang_world(grass, len, y0);
+        let unsup: std::collections::HashSet<(i32, i32, i32)> =
+            w.find_structurally_unsupported(&mats, g).into_iter().collect();
+        let z0 = (w.d / 2) as i32;
+        // Beam voxels at lateral distance d (= x) from the wall hold iff d ≤ reach; the rest fall.
+        for x in 1..=len {
+            let far = (x as f32) > reach;
+            assert_eq!(
+                unsup.contains(&(x, y0, z0)),
+                far,
+                "beam voxel x={x} (dist {x} vs reach {reach:.2}) support classification"
+            );
+        }
+        // The wall's own column (support to base) is never returned.
+        assert!(!unsup.contains(&(0, y0, z0)), "the support wall must hold");
+        assert!(!unsup.contains(&(0, 0, z0)), "the base voxel must hold");
+    }
+
+    #[test]
+    fn overhang_shorter_than_material_reach_holds() {
+        // docs/28 (b): competent rock keeps a small lip. Basalt σ_t≈1.45e7, ρ≈2900 → reach ≈ 22 m, so a
+        // 6-voxel basalt overhang is well within reach and NONE of it collapses (a real crater rim holds).
+        let mats = materials::load();
+        let g = 9.88;
+        let basalt = materials::index_of(&mats, "basalt");
+        let reach = reach_of(&mats[basalt], g);
+        assert!(reach > 10.0, "basalt holds a real lip (reach {reach:.1} m)");
+
+        let len = 6;
+        assert!((len as f32) < reach, "the test overhang is shorter than the reach");
+        let y0 = 15;
+        let w = overhang_world(basalt, len, y0);
+        assert!(
+            w.find_structurally_unsupported(&mats, g).is_empty(),
+            "a rock overhang shorter than its cantilever reach holds — nothing collapses"
+        );
+    }
+
+    #[test]
+    fn a_full_base_supported_column_never_collapses() {
+        // docs/28 (c): matter in a solid column to the base is directly supported and never returned.
+        let mats = materials::load();
+        let g = 9.88;
+        let w = generate(&mats);
+        assert!(
+            w.find_structurally_unsupported(&mats, g).is_empty(),
+            "intact terrain — every column full to y=0 — is fully supported"
+        );
+    }
+
+    #[test]
+    fn a_disconnected_floating_chunk_still_collapses() {
+        // docs/28 (d): don't regress pure disconnection. A chunk with no directly-supported voxel (no
+        // column to the base) has nothing to brace from, so every voxel of it is returned to collapse.
+        let mats = materials::load();
+        let g = 9.88;
+        let rock = materials::index_of(&mats, "basalt");
+        let mut w = generate(&mats);
+        // A small floating 2×2×2 block high above the terrain, disconnected from everything.
+        let fy = w.max_top as i32 + 4;
+        let mut expected = Vec::new();
+        for dy in 0..2 {
+            for dz in 0..2 {
+                for dx in 0..2 {
+                    let (x, y, z) = (4 + dx, fy + dy, 4 + dz);
+                    w.set_voxel(x, y, z, Some(rock));
+                    expected.push((x, y, z));
+                }
+            }
+        }
+        let unsup: std::collections::HashSet<(i32, i32, i32)> =
+            w.find_structurally_unsupported(&mats, g).into_iter().collect();
+        for e in expected {
+            assert!(unsup.contains(&e), "floating chunk voxel {e:?} must collapse");
+        }
+    }
+
+    #[test]
+    fn bulk_height_is_the_shared_terrain_everywhere_including_off_the_footprint() {
+        // Increment 1 (dissolve the cube): the DEFAULT ground is the bulk heightmap EVERYWHERE. bulk_height
+        // must (a) equal the shared terrain_height (in centered coords) so it is the SAME surface the cap
+        // and the resolved voxels use, (b) match the resolved patch top within the footprint (both are
+        // terrain_height, up to the ≤0.5 m voxel rounding), and (c) be defined OFF the footprint (the bulk
+        // continues — a probe/grain out there rests on real terrain, not the void the old finite patch left).
+        let mats = materials::load();
+        let w = generate(&mats);
+        let c = w.center();
+
+        // (a) exactly terrain_height, converted to centered coords, at arbitrary (incl. fractional) points.
+        for &(x, z) in &[(10.0f32, 20.0f32), (48.5, 48.5), (0.0, 95.0), (-500.0, 800.0)] {
+            let expect = terrain_height(x + c.x, z + c.z) - c.y;
+            assert!(
+                (w.bulk_height(x, z) - expect).abs() < 1e-4,
+                "bulk_height({x},{z}) != terrain_height there"
+            );
+        }
+
+        // (b) within the footprint, agrees with the resolved patch top (both are terrain_height ± rounding).
+        for z in (2..D as i32 - 2).step_by(7) {
+            for x in (2..W as i32 - 2).step_by(7) {
+                let patch = w.surface_top_voxel(x, z).unwrap() as f32 - c.y;
+                // bulk_height takes CENTERED coords; convert the voxel index (x,z) → centered (x−c.x, z−c.z).
+                let bulk = w.bulk_height(x as f32 - c.x, z as f32 - c.z);
+                assert!(
+                    (patch - bulk).abs() <= 1.0,
+                    "bulk vs resolved patch top disagree at ({x},{z}): bulk {bulk:.2} patch {patch:.2}"
+                );
+            }
+        }
+
+        // (c) far OFF the footprint the bulk still returns finite real terrain (the old patch had none).
+        let off = w.bulk_height(5000.0, -3000.0);
+        assert!(off.is_finite(), "bulk terrain must extend off the footprint");
+    }
+
+    #[test]
+    fn patch_surface_equals_the_shared_terrain_height() {
+        // The refactor's contract: generate() fills each column up to terrain_height — the SAME function
+        // the distant Earth cap samples. So the resolved patch top must equal round(terrain_height)
+        // everywhere: ONE surface sampled at the fine (patch) resolution. This guards against the patch
+        // and the cap ever drifting apart again (the hovering-rubble bug).
+        let mats = materials::load();
+        let w = generate(&mats);
+        for z in 0..D as i32 {
+            for x in 0..W as i32 {
+                let top = w.surface_top_voxel(x, z).expect("solid column");
+                let th = (terrain_height(x as f32, z as f32).round() as i32)
+                    .clamp(GRASS_THICKNESS as i32 + 1, H as i32 - 1);
+                assert_eq!(top, th, "patch top disagrees with terrain_height at ({x},{z})");
+            }
+        }
+    }
+
+    #[test]
+    fn sea_fills_the_low_basins_below_the_datum_and_only_there() {
+        // Water is REAL MATTER (docs/28): generate() fills every air voxel below SEA_LEVEL_Y and above the
+        // solid land with the DB `water` material, so the terrain's below-sea-level basins become genuine
+        // water bodies — never a decorative plane. Asserts (a) the datum sits WITHIN the relief so the sea
+        // is genuinely visible (some columns submerged, some dry), (b) water appears ONLY in the air space
+        // below the datum and above the land, filling [land_top, sea) so the surface is FLAT at the
+        // waterline, and (c) no water leaks at or above the waterline. (This replaces the pre-ocean
+        // "all land above the datum" invariant, which the sea intentionally supersedes.)
+        let mats = materials::load();
+        let w = generate(&mats);
+        let water = materials::index_of(&mats, "water");
+        let sea = SEA_LEVEL_Y.round() as i32;
+
+        // (a) The demonstration datum is inside the terrain's relief band → genuinely part sea, part land.
+        assert!(
+            SEA_LEVEL_Y > BASE_TOP - AMPLITUDE && SEA_LEVEL_Y < BASE_TOP,
+            "sea level {SEA_LEVEL_Y} must sit within the relief band ({}..{}) to be visible",
+            BASE_TOP - AMPLITUDE,
+            BASE_TOP
+        );
+
+        let (mut water_cols, mut land_cols, mut water_voxels) = (0usize, 0usize, 0usize);
+        for z in 0..D as i32 {
+            for x in 0..W as i32 {
+                // surface_top_voxel is the SOLID land top — the sea is excluded from is_solid, so this is
+                // the seabed, not the waterline.
+                let land_top = w.surface_top_voxel(x, z).expect("solid land column");
+                if land_top < sea {
+                    water_cols += 1;
+                    // (b) water fills exactly [land_top, sea): matter above the seabed, up to the waterline.
+                    for y in 0..H as i32 {
+                        let is_w = w.material_at(x, y, z) == Some(water);
+                        let should = y >= land_top && y < sea;
+                        assert_eq!(
+                            is_w, should,
+                            "water fill wrong at ({x},{y},{z}) with seabed top {land_top}"
+                        );
+                        if is_w {
+                            water_voxels += 1;
+                        }
+                    }
+                    assert!(w.is_water(x, land_top, z), "the seabed voxel is water");
+                    assert!(!w.is_solid(x, land_top, z), "water is matter but NOT solid ground");
+                    assert!(w.is_solid(x, land_top - 1, z), "solid seabed directly under the water");
+                } else {
+                    land_cols += 1;
+                    // (c) a dry column carries no water anywhere.
+                    for y in 0..H as i32 {
+                        assert!(
+                            w.material_at(x, y, z) != Some(water),
+                            "water above the waterline at dry column ({x},{y},{z})"
+                        );
+                    }
+                }
+                // No water ever sits at or above the waterline datum (the surface is flat AT sea level).
+                assert!(!w.is_water(x, sea, z), "no water at the waterline voxel ({x},{sea},{z})");
+            }
+        }
+        assert!(
+            water_cols > 200,
+            "the sea must be visibly large, not a puddle (got {water_cols} submerged columns)"
+        );
+        assert!(
+            land_cols > water_cols,
+            "the patch is mostly land, part sea (land {land_cols} vs sea {water_cols})"
+        );
+        assert!(water_voxels > 0, "the sea is real filled matter");
+    }
+
+    #[test]
+    fn land_strata_beneath_the_seabed_are_intact() {
+        // The sea must NOT corrupt the solid column beneath it: under a submerged basin the seabed still
+        // reads grass → basalt → peridotite → iron (Earth's real radial order), with water in the air
+        // space ABOVE the grass, up to the waterline. Guards docs/28's "water sits above the land strata".
+        let mats = materials::load();
+        let w = generate(&mats);
+        let id = |name| materials::index_of(&mats, name);
+        let sea = SEA_LEVEL_Y.round() as i32;
+
+        // Find a submerged column (its solid land top is below the waterline).
+        let mut found = None;
+        'outer: for z in 0..D as i32 {
+            for x in 0..W as i32 {
+                if w.surface_top_voxel(x, z).unwrap() < sea {
+                    found = Some((x, z));
+                    break 'outer;
+                }
+            }
+        }
+        let (x, z) = found.expect("the demonstration sea must submerge at least one basin");
+        let land_top = w.surface_top_voxel(x, z).unwrap();
+
+        // Water directly above the seabed; grass is the seabed skin just below it.
+        assert!(w.is_water(x, land_top, z), "water fills the air space above the seabed");
+        assert_eq!(w.material_at(x, land_top - 1, z), Some(id("grass")), "seabed skin is grass");
+
+        // The solid strata below, top to bottom, are Earth's real radial order — unchanged by the sea.
+        let mut seq: Vec<usize> = Vec::new();
+        for y in (0..land_top).rev() {
+            if let Some(m) = w.material_at(x, y, z) {
+                if seq.last() != Some(&m) {
+                    seq.push(m);
+                }
+            }
+        }
+        assert_eq!(
+            seq,
+            vec![id("grass"), id("basalt"), id("peridotite"), id("iron")],
+            "seabed column must still be grass → crust → mantle → core"
+        );
+    }
+
+    #[test]
+    fn ocean_pressure_is_continuous_with_the_atmosphere_and_grows_hydrostatically() {
+        // The ocean is ONE hydrostatic column with the atmosphere (docs/28): at the waterline P = P_atm
+        // (the declared atmosphere's weight), and it grows DOWNWARD as P = P_atm + ρ_water·g·depth — the
+        // same hydrostatic law the air obeys, continued through the water. DERIVED from the DB water
+        // density and the declared atmosphere's surface pressure, not a dial.
+        let mats = materials::load();
+        let p_atm = crate::planet::earth().surface_pressure();
+        let rho = mats[materials::index_of(&mats, "water")].density as f64;
+        let g = 9.88; // emergent surface gravity (Engine::surface_g)
+
+        // Continuity at the waterline: depth 0 → exactly the atmosphere's surface pressure.
+        assert!(
+            (ocean_pressure(0.0, g) - p_atm).abs() < 1e-6,
+            "at the waterline the ocean pressure must equal P_atm ({p_atm} Pa)"
+        );
+        // Above the waterline there is no water column — it clamps to P_atm (the atmosphere takes over).
+        assert_eq!(ocean_pressure(-5.0, g), ocean_pressure(0.0, g));
+
+        // Grows linearly with depth at exactly ρ_water·g per metre.
+        for &d in &[1.0f64, 5.0, 10.0, 100.0] {
+            let expect = p_atm + rho * g * d;
+            assert!(
+                (ocean_pressure(d, g) - expect).abs() < 1e-6,
+                "hydrostatic law at depth {d} m: got {} expected {expect}",
+                ocean_pressure(d, g)
+            );
+        }
+        // ≈1 atm of added pressure per ~10 m of water — the real, familiar result (magnitude sanity).
+        let ten_m = ocean_pressure(10.0, g) - p_atm;
+        assert!(
+            ten_m > 9.0e4 && ten_m < 1.1e5,
+            "≈1 atm added per 10 m of water (got {ten_m} Pa)"
+        );
+    }
+
+    #[test]
+    fn column_is_earths_real_layers_top_to_bottom() {
+        // docs/28 A: the terrain is a surface patch of the REAL layered Earth (planet::earth()) as a
+        // declared vertical LOD — grass skin, basalt CRUST, peridotite MANTLE, iron CORE, in that order
+        // down a column. Asserts the strata (not game grass/dirt/granite) so a dig/impact exposes honest
+        // composition. Depths are LOD-compressed; the ORDER and MATERIALS are Earth's.
+        let mats = materials::load();
+        let w = generate(&mats);
+        let id = |name| materials::index_of(&mats, name);
+        let (cx, cz) = (W as i32 / 2, D as i32 / 2);
+        let top = w.surface_top_voxel(cx, cz).expect("solid column at centre");
+
+        // Surface skin is grass; the first solid below it is basalt crust.
+        assert_eq!(w.material_at(cx, top - 1, cz), Some(id("grass")), "surface skin");
+        // Walk down and record the sequence of DISTINCT materials encountered.
+        let mut seq: Vec<usize> = Vec::new();
+        for y in (0..top).rev() {
+            if let Some(m) = w.material_at(cx, y, cz) {
+                if seq.last() != Some(&m) {
+                    seq.push(m);
+                }
+            }
+        }
+        assert_eq!(
+            seq,
+            vec![id("grass"), id("basalt"), id("peridotite"), id("iron")],
+            "column must be Earth's real radial order: grass → crust → mantle → core"
+        );
+    }
+
+    #[test]
+    fn terrain_has_varied_elevation_and_is_solid_all_the_way_down() {
+        // The surface must read as REAL rolling terrain — hills and valleys — not a near-flat plateau,
+        // and the relief must be genuine matter: every column solid from its surface top down to the
+        // base (matter all the way down, no holes). We measure the map-wide surface-top distribution.
+        let mats = materials::load();
+        let w = generate(&mats);
+
+        let mut tops: Vec<f64> = Vec::with_capacity(W * D);
+        for z in 0..D as i32 {
+            for x in 0..W as i32 {
+                let top = w
+                    .surface_top_voxel(x, z)
+                    .expect("every column must be solid (matter all the way down)");
+                // No holes: solid from the base up to the surface top.
+                for y in 0..top {
+                    assert!(
+                        w.is_solid(x, y, z),
+                        "hole at ({x},{y},{z}) beneath surface top {top}"
+                    );
+                }
+                tops.push(top as f64);
+            }
+        }
+
+        let n = tops.len() as f64;
+        let mean = tops.iter().sum::<f64>() / n;
+        let std = (tops.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / n).sqrt();
+        let (min, max) = tops.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &t| {
+            (lo.min(t), hi.max(t))
+        });
+        let range = max - min;
+
+        // Threshold justification: 1 voxel ≈ 1 m. The old amplitude-6 heightfield was a near-flat
+        // plateau (surface-top std under ~1 voxel, peak-to-valley range only a few voxels). Real
+        // rolling terrain over this 96×96 patch must show many metres of relief, so we require
+        // surface-top std ≥ 4 voxels (≈4 m of undulation about the mean) AND a peak-to-valley range
+        // ≥ 15 voxels. The current heightfield measures std ≈ 4.6 and range ≈ 27 — comfortably above
+        // these floors, and far above a slab. (Deterministic/seedless, so these values are stable.)
+        assert!(
+            std >= 4.0,
+            "surface-top std must show real relief, not a plateau (got {std:.2} voxels)"
+        );
+        assert!(
+            range >= 15.0,
+            "peak-to-valley range must be substantial (got {range:.0} voxels)"
+        );
+    }
+
+    #[test]
+    fn ground_is_matter_all_the_way_through() {
+        // Robin: "visible ground is matter all the way through — eliminating the lies of other game
+        // engines." Every column must be SOLID contiguously from its surface top down to the base
+        // (y = 0): no hollow shell, no air pockets. And a downward raycast from high above must strike
+        // solid matter (the surface is not a paper-thin skin over a void).
+        let mats = materials::load();
+        let w = generate(&mats);
+
+        for z in 0..D as i32 {
+            for x in 0..W as i32 {
+                let top = w
+                    .surface_top_voxel(x, z)
+                    .expect("every column must be solid (matter all the way down)");
+                // Contiguous solid from the very base up to the surface top — no gaps anywhere.
+                for y in 0..top {
+                    assert!(
+                        w.is_solid(x, y, z),
+                        "air pocket / hollow at ({x},{y},{z}) below surface top {top}"
+                    );
+                }
+                // The base voxel itself is matter (solid all the way THROUGH to y = 0).
+                assert!(w.is_solid(x, 0, z), "hollow base at ({x},0,{z})");
+            }
+        }
+
+        // A downward raycast from well above the centre column hits solid matter (not a void skin).
+        let c = w.center();
+        let start = Vec3::new(0.0, H as f32 - c.y + 10.0, 0.0); // centered coords, above the terrain
+        let hit = w
+            .raycast(start, Vec3::new(0.0, -1.0, 0.0), 4000.0)
+            .expect("downward ray must strike solid ground");
+        let (hx, hy, hz, _) = hit;
+        assert!(
+            w.is_solid(hx, hy, hz),
+            "raycast reported a non-solid hit voxel"
+        );
+    }
+
+    #[test]
+    fn orbit_camera_never_penetrates_terrain() {
+        // Robin: "camera should never penetrate matter." The terrain orbit camera builds its eye as
+        //   eye = dir * (base_distance * zoom),  dir = (cos(pitch)sin(yaw), sin(pitch), cos(pitch)cos(yaw))
+        // (see the wasm-gated `Engine::view_proj` / `set_orbit` in lib.rs, which is unreachable from
+        // native tests — so we replicate the EXACT construction here). Zoomed in / tilted down, the raw
+        // eye ends up buried in the terrain; `World::clamp_eye_outside` must push it back to free air.
+        let mats = materials::load();
+        let w = generate(&mats);
+
+        let max_dim = w.w.max(w.h).max(w.d) as f32;
+        let base_distance = max_dim * 1.6; // exactly Engine::create's construction
+        let clearance = 2.0;
+
+        let eye_for = |yaw: f32, pitch: f32, zoom: f32| -> Vec3 {
+            let cp = pitch.cos();
+            let dir = Vec3::new(cp * yaw.sin(), pitch.sin(), cp * yaw.cos());
+            dir * (base_distance * zoom)
+        };
+        // A centered eye penetrates iff its voxel is solid, or it sits below the surface of its column.
+        let penetrates = |eye: Vec3| -> bool {
+            let p = eye + w.center();
+            let (xi, yi, zi) = (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32);
+            if w.is_solid(xi, yi, zi) {
+                return true;
+            }
+            match w.surface_top_voxel(xi, zi) {
+                Some(top) => p.y < top as f32,
+                None => false,
+            }
+        };
+
+        // GUARD against a vacuous pass: a config that provably buries the raw eye in the terrain.
+        let buried = eye_for(0.7, -1.4, 0.2);
+        assert!(
+            penetrates(buried),
+            "test setup is vacuous: the raw eye must actually penetrate the terrain, got {buried:?}"
+        );
+
+        // Sweep the full yaw/pitch/zoom envelope (matching set_orbit's clamps: pitch ∈ [-1.5, 1.5],
+        // zoom ∈ [0.2, 6.0]).
+        let mut saw_penetration = false;
+        for &yaw in &[0.0f32, 0.7, 1.5, 2.4, 3.14, 4.7, 6.0] {
+            for &pitch in &[-1.5f32, -1.0, -0.5, -0.16, 0.0, 0.16, 0.6, 1.2, 1.5] {
+                for &zoom in &[0.2f32, 0.4, 0.7, 1.0, 2.0, 4.0, 6.0] {
+                    let raw = eye_for(yaw, pitch, zoom);
+                    if penetrates(raw) {
+                        saw_penetration = true;
+                    }
+                    let clamped = w.clamp_eye_outside(raw, clearance);
+                    // The clamped eye must be free air, never inside/below matter.
+                    assert!(
+                        !penetrates(clamped),
+                        "clamped eye still penetrates at yaw={yaw} pitch={pitch} zoom={zoom}: {clamped:?}"
+                    );
+                    assert!(
+                        w.eye_is_free(clamped, clearance),
+                        "clamped eye not clearance-above ground at yaw={yaw} pitch={pitch} zoom={zoom}"
+                    );
+                    // An already-free eye is returned UNCHANGED (smooth normal orbit).
+                    if w.eye_is_free(raw, clearance) {
+                        assert_eq!(
+                            clamped, raw,
+                            "free eye must be returned unchanged at yaw={yaw} pitch={pitch} zoom={zoom}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            saw_penetration,
+            "sweep must exercise penetrating configs (else the clamp is untested)"
+        );
+    }
+
+    #[test]
+    fn eye_never_goes_below_the_earth_sphere_anywhere() {
+        // Robin rejected the flat decorative ground: off the 96 m patch the OLD clamp treated the eye as
+        // "free" (no ground column) — a hole that was only safe because a fake infinite plane hid it.
+        // With the real curved Earth surface, the eye must be walled in by the planet EVERYWHERE — over
+        // the patch AND far off it — never below the sphere at radius R centred a full Earth radius down.
+        use crate::planet;
+        let mats = materials::load();
+        let w = generate(&mats);
+
+        let radius = planet::earth().radius() as f32; // ≈6.371e6 m — the SAME body the space band draws
+        // The patch centre's surface height in centered coords; the Earth centre is `radius` below it.
+        let c = w.center();
+        let surf_y = w
+            .surface_top_voxel(c.x as i32, c.z as i32)
+            .map(|t| t as f32 - c.y)
+            .expect("solid centre column");
+        let earth_center = Vec3::new(0.0, surf_y - radius, 0.0);
+        let clearance = 2.0f32;
+
+        // True below-the-surface test (f64: the metre-scale drop is below f32 precision at R≈6.4e6).
+        let below_sphere = |eye: Vec3| -> bool {
+            (eye.as_dvec3() - earth_center.as_dvec3()).length() < radius as f64
+        };
+
+        // GUARD (non-vacuous): an eye placed 5 km OFF the patch and 40 m below the local surface height.
+        // The cap there has dropped only ~2 m, so this eye is well below the real sphere — exactly the
+        // off-footprint case the old clamp let through.
+        let off_patch_buried = Vec3::new(5000.0, surf_y - 40.0, 0.0);
+        assert!(
+            below_sphere(off_patch_buried),
+            "test setup vacuous: the off-patch eye must actually start below the Earth sphere"
+        );
+        let fixed = w.clamp_eye_above_earth(off_patch_buried, earth_center, radius, clearance);
+        assert!(
+            !below_sphere(fixed),
+            "clamp failed to lift an off-patch eye above the Earth sphere: {fixed:?}"
+        );
+
+        // The terrain orbit eye (exact `Engine::view_proj` construction, wasm-gated so replicated here).
+        let max_dim = w.w.max(w.h).max(w.d) as f32;
+        let base_distance = max_dim * 1.6;
+        let eye_for = |yaw: f32, pitch: f32, zoom: f32| -> Vec3 {
+            let cp = pitch.cos();
+            let dir = Vec3::new(cp * yaw.sin(), pitch.sin(), cp * yaw.cos());
+            dir * (base_distance * zoom)
+        };
+
+        // Sweep the full envelope; a steep downward pitch drives the raw eye below the sphere.
+        let mut saw_below = false;
+        let extra_lateral = [
+            Vec3::new(9000.0, surf_y - 10.0, 0.0),
+            Vec3::new(-12000.0, surf_y - 30.0, 6000.0),
+            Vec3::new(0.0, surf_y - 200.0, 15000.0),
+        ];
+        for &yaw in &[0.0f32, 0.7, 1.5, 2.4, 3.14, 4.7, 6.0] {
+            for &pitch in &[-1.5f32, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5] {
+                for &zoom in &[0.2f32, 0.7, 1.0, 2.0, 4.0, 6.0] {
+                    let raw = eye_for(yaw, pitch, zoom);
+                    if below_sphere(raw) {
+                        saw_below = true;
+                    }
+                    let clamped = w.clamp_eye_above_earth(raw, earth_center, radius, clearance);
+                    assert!(
+                        !below_sphere(clamped),
+                        "clamped eye still below the Earth sphere at yaw={yaw} pitch={pitch} zoom={zoom}: {clamped:?}"
+                    );
+                }
+            }
+        }
+        for &e in &extra_lateral {
+            assert!(below_sphere(e), "lateral guard {e:?} must start below the sphere");
+            let clamped = w.clamp_eye_above_earth(e, earth_center, radius, clearance);
+            assert!(
+                !below_sphere(clamped),
+                "clamped lateral eye still below the Earth sphere: {clamped:?}"
+            );
+        }
+        assert!(
+            saw_below,
+            "sweep must exercise below-sphere configs (else the sphere clamp is untested)"
+        );
+    }
+
+    #[test]
+    fn bilinear_surface_grounds_a_grain_resting_on_a_slope() {
+        // Regression: GPU debris rests on the BILINEAR terrain surface (particle_step.wgsl::terrain_h),
+        // but the CPU de-resolution readback USED to test "grounded" against only the single column the
+        // grain is binned into. On a slope those disagree: a grain in the LOW column of a cell is held up
+        // by the cell's HIGH corner, so the single-low-column top judged it airborne and it never
+        // de-resolved — and the pile stacked on it stalled as rubble that never returned to the grid
+        // (the debris count plateaus at thousands instead of falling to ~0). `surface_height_bilinear`
+        // mirrors the shader, so grounding now agrees with where the grain physically rests.
+        const PART_HALF: f32 = 0.5; // DEBRIS_PART_HALF (lib.rs) — a grain's collision half-extent
+        const MARGIN: f32 = 0.1; //   SETTLE_GROUND_MARGIN (lib.rs)
+
+        // A pure x-slope: column x=3 tops out low (voxel top = 5), x=4 tops out high (voxel top = 10).
+        let (w, h, d) = (8usize, 16usize, 8usize);
+        let mut world = World { w, h, d, voxels: vec![0u16; w * h * d], max_top: 10, water_mat: None };
+        for z in 0..d as i32 {
+            for y in 0..5 {
+                world.set_voxel(3, y, z, Some(0)); // solid 0..=4 ⇒ surface_top_voxel = 5
+            }
+            for y in 0..10 {
+                world.set_voxel(4, y, z, Some(0)); // solid 0..=9 ⇒ surface_top_voxel = 10
+            }
+        }
+        let c = world.center(); // center.y = max_top/2 = 5
+        assert_eq!(world.surface_top_voxel(3, 0), Some(5));
+        assert_eq!(world.surface_top_voxel(4, 0), Some(10));
+
+        // A grain binned into the LOW column (x=3) but sitting near the HIGH corner (fx = 0.9) of the
+        // cell [3,4]. In centered coords that x is (3.9 - center.x).
+        let vx = 3.9_f32;
+        let vz = 3.5_f32;
+        let pos_xz = Vec3::new(vx - c.x, 0.0, vz - c.z);
+
+        // The bilinear surface here is ~lerp(5,10,0.9)=9.5 voxels ⇒ centered 9.5 - 5 - 0.5 = 4.0.
+        let surf = world.surface_height_bilinear(pos_xz);
+        assert!((surf - 4.0).abs() < 1e-4, "bilinear slope surface should be ~4.0, got {surf}");
+
+        // The single LOW column (x=3) top in the same centered convention: 5 - 5 - 0.5 = -0.5. Far below.
+        let single_low = world.surface_top_voxel(3, 0).unwrap() as f32 - c.y - 0.5;
+        assert!((single_low + 0.5).abs() < 1e-4);
+
+        // A grain resting ON the bilinear surface: its bottom touches `surf`, so its center is surf+HALF.
+        let grain_y = surf + PART_HALF;
+        let pos = Vec3::new(pos_xz.x, grain_y, pos_xz.z);
+
+        // The FIX: grounded against the bilinear surface — TRUE (the grain really is on the slope).
+        assert!(
+            pos.y - PART_HALF <= world.surface_height_bilinear(pos) + MARGIN,
+            "a grain resting on the bilinear slope must read as grounded"
+        );
+        // The BUG it replaces: grounded against only the low column top would be FALSE (surf 4.0 sits far
+        // above single_low -0.5 + margin), so the grain — and everything piled on it — never de-resolved.
+        assert!(
+            !(pos.y - PART_HALF <= single_low + MARGIN),
+            "the old single-low-column test wrongly judged the slope grain airborne (the stall)"
+        );
+    }
 }

@@ -2,83 +2,1082 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!-- Discourage Safari from serving a stale document (hashed JS/wasm are cache-safe on their own). -->
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
     <meta
-      name="viewport"
-      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+      name="description"
+      content="Integrity is a browser game engine built on real physics, from the matter up: real gravity, real materials, every behavior emergent — nothing scripted."
     />
-    <title>greenfield-engine</title>
-    <!-- Critical CSS inlined so styling can't fail (e.g. via a MIME quirk) and the canvas always fills. -->
+    <title>Integrity — a game engine built on real physics</title>
     <style>
-      html,
+      /* ────────────────────────────────────────────────────────────────────────
+         INTEGRITY landing page.
+         Design language: a scientific instrument framing an honest experiment.
+         Colour is the engine's real materials palette — deep-space ink, incandescent
+         amber (matter/energy), cold periwinkle-steel (the instrument reading it).
+         All CSS is inlined on purpose (the project's rule: styling must never fail).
+         ──────────────────────────────────────────────────────────────────────── */
+      :root {
+        --ink: #06080d; /* deep space */
+        --ink-1: #0a0e17; /* raised surface */
+        --ink-2: #0e1420; /* panel */
+        --hair: rgba(143, 182, 217, 0.13); /* cold instrument hairline */
+        --hair-2: rgba(143, 182, 217, 0.26);
+        --steel: #8fb6d9; /* cold instrument text — matches the scenes' sky */
+        --steel-dim: #5f748e;
+        --text: #b4c3d9; /* body copy, cool grey-blue */
+        --bright: #eef4fd; /* headline near-white */
+        --amber: #ffb24c; /* incandescent matter / energy */
+        --amber-pale: #ffe1a8;
+        --whitehot: #ffffff;
+        --grass: #6bb14e;
+        --dirt: #9a6b40;
+        --stone: #aeb6c2;
+        --shell: min(1120px, 92vw);
+        --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        -webkit-text-size-adjust: 100%;
+        scroll-behavior: smooth;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+      }
       body {
         margin: 0;
-        height: 100%;
-        background: #05060a;
-        overflow: hidden;
-        font-family: ui-monospace, "SF Mono", Menlo, monospace;
-        -webkit-text-size-adjust: 100%;
-      }
-      #gpu-canvas {
-        display: block;
-        width: 100vw;
-        height: 100vh;
-        touch-action: none;
-      }
-      #hud {
-        position: fixed;
-        top: 10px;
-        left: 12px;
-        font-size: 12px;
-        color: #9fb4d6;
-        pointer-events: none;
-      }
-      #stats {
-        position: fixed;
-        left: 12px;
-        bottom: 12px;
-        padding: 8px 12px;
-        border-radius: 6px;
-        background: rgba(6, 10, 18, 0.72);
-        border: 1px solid rgba(120, 150, 200, 0.25);
-        font-size: 12px;
+        background: var(--ink);
+        color: var(--text);
+        font-family: var(--font-mono);
         line-height: 1.6;
-        color: #c7d6ef;
-        pointer-events: none;
+        overflow-x: hidden;
       }
-      #stats b {
-        color: #eaf2ff;
+      a {
+        color: var(--amber);
       }
-      #status {
-        position: fixed;
-        inset: 0;
+      ::selection {
+        background: rgba(255, 178, 76, 0.28);
+        color: var(--whitehot);
+      }
+      :focus-visible {
+        outline: 2px solid var(--amber);
+        outline-offset: 3px;
+        border-radius: 2px;
+      }
+
+      /* Shared type roles ──────────────────────────────────────────────────── */
+      .eyebrow {
+        font-family: var(--font-mono);
+        font-size: 12px;
+        letter-spacing: 0.32em;
+        text-transform: uppercase;
+        color: var(--steel);
+        margin: 0 0 18px;
         display: flex;
         align-items: center;
-        justify-content: center;
-        padding: 2rem;
-        text-align: center;
-        color: #dfe8f5;
-        font-size: 16px;
+        gap: 12px;
+      }
+      .eyebrow::before {
+        content: "";
+        width: 26px;
+        height: 1px;
+        background: var(--amber);
+        flex: none;
+      }
+      h2.display,
+      h3.display {
+        font-family: var(--font-sans);
+        color: var(--bright);
+        letter-spacing: -0.02em;
+        line-height: 1.08;
+        font-weight: 800;
+        margin: 0;
+      }
+      h2.display {
+        font-size: clamp(28px, 4.6vw, 48px);
+      }
+      em {
+        color: var(--amber-pale);
+        font-style: normal;
+        text-decoration: underline;
+        text-decoration-color: rgba(255, 178, 76, 0.4);
+        text-underline-offset: 3px;
+      }
+
+      /* ── HERO ─────────────────────────────────────────────────────────────── */
+      .hero {
+        position: relative;
+        min-height: 100svh;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        border-bottom: 1px solid var(--hair-2);
+      }
+      /* Live gravity field (real velocity-Verlet N-body — painted from landing.ts). */
+      #sim {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        display: block;
+        z-index: 0;
+      }
+      /* Faint instrument grid + vignette over the sim. */
+      .hero::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        z-index: 1;
+        pointer-events: none;
+        background:
+          linear-gradient(transparent 0, transparent calc(100% - 1px), var(--hair) 100%),
+          repeating-linear-gradient(90deg, var(--hair) 0 1px, transparent 1px 88px),
+          repeating-linear-gradient(0deg, var(--hair) 0 1px, transparent 1px 88px),
+          radial-gradient(120% 90% at 50% 0%, transparent 55%, rgba(4, 6, 11, 0.55) 100%),
+          linear-gradient(180deg, rgba(6, 8, 13, 0.35) 0%, transparent 22%, transparent 55%, rgba(6, 8, 13, 0.82) 100%);
+        -webkit-mask-image: radial-gradient(150% 120% at 50% 40%, #000 60%, transparent 100%);
+        mask-image: radial-gradient(150% 120% at 50% 40%, #000 60%, transparent 100%);
+      }
+      .hero__inner {
+        position: relative;
+        z-index: 2;
+        width: var(--shell);
+        margin: 0 auto;
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        pointer-events: none; /* let drags reach the canvas; re-enable on controls */
+      }
+      .hero__inner a,
+      .hero__inner button {
+        pointer-events: auto;
+      }
+
+      /* top instrument bar */
+      .topbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 16px;
+        padding: 22px 0 0;
+        font-size: 12px;
+        letter-spacing: 0.12em;
+        color: var(--steel-dim);
+        flex-wrap: wrap;
+      }
+      .topbar__mark {
+        color: var(--bright);
+        letter-spacing: 0.36em;
+        font-weight: 500;
+      }
+      .topbar__mark b {
+        color: var(--amber);
+        font-weight: 500;
+      }
+      .topbar__meta .wip {
+        color: var(--amber);
+      }
+
+      /* headline block, anchored low-left (not centered — deliberate) */
+      .hero__head {
+        margin-top: auto;
+        padding: 0 0 8px;
+        max-width: 780px;
+      }
+      .wordmark {
+        font-family: var(--font-sans);
+        font-weight: 800;
+        letter-spacing: -0.045em;
+        line-height: 0.86;
+        font-size: clamp(72px, 15vw, 184px);
+        margin: 6px 0 0;
+        color: var(--bright);
+        text-shadow: 0 0 60px rgba(255, 178, 76, 0.14);
+      }
+      .lede-hero {
+        font-family: var(--font-mono);
+        font-size: clamp(14px, 1.7vw, 17px);
+        color: var(--text);
+        max-width: 60ch;
+        margin: 26px 0 0;
         line-height: 1.7;
       }
-      #status.err {
-        color: #ffd7d7;
-        background: #1a0d10;
+      .cta-row {
+        display: flex;
+        align-items: center;
+        gap: 12px 22px;
+        flex-wrap: wrap;
+        margin-top: 30px;
       }
-      [hidden] {
-        display: none !important;
-      }
-      kbd {
-        padding: 0 4px;
-        border: 1px solid rgba(160, 180, 220, 0.4);
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        font-family: var(--font-mono);
+        font-size: 15px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        text-decoration: none;
+        padding: 15px 24px;
         border-radius: 3px;
+        transition:
+          transform 0.12s ease,
+          box-shadow 0.2s ease,
+          background 0.2s ease;
+      }
+      .btn--primary {
+        color: #180d02;
+        background: linear-gradient(180deg, var(--amber-pale), var(--amber));
+        box-shadow:
+          0 0 0 1px rgba(255, 178, 76, 0.5),
+          0 10px 40px rgba(255, 178, 76, 0.28);
+      }
+      .btn--primary .tick {
+        transition: transform 0.16s ease;
+      }
+      .btn--primary:hover {
+        transform: translateY(-2px);
+        box-shadow:
+          0 0 0 1px rgba(255, 178, 76, 0.7),
+          0 14px 50px rgba(255, 178, 76, 0.4);
+      }
+      .btn--primary:hover .tick {
+        transform: translateX(4px);
+      }
+      .btn--primary:active {
+        transform: translateY(0);
+      }
+      /* scene chips */
+      .chips {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .chip {
+        font-family: var(--font-mono);
+        font-size: 12.5px;
+        letter-spacing: 0.02em;
+        color: var(--steel);
+        text-decoration: none;
+        padding: 8px 13px;
+        border: 1px solid var(--hair-2);
+        border-radius: 999px;
+        transition:
+          border-color 0.18s ease,
+          color 0.18s ease,
+          background 0.18s ease;
+      }
+      .chip:hover {
+        color: var(--bright);
+        border-color: var(--steel);
+        background: rgba(143, 182, 217, 0.08);
+      }
+
+      /* telemetry strip — reads live values off the running simulation */
+      .telemetry {
+        position: relative;
+        z-index: 2;
+        width: var(--shell);
+        margin: 0 auto;
+        padding: 14px 0 26px;
+        display: flex;
+        align-items: baseline;
+        gap: 10px 26px;
+        flex-wrap: wrap;
+        border-top: 1px solid var(--hair);
+        margin-top: 26px;
+        font-size: 12.5px;
+      }
+      .telemetry .live {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--amber);
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        font-size: 11px;
+      }
+      .telemetry .dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--amber);
+        box-shadow: 0 0 10px 1px var(--amber);
+        animation: pulse 1.9s ease-in-out infinite;
+      }
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.25;
+        }
+      }
+      .readout {
+        color: var(--steel-dim);
+        white-space: nowrap;
+      }
+      .readout b {
+        color: var(--steel);
+        font-weight: 600;
+      }
+      .telemetry__note {
+        flex-basis: 100%;
+        margin: 4px 0 0;
+        color: var(--steel-dim);
+        font-size: 12.5px;
+        line-height: 1.6;
+      }
+      .telemetry__note b {
+        color: var(--text);
+        font-weight: 400;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .dot {
+          animation: none;
+        }
+      }
+
+      /* ── shared section frame ─────────────────────────────────────────────── */
+      .wrap {
+        width: var(--shell);
+        margin: 0 auto;
+      }
+      .band {
+        padding: clamp(64px, 9vw, 118px) 0;
+        border-bottom: 1px solid var(--hair);
+      }
+      /* scroll-reveal (progressive enhancement; .is-in added by landing.ts) */
+      .reveal {
+        opacity: 0;
+        transform: translateY(18px);
+        transition:
+          opacity 0.7s ease,
+          transform 0.7s cubic-bezier(0.2, 0.7, 0.2, 1);
+      }
+      .reveal.is-in {
+        opacity: 1;
+        transform: none;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .reveal {
+          opacity: 1;
+          transform: none;
+          transition: none;
+        }
+      }
+
+      /* ── THESIS ───────────────────────────────────────────────────────────── */
+      .thesis h2 {
+        max-width: 20ch;
+      }
+      .thesis .sub {
+        max-width: 62ch;
+        margin: 22px 0 0;
+        font-size: 16px;
+        line-height: 1.75;
+      }
+      .contrast {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 14px;
+        margin-top: 44px;
+      }
+      .col {
+        border: 1px solid var(--hair-2);
+        border-radius: 4px;
+        padding: 24px 24px 26px;
+        background: linear-gradient(180deg, var(--ink-1), rgba(10, 14, 23, 0));
+      }
+      .col .tag {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        letter-spacing: 0.24em;
+        text-transform: uppercase;
+        display: inline-block;
+        margin-bottom: 16px;
+      }
+      .col--fake .tag {
+        color: var(--steel-dim);
+      }
+      .col--real {
+        border-color: rgba(255, 178, 76, 0.4);
+        background: linear-gradient(180deg, rgba(255, 178, 76, 0.06), rgba(10, 14, 23, 0));
+      }
+      .col--real .tag {
+        color: var(--amber);
+      }
+      .col ul {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        display: grid;
+        gap: 14px;
+      }
+      .col li {
+        font-size: 14.5px;
+        line-height: 1.6;
+        padding-left: 20px;
+        position: relative;
+      }
+      .col--fake li {
+        color: var(--steel-dim);
+      }
+      .col--fake li::before {
+        content: "✕";
+        position: absolute;
+        left: 0;
+        color: #5a6b80;
+        font-size: 12px;
+        top: 1px;
+      }
+      .col--real li {
+        color: var(--text);
+      }
+      .col--real li::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 8px;
+        width: 7px;
+        height: 7px;
+        background: var(--amber);
+        box-shadow: 0 0 8px rgba(255, 178, 76, 0.7);
+      }
+      .col--real li b {
+        color: var(--bright);
+        font-weight: 600;
+      }
+
+      /* ── PRINCIPLES (three laws) ──────────────────────────────────────────── */
+      .laws {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 14px;
+        margin-top: 46px;
+      }
+      .law {
+        border: 1px solid var(--hair);
+        border-top: 2px solid var(--amber);
+        border-radius: 4px;
+        padding: 26px 22px 28px;
+        background: var(--ink-1);
+        position: relative;
+      }
+      .law__key {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        letter-spacing: 0.14em;
+        color: var(--amber);
+        text-transform: lowercase;
+      }
+      .law h3 {
+        font-family: var(--font-sans);
+        font-weight: 700;
+        font-size: 20px;
+        letter-spacing: -0.01em;
+        color: var(--bright);
+        margin: 14px 0 12px;
+        line-height: 1.15;
+      }
+      .law p {
+        margin: 0;
+        font-size: 14px;
+        line-height: 1.62;
+        color: var(--text);
+      }
+      .law .eg {
+        display: block;
+        margin-top: 16px;
+        padding-top: 14px;
+        border-top: 1px solid var(--hair);
+        font-size: 12.5px;
+        color: var(--steel-dim);
+        line-height: 1.55;
+      }
+      .law .eg b {
+        color: var(--steel);
+        font-weight: 600;
+      }
+
+      /* ── TWO LAYERS (resolved / declared) ─────────────────────────────────── */
+      .layers {
+        display: grid;
+        grid-template-columns: 0.9fr 1.1fr;
+        gap: 48px;
+        align-items: start;
+      }
+      .layers .lead p {
+        font-size: 16px;
+        line-height: 1.75;
+        margin: 22px 0 0;
+        max-width: 46ch;
+      }
+      .layers__stack {
+        display: grid;
+        gap: 12px;
+      }
+      .layer {
+        border: 1px solid var(--hair-2);
+        border-radius: 4px;
+        padding: 20px 22px;
+        background: var(--ink-1);
+      }
+      .layer h4 {
+        margin: 0 0 8px;
+        font-family: var(--font-mono);
+        font-size: 13px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--bright);
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .layer h4 span {
+        font-size: 11px;
+        letter-spacing: 0.14em;
+        padding: 3px 8px;
+        border-radius: 999px;
+      }
+      .layer--res h4 span {
+        color: var(--amber);
+        border: 1px solid rgba(255, 178, 76, 0.4);
+      }
+      .layer--dec h4 span {
+        color: var(--steel);
+        border: 1px solid var(--hair-2);
+      }
+      .layer p {
+        margin: 0;
+        font-size: 14px;
+        line-height: 1.62;
+      }
+      .layer p b {
+        color: var(--bright);
+        font-weight: 600;
+      }
+
+      /* ── SCENES ───────────────────────────────────────────────────────────── */
+      .scenes {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 14px;
+        margin-top: 46px;
+      }
+      .scene {
+        display: grid;
+        grid-template-columns: 108px 1fr;
+        gap: 20px;
+        align-items: center;
+        text-decoration: none;
+        color: inherit;
+        border: 1px solid var(--hair);
+        border-radius: 5px;
+        padding: 20px 22px;
+        background: var(--ink-1);
+        transition:
+          border-color 0.2s ease,
+          transform 0.2s ease,
+          background 0.2s ease;
+      }
+      .scene:hover {
+        border-color: var(--steel);
+        transform: translateY(-3px);
+        background: var(--ink-2);
+      }
+      .scene__art {
+        width: 108px;
+        height: 88px;
+        border-radius: 4px;
+        overflow: hidden;
+        background: radial-gradient(120% 120% at 50% 15%, #0f1626, #05070c);
+        border: 1px solid var(--hair);
+      }
+      .scene__art svg {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+      .scene h3 {
+        margin: 0 0 6px;
+        font-family: var(--font-sans);
+        font-weight: 700;
+        font-size: 18px;
+        letter-spacing: -0.01em;
+        color: var(--bright);
+      }
+      .scene p {
+        margin: 0;
+        font-size: 13px;
+        line-height: 1.55;
+        color: var(--steel-dim);
+      }
+      .scene .go {
+        display: inline-block;
+        margin-top: 10px;
+        font-size: 12px;
+        letter-spacing: 0.1em;
+        color: var(--amber);
+        text-transform: uppercase;
+      }
+
+      /* ── JOURNAL ──────────────────────────────────────────────────────────── */
+      .journal__head {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-end;
+        gap: 20px;
+        flex-wrap: wrap;
+        margin-bottom: 8px;
+      }
+      .journal__head p {
+        max-width: 52ch;
+        margin: 14px 0 0;
+        font-size: 14.5px;
+        color: var(--steel-dim);
+      }
+      .log {
+        margin-top: 34px;
+        border: 1px solid var(--hair);
+        border-radius: 5px;
+        background: var(--ink-1);
+      }
+      .log__bar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 18px;
+        border-bottom: 1px solid var(--hair);
+        font-size: 11.5px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--steel-dim);
+      }
+      .log__bar .dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--grass);
+        box-shadow: 0 0 8px var(--grass);
+      }
+      #journal-body {
+        max-height: 62vh;
+        overflow-y: auto;
+        padding: 8px 26px 30px;
+        overscroll-behavior: contain;
+        mask-image: linear-gradient(180deg, transparent 0, #000 34px, #000 calc(100% - 40px), transparent 100%);
+        -webkit-mask-image: linear-gradient(
+          180deg,
+          transparent 0,
+          #000 34px,
+          #000 calc(100% - 40px),
+          transparent 100%
+        );
+      }
+      #journal-body::-webkit-scrollbar {
+        width: 10px;
+      }
+      #journal-body::-webkit-scrollbar-thumb {
+        background: var(--hair-2);
+        border-radius: 10px;
+      }
+      #journal-body h1 {
+        display: none;
+      }
+      #journal-body h2 {
+        color: var(--bright);
+        font-family: var(--font-mono);
+        font-size: 15px;
+        letter-spacing: 0.01em;
+        margin: 34px 0 4px;
+        padding-top: 24px;
+        border-top: 1px solid var(--hair);
+        line-height: 1.4;
+      }
+      #journal-body h2:first-of-type {
+        border-top: 0;
+        padding-top: 6px;
+      }
+      #journal-body h3 {
+        color: var(--steel);
+        font-size: 13.5px;
+        margin: 18px 0 4px;
+      }
+      #journal-body p,
+      #journal-body li {
+        font-size: 13.5px;
+        line-height: 1.62;
+        color: var(--text);
+      }
+      #journal-body b,
+      #journal-body strong {
+        color: var(--bright);
+        font-weight: 600;
+      }
+      #journal-body code {
+        background: rgba(143, 182, 217, 0.12);
+        color: var(--amber-pale);
+        padding: 1px 5px;
+        border-radius: 4px;
+        font-size: 0.92em;
+      }
+      #journal-body hr {
+        display: none;
+      }
+      #journal-body ul {
+        padding-left: 18px;
+      }
+      #journal-body table {
+        border-collapse: collapse;
+        margin: 12px 0;
+        font-size: 0.9em;
+        display: block;
+        overflow-x: auto;
+      }
+      #journal-body td,
+      #journal-body th {
+        border: 1px solid var(--hair-2);
+        padding: 6px 10px;
+        text-align: left;
+      }
+      #journal-body th {
+        color: var(--steel);
+      }
+
+      /* ── FOOTER ───────────────────────────────────────────────────────────── */
+      footer {
+        padding: 44px 0 60px;
+      }
+      .foot {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 14px 24px;
+        flex-wrap: wrap;
+        font-size: 12.5px;
+        color: var(--steel-dim);
+      }
+      .foot b {
+        color: var(--steel);
+        font-weight: 600;
+        letter-spacing: 0.2em;
+      }
+      .foot__stamp {
+        font-size: 11.5px;
+        letter-spacing: 0.06em;
+      }
+
+      /* ── responsive ───────────────────────────────────────────────────────── */
+      @media (max-width: 820px) {
+        .contrast,
+        .laws,
+        .layers,
+        .scenes {
+          grid-template-columns: 1fr;
+        }
+        .layers {
+          gap: 28px;
+        }
+      }
+      @media (max-width: 520px) {
+        .scene {
+          grid-template-columns: 1fr;
+        }
+        .scene__art {
+          width: 100%;
+          height: 120px;
+        }
+        .telemetry__note {
+          font-size: 12px;
+        }
       }
     </style>
   </head>
   <body>
-    <canvas id="gpu-canvas"></canvas>
-    <div id="hud">greenfield-engine · phase 5 · tap dig · long-press blast</div>
-    <div id="stats" hidden></div>
-    <div id="status">Loading greenfield-engine…</div>
-    <script type="module" src="/src/main.ts"></script>
+    <!-- ═══ HERO ═══════════════════════════════════════════════════════════ -->
+    <header class="hero">
+      <!-- Live velocity-Verlet N-body field (F = G·m/r²), painted by web/src/landing.ts. -->
+      <canvas id="sim" aria-hidden="true"></canvas>
+      <div class="hero__inner">
+        <div class="topbar">
+          <span class="topbar__mark"><b>◆</b>&nbsp; INTEGRITY</span>
+          <span class="topbar__meta"
+            >browser game engine · real physics · Rust + WebGPU · <span class="wip">work in progress</span></span
+          >
+        </div>
+
+        <div class="hero__head">
+          <p class="eyebrow">A game engine built on real physics</p>
+          <h1 class="wordmark">Integrity</h1>
+          <p class="lede-hero">
+            A game engine that refuses to fake it. Real matter, real gravity, simulated from the
+            particle up — every behavior <em>emerges</em> from physical law. Nothing is scripted.
+          </p>
+          <div class="cta-row">
+            <a class="btn btn--primary" href="/orbit.html"
+              >Launch the demo <span class="tick" aria-hidden="true">▸</span></a
+            >
+            <nav class="chips" aria-label="scenes">
+              <a class="chip" href="/orbit.html">Space</a>
+              <a class="chip" href="/birth.html">Birth of the Moon</a>
+              <a class="chip" href="/terrain.html">Terrain</a>
+              <a class="chip" href="/twomoons.html">Two Moons</a>
+            </nav>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live readouts off the hero N-body field, wired in web/src/landing.ts. -->
+      <figure class="telemetry" id="telemetry">
+        <span class="live"><span class="dot"></span> live</span>
+        <span class="readout">integrator <b id="tm-int">velocity-Verlet</b></span>
+        <span class="readout">bodies <b id="tm-n">—</b></span>
+        <span class="readout">steps <b id="tm-steps">0</b></span>
+        <span class="readout">Σ½mv² <b id="tm-ke">—</b></span>
+        <figcaption class="telemetry__note">
+          <b
+            >This field is not a loop. It's <code style="color: var(--amber-pale)">F = G·m/r²</code>
+            integrated live — a 2-D sketch of the same law the engine runs at planetary scale. Drag
+            to toss in a mass; it obeys the field like everything else.</b
+          >
+        </figcaption>
+      </figure>
+    </header>
+
+    <!-- ═══ THESIS ═════════════════════════════════════════════════════════ -->
+    <section class="band">
+      <div class="wrap thesis reveal">
+        <p class="eyebrow">The premise</p>
+        <h2 class="display">Most engines paint a picture of physics. Integrity computes it.</h2>
+        <p class="sub">
+          There is one rule — real matter with real properties, integrated honestly through time — and
+          everything else is a <em>consequence</em>. The difference shows up the moment you look
+          closely:
+        </p>
+        <div class="contrast">
+          <div class="col col--fake">
+            <span class="tag">the usual way — authored</span>
+            <ul>
+              <li>A crate falls because a designer wrote "make crates fall."</li>
+              <li>A wall shatters into pieces an artist cut ahead of time.</li>
+              <li>A planet orbits along a path baked into a spline.</li>
+              <li>Sand piles at whatever slope looks about right.</li>
+            </ul>
+          </div>
+          <div class="col col--real">
+            <span class="tag">Integrity — emergent</span>
+            <ul>
+              <li>A crate falls because it is <b>unsupported</b>.</li>
+              <li>Rock breaks only when <b>stress exceeds its strength</b>.</li>
+              <li>Orbits, escape velocity and precession fall out of <b>gravity alone</b>.</li>
+              <li>Sand finds its <b>angle of repose</b> because grains stop sliding when friction holds.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ PRINCIPLES ═════════════════════════════════════════════════════ -->
+    <section class="band">
+      <div class="wrap reveal">
+        <p class="eyebrow">The rules of the house</p>
+        <h2 class="display">Three commitments, kept all the way down.</h2>
+        <div class="laws">
+          <article class="law">
+            <span class="law__key">// emergent</span>
+            <h3>Behavior is a consequence, never a script.</h3>
+            <p>
+              Kepler orbits, escape velocity, the angle a sand pile holds, crater scaling — all fall
+              out of particle physics. None are coded as rules.
+            </p>
+            <span class="eg"
+              >A dropped Moon shatters because <b>impact energy dwarfs its binding energy</b> — not
+              because someone authored the pieces.</span
+            >
+          </article>
+          <article class="law">
+            <span class="law__key">// faithful</span>
+            <h3>The parameters declare real physics.</h3>
+            <p>
+              G, a planet's mass, a material's density and strength — these declare <em>real</em>
+              numbers. The engine's job is to honor them exactly, not to approximate for convenience.
+            </p>
+            <span class="eg"
+              >When the model and reality disagree, we hunt the <b>missing physics</b> — we never turn
+              a dial to fake the result.</span
+            >
+          </article>
+          <article class="law">
+            <span class="law__key">// legible</span>
+            <h3>Honest physics can be re-derived by playing.</h3>
+            <p>
+              If the simulation is faithful, you can discover the laws from inside it. A child — and
+              one day an embodied AI — could infer nature by experiment.
+            </p>
+            <span class="eg"
+              >That's the point: a fudged engine teaches <b>wrong physics</b>. This one is meant to be
+              a place you can learn from.</span
+            >
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ TWO LAYERS ═════════════════════════════════════════════════════ -->
+    <section class="band">
+      <div class="wrap layers reveal">
+        <div class="lead">
+          <p class="eyebrow">How honesty scales</p>
+          <h2 class="display">Two layers, both honest.</h2>
+          <p>
+            Physics runs across enormous ranges of scale, so Integrity is explicit about what it
+            resolves and what it models — and never lets the second masquerade as the first.
+          </p>
+        </div>
+        <div class="layers__stack">
+          <div class="layer layer--res">
+            <h4>Resolved <span>emergent</span></h4>
+            <p>
+              Real particles interacting under real forces. Nothing stands between the law and the
+              result — the behavior <b>is</b> the physics playing out.
+            </p>
+          </div>
+          <div class="layer layer--dec">
+            <h4>Declared <span>modeled</span></h4>
+            <p>
+              For physics below the resolution, a subgrid model. But every declared model is
+              <b>derived from real physics, flagged as declared, and replaceable</b> by resolving it —
+              honesty you can audit, not a shortcut you can't see.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ SCENES ═════════════════════════════════════════════════════════ -->
+    <section class="band">
+      <div class="wrap reveal">
+        <p class="eyebrow">Run it yourself</p>
+        <h2 class="display">Four scenes. Same law in every one.</h2>
+        <div class="scenes">
+          <a class="scene" href="/orbit.html">
+            <span class="scene__art" aria-hidden="true">
+              <svg viewBox="0 0 108 88" fill="none">
+                <ellipse cx="54" cy="44" rx="40" ry="22" stroke="#3a4a63" stroke-width="1" />
+                <circle cx="54" cy="44" r="9" fill="#5b7fb8" />
+                <circle cx="54" cy="44" r="9" fill="url(#g1)" />
+                <circle cx="94" cy="44" r="4" fill="#c9d4e6" />
+                <circle cx="54" cy="44" r="14" stroke="#5b7fb8" stroke-opacity="0.35" stroke-width="1" />
+                <defs>
+                  <radialGradient id="g1" cx="0.35" cy="0.3" r="0.8">
+                    <stop offset="0" stop-color="#7fa8e0" />
+                    <stop offset="1" stop-color="#2c4strafrom" stop-opacity="0" />
+                  </radialGradient>
+                </defs>
+              </svg>
+            </span>
+            <div>
+              <h3>Space</h3>
+              <p>A real Earth and Moon on a live Kepler orbit — set by mass and velocity, not a path.</p>
+              <span class="go">enter ▸</span>
+            </div>
+          </a>
+
+          <a class="scene" href="/birth.html">
+            <span class="scene__art" aria-hidden="true">
+              <svg viewBox="0 0 108 88" fill="none">
+                <circle cx="42" cy="48" r="16" fill="#5b7fb8" />
+                <path d="M42 48 L96 16" stroke="#ffb24c" stroke-width="2" stroke-linecap="round" />
+                <circle cx="96" cy="16" r="6" fill="#ffe1a8" />
+                <circle cx="96" cy="16" r="10" fill="#ffb24c" fill-opacity="0.3" />
+                <circle cx="70" cy="30" r="2" fill="#ffd08a" />
+                <circle cx="80" cy="52" r="1.6" fill="#ffd08a" />
+                <circle cx="58" cy="24" r="1.4" fill="#ffd08a" />
+              </svg>
+            </span>
+            <div>
+              <h3>Birth of the Moon</h3>
+              <p>A Theia-scale impact strikes Earth; the Moon condenses from the debris disk it throws off.</p>
+              <span class="go">enter ▸</span>
+            </div>
+          </a>
+
+          <a class="scene" href="/terrain.html">
+            <span class="scene__art" aria-hidden="true">
+              <svg viewBox="0 0 108 88" shape-rendering="crispEdges">
+                <rect x="18" y="30" width="72" height="14" fill="#6bb14e" />
+                <rect x="18" y="44" width="72" height="10" fill="#9a6b40" />
+                <rect x="18" y="54" width="72" height="22" fill="#8a92a0" />
+                <rect x="44" y="30" width="20" height="10" fill="#05070c" />
+                <circle cx="54" cy="38" r="5" fill="#fff" />
+                <circle cx="54" cy="38" r="9" fill="#ffb24c" fill-opacity="0.4" />
+              </svg>
+            </span>
+            <div>
+              <h3>Terrain</h3>
+              <p>Grass over dirt over stone. Dig it, blast it — each material breaks by its own strength, and the crater stays.</p>
+              <span class="go">enter ▸</span>
+            </div>
+          </a>
+
+          <a class="scene" href="/twomoons.html">
+            <span class="scene__art" aria-hidden="true">
+              <svg viewBox="0 0 108 88" fill="none">
+                <circle cx="54" cy="44" r="8" fill="#5b7fb8" />
+                <ellipse cx="54" cy="44" rx="34" ry="20" stroke="#3a4a63" stroke-width="1" />
+                <circle cx="88" cy="44" r="4" fill="#c9d4e6" />
+                <circle cx="20" cy="44" r="4" fill="#c9d4e6" />
+              </svg>
+            </span>
+            <div>
+              <h3>Two Moons</h3>
+              <p>Two moons on opposing orbits. Nudge one down and watch the whole system respond.</p>
+              <span class="go">enter ▸</span>
+            </div>
+          </a>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ JOURNAL ════════════════════════════════════════════════════════ -->
+    <section class="band">
+      <div class="wrap reveal">
+        <div class="journal__head">
+          <div>
+            <p class="eyebrow">Built in the open</p>
+            <h2 class="display">The engineering journal.</h2>
+            <p>
+              The real log — what changed, why, and how it was verified. Newest first. It's early and
+              rough on purpose; this is the work as it actually happened.
+            </p>
+          </div>
+        </div>
+        <div class="log">
+          <div class="log__bar"><span class="dot"></span> journal.md — verified milestones</div>
+          <div id="journal-body">Loading journal…</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ FOOTER ═════════════════════════════════════════════════════════ -->
+    <footer>
+      <div class="wrap foot">
+        <span><b>INTEGRITY</b> &nbsp;·&nbsp; Bothead Studios</span>
+        <span class="foot__stamp" id="build-stamp"></span>
+      </div>
+    </footer>
+
+    <script type="module" src="/src/landing.ts"></script>
   </body>
 </html>

@@ -1,0 +1,11 @@
+import { chromium } from 'playwright';
+const out = process.env.OUT || '/tmp'; const PORT = process.env.PORT || '5307';
+const b = await chromium.launch({ headless: false, args: ['--enable-unsafe-webgpu','--enable-features=Vulkan','--use-angle=vulkan','--no-sandbox'] });
+const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
+await p.goto(`http://127.0.0.1:${PORT}/birth.html`, { waitUntil: 'load' });
+await p.waitForTimeout(185000);
+await p.evaluate(() => window.__demo?.set_render_blend?.(0));
+await p.waitForTimeout(1000);
+await p.screenshot({ path: `${out}/moon-settled.png` });
+console.log('moon', await p.evaluate(() => window.__demo?.gpu_moon_track_json?.()??'null'));
+await b.close(); console.log('done');

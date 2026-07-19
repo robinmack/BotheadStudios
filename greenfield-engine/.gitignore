@@ -22,3 +22,5 @@ npm-debug.log*
 .idea/
 .vscode/
 *.swp
+web/shots/
+/shots/

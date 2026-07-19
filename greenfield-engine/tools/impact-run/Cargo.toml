@@ -1,0 +1,26 @@
+# Standalone (own [workspace]) offline harness for the high-N deformable-Earth giant impact (docs/33 stage
+# 4c.2). Runs shaders/sph_step.wgsl on the box's RTX 2070 via native Vulkan wgpu — kept OUT of the engine
+# workspace so the native backend never leaks into the engine's webgpu-only wasm build (the same reason
+# tools/sph-verify is standalone). Builds two differentiated EOS bodies, RELAXES them on the GPU (cs_relax),
+# collides them obliquely at ~mutual escape speed, KDK-steps the aftermath with adaptive Courant dt, and
+# measures the bound orbiting disk split by provenance (Earth vs Theia) — the isotopic-crisis number at the
+# resolution the CPU (docs/33 stage 3c, ~2100 particles) could not reach.
+[package]
+name = "impact-run"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+wgpu = "24"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+
+[[bin]]
+name = "impact-run"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3

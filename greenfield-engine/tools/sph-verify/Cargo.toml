@@ -1,0 +1,20 @@
+# Standalone (NOT a workspace member — its own [workspace] table) so the native Vulkan wgpu build never
+# leaks into the engine's browser (webgpu-only) wasm build via feature unification. Runs
+# shaders/sph_step.wgsl on the box's RTX 2070 and VERIFIES it against an independent f64 CPU computation of
+# the same SPH-EOS-gravity physics (docs/33 stage 4). Exit code 0 = the GPU kernel matches the CPU.
+[package]
+name = "sph-verify"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+wgpu = "24"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+
+[[bin]]
+name = "sph-verify"
+path = "src/main.rs"

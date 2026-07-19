@@ -1,0 +1,21 @@
+import { chromium } from 'playwright';
+const out = process.env.OUT || '/tmp';
+const PORT = process.env.PORT || '5307';
+const b = await chromium.launch({ headless: false, args: ['--enable-unsafe-webgpu','--enable-features=Vulkan','--use-angle=vulkan','--no-sandbox'] });
+const p = await b.newPage({ viewport: { width: 1100, height: 720 } });
+p.on('pageerror', e => console.log('PAGEERR:', e.message));
+await p.goto(`http://127.0.0.1:${PORT}/birth.html`, { waitUntil: 'load' });
+await p.waitForTimeout(4000);
+const mpp = () => p.evaluate(() => window.__demo?.meters_per_pixel?.() ?? -1);
+const setZoom = (v) => p.evaluate((val) => {
+  const s = [...document.querySelectorAll('input[type=range]')].find(el => el.parentElement.textContent.includes('Zoom'));
+  if (!s) return 'no-zoom-slider';
+  s.value = String(val); s.dispatchEvent(new Event('input', { bubbles: true })); return s.value;
+}, v);
+const a = await mpp();
+console.log('zoom-out set', await setZoom(10)); await p.waitForTimeout(600); const b1 = await mpp();
+console.log('zoom-in  set', await setZoom(95)); await p.waitForTimeout(600); const c = await mpp();
+await p.screenshot({ path: `${out}/zoom-in.png` });
+console.log(`m/px: initial=${a.toExponential(2)}  after-out(10)=${b1.toExponential(2)}  after-in(95)=${c.toExponential(2)}`);
+console.log(b1 > c ? 'OK: slider 10 = zoomed OUT (more m/px), 95 = zoomed IN (less m/px)' : 'CHECK direction');
+await b.close(); console.log('done');

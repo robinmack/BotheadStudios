@@ -65,6 +65,18 @@ npm install
 npm run dev        # builds the Rust/WASM core and serves the host app
 ```
 
+## Deploying
+
+The public demo is live at **[integrity.bothead.net](https://integrity.bothead.net)** — a static
+build served by nginx (`:8080`) behind a Cloudflare tunnel. One command builds and publishes it:
+
+```bash
+./scripts/deploy.sh   # npm run build → rsync web/dist → /var/www/integrity
+```
+
+Full pipeline, serving stack, and one-time wiring: [`docs/29-deployment.md`](docs/29-deployment.md).
+For on-device LAN testing without deploying, use [`scripts/dev-lan.sh`](scripts/dev-lan.sh).
+
 ## License
 
 [MIT](LICENSE-MIT). Part of the [BotheadStudios](https://github.com/robinmack/BotheadStudios)

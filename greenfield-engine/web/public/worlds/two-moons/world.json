@@ -1,0 +1,58 @@
+{
+  "name": "Two Moons",
+  "type": "system",
+  "bodies": [
+    {
+      "name": "Sun",
+      "role": "star",
+      "profile": "sun",
+      "pos_m": [0, 0, 0],
+      "vel_ms": [0, 0, 0]
+    },
+    {
+      "name": "Earth",
+      "role": "planet",
+      "profile": "earth",
+      "mass_kg": 5.972e24,
+      "radius_m": 6371000,
+      "pos_m": [1.496e11, 0, 0],
+      "vel_ms": [0, 29780, 0],
+      "spin_period_s": 86164
+    },
+    {
+      "name": "Moon",
+      "role": "moon",
+      "profile": "moon",
+      "mass_kg": 7.342e22,
+      "radius_m": 1737000,
+      "pos_m": [1.499844e11, 0, 0],
+      "vel_ms": [0, 30802, 0]
+    },
+    {
+      "name": "Moon II",
+      "role": "moon",
+      "profile": "moon",
+      "mass_kg": 7.342e22,
+      "radius_m": 1737000,
+      "pos_m": [1.492156e11, 0, 0],
+      "vel_ms": [0, 28758, 0]
+    }
+  ],
+  "camera": { "mode": "orbit", "yaw": 0.6, "pitch": 0.5, "zoom": 1.0, "focus": "Earth" },
+  "time": { "scale": 118000 },
+  "controls": {
+    "keys": [
+      { "code": "KeyB", "action": "brake" },
+      { "code": "KeyN", "action": "drop" },
+      { "code": "KeyR", "action": "reset" },
+      { "code": "KeyF", "action": "focus" }
+    ],
+    "buttons": [
+      { "label": "Brake ½v", "action": "brake" },
+      { "label": "Drop", "action": "drop" },
+      { "label": "Reset", "action": "reset" },
+      { "label": "Focus Earth", "action": "focus_earth" },
+      { "label": "Focus Moon", "action": "focus_moon" }
+    ]
+  }
+}
