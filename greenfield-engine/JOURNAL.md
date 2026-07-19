@@ -5,6 +5,24 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-18 — HOTFIX: adaptive GPU-load control — the sim was freezing the tab/OS (docs/42)
+
+**What.** The deployed GPU impact encoded a FIXED 100 KDK substeps (and a 300-step relax chunk) per frame — ~100
+direct-sum O(N²) dispatches in one command buffer — so the GPU was monopolized and `present()` blocked for a long
+time each frame, freezing the browser tab and starving the OS GPU scheduler. Replaced the fixed counts with an
+ADAPTIVE per-frame substep budget: `sph_substeps` grows by one when there's frame-time headroom and shrinks
+multiplicatively (down to 1) when a frame runs long, keyed off the wall-clock `real_dt`. The relax chunk rides the
+same budget. Self-scales to the device — weak GPU → fewer substeps, strong GPU → more, frame time stays bounded.
+
+**Why.** The 100-substep count was left over from the parity/diagnostic work; it must never ship. A sim can't be
+allowed to break the device or the interface — it has to live inside a frame budget.
+
+**Verified (rig `frame_check`, xvfb).** Frame time bounded at **~33 ms (30 fps), worst ~50 ms** (was effectively a
+multi-second stall). The controller ramps 18→30 fps as it tunes. Full suite green (163 passed / 18 skipped).
+Redeployed to integrity.bothead.net.
+
+---
+
 ## 2026-07-18 — The "pretty render" layer over the GPU impact + browser parity → DEPLOYED (docs/42)
 
 **What.** Built the render-side of the JIT primitive (Robin's vision): the real GPU SPH giant impact underneath, a

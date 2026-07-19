@@ -2508,6 +2508,10 @@ mod app {
         /// playback). `sph_sim_t` is the physical time integrated since the collision started.
         sph_sim_t: f64,
         sph_dt_aftermath: f32,
+        /// docs/42 — ADAPTIVE GPU load: substeps (relax steps) encoded per frame, scaled to a wall-clock frame
+        /// budget so the sim never monopolizes the GPU / freezes the tab or OS. Grows when there's headroom,
+        /// shrinks (down to 1) when frames run long. The direct-sum O(N²) step is heavy, so this self-limits.
+        sph_substeps: u32,
         /// Latest async read-back of the GPU SPH particles (one frame behind) — for the HUD/disk-stats and
         /// (later) the momentum mirror. Empty until the first read-back completes.
         sph_snapshot: Vec<crate::gpu_sph::SphParticle>,
@@ -2794,6 +2798,7 @@ mod app {
                 sph_soft: 1.0,
                 sph_sim_t: 0.0,
                 sph_dt_aftermath: 0.0,
+                sph_substeps: 6,
                 sph_snapshot: Vec::new(),
                 sph_phase: SphPhase::Dynamics,
                 render_blend: 0.0, // pretty by default (docs/42)
@@ -3299,6 +3304,7 @@ mod app {
             self.sph_phase = SphPhase::Relaxing(0);
             self.gpu_impact_site = None; // no crater until Theia makes contact (docs/42 Phase 2)
             self.gpu_crater_frac = 0.0;
+            self.sph_substeps = 6; // start conservative; the frame-budget controller adapts up (docs/42)
             self.focus = 1; // centre on Earth (the particle system sits at the display origin)
             self.camera.zoom = 0.4; // frame the impact (the Earth–Moon default zoom shows it as a speck)
         }
@@ -3332,6 +3338,17 @@ mod app {
         /// the physics with an oversized step — time slows before truth breaks.
         pub fn advance(&mut self, real_dt: f64) {
             let real_dt = real_dt.clamp(0.0, 0.25); // tab-sleep / hiccup guard
+            // docs/42 — ADAPTIVE GPU-load control: keep each frame's encoded work inside a wall-clock budget so
+            // the sim can never monopolize the GPU and freeze the tab / OS. `real_dt` is the previous frame's
+            // total time; a slow frame shrinks the substep count (multiplicative, down to 1), headroom grows it
+            // by one (additive, capped). The heavy direct-sum O(N²) step is exactly what this throttles.
+            if self.sph_active {
+                if real_dt > 0.060 {
+                    self.sph_substeps = (self.sph_substeps * 3 / 4).max(1);
+                } else if real_dt < 0.028 {
+                    self.sph_substeps = (self.sph_substeps + 1).min(24);
+                }
+            }
             // GPU SPH deformable-Earth impact owns the frame while active (docs/33 stage 4c.4): encode a batch
             // of KDK substeps on the GPU and skip the CPU orbital physics. Fixed dt (WebGPU forbids the
             // adaptive read-back); ~8 substeps/frame plays the ~10 h aftermath out over a few seconds.
@@ -3340,18 +3357,20 @@ mod app {
                     // RELAX (on the GPU): the two bodies sit far apart and settle under their own gravity via
                     // `cs_relax`. Fast enough to run many steps/frame; on completion, kick off the read-back.
                     SphPhase::Relaxing(steps) => {
-                        const CHUNK: u32 = 300;
+                        // Relax steps/frame ride the same adaptive budget (a relax step ≈ half a KDK substep, so
+                        // ~2× the count) — bounded so even the relax phase can't stall the device.
+                        let chunk: u32 = (2 * self.sph_substeps).clamp(2, 48);
                         const TARGET: u32 = 2400; // AV-free relax is stable at the normal Courant dt ⇒ few steps
                         if let Some(sph) = self.gpu_sph.as_mut() {
                             let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sph-relax") });
-                            sph.encode_relax(&mut enc, CHUNK);
+                            sph.encode_relax(&mut enc, chunk);
                             self.queue.submit(std::iter::once(enc.finish()));
-                            let done = steps + CHUNK >= TARGET;
+                            let done = steps + chunk >= TARGET;
                             if done {
                                 sph.begin_readback(&self.device, &self.queue);
                                 self.sph_phase = SphPhase::Assembling;
                             } else {
-                                self.sph_phase = SphPhase::Relaxing(steps + CHUNK);
+                                self.sph_phase = SphPhase::Relaxing(steps + chunk);
                             }
                         }
                         return;
@@ -3382,11 +3401,11 @@ mod app {
                     // disk rather than dispersing (docs/35). An in-kernel per-substep adaptive dt (to trim the
                     // residual escape) is the next refinement.
                     SphPhase::Dynamics => {
-                        const SPH_SUBSTEPS: u32 = 100; // many substeps/frame so the small shock dt still plays
+                        let substeps = self.sph_substeps; // adaptive (frame-budget controlled) — never a fixed 100
                         const SPH_SHOCK_WINDOW_S: f64 = 5400.0; // ~1.5 h — cover the collision + excavation, then coarsen
                         if let Some(sph) = self.gpu_sph.as_mut() {
                             let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sph-step") });
-                            sph.encode_kdk(&mut enc, SPH_SUBSTEPS);
+                            sph.encode_kdk(&mut enc, substeps);
                             self.queue.submit(std::iter::once(enc.finish()));
                             if let Some(snap) = sph.take_readback() {
                                 self.sph_snapshot = snap;
@@ -3395,7 +3414,7 @@ mod app {
                         }
                         // Scheduled dt (docs/42): once the shock window has passed, coarsen the dt for the slow
                         // disk aftermath (WebGPU can't read back the adaptive Courant dt, so we schedule by time).
-                        self.sph_sim_t += SPH_SUBSTEPS as f64 * self.sph_dt as f64;
+                        self.sph_sim_t += substeps as f64 * self.sph_dt as f64;
                         if self.sph_dt < self.sph_dt_aftermath && self.sph_sim_t > SPH_SHOCK_WINDOW_S {
                             self.sph_dt = self.sph_dt_aftermath;
                             if let Some(sph) = self.gpu_sph.as_mut() {
