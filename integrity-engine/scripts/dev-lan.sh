@@ -29,6 +29,7 @@ IP="$(lan_ip)"; IP="${IP:-127.0.0.1}"
 print_urls() {
   echo "    terrain slice : https://$IP:$PORT/"
   echo "    space band    : https://$IP:$PORT/orbit.html"
+  echo "    GPU probe     : https://$IP:$PORT/gpu-probe.html"
   echo "  (same Wi-Fi; accept the self-signed cert on first load)"
 }
 
