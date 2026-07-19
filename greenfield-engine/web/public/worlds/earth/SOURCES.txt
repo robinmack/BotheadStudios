@@ -1,0 +1,4 @@
+Earth world rasters — provenance (docs/43, baked by tools/bake-earth/bake.py)
+landmask.png   : Natural Earth ne_110m_land (naturalearthdata.com) — MEASURED
+elevation.png  : NOAA ETOPO 2022 60s surface (doi:10.25921/fd45-gt74) — MEASURED
+landcover.png  : derived — DERIVED climate approximation from lat+elevation+coast, NOT a measured land-cover dataset (flagged; real MODIS MCD12Q1 is the follow-up)

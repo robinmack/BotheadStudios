@@ -77,10 +77,34 @@ async function main(): Promise<void> {
       if (!r.ok) throw new Error(`world fetch ${worldUrl} → HTTP ${r.status}`);
       return r.text();
     });
+    const world = JSON.parse(worldJson);
+    const base = worldUrl.slice(0, worldUrl.lastIndexOf("/") + 1);
+
+    // Decode a surface raster PNG → raw RGBA bytes (ImageBitmap → OffscreenCanvas → getImageData) for the engine.
+    type Raster = { data: Uint8Array; w: number; h: number };
+    async function decode(url?: string): Promise<Raster> {
+      if (!url) return { data: new Uint8Array(0), w: 0, h: 0 };
+      const bmp = await fetch(base + url)
+        .then((r) => r.blob())
+        .then((b) => createImageBitmap(b));
+      const cv = new OffscreenCanvas(bmp.width, bmp.height);
+      const ctx = cv.getContext("2d", { willReadFrequently: true }) as OffscreenCanvasRenderingContext2D;
+      ctx.drawImage(bmp, 0, 0);
+      const img = ctx.getImageData(0, 0, bmp.width, bmp.height);
+      return { data: new Uint8Array(img.data.buffer.slice(0)), w: bmp.width, h: bmp.height };
+    }
+    setStatus("Loading surface rasters…");
+    const s = world.surface ?? {};
+    const [lm, ev, lc] = await Promise.all([
+      decode(s.landmask_url),
+      decode(s.elevation_url),
+      decode(s.landcover_url),
+    ]);
+    report("info", `rasters: land ${lm.w}x${lm.h}, elev ${ev.w}x${ev.h}, cover ${lc.w}x${lc.h}`);
 
     setStatus("Requesting GPU device…");
     const terra = await Terra.create(canvas);
-    terra.load_world(worldJson);
+    terra.load_world(worldJson, lm.data, lm.w, lm.h, ev.data, ev.w, ev.h, lc.data, lc.w, lc.h);
     hideStatus();
     report("info", `Terra world loaded: ${terra.world_name()}`);
     (window as unknown as { __terra?: Terra }).__terra = terra;

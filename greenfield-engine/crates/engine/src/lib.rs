@@ -4596,11 +4596,19 @@ mod app {
         pipeline: wgpu::RenderPipeline,
         sphere_gpu: GpuMesh,
         shell_unis: Vec<UniformSlot>,
+        shell_count: usize,
         mats: Vec<materials::Material>,
         camera: Camera,
         planet_radius: f64,
         atm_tau: [f64; 3],
         world_name: String,
+        // docs/43 Phase 2 — the baked surface rasters (land mask, elevation+bathymetry, land-cover biome) and
+        // the biome-index → material-index map. `None` until a world with surface rasters is loaded.
+        landmask: Option<crate::terra::raster::Raster>,
+        elevation: Option<crate::terra::raster::Raster>,
+        landcover: Option<crate::terra::raster::Raster>,
+        elev_range: [f64; 2],
+        biome_mats: Vec<usize>, // biome index → index into `mats`
     }
 
     #[wasm_bindgen]
@@ -4651,18 +4659,21 @@ mod app {
             };
             surface.configure(&device, &config);
             let depth_view = create_depth_view(&device, width, height);
+            // A LOW-poly grain sphere: with a fine shell (thousands of grains) each grain is tiny, so a coarse
+            // sphere keeps the triangle + draw budget sane (the smooth displaced globe mesh arrives in Phase 3).
             let sphere_gpu = upload_mesh(
                 &device,
-                "terra-sphere",
-                &mesher::build_uv_sphere(1.0, 0, [1.0, 1.0, 1.0], 48, 64),
+                "terra-grain",
+                &mesher::build_uv_sphere(1.0, 0, [1.0, 1.0, 1.0], 10, 14),
             );
             let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("terra-bind-layout"),
                 entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT)],
             });
             let pipeline = build_space_pipeline(&device, &bind_layout, config.format);
+            let shell_count = 4096; // ~2.8° grain spacing — resolves continents/biomes (Phase 2, grain shell)
             let shell_unis: Vec<UniformSlot> =
-                (0..SHELL_N).map(|_| make_space_uniform(&device, &bind_layout)).collect();
+                (0..shell_count).map(|_| make_space_uniform(&device, &bind_layout)).collect();
             let atm_tau = crate::atmosphere::rayleigh_tau(crate::planet::earth().surface_pressure() / 101_325.0);
             let mats = materials::load();
             let camera = Camera { yaw: 0.6, pitch: 0.35, zoom: 1.0, base_distance: 3.0 };
@@ -4675,17 +4686,37 @@ mod app {
                 pipeline,
                 sphere_gpu,
                 shell_unis,
+                shell_count,
                 mats,
                 camera,
                 planet_radius: EARTH_RADIUS_M,
                 atm_tau,
                 world_name: String::new(),
+                landmask: None,
+                elevation: None,
+                landcover: None,
+                elev_range: [-11000.0, 9000.0],
+                biome_mats: Vec::new(),
             })
         }
 
-        /// docs/43: load a world from JSON. v1 consumes the planet radius + declared atmosphere; the rest is
-        /// parsed-and-logged (the reusable schema contract). Surface rasters + fly camera arrive in later phases.
-        pub fn load_world(&mut self, world_json: &str) -> Result<(), JsValue> {
+        /// docs/43: load a world from JSON + its decoded surface rasters. The JS host decodes each PNG to raw
+        /// RGBA (4 channels) via ImageBitmap and passes the bytes + dims here. Any raster may be empty (`len 0`)
+        /// → treated as absent (falls back to the built-in ASCII landmask / no displacement).
+        #[allow(clippy::too_many_arguments)]
+        pub fn load_world(
+            &mut self,
+            world_json: &str,
+            landmask: &[u8],
+            lm_w: u32,
+            lm_h: u32,
+            elevation: &[u8],
+            ev_w: u32,
+            ev_h: u32,
+            landcover: &[u8],
+            lc_w: u32,
+            lc_h: u32,
+        ) -> Result<(), JsValue> {
             let w = crate::terra::world_def::World::parse(world_json).map_err(|e| JsValue::from_str(&e))?;
             self.planet_radius = w.planet.radius_m;
             let p_ratio = w
@@ -4696,11 +4727,42 @@ mod app {
                 .unwrap_or_else(|| crate::planet::earth().surface_pressure() / 101_325.0);
             self.atm_tau = crate::atmosphere::rayleigh_tau(p_ratio);
             self.world_name = w.name.clone();
+
+            use crate::terra::raster::Raster;
+            let mk = |bytes: &[u8], rw: u32, rh: u32| -> Option<Raster> {
+                if bytes.is_empty() {
+                    return None;
+                }
+                Raster::new(rw as usize, rh as usize, 4, bytes.to_vec()).ok()
+            };
+            self.landmask = mk(landmask, lm_w, lm_h);
+            self.elevation = mk(elevation, ev_w, ev_h);
+            self.landcover = mk(landcover, lc_w, lc_h);
+
+            // Biome index → material index. `biomes` maps a string index → material id in data/materials.json.
+            self.biome_mats.clear();
+            self.elev_range = [-11000.0, 9000.0];
+            if let Some(s) = w.surface.as_ref() {
+                if let Some(r) = s.elevation_range_m {
+                    self.elev_range = r;
+                }
+                let max_idx = s.biomes.keys().filter_map(|k| k.parse::<usize>().ok()).max().unwrap_or(0);
+                self.biome_mats = (0..=max_idx)
+                    .map(|i| {
+                        let mat_id = s.biomes.get(&i.to_string()).map(String::as_str).unwrap_or("granite");
+                        materials::index_of(&self.mats, mat_id)
+                    })
+                    .collect();
+            }
+            let land_frac = self.landmask.as_ref().map(|r| r.land_fraction());
             log::info!(
-                "Terra: loaded world '{}' — planet radius {:.0} km, {} biome(s)",
+                "Terra: loaded '{}' — radius {:.0} km, rasters land={} elev={} cover={}, land fraction {:?}",
                 w.name,
                 w.planet.radius_m / 1e3,
-                w.surface.as_ref().map_or(0, |s| s.biomes.len())
+                self.landmask.is_some(),
+                self.elevation.is_some(),
+                self.landcover.is_some(),
+                land_frac,
             );
             Ok(())
         }
@@ -4738,15 +4800,38 @@ mod app {
                 cp * (self.camera.yaw as f64).cos(),
             ) * (self.camera.base_distance * self.camera.zoom) as f64;
             let r_disp = self.planet_radius * DISPLAY_SCALE; // = 1.0 for Earth
-            let shell_spacing = self.planet_radius * (4.0 * std::f64::consts::PI / SHELL_N as f64).sqrt();
+            let shell_spacing = self.planet_radius * (4.0 * std::f64::consts::PI / self.shell_count as f64).sqrt();
             let grain_r = ((0.62 * shell_spacing) * DISPLAY_SCALE) as f32;
+            const EXAG: f64 = 30.0; // elevation exaggeration so relief reads on a radius-1 globe (Everest ≈ 3.5%)
+            let water_idx = materials::index_of(&self.mats, "water");
             for (i, uni) in self.shell_unis.iter().enumerate() {
-                let dir = crate::impact::fib_dir(i, SHELL_N);
-                let spos = (dir * r_disp).as_vec3();
-                let surf = crate::planet::earth_surface_material(dir);
-                let m = &self.mats[materials::index_of(&self.mats, surf)];
+                let dir = crate::impact::fib_dir(i, self.shell_count);
+                let lat = dir.y.asin().to_degrees();
+                let lon = dir.z.atan2(dir.x).to_degrees();
+                // Land/ocean from the real Natural Earth mask (fallback: the built-in ASCII mask).
+                let is_land = self
+                    .landmask
+                    .as_ref()
+                    .map(|r| r.land_at(lat, lon))
+                    .unwrap_or_else(|| crate::planet::earth_surface_material(dir) == "granite");
+                // Land: biome material (land-cover) + real elevation displacement. Ocean: water at sea level.
+                let (mat_idx, elev_m) = if is_land {
+                    let biome = self.landcover.as_ref().map_or(1, |r| r.biome_at(lat, lon) as usize);
+                    let mi = self.biome_mats.get(biome).copied().unwrap_or(water_idx);
+                    let e = self
+                        .elevation
+                        .as_ref()
+                        .map_or(0.0, |r| r.elevation_m_at(lat, lon, self.elev_range[0], self.elev_range[1]))
+                        .max(0.0);
+                    (mi, e)
+                } else {
+                    (water_idx, 0.0)
+                };
+                let m = &self.mats[mat_idx];
+                let pos = dir * (r_disp + elev_m * DISPLAY_SCALE * EXAG);
+                let spos = pos.as_vec3();
                 // Rayleigh atmosphere (docs/26): blue veil (added light) + two-way transmittance on the ground.
-                let v_dir = (eye - dir * r_disp).normalize_or_zero();
+                let v_dir = (eye - pos).normalize_or_zero();
                 let mu_v = dir.dot(v_dir);
                 let mu_s = dir.dot(sun_dir);
                 let cos_th = v_dir.dot(sun_dir);
