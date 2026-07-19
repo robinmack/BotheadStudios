@@ -9,6 +9,19 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Bodies get real ground friction (traction)** — `Engine::collide_probe_with_terrain` now resolves
+  against `granular::terrain_contact_resolve`, the same non-injecting constraint the GPU debris uses,
+  replacing a tangential `vel *= 0.5` velocity multiply that was blind to normal load, μ and slope. μ is
+  read from the terrain material's own datum, so ice (μ=0.05) and basalt (μ=0.7) now behave differently
+  under a body. New `World::surface_bilinear_grad` supplies the surface gradient (hence the normal) that
+  bounded Coulomb friction requires; `surface_height_bilinear` delegates to it, so one implementation.
+  Also removes the `DEAD = 0.15` dead-zone hack, and derives the probe's bond damping from iron's own
+  restitution (`granular::zeta_for_restitution`, factored out of `damping_for_restitution`) instead of a
+  hardcoded ζ=0.4 that implied e≈0.254. **Behaviour change:** the probe now takes ~35 s to settle after a
+  drop instead of ~6.5 s. The old figure was not a physical one — the removed `vel *= 0.5` was a
+  ~50%-per-substep damper doing nearly all the settling work, so the lattice's real elastic ringing was
+  suppressed rather than dissipated. Bonds stay intact
+  (integrity 100%). Anything assuming a fast settle needs to cope with the longer transient.
 - **VERIFIED ON METAL — iPad Pro (M4) and iPhone 15 Pro Max (A17 Pro)** — the granular GPU step
   produces the same physics on Metal as on Vulkan across all three devices (`tot = 1.585e+7`,
   `vmax = 30.945` at N=60,000; `4.179e-8` at N=1; no energy injection at any N), confirming the

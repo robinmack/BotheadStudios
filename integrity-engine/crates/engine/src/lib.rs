@@ -134,6 +134,17 @@ mod app {
     // Normal damping is no longer a constant — it's DERIVED per-material from restitution (docs/24
     // Stage 1), see `granular::damping_for_restitution` in `gpu_step_params`.
     const CONTACT_TANGENT_DAMP: f32 = 100.0; // friction ramp with slip speed
+
+    /// Per-substep position-projection cap for a BODY resolving against the terrain constraint. Mirrors
+    /// `particle_step.wgsl::MAX_SURFACE_CORRECTION` (0.01 m) — the bound that makes the projection
+    /// stack-safe and stops it doing work, which is what fixed the grains' settling storm
+    /// (JOURNAL 2026-07-19). A body's bonds are stiffer than a grain's contacts, so this bound matters
+    /// more here, not less: an unbounded snap is exactly what used to pump the probe apart.
+    const PROBE_MAX_SURFACE_CORRECTION: f64 = 0.01;
+    /// μ used when the column under a contact has no material (empty column / off the voxel footprint).
+    /// Basalt's coefficient — this world's actual crust (docs/28), the same representative choice
+    /// `gpu_step_params` makes for debris, so a body off the patch grips like the ground it is drawn on.
+    const PROBE_GROUND_MU_FALLBACK: f64 = 0.7;
     // Specific heat (J/(kg·K)) for the grain's temp↔u conversion (u = c·T). Generic rock default, matching
     // aggregate/hydrostatic; per-material c is a flagged refinement (like the global contact params). docs/38.
     const GRAIN_SPECIFIC_HEAT: f32 = 1000.0;
@@ -1422,37 +1433,66 @@ mod app {
             for p in &mut self.probe.particles {
                 let xi = (p.pos.x as f32 + c.x).floor() as i32;
                 let zi = (p.pos.z as f32 + c.z).floor() as i32;
-                // DEFAULT = rest on the BULK surface (the full-disk cap, what's drawn) at terrain_height.
-                // Where the patch is RESOLVED, rest on the visible voxel iso-surface (−0.5: surface_top_voxel
-                // is the air-start voxel, but the drawn surface-nets iso sits half a voxel below it), so the
-                // ball sags into a real crater. Off the footprint the bulk continues (no void to fall into).
-                let ground = if self.patch_resolved {
-                    self.world
-                        .surface_top_voxel(xi, zi)
-                        .map(|t| t as f64 - 0.5 - c.y as f64)
-                        .unwrap_or_else(|| self.world.bulk_height(p.pos.x as f32, p.pos.z as f32) as f64)
+                // TRACTION (docs/23): resolve against the SAME non-injecting constraint the GPU grains
+                // use — `granular::terrain_contact_resolve`, already unit-tested and hardware-verified
+                // (gpu-verify scenes K/L/N). This REPLACES the previous `p.vel.x *= 0.5` tangential
+                // multiply, which was a raw velocity scale: it did not depend on the normal load, on μ, or
+                // on the surface at all, so it could not express traction. Coulomb friction bounded by
+                // `μ·jn` is exactly "a harder-pressed contact grips more", which is what makes a driven
+                // body accelerate instead of skate.
+                //
+                // The old dead-zone/half-correction hack is gone with it: `terrain_contact_resolve`'s
+                // position projection is velocity-decoupled and bounded by MAX_SURFACE_CORRECTION, which
+                // is the mechanism that fixed the settling storm for grains (JOURNAL 2026-07-19) — it adds
+                // no KE, so it cannot pump the probe's stiff bonds the way a hard snap did.
+                // Surface + gradient. Inside a RESOLVED patch use the voxel iso-surface — the SAME
+                // bilinear field the GPU grains collide against, so the probe and the debris around it
+                // agree on where the ground is. Outside the footprint (or before any dig) the BULK field
+                // continues, exactly as before: `surface_bilinear_grad` edge-clamps, which would wrongly
+                // extend the patch rim out over the bulk, so the in-bounds test is load-bearing.
+                let in_patch = xi >= 0
+                    && zi >= 0
+                    && (xi as usize) < self.world.w
+                    && (zi as usize) < self.world.d;
+                let (h, dhdx, dhdz) = if self.patch_resolved && in_patch {
+                    let (h, gx, gz) = self.world.surface_bilinear_grad(p.pos.as_vec3());
+                    (h as f64, gx as f64, gz as f64)
                 } else {
-                    self.world.bulk_height(p.pos.x as f32, p.pos.z as f32) as f64
+                    // Bulk band: analytic height, gradient by central difference on the same field.
+                    const E: f32 = 0.5; // half a voxel — the finest the bulk field is sampled at
+                    let (px, pz) = (p.pos.x as f32, p.pos.z as f32);
+                    let hb = |x: f32, z: f32| self.world.bulk_height(x, z);
+                    (
+                        hb(px, pz) as f64,
+                        ((hb(px + E, pz) - hb(px - E, pz)) / (2.0 * E)) as f64,
+                        ((hb(px, pz + E) - hb(px, pz - E)) / (2.0 * E)) as f64,
+                    )
                 };
-                let floor = ground + half;
-                if p.pos.y < floor {
-                    // Correct only the penetration BEYOND a small dead zone, and gently. Hard-snapping
-                    // the tiny per-substep penetration of a RESTING probe pumps potential energy into
-                    // its stiff bonds every substep — that was the probe's "free energy" (it vibrated
-                    // apart and its scattered particles fell forever). The dead zone lets it rest with a
-                    // hair of sink and injects nothing; a deep penetration (a hard landing) is eased out,
-                    // not snapped. Velocity clamp + friction only ever REMOVE energy. (The clean fix is
-                    // implicit integration of the stiff bonds — flagged, docs/23.)
-                    const DEAD: f64 = 0.15;
-                    let pen = floor - p.pos.y;
-                    if pen > DEAD {
-                        p.pos.y += 0.5 * (pen - DEAD);
-                    }
-                    if p.vel.y < 0.0 {
-                        p.vel.y = 0.0;
-                    }
-                    p.vel.x *= 0.5; // ground friction (crude; emergent friction is future, docs/23)
-                    p.vel.z *= 0.5;
+                // μ is the TERRAIN's own coefficient under this contact — ice is slippery because ice's
+                // material datum says so, not because a scene flag says so. FLAGGED APPROXIMATION: this
+                // uses the surface material's μ alone; a proper pair-combining rule between the body's
+                // material and the ground's does not exist yet (the same gap `gpu_step_params` flags for
+                // mixed-material debris).
+                let mu = self
+                    .world
+                    .surface_top_voxel(xi, zi)
+                    .and_then(|t| self.world.material_at(xi, t, zi))
+                    .map(|m| self.mats[m].friction_coefficient as f64)
+                    .unwrap_or(PROBE_GROUND_MU_FALLBACK);
+                let hit = crate::granular::terrain_contact_resolve(
+                    p.pos,
+                    p.vel,
+                    h,
+                    dhdx,
+                    dhdz,
+                    half,
+                    mu,
+                    PROBE_MAX_SURFACE_CORRECTION,
+                    f64::INFINITY, // open sky: nothing rests on the probe
+                );
+                if hit.hit {
+                    p.vel = hit.vel;
+                    p.pos += hit.dpos;
                 }
             }
         }
@@ -2535,10 +2575,26 @@ mod app {
             0.0,
             break_strain,
         );
-        // Sub-critical, coordination-corrected damping so the ball settles rigidly WITHOUT the
-        // explicit integrator exploding (the detonation bug: √(k·m) alone over-damped each particle
-        // ~√(bonds)× past critical). See Aggregate::critically_damped (docs/23).
-        probe.damping = probe.critically_damped(0.4);
+        // Damping DERIVED from iron's own coefficient of restitution, not chosen: ζ = −ln(e)/√(π²+ln²e)
+        // is the standard spring-dashpot inversion of e = exp(−ζπ/√(1−ζ²)), and it is the SAME
+        // `zeta_for_restitution` the granular contact law uses — so a bond and a grain contact agree on
+        // what "iron is this bouncy" means. `critically_damped` then supplies the units: √(k·m) with the
+        // coordination correction that fixed the old detonation bug (√(k·m) alone over-damped each
+        // particle ~√(bonds)× past critical — note the danger there was OVER-damping, docs/23).
+        //
+        // This REPLACES a hardcoded ζ = 0.4, picked so the ball "settles rigidly" — a behavioural target,
+        // and one that implied a restitution of e ≈ 0.254, i.e. it modelled iron as ~2.4× less bouncy
+        // than the material data says it is. The honest ζ is LOWER (iron e = 0.6 ⇒ ζ ≈ 0.16).
+        //
+        // MEASURED, not assumed (rig `probe_traction.mjs`): this change costs essentially NO extra settle
+        // time — 35.0 s → 35.5 s, inside the rig's 0.5 s sampling interval. The first rebound is actually
+        // LOWER (4.5 m → 3.9 m): a springier lattice stores impact energy in internal modes instead of
+        // returning it as one coherent bounce. The long settle comes almost entirely from removing the
+        // TANGENTIAL FUDGE in `collide_probe_with_terrain` (6.5 s → 35.0 s at unchanged ζ), which was
+        // crushing the bounce flat. So ring-down is not a damping dial to tune away — bounding its
+        // compute cost belongs to the demotion criterion (docs/44), not here.
+        probe.damping = probe
+            .critically_damped(crate::granular::zeta_for_restitution(mats[iron].restitution as f64));
         // Surface gravity is the field of the WHOLE planet below (matter all the way down), ~uniform over
         // this small patch — passed in, computed from planet::earth(), not a hardcoded constant.
         probe.with_gravity(glam::DVec3::new(0.0, -surface_g, 0.0))
