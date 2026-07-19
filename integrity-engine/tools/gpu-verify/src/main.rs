@@ -17,25 +17,25 @@ const SHADER: &str = include_str!("../../../shaders/particle_step.wgsl");
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Debug)]
 struct Particle {
     offset: [f32; 3],
-    temp: f32,
+    u: f32, // specific internal energy (J/kg); temp = u/c (docs/38, was `temp` in K)
     vel: [f32; 3],
     resting: f32,
     color: [f32; 3],
     material: f32,
     emission: [f32; 3],
-    _pad: f32,
+    rho: f32, // density (kg/m³); ρ₀ placeholder (was `_pad`)
 }
 impl Particle {
     fn at(x: f32, y: f32, z: f32) -> Self {
         Particle {
             offset: [x, y, z],
-            temp: 300.0,
+            u: GRAIN_SPECIFIC_HEAT * 300.0, // cold: 300 K
             vel: [0.0; 3],
             resting: 0.0,
             color: [0.5; 3],
             material: 0.0,
             emission: [0.0; 3],
-            _pad: 0.0,
+            rho: 2700.0, // basalt ρ₀ (placeholder)
         }
     }
 }
@@ -63,6 +63,10 @@ struct Params {
     c_normal_damp: f32,
     c_friction: f32,
     c_tangent_damp: f32,
+    specific_heat: f32,
+    _hp0: f32,
+    _hp1: f32,
+    _hp2: f32,
 }
 
 // DECOUPLED SCALE (docs/23): the PHYSICS particle is one per 1 m voxel (spacing 1.0, radius 0.5); the
@@ -76,6 +80,7 @@ const CONTACT_RADIUS: f32 = 0.5; // = half the 1 m spacing ⇒ lattice neighbour
 const C_STIFFNESS: f32 = 5.0e5;
 const C_NORMAL_DAMP: f32 = 100.0;
 const C_TANGENT_DAMP: f32 = 100.0;
+const GRAIN_SPECIFIC_HEAT: f32 = 1000.0; // J/(kg·K): grain temp↔u (u = c·T), matches the engine (docs/38)
 const TABLE_SIZE: u32 = 1 << 15; // 32768 cells — ample for these scenes
 const BUCKET_K: u32 = 16;
 const SUBSTEPS: u32 = 16;
@@ -142,6 +147,10 @@ impl Scene {
             c_normal_damp: self.normal_damp.unwrap_or(C_NORMAL_DAMP),
             c_friction: self.friction,
             c_tangent_damp: C_TANGENT_DAMP,
+            specific_heat: GRAIN_SPECIFIC_HEAT,
+            _hp0: 0.0,
+            _hp1: 0.0,
+            _hp2: 0.0,
         }
     }
 }

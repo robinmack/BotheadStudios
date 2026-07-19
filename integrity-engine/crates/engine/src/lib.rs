@@ -134,6 +134,9 @@ mod app {
     // Normal damping is no longer a constant — it's DERIVED per-material from restitution (docs/24
     // Stage 1), see `granular::damping_for_restitution` in `gpu_step_params`.
     const CONTACT_TANGENT_DAMP: f32 = 100.0; // friction ramp with slip speed
+    // Specific heat (J/(kg·K)) for the grain's temp↔u conversion (u = c·T). Generic rock default, matching
+    // aggregate/hydrostatic; per-material c is a flagged refinement (like the global contact params). docs/38.
+    const GRAIN_SPECIFIC_HEAT: f32 = 1000.0;
 
     // How often the GPU debris is de-resolved back into voxels (docs/22): a grain that has come to REST
     // on the terrain returns to the voxel grid, matter-conserving, so the debris count falls to ~0 once
@@ -1036,13 +1039,13 @@ mod app {
                 .iter()
                 .map(|p| GpuParticle {
                     offset: [p.pos.x, p.pos.y, p.pos.z],
-                    temp: p.temp_k,
+                    u: GRAIN_SPECIFIC_HEAT * p.temp_k, // specific internal energy (matches hydrostatic.rs u=c·T)
                     vel: [p.vel.x, p.vel.y, p.vel.z],
                     resting: 0.0,
                     color: self.mats[p.material].albedo,
                     material: p.material as f32,
                     emission: emission::incandescence(p.temp_k),
-                    _pad: 0.0,
+                    rho: self.mats[p.material].density, // ρ₀ at spawn (placeholder until 4b.2 computes it)
                 })
                 .collect();
             self.gpu_particles.append(&self.queue, &gpu);
@@ -1175,13 +1178,13 @@ mod app {
                     let emission = emission::incandescence(t);
                     SUB8.map(|o| GpuParticle {
                         offset: [px + o[0], py + o[1], pz + o[2]],
-                        temp: t,
+                        u: GRAIN_SPECIFIC_HEAT * t, // render-only instances (renderer reads offset/color/emission)
                         vel: [0.0, 0.0, 0.0],
                         resting: 0.0,
                         color: albedo,
                         material: mat,
                         emission,
-                        _pad: 0.0,
+                        rho: 0.0, // render-only: unread by the renderer
                     })
                 })
                 .collect();
@@ -1260,6 +1263,10 @@ mod app {
                 c_normal_damp: normal_damp,
                 c_friction: friction,
                 c_tangent_damp: CONTACT_TANGENT_DAMP,
+                specific_heat: GRAIN_SPECIFIC_HEAT,
+                _hp0: 0.0,
+                _hp1: 0.0,
+                _hp2: 0.0,
             }
         }
 
@@ -1851,13 +1858,13 @@ mod app {
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct GpuParticle {
         offset: [f32; 3], // position (centered coords) = the render instance offset
-        temp: f32,        // K
+        u: f32,           // specific internal energy (J/kg); temp = u/c is derived (docs/38, was `temp` in K)
         vel: [f32; 3],
         resting: f32,       // 0 in flight, 1 settled
         color: [f32; 3],    // material albedo (set on spawn)
         material: f32,      // material index (informational)
         emission: [f32; 3], // incandescent glow (written by the compute step)
-        _pad: f32,
+        rho: f32,           // density (kg/m³) — Tillotson input; ρ₀ placeholder until 4b.2 (was `_pad`)
     }
 
     /// Per-dispatch uniforms for the compute step — matches `particle_step.wgsl`'s `Params` (80 bytes).
@@ -1885,6 +1892,10 @@ mod app {
         c_normal_damp: f32,
         c_friction: f32,
         c_tangent_damp: f32,
+        specific_heat: f32, // J/(kg·K) — grain temp↔u (docs/38)
+        _hp0: f32,
+        _hp1: f32,
+        _hp2: f32,
     }
 
     /// GPU-resident debris: a storage+vertex buffer of `GpuParticle`, a compute pipeline that steps it,
@@ -2330,6 +2341,13 @@ mod app {
             // Flat floor at voxel 0 — the probe measures the granular step, not terrain shape.
             parts.upload_heightfield(&self.queue, &vec![0i32; (PROBE_W * PROBE_W) as usize]);
 
+            // ρ₀ from the REAL material (basalt), matching `probe_params` and the spawn path — the
+            // grain carries density as Tillotson input (docs/38), so it must not be invented.
+            let rho0 = {
+                let mats = materials::load();
+                mats[materials::index_of(&mats, "basalt")].density
+            };
+
             // A cube of grains on the 1 m lattice, jittered for the same reason gpu-verify jitters: a
             // perfect lattice is metastable and will not flow, so an unjittered pile is not a
             // representative contact workload.
@@ -2343,13 +2361,15 @@ mod app {
                 };
                 grains.push(GpuParticle {
                     offset: [x as f32 + j(1), 8.0 + y as f32 + j(2), z as f32 + j(3)],
-                    temp: 300.0,
+                    // docs/38: the grain's thermodynamic state is specific internal energy, not
+                    // temperature — temp = u/c is derived. 300 K ambient, same as the spawn path.
+                    u: GRAIN_SPECIFIC_HEAT * 300.0,
                     vel: [0.0; 3],
                     resting: 0.0,
                     color: [0.5, 0.5, 0.5],
                     material: 0.0,
                     emission: [0.0; 3],
-                    _pad: 0.0,
+                    rho: rho0, // ρ₀ at spawn, from the real material (docs/38 4b.2 will compute it)
                 });
             }
             parts.append(&self.queue, &grains);
@@ -2460,6 +2480,13 @@ mod app {
                 c_normal_damp: normal_damp,
                 c_friction: bulk.friction_coefficient,
                 c_tangent_damp: CONTACT_TANGENT_DAMP,
+                // docs/38: the grain carries u = c·T, so the shader needs c to derive temperature.
+                // Same constant the production path passes (`gpu_step_params`) — the probe must not
+                // run a different thermodynamic conversion than the engine it is measuring.
+                specific_heat: GRAIN_SPECIFIC_HEAT,
+                _hp0: 0.0,
+                _hp1: 0.0,
+                _hp2: 0.0,
             }
         }
     }

@@ -35,6 +35,9 @@ struct Params {
     c_normal_damp: f32,       // normal damping (1/s)
     c_friction   : f32,       // Coulomb μ
     c_tangent_damp: f32,      // tangential regularization (1/s)
+    // --- thermodynamic state (docs/35 increment 4b, docs/38) ---
+    specific_heat : f32,      // J/(kg·K): the grain carries u = c·T, so temp = u/specific_heat (matches hydrostatic.rs)
+    _hp0 : f32, _hp1 : f32, _hp2 : f32, // pad the uniform tail to a full 16-byte row
 };
 
 // θ-method blend for the directional implicit contact solve (docs/24 Stage 0+1). θ=0.5 is the
@@ -51,13 +54,15 @@ const THETA_RHO : f32 = (1.0 - THETA) / THETA;
 
 struct Particle {
     offset   : vec3<f32>,
-    temp     : f32,
+    u        : f32,       // specific internal energy (J/kg) — the thermodynamic state (docs/38). temp = u/c is
+                          // DERIVED (grain_temp): the physically-correct variable across phase change (T plateaus
+                          // at melt/vapor while u keeps rising) and the same state the SPH Particle carries.
     vel      : vec3<f32>,
     resting  : f32,
     color    : vec3<f32>,
     material : f32,
     emission : vec3<f32>,
-    _pad     : f32,
+    rho      : f32,       // density (kg/m³) — the other Tillotson input. Placeholder ρ₀ until 4b.2 computes it.
 };
 
 // Per-grain contact accumulation for the directional implicit velocity solve: the total contact force,
@@ -86,6 +91,13 @@ struct Accum {
 @group(0) @binding(4) var<storage, read_write> grid_bucket : array<u32>;
 @group(0) @binding(5) var<storage, read_write> forces : array<Accum>;
 @group(0) @binding(6) var<storage, read_write> render_out : array<Particle>; // 8× render sub-cubes
+
+// Temperature (K) derived from the grain's specific internal energy: u = c·T ⇒ T = u/c (matches the SPH
+// path, hydrostatic.rs:82). NOTE (4b): linear for now — the latent-heat plateaus at melt/vaporization
+// (T ~constant while u climbs through e_iv..e_cv) come with the EOS tier (4b.3), where they matter.
+fn grain_temp(u : f32) -> f32 {
+    return u / max(P.specific_heat, 1.0);
+}
 
 fn incandescence(t : f32) -> vec3<f32> {
     if (t <= 800.0) { return vec3<f32>(0.0); }
@@ -387,9 +399,10 @@ fn cs_integrate(@builtin(global_invocation_id) gid : vec3<u32>) {
     if (i >= P.count) { return; }
     var pt = particles[i];
 
-    // Cool toward ambient (Newton's law of cooling). EVERY particle steps every frame — a settled
-    // grain is not skipped, so it keeps cooling AND re-checks its support / neighbours.
-    pt.temp = 300.0 + (pt.temp - 300.0) * exp(-P.cool_rate * P.dt);
+    // Cool toward ambient (Newton's law of cooling), in energy: u relaxes toward u_ambient = c·300 K. EVERY
+    // particle steps every frame — a settled grain keeps cooling AND re-checks its support / neighbours.
+    let u_amb = P.specific_heat * 300.0;
+    pt.u = u_amb + (pt.u - u_amb) * exp(-P.cool_rate * P.dt);
 
     // DIRECTIONAL TRAPEZOIDAL contact solve (docs/24 Stage 0 + Stage 1): solve (I + S)·v_new = (I − S)·v
     // + dt·a, where S = Σ [(dt²/4)·k + (dt/2)·c]·(n⊗n) is the per-grain contact Jacobian along the contact
@@ -465,6 +478,6 @@ fn cs_integrate(@builtin(global_invocation_id) gid : vec3<u32>) {
     } else {
         pt.resting = 0.0;
     }
-    pt.emission = incandescence(pt.temp);
+    pt.emission = incandescence(grain_temp(pt.u));
     particles[i] = pt;
 }
