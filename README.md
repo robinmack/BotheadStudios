@@ -5,7 +5,7 @@ a self-contained project with its own README, build, and docs.
 
 ## Projects
 
-### [`greenfield-engine/`](greenfield-engine/) — *(working title)*
+### [`integrity-engine/`](integrity-engine/) — the Integrity engine
 
 An OSS **browser game engine with real Newtonian physics at its core**. Matter is simulated as
 aggregates of particles with mass and density; material behavior *emerges* from density (rock vs.
@@ -14,8 +14,8 @@ produces real self-gravity (`F = ma`). Stack: Rust → WASM, a custom `wgpu` Web
 Rapier rigid bodies, with a thin TypeScript host.
 
 **Status:** pre-alpha — Phase 0 (scaffold + first pixel) complete, `v0.1.0`. See the project's
-[README](greenfield-engine/README.md), [roadmap/JOURNAL](greenfield-engine/JOURNAL.md), and
-[CHANGELOG](greenfield-engine/CHANGELOG.md).
+[README](integrity-engine/README.md), [roadmap/JOURNAL](integrity-engine/JOURNAL.md), and
+[CHANGELOG](integrity-engine/CHANGELOG.md).
 
 ## License
 
