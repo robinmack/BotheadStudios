@@ -4512,6 +4512,70 @@ mod app {
         })
     }
 
+    /// docs/43 Phase 3 — the Terra globe pipeline: the same vertex layout + bind layout as the space pipeline,
+    /// but `globe.wgsl` (per-vertex biome colour + a cheap atmospheric limb) instead of the flat-tint shader.
+    fn build_globe_pipeline(
+        device: &wgpu::Device,
+        bind_layout: &wgpu::BindGroupLayout,
+        format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("globe-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/globe.wgsl").into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("globe-pipeline-layout"),
+            bind_group_layouts: &[bind_layout],
+            push_constant_ranges: &[],
+        });
+        const ATTRS: [wgpu::VertexAttribute; 4] =
+            wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Uint32];
+        let vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Vertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &ATTRS,
+        };
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("globe-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[vertex_layout],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview: None,
+            cache: None,
+        })
+    }
+
     /// The instanced particle pipeline for the GPU SPH impact (docs/33 stage 4c.4). One camera-facing
     /// billboard quad per particle, generated in the vertex shader; the instance buffer is the `sph_step.wgsl`
     /// particle buffer itself (48-byte stride, pos at offset 0, provenance u32 at offset 44). No mesh, no
@@ -4597,6 +4661,12 @@ mod app {
         sphere_gpu: GpuMesh,
         shell_unis: Vec<UniformSlot>,
         shell_count: usize,
+        // docs/43 Phase 3 — the displaced cube-sphere globe. Once a world with surface rasters loads, this
+        // smooth mesh (land lifted by real elevation + biome-coloured, ocean cells at sea level with the water
+        // material) replaces the grain shell for the scene. `None` until then (falls back to the grain shell).
+        globe_pipeline: wgpu::RenderPipeline,
+        globe_mesh: Option<GpuMesh>,
+        globe_uni: UniformSlot,
         mats: Vec<materials::Material>,
         camera: Camera,
         planet_radius: f64,
@@ -4671,6 +4741,8 @@ mod app {
                 entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT)],
             });
             let pipeline = build_space_pipeline(&device, &bind_layout, config.format);
+            let globe_pipeline = build_globe_pipeline(&device, &bind_layout, config.format);
+            let globe_uni = make_space_uniform(&device, &bind_layout);
             let shell_count = 4096; // ~2.8° grain spacing — resolves continents/biomes (Phase 2, grain shell)
             let shell_unis: Vec<UniformSlot> =
                 (0..shell_count).map(|_| make_space_uniform(&device, &bind_layout)).collect();
@@ -4687,6 +4759,9 @@ mod app {
                 sphere_gpu,
                 shell_unis,
                 shell_count,
+                globe_pipeline,
+                globe_mesh: None,
+                globe_uni,
                 mats,
                 camera,
                 planet_radius: EARTH_RADIUS_M,
@@ -4754,7 +4829,14 @@ mod app {
                     })
                     .collect();
             }
+            // docs/43 Phase 3 — build the smooth displaced globe from the loaded rasters (retires the grain
+            // shell for this scene). Built once here; the fly-camera LOD refinement comes in Phase 5.
+            let mesh = self.build_surface_mesh();
+            let tri = mesh.indices.len() / 3;
+            self.globe_mesh = Some(upload_mesh(&self.device, "terra-globe", &mesh));
+
             let land_frac = self.landmask.as_ref().map(|r| r.land_fraction());
+            log::info!("Terra: globe mesh built — {} triangles", tri);
             log::info!(
                 "Terra: loaded '{}' — radius {:.0} km, rasters land={} elev={} cover={}, land fraction {:?}",
                 w.name,
@@ -4800,53 +4882,71 @@ mod app {
                 cp * (self.camera.yaw as f64).cos(),
             ) * (self.camera.base_distance * self.camera.zoom) as f64;
             let r_disp = self.planet_radius * DISPLAY_SCALE; // = 1.0 for Earth
-            let shell_spacing = self.planet_radius * (4.0 * std::f64::consts::PI / self.shell_count as f64).sqrt();
-            let grain_r = ((0.62 * shell_spacing) * DISPLAY_SCALE) as f32;
-            const EXAG: f64 = 30.0; // elevation exaggeration so relief reads on a radius-1 globe (Everest ≈ 3.5%)
-            let water_idx = materials::index_of(&self.mats, "water");
-            for (i, uni) in self.shell_unis.iter().enumerate() {
-                let dir = crate::impact::fib_dir(i, self.shell_count);
-                let lat = dir.y.asin().to_degrees();
-                let lon = dir.z.atan2(dir.x).to_degrees();
-                // Land/ocean from the real Natural Earth mask (fallback: the built-in ASCII mask).
-                let is_land = self
-                    .landmask
-                    .as_ref()
-                    .map(|r| r.land_at(lat, lon))
-                    .unwrap_or_else(|| crate::planet::earth_surface_material(dir) == "granite");
-                // Land: biome material (land-cover) + real elevation displacement. Ocean: water at sea level.
-                let (mat_idx, elev_m) = if is_land {
-                    let biome = self.landcover.as_ref().map_or(1, |r| r.biome_at(lat, lon) as usize);
-                    let mi = self.biome_mats.get(biome).copied().unwrap_or(water_idx);
-                    let e = self
-                        .elevation
-                        .as_ref()
-                        .map_or(0.0, |r| r.elevation_m_at(lat, lon, self.elev_range[0], self.elev_range[1]))
-                        .max(0.0);
-                    (mi, e)
-                } else {
-                    (water_idx, 0.0)
-                };
-                let m = &self.mats[mat_idx];
-                let pos = dir * (r_disp + elev_m * DISPLAY_SCALE * EXAG);
-                let spos = pos.as_vec3();
-                // Rayleigh atmosphere (docs/26): blue veil (added light) + two-way transmittance on the ground.
-                let v_dir = (eye - pos).normalize_or_zero();
-                let mu_v = dir.dot(v_dir);
-                let mu_s = dir.dot(sun_dir);
-                let cos_th = v_dir.dot(sun_dir);
-                let veil = crate::atmosphere::rayleigh_veil(mu_v, mu_s, cos_th, self.atm_tau, 22.0);
-                let tr = crate::atmosphere::rayleigh_transmit(mu_v, mu_s, self.atm_tau);
-                let tint = [m.albedo[0] * tr[0], m.albedo[1] * tr[1], m.albedo[2] * tr[2], 1.0];
+            if self.globe_mesh.is_some() {
+                // docs/43 Phase 3 — the displaced globe: one draw. Identity model (the mesh is already in
+                // display units, Earth-centred at the origin); white tint (the mesh carries the per-vertex biome
+                // colour); emissive.xyz = camera eye (display units), .w = atmosphere strength (the globe.wgsl
+                // Rayleigh limb). The per-vertex Rayleigh ground veil is a Phase-5 refinement.
                 write_space_uniform(
                     &self.queue,
-                    uni,
+                    &self.globe_uni,
                     view_proj,
-                    Mat4::from_translation(spos) * Mat4::from_scale(Vec3::splat(grain_r)),
+                    Mat4::IDENTITY,
                     sun_light,
-                    tint,
-                    [veil[0], veil[1], veil[2], 1.0],
+                    [1.0, 1.0, 1.0, 1.0],
+                    [eye.x as f32, eye.y as f32, eye.z as f32, 0.8],
                 );
+            } else {
+                // Fallback: the Phase-2 grain shell (used until a world's surface rasters build the globe mesh).
+                let shell_spacing =
+                    self.planet_radius * (4.0 * std::f64::consts::PI / self.shell_count as f64).sqrt();
+                let grain_r = ((0.62 * shell_spacing) * DISPLAY_SCALE) as f32;
+                const EXAG: f64 = 30.0; // relief exaggeration so it reads on a radius-1 globe (Everest ≈ 3.5%)
+                let water_idx = materials::index_of(&self.mats, "water");
+                for (i, uni) in self.shell_unis.iter().enumerate() {
+                    let dir = crate::impact::fib_dir(i, self.shell_count);
+                    let lat = dir.y.asin().to_degrees();
+                    let lon = dir.z.atan2(dir.x).to_degrees();
+                    // Land/ocean from the real Natural Earth mask (fallback: the built-in ASCII mask).
+                    let is_land = self
+                        .landmask
+                        .as_ref()
+                        .map(|r| r.land_at(lat, lon))
+                        .unwrap_or_else(|| crate::planet::earth_surface_material(dir) == "granite");
+                    // Land: biome material (land-cover) + real elevation displacement. Ocean: water at sea level.
+                    let (mat_idx, elev_m) = if is_land {
+                        let biome = self.landcover.as_ref().map_or(1, |r| r.biome_at(lat, lon) as usize);
+                        let mi = self.biome_mats.get(biome).copied().unwrap_or(water_idx);
+                        let e = self
+                            .elevation
+                            .as_ref()
+                            .map_or(0.0, |r| r.elevation_m_at(lat, lon, self.elev_range[0], self.elev_range[1]))
+                            .max(0.0);
+                        (mi, e)
+                    } else {
+                        (water_idx, 0.0)
+                    };
+                    let m = &self.mats[mat_idx];
+                    let pos = dir * (r_disp + elev_m * DISPLAY_SCALE * EXAG);
+                    let spos = pos.as_vec3();
+                    // Rayleigh atmosphere (docs/26): blue veil (added light) + two-way transmittance on the ground.
+                    let v_dir = (eye - pos).normalize_or_zero();
+                    let mu_v = dir.dot(v_dir);
+                    let mu_s = dir.dot(sun_dir);
+                    let cos_th = v_dir.dot(sun_dir);
+                    let veil = crate::atmosphere::rayleigh_veil(mu_v, mu_s, cos_th, self.atm_tau, 22.0);
+                    let tr = crate::atmosphere::rayleigh_transmit(mu_v, mu_s, self.atm_tau);
+                    let tint = [m.albedo[0] * tr[0], m.albedo[1] * tr[1], m.albedo[2] * tr[2], 1.0];
+                    write_space_uniform(
+                        &self.queue,
+                        uni,
+                        view_proj,
+                        Mat4::from_translation(spos) * Mat4::from_scale(Vec3::splat(grain_r)),
+                        sun_light,
+                        tint,
+                        [veil[0], veil[1], veil[2], 1.0],
+                    );
+                }
             }
             let output = self
                 .surface
@@ -4875,14 +4975,53 @@ mod app {
                     timestamp_writes: None,
                     occlusion_query_set: None,
                 });
-                pass.set_pipeline(&self.pipeline);
-                for uni in self.shell_unis.iter() {
-                    draw(&mut pass, uni, &self.sphere_gpu);
+                if let Some(globe) = &self.globe_mesh {
+                    pass.set_pipeline(&self.globe_pipeline);
+                    draw(&mut pass, &self.globe_uni, globe);
+                } else {
+                    pass.set_pipeline(&self.pipeline);
+                    for uni in self.shell_unis.iter() {
+                        draw(&mut pass, uni, &self.sphere_gpu);
+                    }
                 }
             }
             self.queue.submit(std::iter::once(encoder.finish()));
             output.present();
             Ok(())
+        }
+
+        /// docs/43 Phase 3 — build the displaced cube-sphere globe surface from the loaded rasters. The ocean is
+        /// integrated into the same mesh (ocean cells sit at exactly sea level with the water material), so there
+        /// is no separate ocean shell and no coast z-fighting. `EXAG` exaggerates relief so it reads on a radius-1
+        /// globe (Everest is only ~0.05% of Earth's radius); the true ratio returns with the ground LOD (Phase 5).
+        fn build_surface_mesh(&self) -> Mesh {
+            let r_disp = self.planet_radius * DISPLAY_SCALE; // = 1.0 for Earth
+            const EXAG: f64 = 30.0;
+            let ds = DISPLAY_SCALE;
+            let water_idx = materials::index_of(&self.mats, "water");
+            let water_alb = self.mats[water_idx].albedo;
+            crate::terra::globe_mesh::build_globe(256, r_disp, |dir| {
+                let lat = dir.y.asin().to_degrees();
+                let lon = dir.z.atan2(dir.x).to_degrees();
+                let is_land = self
+                    .landmask
+                    .as_ref()
+                    .map(|r| r.land_at(lat, lon))
+                    .unwrap_or_else(|| crate::planet::earth_surface_material(dir) == "granite");
+                if is_land {
+                    let biome = self.landcover.as_ref().map_or(1, |r| r.biome_at(lat, lon) as usize);
+                    let mi = self.biome_mats.get(biome).copied().unwrap_or(water_idx);
+                    let e = self
+                        .elevation
+                        .as_ref()
+                        .map_or(0.0, |r| r.elevation_m_at(lat, lon, self.elev_range[0], self.elev_range[1]));
+                    // Land above sea level; below-sea-level land (Dead Sea etc.) clamps to the shore.
+                    (self.mats[mi].albedo, e.max(0.0) * ds * EXAG)
+                } else {
+                    // Ocean surface: flat at sea level with the water albedo (bathymetry is hidden, so unused).
+                    (water_alb, 0.0)
+                }
+            })
         }
 
         fn view_proj(&self) -> Mat4 {

@@ -5,6 +5,35 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-19 — Terra Phase 3: the displaced cube-sphere globe (a real blue-marble from world.json + rasters)
+
+**What.** The `Terra` scene (docs/43, worlds-as-data) now renders a smooth **displaced cube-sphere globe** instead
+of the Phase-2 grain shell. New pure module `terra/globe_mesh.rs` (`build_globe(res, r_disp, sample)`): 6 cube
+faces, each a res×res grid projected to the sphere, every vertex displaced radially by the sampled surface offset
+and coloured by its biome albedo; normals come from central differences of the *displaced* grid so relief reads as
+shaded terrain. `Terra::build_surface_mesh` drives it from the real rasters — land cells lifted by ETOPO elevation
+(×30 exaggeration so relief reads on a radius-1 globe) and coloured by the land-cover biome material; **ocean cells
+sit flat at sea level with the water material**, integrated into the same mesh (no separate ocean shell, so no
+coast z-fighting). New `shaders/globe.wgsl` + `build_globe_pipeline`: per-vertex biome colour × tint, `SUN_GAIN=22`
+Reinhard day side (black night side, emergent terminator), plus a cheap view-dependent blue Fresnel **atmospheric
+limb**. Built once in `load_world` (256² per face → 780,300 triangles); the grain shell stays as the fallback until
+a world's rasters load.
+
+**Why.** Phase 3 of the terrain rework (the plan): retire the grain shell for the Earth scene and deliver the
+Google-Earth look. The grain shell proved the data path (Phases 1–2); a displaced mesh is the render surface the
+fly camera (Phase 4) and ground LOD (Phase 5) build on. Ethos-consistent for v1: the surface is un-particalized
+bulk, and the engine already renders un-materialized bulk as a smooth object — grains return where a region is
+*resolved* (the JIT-particalize seam, docs/39/42).
+
+**Verified.** `globe_mesh` unit tests (counts + index bounds; undisplaced = a unit sphere with outward normals;
+displacement pushes vertices out by the offset) + full fast suite **166/166 green**. Rig `terra_globe` + rotated
+angles (`xvfb-run`): an unmistakable Earth — Africa/Mediterranean/Arabia, the snow-capped Himalaya and Andes with
+raised relief, the tan Sahara, a green temperate belt, Antarctica, a blue day-side ocean darkening through the
+terminator, and the atmospheric limb — all from `world.json` + the baked Natural Earth / ETOPO / land-cover
+rasters. Winding correct (convex front faces, back-culled). Land fraction 0.335.
+
+---
+
 ## 2026-07-18 — FIX: the accreted Moon was escaping (Robin caught it) — near-breakup spin + inside-Roche mislabel
 
 **What.** Robin watched the browser Moon accrete, compress, then leave on a near-straight outward trajectory —

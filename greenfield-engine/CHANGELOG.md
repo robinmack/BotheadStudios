@@ -9,6 +9,12 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Terra scene = a data-defined Earth globe (worlds-as-data, docs/43)** — a new `Terra` wasm scene renders Earth
+  from a `world.json` + baked rasters (Natural Earth land mask · ETOPO elevation+bathymetry · derived land-cover
+  biomes). Phase 3 adds `terra/globe_mesh.rs` (`build_globe`) + `shaders/globe.wgsl` + `Terra::build_surface_mesh`:
+  a smooth **displaced cube-sphere globe** (land lifted by real elevation and biome-coloured; ocean flat at sea
+  level with the water material) with relief-shaded normals and a blue atmospheric limb — the grain shell becomes
+  the fallback. New host `web/terra.ts` / `web/terra.html`; nav label "Earth". Fly camera + ground LOD next.
 - **Birth-of-the-Moon scene = the GPU impact + a "pretty render" layer, DEPLOYED** (`gpu_sph.rs`, `lib.rs`,
   `sph_render.wgsl`, `docs/42`) — the browser birth scene now runs the GPU SPH deformable-Earth impact by default
   (the old CPU-Aggregate impact retired) with a **Pretty ⇄ Physics slider** cross-fading a faithful render (textured
