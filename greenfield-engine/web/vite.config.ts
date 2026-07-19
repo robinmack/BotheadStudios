@@ -131,6 +131,7 @@ export default defineConfig({
       input: {
         main: resolve(root, "index.html"),
         terrain: resolve(root, "terrain.html"),
+        terra: resolve(root, "terra.html"), // docs/43 — the data-defined Earth world
         orbit: resolve(root, "orbit.html"),
         birth: resolve(root, "birth.html"),
         twomoons: resolve(root, "twomoons.html"),

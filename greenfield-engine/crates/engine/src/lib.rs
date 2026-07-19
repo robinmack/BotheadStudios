@@ -43,6 +43,8 @@ mod matter;
 mod mesher;
 mod neighbors;
 mod orbit;
+mod terra; // docs/43 — worlds-as-data: the world schema (+ later raster/mesh/camera). The wasm `Terra` scene
+           // struct lives in `mod app` below to reuse its render helpers.
 mod texture;
 mod world;
 
@@ -4577,6 +4579,235 @@ mod app {
             multiview: None,
             cache: None,
         })
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // docs/43 — Terra: a planet/terrain scene built from a DATA "world" (the first worlds-as-data scene).
+    // Phase 1 renders the Earth as the reused grain shell, recolored by the loaded world + its declared
+    // atmosphere; later phases add the raster surface sampler, the displaced globe mesh, and the fly camera.
+    // ---------------------------------------------------------------------------------------------
+    #[wasm_bindgen]
+    pub struct Terra {
+        surface: wgpu::Surface<'static>,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        config: wgpu::SurfaceConfiguration,
+        depth_view: wgpu::TextureView,
+        pipeline: wgpu::RenderPipeline,
+        sphere_gpu: GpuMesh,
+        shell_unis: Vec<UniformSlot>,
+        mats: Vec<materials::Material>,
+        camera: Camera,
+        planet_radius: f64,
+        atm_tau: [f64; 3],
+        world_name: String,
+    }
+
+    #[wasm_bindgen]
+    impl Terra {
+        pub async fn create(canvas: HtmlCanvasElement) -> Result<Terra, JsValue> {
+            console_error_panic_hook::set_once();
+            let _ = console_log::init_with_level(log::Level::Info);
+            let width = canvas.width().max(1);
+            let height = canvas.height().max(1);
+            let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::BROWSER_WEBGPU,
+                ..Default::default()
+            });
+            let surface = instance
+                .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+                .map_err(|e| JsValue::from_str(&format!("create_surface failed: {e}")))?;
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    force_fallback_adapter: false,
+                    compatible_surface: Some(&surface),
+                })
+                .await
+                .ok_or_else(|| JsValue::from_str("no suitable GPU adapter found"))?;
+            let (device, queue) = adapter
+                .request_device(
+                    &wgpu::DeviceDescriptor {
+                        label: Some("greenfield-terra"),
+                        required_features: wgpu::Features::empty(),
+                        required_limits: adapter.limits(),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .await
+                .map_err(|e| JsValue::from_str(&format!("request_device failed: {e}")))?;
+            let caps = surface.get_capabilities(&adapter);
+            let format = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]);
+            let config = wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format,
+                width,
+                height,
+                present_mode: wgpu::PresentMode::Fifo,
+                alpha_mode: caps.alpha_modes[0],
+                view_formats: vec![],
+                desired_maximum_frame_latency: 2,
+            };
+            surface.configure(&device, &config);
+            let depth_view = create_depth_view(&device, width, height);
+            let sphere_gpu = upload_mesh(
+                &device,
+                "terra-sphere",
+                &mesher::build_uv_sphere(1.0, 0, [1.0, 1.0, 1.0], 48, 64),
+            );
+            let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("terra-bind-layout"),
+                entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT)],
+            });
+            let pipeline = build_space_pipeline(&device, &bind_layout, config.format);
+            let shell_unis: Vec<UniformSlot> =
+                (0..SHELL_N).map(|_| make_space_uniform(&device, &bind_layout)).collect();
+            let atm_tau = crate::atmosphere::rayleigh_tau(crate::planet::earth().surface_pressure() / 101_325.0);
+            let mats = materials::load();
+            let camera = Camera { yaw: 0.6, pitch: 0.35, zoom: 1.0, base_distance: 3.0 };
+            Ok(Terra {
+                surface,
+                device,
+                queue,
+                config,
+                depth_view,
+                pipeline,
+                sphere_gpu,
+                shell_unis,
+                mats,
+                camera,
+                planet_radius: EARTH_RADIUS_M,
+                atm_tau,
+                world_name: String::new(),
+            })
+        }
+
+        /// docs/43: load a world from JSON. v1 consumes the planet radius + declared atmosphere; the rest is
+        /// parsed-and-logged (the reusable schema contract). Surface rasters + fly camera arrive in later phases.
+        pub fn load_world(&mut self, world_json: &str) -> Result<(), JsValue> {
+            let w = crate::terra::world_def::World::parse(world_json).map_err(|e| JsValue::from_str(&e))?;
+            self.planet_radius = w.planet.radius_m;
+            let p_ratio = w
+                .atmosphere
+                .as_ref()
+                .and_then(|a| a.surface_pressure_pa)
+                .map(|pa| pa / 101_325.0)
+                .unwrap_or_else(|| crate::planet::earth().surface_pressure() / 101_325.0);
+            self.atm_tau = crate::atmosphere::rayleigh_tau(p_ratio);
+            self.world_name = w.name.clone();
+            log::info!(
+                "Terra: loaded world '{}' — planet radius {:.0} km, {} biome(s)",
+                w.name,
+                w.planet.radius_m / 1e3,
+                w.surface.as_ref().map_or(0, |s| s.biomes.len())
+            );
+            Ok(())
+        }
+
+        pub fn world_name(&self) -> String {
+            self.world_name.clone()
+        }
+
+        pub fn set_orbit(&mut self, yaw: f32, pitch: f32, zoom: f32) {
+            self.camera.yaw = yaw;
+            self.camera.pitch = pitch.clamp(-1.5, 1.5);
+            self.camera.zoom = zoom.clamp(0.1, 8.0);
+        }
+
+        pub fn resize(&mut self, width: u32, height: u32) {
+            if width == 0 || height == 0 {
+                return;
+            }
+            self.config.width = width;
+            self.config.height = height;
+            self.surface.configure(&self.device, &self.config);
+            self.depth_view = create_depth_view(&self.device, width, height);
+        }
+
+        pub fn render(&mut self) -> Result<(), JsValue> {
+            let view_proj = self.view_proj();
+            // Fixed direction TO the sun → a pleasant ¾ lighting; the day/night terminator is emergent.
+            let sun_dir = glam::DVec3::new(1.0, 0.45, 0.6).normalize();
+            let sun_light = Vec3::new(sun_dir.x as f32, sun_dir.y as f32, sun_dir.z as f32);
+            // Camera eye in display units (the shell is Earth-centred at the origin, radius = r_disp).
+            let cp = (self.camera.pitch as f64).cos();
+            let eye = glam::DVec3::new(
+                cp * (self.camera.yaw as f64).sin(),
+                (self.camera.pitch as f64).sin(),
+                cp * (self.camera.yaw as f64).cos(),
+            ) * (self.camera.base_distance * self.camera.zoom) as f64;
+            let r_disp = self.planet_radius * DISPLAY_SCALE; // = 1.0 for Earth
+            let shell_spacing = self.planet_radius * (4.0 * std::f64::consts::PI / SHELL_N as f64).sqrt();
+            let grain_r = ((0.62 * shell_spacing) * DISPLAY_SCALE) as f32;
+            for (i, uni) in self.shell_unis.iter().enumerate() {
+                let dir = crate::impact::fib_dir(i, SHELL_N);
+                let spos = (dir * r_disp).as_vec3();
+                let surf = crate::planet::earth_surface_material(dir);
+                let m = &self.mats[materials::index_of(&self.mats, surf)];
+                // Rayleigh atmosphere (docs/26): blue veil (added light) + two-way transmittance on the ground.
+                let v_dir = (eye - dir * r_disp).normalize_or_zero();
+                let mu_v = dir.dot(v_dir);
+                let mu_s = dir.dot(sun_dir);
+                let cos_th = v_dir.dot(sun_dir);
+                let veil = crate::atmosphere::rayleigh_veil(mu_v, mu_s, cos_th, self.atm_tau, 22.0);
+                let tr = crate::atmosphere::rayleigh_transmit(mu_v, mu_s, self.atm_tau);
+                let tint = [m.albedo[0] * tr[0], m.albedo[1] * tr[1], m.albedo[2] * tr[2], 1.0];
+                write_space_uniform(
+                    &self.queue,
+                    uni,
+                    view_proj,
+                    Mat4::from_translation(spos) * Mat4::from_scale(Vec3::splat(grain_r)),
+                    sun_light,
+                    tint,
+                    [veil[0], veil[1], veil[2], 1.0],
+                );
+            }
+            let output = self
+                .surface
+                .get_current_texture()
+                .map_err(|e| JsValue::from_str(&format!("get_current_texture failed: {e}")))?;
+            let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("terra-frame") });
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("terra-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.01, g: 0.01, b: 0.03, a: 1.0 }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_view,
+                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.pipeline);
+                for uni in self.shell_unis.iter() {
+                    draw(&mut pass, uni, &self.sphere_gpu);
+                }
+            }
+            self.queue.submit(std::iter::once(encoder.finish()));
+            output.present();
+            Ok(())
+        }
+
+        fn view_proj(&self) -> Mat4 {
+            let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
+            let proj = Mat4::perspective_rh(0.9, aspect, 0.001, 100_000.0);
+            let cp = self.camera.pitch.cos();
+            let dir = Vec3::new(cp * self.camera.yaw.sin(), self.camera.pitch.sin(), cp * self.camera.yaw.cos());
+            let eye = dir * (self.camera.base_distance * self.camera.zoom);
+            proj * Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y)
+        }
     }
 }
 
