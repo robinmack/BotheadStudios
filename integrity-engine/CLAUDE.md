@@ -13,6 +13,12 @@ violation (the same question, two answers), and carries the **conformance ledger
 with their evidence. **Read it before adding physics, and add a row when you find a new one** — it exists
 so the list is inherited, not rediscovered every session.
 
+> **Sense déjà-vu? Read the docs.** If you find yourself deriving a conclusion that feels like it was
+> reached before — it was. Nearly every "discovery" in this engine is already written down, with the
+> evidence and the reasoning that produced it. Deriving it again wastes the session AND risks landing a
+> *different* answer to a question already settled, which is itself a charter violation (docs/46).
+> Search `docs/` and `JOURNAL.md` first; add to them when you genuinely find something new.
+
 **Before exploring, read [`docs/32-architecture-map.md`](docs/32-architecture-map.md)** — the full module
 map with `file:line` anchors. It exists so you don't rediscover machinery. The realignment plan the engine
 is being refactored toward is [`docs/33-architecture-realignment.md`](docs/33-architecture-realignment.md).

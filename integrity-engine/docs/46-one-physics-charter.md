@@ -21,12 +21,53 @@ Not every difference is a breach. The criterion is sharp:
   mean"). Forcing one integrator on both is unstable or ruinously slow. Boundary conditions likewise:
   the terrain band models Earth as a rigid heightfield because you are standing on a 96 m patch, not
   simulating a planet's interior.
-- **Violation** — the *same physical question* gets two different answers. Two implementations of one
-  law that can drift. A law implemented completely in one place and partially in another. A quantity
-  conserved in one scene and not in the other.
+- **DECLARED (a resolution IOU)** — the resolved physics is real and correct but **unaffordable at the
+  timescale humans and models need in order to play with it and learn from it**. So the outcome is
+  computed from the material's own data and rendered, instead of being allowed to emerge. This is
+  legitimate, and it is where most of the interesting engineering will live for years.
+- **Violation (a fudge)** — the *same physical question* gets two different answers. Two implementations
+  of one law that can drift. A law implemented completely in one place and partially in another. A
+  quantity conserved in one scene and not in the other. Or a number chosen because the result looked right.
+
+### Declared is not fudged — the distinction that keeps it honest
+
+A drive-shaft *should* shear when torque exceeds what its material can carry, and in a perfect world it
+would do so because the bonds actually failed. That is far too expensive today. So we compute whether it
+shears — real torque against the material's real shear strength — and render that outcome.
+
+**That is not a second answer to the same question.** It is the same physics evaluated analytically
+because the resolved evaluation sits below the resolution we can afford. The test that separates it from
+a fudge:
+
+> **Can you name the resolved computation this replaces, and would the declared answer converge to it as
+> resolution rises?**
+
+If yes, it is a declared model carrying an IOU. If you cannot name it, it is a fudge wearing a physics
+coat.
+
+The codebase already does this well, and those are the pattern to copy: `plough_loft` declares an
+excavation shock finer than a grain as a **conserved momentum transfer**, says so outright, and notes
+that co-motion is the physical maximum so there is no coefficient to tune; `Furrow::ejection` marks its
+velocity SCALE honest and its distribution SHAPE an explicit resolution IOU *"to be DELETED once particle
+count is high enough for the flow to emerge on its own."*
+
+Compare the fudges: `MAX_EJECT = 0.045`, `steep_drop = 3`, a hardcoded damping ζ. None names a resolved
+computation; none would converge to anything.
+
+### The horizon — write IOUs so a descendant can delete them
+
+This layer is a **compute-era limitation, not a design preference**. The purpose is to render real
+physics on the timescale and compute humans and LLM models need to enjoy and learn from it. If compute
+becomes cheap enough — quantum or otherwise — descendants of this engine should be able to delete the
+calculate-and-render step and simply let the drive-shaft shear.
+
+That only works if IOUs are written *for deletion*: each declared model must state the resolved
+computation it stands in for, so retiring it is a substitution rather than an archaeology project.
+**A declared model with no stated resolved counterpart is a fudge, because nobody can ever retire it.**
 
 The test any change must pass: **does this reduce the number of places where one physical question has
-two answers?** If a change adds a second answer, it needs a physics reason, written down, or it is debt.
+two answers?** A declared model does not add an answer — it defers one, in writing. If a change adds a
+genuine second answer, it needs a physics reason, written down, or it is debt.
 
 ## 2. What is already unified (do not fork these)
 
