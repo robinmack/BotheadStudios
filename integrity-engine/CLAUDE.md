@@ -4,6 +4,15 @@ A Rust→WASM→WebGPU real-time **physics** engine. Charter: *everything is mat
 gravity law govern it at every scale* — a tire, a meteor, and Theia are the same physics at different
 scale/energy/material (docs/23, docs/24, docs/28). Physics drives the render, never the reverse.
 
+**The promise is REAL physics: one law, at every scale, in every scene — a world is a world is a world.**
+That is the product, not a preference about code structure. An engine that answers the same physical
+question two different ways in two different scenes has broken it.
+[`docs/46-one-physics-charter.md`](docs/46-one-physics-charter.md) states the rule that separates
+legitimate specialization (the *physics* differs — stiff contacts vs orbital integrators) from a
+violation (the same question, two answers), and carries the **conformance ledger** of open violations
+with their evidence. **Read it before adding physics, and add a row when you find a new one** — it exists
+so the list is inherited, not rediscovered every session.
+
 **Before exploring, read [`docs/32-architecture-map.md`](docs/32-architecture-map.md)** — the full module
 map with `file:line` anchors. It exists so you don't rediscover machinery. The realignment plan the engine
 is being refactored toward is [`docs/33-architecture-realignment.md`](docs/33-architecture-realignment.md).
