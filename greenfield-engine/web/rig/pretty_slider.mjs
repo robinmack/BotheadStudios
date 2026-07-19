@@ -6,7 +6,7 @@ const b = await chromium.launch({ headless: false, args: ['--enable-unsafe-webgp
 const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
 p.on('pageerror', (e) => console.log('PAGEERR:', e.message));
 await p.goto(`http://127.0.0.1:${PORT}/birth.html`, { waitUntil: 'load' });
-await p.waitForTimeout(9000); // let the impact resolve into a remnant + disk
+await p.waitForTimeout(15000); // let the impact resolve into a remnant + disk
 for (const blend of [0, 0.5, 1]) {
   await p.evaluate((x) => window.__demo?.set_render_blend?.(x), blend);
   await p.waitForTimeout(1200);

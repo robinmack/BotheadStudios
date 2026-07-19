@@ -2511,6 +2511,11 @@ mod app {
         /// Cross-fades by size (grains × (1−blend), billboards × blend), so no alpha-sort. Only meaningful while
         /// `sph_active`. Default 0 (pretty first — the slider reveals the physics).
         render_blend: f64,
+        /// docs/42 Phase 2: the giant-impact crater on the pretty sphere. The impact site (an EARTH-RELATIVE
+        /// unit direction, captured from the GPU field at first Theia contact) and how open the bowl is (0→1,
+        /// grows as the shock excavates). `None` until contact. Persists after (bake-back — Robin's call).
+        gpu_impact_site: Option<glam::DVec3>,
+        gpu_crater_frac: f64,
     }
 
     // Moon-shot Stage A constants.
@@ -2784,6 +2789,8 @@ mod app {
                 sph_snapshot: Vec::new(),
                 sph_phase: SphPhase::Dynamics,
                 render_blend: 0.0, // pretty by default (docs/42)
+                gpu_impact_site: None,
+                gpu_crater_frac: 0.0,
             })
         }
 
@@ -3282,6 +3289,8 @@ mod app {
             self.sph_active = true;
             self.sph_snapshot.clear();
             self.sph_phase = SphPhase::Relaxing(0);
+            self.gpu_impact_site = None; // no crater until Theia makes contact (docs/42 Phase 2)
+            self.gpu_crater_frac = 0.0;
             self.focus = 1; // centre on Earth (the particle system sits at the display origin)
             self.camera.zoom = 0.4; // frame the impact (the Earth–Moon default zoom shows it as a speck)
         }
@@ -3867,8 +3876,32 @@ mod app {
             };
             let pretty_fade = if self.sph_active { (1.0 - self.render_blend) as f32 } else { 1.0 };
             let shell_spacing = pretty_r_surf * (4.0 * std::f64::consts::PI / SHELL_N as f64).sqrt();
-            let shell_grain_r = ((0.62 * shell_spacing) * pretty_scale) as f32 * pretty_fade;
-            let crater_r = 1.1 * self.hole_radius(); // the crater as it stands — healing shrinks it
+            // Grains overlap MORE while the GPU impact is live (0.90 vs 0.62 of the spacing) so the crust reads
+            // as opaque — the glowing interior then shows ONLY through the actual crater hole, not every crevice.
+            let grain_overlap = if self.sph_active { 0.90 } else { 0.62 };
+            let shell_grain_r = ((grain_overlap * shell_spacing) * pretty_scale) as f32 * pretty_fade;
+            // docs/42 Phase 2 — capture the giant-impact crater site from the GPU field: at first Theia (prov 1)
+            // contact with Earth (prov 0) freeze the impact DIRECTION (Earth-relative), then open the bowl over
+            // ~1 s. Persists after (bake-back). The bowl radius grows with `gpu_crater_frac` (set in the crater
+            // block below). `earth_center + dir·pretty_r_surf` lands it on the sub-scale surface, same frame as
+            // the shell grains, so the `hidden` test carves the crust exactly where Theia struck.
+            if self.sph_active && !self.sph_snapshot.is_empty() {
+                let (mut ec, mut me, mut tc, mut mt) = (glam::DVec3::ZERO, 0.0f64, glam::DVec3::ZERO, 0.0f64);
+                for p in &self.sph_snapshot {
+                    let pos = glam::DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
+                    let m = p.mass as f64;
+                    if p.prov == 0 { ec += pos * m; me += m; } else { tc += pos * m; mt += m; }
+                }
+                if me > 0.0 && mt > 0.0 {
+                    let (ec, tc) = (ec / me, tc / mt);
+                    if self.gpu_impact_site.is_none() && (tc - ec).length() < 1.3e7 {
+                        self.gpu_impact_site = (tc - ec).try_normalize(); // contact ≈ r_e + r_t (sub-scale)
+                    }
+                    if self.gpu_impact_site.is_some() {
+                        self.gpu_crater_frac = (self.gpu_crater_frac + 0.03).min(1.0);
+                    }
+                }
+            }
             // Camera eye in display coordinates (relative to the focus body) — the same construction
             // as view_proj, needed for the per-grain Rayleigh view path.
             let cp = self.camera.pitch.cos();
@@ -3889,10 +3922,16 @@ mod app {
             // material once the impact spun Earth up — a render-truth frame mismatch (the crater and the
             // matter it's cut from must share one frame). `impact_site_rel` was captured at spin_angle≈0, so
             // `spin_rot·rel` carries it forward with the crust.
-            let crater_site = if r_shattered {
-                self.impact_site_rel.map(|rel| earth_center + spin_rot * rel)
+            let (crater_site, crater_r) = if self.sph_active {
+                // GPU impact (docs/42 Phase 2): the frozen site on the sub-scale surface; the bowl opens with the shock.
+                match self.gpu_impact_site {
+                    Some(dir) => (Some(earth_center + dir * pretty_r_surf), self.gpu_crater_frac * 0.72 * pretty_r_surf),
+                    None => (None, 0.0),
+                }
+            } else if r_shattered {
+                (self.impact_site_rel.map(|rel| earth_center + spin_rot * rel), 1.1 * self.hole_radius())
             } else {
-                None
+                (None, 0.0)
             };
             // OBLATE figure: the spin flattens the planet (Radau–Darwin) — equator bulges (+f/3),
             // poles sink (−2f/3), volume-preserving to first order. At today's day it's 1/298
@@ -3964,15 +4003,25 @@ mod app {
             // crater exposes — the top of the outer core — glowing at its real temperature (docs/25).
             // The planet is not hollow; through the crater you see molten interior, not far-side crust.
             {
-                let ipos = ((earth_center - focus) * DISPLAY_SCALE).as_vec3();
+                let ipos = ((earth_center - focus) * pretty_scale).as_vec3();
                 // The interior must wear the SAME oblate figure as the shell, else at the post-impact
                 // ~13% flattening the poles sink below a perfect 0.985 R sphere and the interior pokes
                 // OUT through the crust at both poles (a render-truth bug). Ellipsoid: equator +f/3,
                 // poles −2f/3 about the spin axis — one non-uniform scale, oriented to the spin axis.
-                let ir = (EARTH_RADIUS_M * 0.985) * DISPLAY_SCALE;
+                // docs/42: sized to the sub-scale body + faded with the blend while the GPU impact is live.
+                let ir = (pretty_r_surf * 0.985) * pretty_scale * pretty_fade as f64;
                 let ir_eq = (ir * (1.0 + flat / 3.0)) as f32;
                 let ir_pol = (ir * (1.0 - 2.0 * flat / 3.0)) as f32;
                 let align = glam::DQuat::from_rotation_arc(glam::DVec3::Z, spin_axis);
+                // During the GPU giant impact the exposed interior is a MAGMA ocean (docs/42 Phase 2): a hot
+                // self-lit orange, ramping up as the crater opens — so the crater (and the melt showing between
+                // crust grains) reads as a molten post-impact Earth rather than the CPU scene's cool interior.
+                let (itint, iglow) = if self.sph_active {
+                    let g = 0.6 + 2.4 * self.gpu_crater_frac as f32; // brighter as the shock excavates
+                    ([0.20, 0.09, 0.05, 1.0], [1.0, 0.42, 0.12, g])
+                } else {
+                    (self.interior_tint, self.interior_glow)
+                };
                 write_space_uniform(
                     &self.queue,
                     &self.interior_uni,
@@ -3981,8 +4030,8 @@ mod app {
                         * Mat4::from_quat(align.as_quat())
                         * Mat4::from_scale(Vec3::new(ir_eq, ir_eq, ir_pol)),
                     earth_light,
-                    self.interior_tint,
-                    self.interior_glow, // outer-core iron: self-lit at its real temperature
+                    itint,
+                    iglow, // outer-core iron: self-lit at its real temperature (magma while impacting)
                 );
             }
             // CRATER WALL: grains on the carved bowl surface (the physical boundary hole), each wearing
@@ -4179,7 +4228,6 @@ mod app {
                 // The rigid-Earth + sphere-debris model draws only when the GPU SPH impact is NOT running
                 // (docs/33 stage 4c.4): with the deformable impact active, the particle field IS the planet.
                 if !self.sph_active {
-                    draw(&mut pass, &self.interior_uni, &self.sphere_gpu); // the glowing deep interior
                     for uni in self.wall_unis.iter() {
                         draw(&mut pass, uni, &self.sphere_gpu); // crater bowl wall (zero-scale when intact)
                     }
@@ -4197,6 +4245,8 @@ mod app {
                 // isn't fully at the physics end (its grains were sized to the SPH body + faded by 1−blend above,
                 // so they overlay the particle field and cross-fade to it).
                 if !self.sph_active || self.render_blend < 1.0 {
+                    // the glowing deep interior first (shows through the crater), then the crust shell over it
+                    draw(&mut pass, &self.interior_uni, &self.sphere_gpu);
                     for uni in self.shell_unis.iter() {
                         draw(&mut pass, uni, &self.sphere_gpu); // Earth: a shell of coarse grains
                     }
