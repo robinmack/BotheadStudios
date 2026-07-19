@@ -93,13 +93,22 @@ impl FlyCamera {
     pub fn view(&self, r_disp: f64, ds: f64, aspect: f64, ground_disp: f64) -> View {
         let (eye, fwd, up_view) = self.view_basis(r_disp, ds, ground_disp);
         let (up, north, east) = self.frame();
-        // NEAR keys off altitude ABOVE THE LOCAL GROUND (not total height): the nearest thing the camera can see
-        // is roughly `alt` below/ahead of it, so `near ∝ alt`. FAR reaches just past the horizon.
         let alt_disp = (self.alt_m * ds).max(1e-9);
-        let near = (alt_disp * 0.05).clamp(1e-6, 0.05);
         let h = (ground_disp + alt_disp).max(1e-9);
         let horizon = (h * (h + 2.0 * r_disp)).sqrt();
-        let far = (horizon * 1.4).max(near * 1000.0);
+        // FAR reaches just past the horizon (the farthest visible surface); not inflated beyond that (the old
+        // `.max(near*1000)` was), so the depth range stays tight.
+        let far = horizon * 1.4;
+        // NEAR: tuned for depth precision. At HIGH altitude the nearest visible surface is the point directly
+        // below the camera (~the altitude itself), so `near` can be a large fraction of it — a tight near/far
+        // range keeps the globe's far hemisphere cleanly depth-occluded (the globe is drawn without back-face
+        // culling; see the globe pipeline). Near the GROUND the cap can have terrain very close (down to
+        // `min_alt`), so `near` must stay tiny there. Blend by altitude (metres): ground regime below ~10 km,
+        // globe regime above ~60 km.
+        let t = ((self.alt_m - 10_000.0) / 50_000.0).clamp(0.0, 1.0);
+        let globe_regime = t * t * (3.0 - 2.0 * t);
+        let near_frac = 0.03 + 0.45 * globe_regime;
+        let near = (alt_disp * near_frac).clamp(1e-6, 0.5).min(far * 0.5);
         let proj = DMat4::perspective_rh(0.9, aspect.max(1e-3), near, far);
         let vp_abs = (proj * DMat4::look_at_rh(eye, eye + fwd, up_view)).as_mat4();
         let vp_rel = (proj * DMat4::look_at_rh(DVec3::ZERO, fwd, up_view)).as_mat4();

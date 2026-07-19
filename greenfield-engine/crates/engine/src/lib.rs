@@ -4550,7 +4550,10 @@ mod app {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
+                // docs/43: NO culling — the fly camera looking down saw the front-facing globe triangles
+                // culled (a growing black VOID at nadir on descent, the ~250 km bug). Convex globe → depth
+                // alone occludes correctly; robust regardless of winding, extra fragments are cheap.
+                cull_mode: None,
                 unclipped_depth: false,
                 polygon_mode: wgpu::PolygonMode::Fill,
                 conservative: false,

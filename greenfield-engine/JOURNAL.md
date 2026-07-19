@@ -5,6 +5,30 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-19 — FIX: the Terra "growing black void" on descent (Robin caught it) — globe back-face culling
+
+**What.** Robin: flying in toward Earth, a black circle appeared at nadir around ~250 km altitude and grew to fill
+the screen as he descended — "a void, I can see nothing through it." Root cause: the displaced globe was drawn
+with **back-face culling**, and the fly camera — sitting just above the surface looking *down* — had its near
+(front-facing) globe triangles culled, leaving the clear colour (the void); the limb (grazing triangles) still
+rendered, so it read as a growing disc. The Phase-3 orbital camera looked at the planet *centre* from far away and
+happened not to trip it, so it lay hidden until the fly camera shipped. Fix: **no culling for the globe/cap
+pipeline** — the globe is convex, so the depth buffer alone gives correct occlusion; drawing both sides is robust
+regardless of winding and costs only a few extra fragments. Also tightened the camera's near/far (dropped the
+`far = near×1000` inflation; `near` is now a large fraction of the altitude at height, tiny near the ground) so the
+globe's far hemisphere stays cleanly depth-occluded now that culling is off, and depth precision is far better.
+
+**Why it was invisible in the rig at first.** The headless software GPU (ANGLE/llvmpipe) tolerated the original
+setup; the bug showed on Robin's real GPU. Diagnosing it end-to-end (clip vs depth vs cull) in the rig — depth
+`Always` still voided, `cull_mode: None` filled it — pinned it to culling, and reproduced/fixed it in software.
+
+**Verified (rig `terra_depth`, xvfb).** Over the SUB-SOLAR point (fully day-lit nadir, so a void can't hide as
+night side): orbit 6000 km, 500/259/250/100/45 km, and 1.5 km all render the **full lit surface — no void**, with
+correct occlusion (near hemisphere only, no back-face bleed-through). `terra_globe`/`terra_fly` regression rigs
+clean (full Earth; W moves north, orbital drag orbits, ground drag free-looks). 173/173 fast tests green.
+
+---
+
 ## 2026-07-19 — Terra Phase 6: data-driven controls + HUD polish (the worlds-as-data controls contract)
 
 **What.** The Terra scene's key bindings now come from the WORLD FILE, not code: `world.controls.keys` maps a

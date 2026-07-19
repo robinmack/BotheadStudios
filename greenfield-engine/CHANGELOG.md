@@ -9,6 +9,10 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **FIX: Terra "growing black void" on descent** — the globe was back-face culled, so the fly camera looking down
+  from just above the surface culled the near (front-facing) triangles → a black void at nadir that grew on
+  descent (~250 km). The globe/cap now draw without culling (convex → depth occludes correctly), and the camera's
+  near/far were tightened so the far hemisphere stays cleanly depth-occluded.
 - **Terra data-driven controls + HUD (docs/43 Phase 6)** — key bindings now come from the world file
   (`controls.keys`: code → action), not code; `web/terra.ts` builds the input handler from it (WASD move + R/F
   climb/descend for Earth), and the HUD shows `world · altitude · lat/lon · biome · fps` with a controls hint
