@@ -9,11 +9,17 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
-- **VERIFIED ON METAL (iPad Pro / Apple GPU)** — the granular GPU step produces the same physics on
-  Metal as on Vulkan (total energy and max speed agree to 4 significant figures at N=60,000; no energy
-  injection at any N), confirming the four-separate-passes mitigation against a cross-backend race. The
-  M4 is also faster than a desktop RTX 2070 at every measured N (2.3× at N=1, 1.3× at N=60,000), and
-  sustains 10.3 ms/frame at `MAX_PARTICLES` — a ~97 fps physics ceiling on tablet hardware.
+- **VERIFIED ON METAL — iPad Pro (M4) and iPhone 15 Pro Max (A17 Pro)** — the granular GPU step
+  produces the same physics on Metal as on Vulkan across all three devices (`tot = 1.585e+7`,
+  `vmax = 30.945` at N=60,000; `4.179e-8` at N=1; no energy injection at any N), confirming the
+  four-separate-passes mitigation against a cross-backend race.
+- **Device-tier guidance: the practical particle budget depends on hardware tier, and rankings REVERSE
+  with N.** Apple hardware is latency-strong and wins below the knee — the iPhone beats a desktop
+  RTX 2070 by 2.0× at N=1 and 1.6× at N=1,000 — then loses above it (0.8× at N≥10,000). At
+  `MAX_PARTICLES` = 60,000: M4 10.3 ms/frame (~97 fps physics ceiling), A17 Pro 16.0 ms (~62 fps, with
+  nothing left for rendering). Budget roughly **30,000 grains on an A17-class phone** vs 60,000 on an
+  M4. Quote a device tier AND an N with any performance claim; a single benchmark point ranks these
+  devices wrong in one direction or the other.
 - **NEW `GpuProbe` (wasm) + `/gpu-probe.html` — cross-device GPU verification** — a compute-only probe
   that runs the real `particle_step.wgsl` through the real `GpuParticles` on whatever device opens the
   page (iPad / phone / desktop), reporting which adapter ran, per-frame cost across N = 1…60,000, and

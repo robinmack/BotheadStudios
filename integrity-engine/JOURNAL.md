@@ -5,6 +5,57 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-19 — iPhone 15 Pro Max: a latency/throughput CROSSOVER, and the same physics on a third device
+
+**What.** Third entry in the cross-vendor matrix (iPhone 15 Pro Max, A17 Pro, Metal), run through
+`/gpu-probe.html` on the LAN dev server.
+
+**Correctness — three devices, two backends, one answer.** At N=60,000 all of Vulkan/RTX 2070,
+Metal/M4 and Metal/A17 report `tot = 1.585e+7` and `vmax = 30.945`; at N=1 all report
+`tot = 4.179e-8`. No energy injection anywhere. The four-separate-passes race mitigation holds on
+every device tested.
+
+**The finding — a latency/throughput crossover between N=1,000 and N=10,000.**
+
+| N | 2070 (Vulkan) | M4 (Metal) | A17 Pro (Metal) | iPhone vs 2070 |
+|---|---|---|---|---|
+| 1 | 1.25 ms | 0.540 ms | 0.613 ms | **2.0× faster** |
+| 1,000 | 1.83 ms | 0.833 ms | 1.113 ms | **1.6× faster** |
+| 10,000 | 2.23 ms | 1.553 ms | 2.793 ms | 0.8× (slower) |
+| 60,000 | 13.40 ms | 10.317 ms | 16.017 ms | 0.84× (slower) |
+
+A phone BEATS a desktop discrete GPU below the knee and loses above it. The A17 Pro is the ideal probe
+for this because it has Apple's latency advantage with much less throughput, so the two effects
+separate. The ratios confirm the mechanism quantitatively — A17 Pro has a 6-core GPU vs the M4's 10
+(a 1.67× core ratio):
+
+- **N=60,000: M4/A17 = 1.55×** ≈ the core ratio ⇒ throughput-bound, core count predicts the gap.
+- **N=1: M4/A17 = 1.14×** ≪ the core ratio ⇒ latency-bound, core count nearly irrelevant.
+
+Same silicon family, same backend, two limiting regimes, crossover at the knee. This is the §7
+saturation-knee argument (`gpu-perf`) showing up as hardware ranking that REVERSES with N — a single
+benchmark point would have ranked these devices wrong in either direction depending on which N it
+happened to pick.
+
+**Product consequence — the phone's practical particle budget is well under `MAX_PARTICLES`.** At
+N=60,000 physics alone costs 16.0 ms, a ~62 fps ceiling with essentially nothing left for rendering
+inside a 16.67 ms frame. At 0.267 µs/particle, keeping physics to about half the frame budget implies
+roughly **30,000 grains on an A17-class phone** (vs 60,000 viable on the M4). Not a bug — a real
+device-tier limit to design scenes against.
+
+**This raises the priority of the O(table) grid clear.** Its ~0.53 ms/frame is FIXED regardless of N,
+so it is proportionally most expensive exactly where Apple hardware is otherwise strongest (small N),
+and it eats a bigger share of a tighter phone frame budget. The epoch-tag fix is output-neutral and
+now has a clear beneficiary.
+
+**Unchanged limits:** Safari masks every `GPUAdapterInfo` field to the literal string `apple` on this
+device too, so "A17 Pro" is the operator's knowledge of the hardware, not a probe measurement.
+`max_buffer_size` is 1024 MiB, same as the iPad — the N=60,000 run completed without hitting it
+(a prior concern that iOS Safari's tighter per-tab memory limits might kill the run did not
+materialise).
+
+---
+
 ## 2026-07-19 — FIRST NON-VULKAN RESULT: the engine's granular step runs correctly on Metal (iPad Pro)
 
 **What.** Ran `/gpu-probe.html` on an iPad Pro (M4) over the LAN HTTPS dev server. First time any part of
