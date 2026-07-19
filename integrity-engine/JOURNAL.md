@@ -302,6 +302,78 @@ N-comparison.
 
 ---
 
+## 2026-07-18 — Frame-cost breakdown + hardware analysis → DECISION: defer GPU Barnes–Hut (option B, docs/37)
+
+**What.** Followed the docs/37 GPU-BH finding with the measurement it was missing — a per-pass frame breakdown
+(`tools/impact-run bench`, `cargo run --release -- bench`) across N=2k…256k, so the A-vs-B call is quantitative.
+Timed each GPU pass of a force eval (`cs_density` is pure O(N) grid; `cs_forces` fuses O(N²) gravity + O(N)
+pressure) and calibrated a real-fps model against the two observed browser points.
+
+**Verified / measured (RTX 2070).** force_eval 2.2 ms @2k → 4.6 @8k → 16 @32k → 196 @128k → 700 @256k.
+Physics-only fps (16 evals/frame): 28 @2k, 13 @8k, 3.9 @32k, 0.3 @128k. real-fps = ~0.3× physics (render + the
+per-frame HUD read-back) — lands on the observed 2.8k→11 fps and 8.2k→4 fps. **Corrections to the earlier
+inference:** gravity is ~35 % of the frame at 8k rising to ~50 % by 32k (not the ~25 % I'd guessed), so it IS
+about half the physics cost — but the SPH grid+pressure is the co-equal other half, and the grid ALSO goes
+super-linear past 64k (fixed `TABLE_SIZE=65536` saturates). So even free gravity ~doubles fps at most, and BH
+still doesn't win below 128k. Interactive ceiling on the 2070 ≈ 12–15k; quadrupling the N=2.8k button → ~11k
+lands ~3–4 fps.
+
+**Hardware caveat (Robin's point — recorded for the revisit).** The 2070 is the *worst* case: (1) **unified
+memory** (M4/A18/Snapdragon) makes a CPU-`bhtree.rs` + GPU-SPH realtime hybrid viable with zero new GPU code
+(the CPU↔GPU copy is free; on our discrete PCIe-3 card it isn't → offline-only); (2) the BH crossover likely
+drops to ~30–60k on cache-rich / lower-FLOPS GPUs (unmeasured). Cheaper levers for more particles NOW (no GPU
+sort): fewer KDK substeps, grow `TABLE_SIZE` with N, lighter HUD read-back.
+
+**DECISION (Robin, 2026-07-18): option B — defer.** Keep direct O(N²) gravity everywhere; do NOT wire BH or
+build the GPU radix sort. Direct-sum is correct for every N we target; the sort is the most expensive remaining
+kernel with no near-term payoff. The verified BH crate is banked + re-verifiable. **docs/37 now carries the full
+write-up: frame table, hardware analysis, revisit triggers (high-N campaign OR Apple/mobile target), and a
+resume plan (build the GPU sort as a *reusable* primitive — it also unblocks GPU accretion + grid reorder).**
+`impact-run bench` mode committed. On branch `gpu-barnes-hut-verify` off `orbit-diagnostic`; nothing wired or
+deployed.
+
+---
+
+## 2026-07-17 — GPU Barnes–Hut built + verified; direct-sum wins below N≈128k → do NOT wire it in-browser (docs/37)
+
+**What.** Built the full GPU Barnes–Hut (LBVH) self-gravity solver spec'd in docs/36 — a standalone native-
+Vulkan crate `tools/gpu-bh-verify` + `shaders/bh_gravity.wgsl` with the whole pipeline as WGSL compute kernels
+(adaptive bbox via float-radix atomicMin/Max → 30-bit Morton → [interim CPU sort] → Karras binary-radix tree →
+atomic-free bottom-up COM → θ-traversal), each **verified against an independent CPU reference before the next
+was trusted**.
+
+**Why the design choices.** Opening criterion is the robust Salmon–Warren/Barnes MAC — AABB **diagonal** as the
+node size + centre↔COM offset δ — because a plain `maxside/dist<θ` on a *tight* box (the tight box is mandatory
+for resolution, docs/36) under-opens and left a 28 % worst-case particle; diagonal+δ keeps the tight box AND
+caps the error. Traversal runs in Morton order over a permuted `sbodies[]` so adjacent threads walk coherent
+paths with coalesced reads. Leaf bucketing parameterized (`bucket_k`).
+
+**Verified.** `cargo run --release` (RTX 2070) prints PASS for every stage: bbox **exact** (lossless u32
+encode), Morton **bit-exact** (coincident→equal), Karras tree structural (every leaf reached exactly once,
+parent/child consistent), COM root mass 1.0e-8 / COM 8.2e-8 (**the atomic children-ready climb is coherent on
+this hardware**), θ-traversal RMS **0.70 %** at θ=0.5 and **1.8e-6 as θ→0** (recovers the exact direct sum —
+the strong structural proof). The GPU direct-sum baseline itself matches CPU f64 to 2.4e-6.
+
+**The finding (disconfirms the docs/36 premise — no-fudge).** Per-eval GPU wall time, θ=0.5: BH overtakes GPU
+direct-sum only at **N≈128 000** (2.15×); below it direct-sum wins (N=8k: 0.89×, N=32k: 0.86×). Asymptotics are
+textbook — direct → O(N²) (p≈1.84), BH → O(N log N) (p≈1.0) — but the *crossover* is 128k. **Leaf bucketing
+(K=8/16/32) does not lower it** (buckets raise accuracy to RMS 6e-4 but cost more traversal time; K=1 has the
+lowest crossover). Reason: GPU direct N-body is the near-ideal GPU workload (lockstep broadcast reads, coalesced
+FMA, compute-bound), while BH trades cheap FLOPs for divergent memory-bound tree traversal; on the 2070 that
+only pays past ~128k. The browser runs N≤~20k and offline `impact-run` at N≈35k — **both far below 128k** — so
+wiring BH in-browser (docs/36 stage 8) would *reduce* fps. Also: gravity is only ~25 % of the browser frame at
+8k, so it isn't the fps lever regardless.
+
+**Recommendation + open decision.** Keep direct O(N²) gravity for N≤~100k. BH's real niche is **very-high-N
+offline convergence (N≳128k)** where it gives a growing speedup (≈9× at 512k extrapolated) — the only path
+where the isotopic-fraction scatter (docs/28 ceiling) could be beaten down. So: (A) pursue a converged number →
+build the GPU radix sort (docs/36 stage 3, the one hard kernel) + run `impact-run` at N≳128k with BH; or (B)
+defer — the verified crate is banked and re-verifiable. The GPU sort was deliberately **not** built (gated on
+this decision; most expensive kernel; only needed for option A). Full write-up: **`docs/37`**. Nothing wired,
+nothing deployed; on branch off `orbit-diagnostic`.
+
+---
+
 ## 2026-07-17 — Direct-sum gravity ceiling measured → GPU Barnes–Hut spec'd for a fresh session (docs/36)
 
 **What.** Measured how far the browser GPU impact's DIRECT O(N²) gravity scales before spec'ing the

@@ -1,0 +1,21 @@
+# Standalone (NOT a workspace member — its own [workspace] table) so the native Vulkan wgpu build never
+# leaks into the engine's browser (webgpu-only) wasm build via feature unification — same reason as
+# sph-verify / impact-run. Runs shaders/bh_gravity.wgsl on the box's RTX 2070 and VERIFIES a GPU
+# Barnes-Hut (LBVH) self-gravity solver against the GPU direct-sum (θ multipole error) and the CPU
+# bhtree.rs (docs/36). Exit code 0 = the GPU tree matches within the θ bound.
+[package]
+name = "gpu-bh-verify"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+wgpu = "24"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+
+[[bin]]
+name = "gpu-bh-verify"
+path = "src/main.rs"

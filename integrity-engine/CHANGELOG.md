@@ -291,6 +291,20 @@ because **we are our own first customers** and pin exact engine versions in our 
   `dig` carves a true Euclidean sphere (right volume, equal reach per axis, no lateral ejection bias).
   Each guard was verified non-vacuous by confirming it goes red under a deliberately anisotropic mutant.
 
+- **GPU Barnes–Hut solver, built + verified; measured NOT worth wiring in-browser** (`tools/gpu-bh-verify` +
+  `shaders/bh_gravity.wgsl`, `docs/36`→`docs/37`) — the full LBVH self-gravity pipeline (adaptive bbox → Morton
+  → interim CPU sort → Karras tree → atomic-free bottom-up COM → robust-MAC θ-traversal) as verified WGSL
+  compute kernels. Correctness proven stage-by-stage against CPU references (bbox exact, Morton bit-exact, tree
+  structural, COM <1e-6, θ=0.5 RMS 0.70 %, θ→0 recovers the exact direct sum). **Finding:** on the RTX 2070 GPU
+  direct-sum beats Barnes–Hut until **N≈128k** (BH is 0.6–0.9× at N≤32k); asymptotics are correct (direct
+  O(N²), BH O(N log N)) but the crossover sits far above the browser (N≤20k) and offline (N≈35k) regimes, so BH
+  would *reduce* in-browser fps. **Decision (2026-07-18): defer (option B)** — keep direct O(N²) gravity
+  everywhere; do not wire BH or build the GPU radix sort. A per-pass frame breakdown (`impact-run bench`, new)
+  quantified it: on the 2070 gravity is ~35–50 % of the frame across the browser range but SPH grid+pressure is
+  the co-equal half (and the grid saturates past 64k), interactive ceiling ~12–15k, all far below the 128k BH
+  crossover. Hardware caveat recorded: on unified-memory parts (M4/A18/Snapdragon) a CPU-`bhtree`+GPU-SPH
+  realtime hybrid needs zero new GPU code and the crossover likely drops. No engine physics changed; the
+  verified BH crate is banked. Full write-up + revisit triggers + resume plan in `docs/37`.
 ## [0.9.0] — 2026-07-09
 
 **Space band — you can now *watch* the Moon orbit.** The first rung of the scale-relative ladder
