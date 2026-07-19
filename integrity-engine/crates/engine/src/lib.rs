@@ -2341,6 +2341,13 @@ mod app {
             // Flat floor at voxel 0 — the probe measures the granular step, not terrain shape.
             parts.upload_heightfield(&self.queue, &vec![0i32; (PROBE_W * PROBE_W) as usize]);
 
+            // ρ₀ from the REAL material (basalt), matching `probe_params` and the spawn path — the
+            // grain carries density as Tillotson input (docs/38), so it must not be invented.
+            let rho0 = {
+                let mats = materials::load();
+                mats[materials::index_of(&mats, "basalt")].density
+            };
+
             // A cube of grains on the 1 m lattice, jittered for the same reason gpu-verify jitters: a
             // perfect lattice is metastable and will not flow, so an unjittered pile is not a
             // representative contact workload.
@@ -2354,13 +2361,15 @@ mod app {
                 };
                 grains.push(GpuParticle {
                     offset: [x as f32 + j(1), 8.0 + y as f32 + j(2), z as f32 + j(3)],
-                    temp: 300.0,
+                    // docs/38: the grain's thermodynamic state is specific internal energy, not
+                    // temperature — temp = u/c is derived. 300 K ambient, same as the spawn path.
+                    u: GRAIN_SPECIFIC_HEAT * 300.0,
                     vel: [0.0; 3],
                     resting: 0.0,
                     color: [0.5, 0.5, 0.5],
                     material: 0.0,
                     emission: [0.0; 3],
-                    _pad: 0.0,
+                    rho: rho0, // ρ₀ at spawn, from the real material (docs/38 4b.2 will compute it)
                 });
             }
             parts.append(&self.queue, &grains);
@@ -2471,6 +2480,13 @@ mod app {
                 c_normal_damp: normal_damp,
                 c_friction: bulk.friction_coefficient,
                 c_tangent_damp: CONTACT_TANGENT_DAMP,
+                // docs/38: the grain carries u = c·T, so the shader needs c to derive temperature.
+                // Same constant the production path passes (`gpu_step_params`) — the probe must not
+                // run a different thermodynamic conversion than the engine it is measuring.
+                specific_heat: GRAIN_SPECIFIC_HEAT,
+                _hp0: 0.0,
+                _hp1: 0.0,
+                _hp2: 0.0,
             }
         }
     }
