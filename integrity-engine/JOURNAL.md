@@ -3,6 +3,93 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+
+## 2026-07-19 — the probe gets real traction: terrain contact swapped onto the honest constraint
+
+**What.** `Engine::collide_probe_with_terrain` now resolves against `granular::terrain_contact_resolve`
+— the same non-injecting constraint the GPU grains use — instead of its own hand-rolled path. Deletes
+two fudges in one move: the tangential `p.vel.x *= 0.5; p.vel.z *= 0.5` velocity multiply, and the
+`DEAD: f64 = 0.15` dead-zone/half-correction hack. Adds `World::surface_bilinear_grad` returning
+`(h, ∂h/∂x, ∂h/∂z)`; `surface_height_bilinear` now delegates to it, so there is exactly ONE bilinear
+surface implementation on the CPU.
+
+**Why.** `vel *= 0.5` is a raw velocity scale — blind to the normal load, to μ, and to the surface
+itself. It cannot express traction, which is the whole content of driving: Coulomb friction bounded by
+`μ·jn`, i.e. a harder-pressed contact grips more. The constraint already implements exactly that, is
+unit-tested, and is hardware-verified (gpu-verify K/L/N) — it was simply only wired to grains. μ now
+comes from the terrain material's own datum, so ice is slippery because ice's data says so.
+
+The gradient is the load-bearing addition: without `∂h/∂x, ∂h/∂z` there is no surface normal, so a body
+on a slope was treated as sitting on a flat floor and there was no normal impulse to bound friction with.
+
+**Verified.**
+- 178 tests pass (was 174). Four new in `world.rs`: the height is byte-identical through the refactor;
+  the gradient matches a central difference of its own field; flat ground reports zero gradient; and
+  **friction responds to μ** — ice retains more speed than basalt through the same contact, which the
+  old multiplier could not express at any μ.
+- New rig `web/rig/probe_traction.mjs` (engine telemetry, not pixels), run against BOTH this branch and
+  a detached baseline worktree at `main` — because the claims below are comparative and would otherwise
+  be assumptions:
+
+  | | baseline (`main`) | this branch |
+  |---|---|---|
+  | settled altitude | 0.60 m | **0.50 m** = `PARTICLE_HALF` |
+  | time to settle | ~3.5 s | **~30 s** |
+  | probe integrity | 100% | **100%** |
+
+  **integrity 100% on both** — the bonds never broke, so the bounded velocity-decoupled projection does
+  not pump the lattice the way a hard snap would, and the dead zone is genuinely unnecessary rather than
+  merely removed. That was the regression risk and it is clear.
+
+**Also removes the probe's damping fudge.** `probe.damping = critically_damped(0.4)` — a ζ picked so the
+ball "settles rigidly" — is replaced by ζ derived from iron's own restitution via the new
+`granular::zeta_for_restitution` (factored out of `damping_for_restitution`, which now calls it, so bond
+damping and contact damping cannot drift apart). The old 0.4 implied e ≈ 0.254; iron's data says e = 0.6
+⇒ ζ ≈ 0.16, so the probe was modelled ~2.4× less bouncy than iron is.
+
+**Measured across three variants** (rig `probe_traction.mjs`, settle = first time the trace stays within
+0.05 m of its final value):
+
+| variant | settles | final alt | first rebound |
+|---|---|---|---|
+| `main` — fudged friction, ζ=0.4 | **6.5 s** | 0.6 m | 0.7 m (bounce crushed flat) |
+| honest friction, ζ=0.4 | **35.0 s** | 0.5 m | 4.5 m |
+| honest friction + honest ζ | **35.5 s** | 0.4 m | 3.9 m |
+
+Integrity **100% in all three** — the honest, lower damping did not destabilise the explicit integrator
+(the documented danger was OVER-damping, docs/23), so the stability concern behind ζ=0.4 was unfounded.
+
+**Three findings, two of which refuted what this entry first claimed.**
+
+1. **The resting height shift is the SURFACE, not the dead zone.** An earlier draft said the old
+   `DEAD = 0.15` let the probe rest "up to 0.15 m sunk". Measurement refutes it: baseline rests *higher*
+   (0.60 m). The probe now reads `surface_bilinear_grad` — four columns, bilinear, the SAME field the GPU
+   grains collide against — where it previously read a single `surface_top_voxel`. Probe and debris now
+   agree on where the ground is; they did not before. That is the real improvement.
+2. **The damping derivation costs ~no settle time**, and I predicted the opposite. 35.0 → 35.5 s is inside
+   the sampling interval, and the first rebound is *lower* (4.5 → 3.9 m): a springier lattice puts impact
+   energy into internal modes rather than one coherent bounce.
+3. **The tangential fudge was doing essentially all the settling work** — 6.5 s → 35.0 s at unchanged ζ.
+   `vel *= 0.5` per substep is a ~50%-per-step damper; it was not a small approximation to friction, it
+   was the mechanism that made the scene settle at all. Removing it exposes the lattice's real ringing.
+   **35 s is the honest settle time; 6.5 s never was one.** It was manufactured by a ~50%-per-substep
+   velocity damper standing in for friction — self-flagged in its own comment as *"crude; emergent
+   friction is future"*, i.e. known debt, not a design to preserve. So this is a behavioural CHANGE to a
+   deployed scene, not a regression against a correct baseline: nothing that depended on 6.5 s was
+   depending on physics. What is real is the consequence — anything assuming a quick settle
+   (de-resolution timing, UX) now faces a ~35 s transient, and bounding it belongs to the docs/44
+   demotion criterion (demote on *irrelevance* — contact stress below yield — not on silence), never to
+   re-tuning a dial back until the number looks familiar.
+
+**NOT verified — stated rather than implied.** Traction is demonstrated at the law level (unit test) and
+the fudge is gone, but nothing in the scene *drives*, so in-scene grip is unexercised. A probe dropped
+straight down produces no tangential load. That waits on a driven body.
+
+**Flagged.** μ is taken from the surface material alone; no pair-combining rule between a body's
+material and the ground's exists yet (the same gap `gpu_step_params` flags for mixed-material debris).
+The first sampling window (12 s) read the still-ringing transient as a failure to settle — the landing
+transient runs ~30 s, so `SAMPLES` is env-tunable on the rig.
+
 ---
 
 ## 2026-07-19 — iPhone 15 Pro Max: a latency/throughput CROSSOVER, and the same physics on a third device

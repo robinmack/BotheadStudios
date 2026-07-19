@@ -263,10 +263,21 @@ pub fn contact_dissipation(pi: DVec3, vi: DVec3, pj: DVec3, vj: DVec3, c: &Conta
 /// θ-solver in the shader adds a little numerical dissipation on top, so the realized restitution is
 /// somewhat below `e` (a documented approximation, verified by the bounce test in `tools/gpu-verify`).
 pub fn damping_for_restitution(e: f64, stiffness: f64) -> f64 {
+    2.0 * zeta_for_restitution(e) * stiffness.sqrt()
+}
+
+/// The DAMPING RATIO ζ a material's coefficient of restitution implies, for a linear spring-dashpot
+/// contact: `ζ = −ln(e) / √(π² + ln²e)`. This is the standard inversion of `e = exp(−ζπ/√(1−ζ²))`.
+///
+/// Factored out of [`damping_for_restitution`] (which now calls it) because ζ is needed on its own by
+/// callers whose damping coefficient carries different units — e.g. `Aggregate::critically_damped`
+/// works in force units and applies its own `√(k·m)` and coordination correction, whereas
+/// `damping_for_restitution` returns a per-unit-mass coefficient (`granular`'s stiffness is an
+/// acceleration per metre of overlap). Same physics, one implementation, so the two cannot drift.
+pub fn zeta_for_restitution(e: f64) -> f64 {
     let e = e.clamp(1.0e-3, 0.999);
     let l = -e.ln();
-    let zeta = l / (std::f64::consts::PI.powi(2) + l * l).sqrt();
-    2.0 * zeta * stiffness.sqrt()
+    l / (std::f64::consts::PI.powi(2) + l * l).sqrt()
 }
 
 /// Result of resolving one grain against the terrain: the corrected velocity and the position delta.

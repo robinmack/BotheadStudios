@@ -146,6 +146,21 @@ impl World {
     /// column top and never de-resolves, so the pile stacked on it can never peel down to voxels either
     /// (the "rubble that never returns to the grid" stall). Mirrors the shader by construction.
     pub fn surface_height_bilinear(&self, pos: Vec3) -> f32 {
+        self.surface_bilinear_grad(pos).0
+    }
+
+    /// The bilinear surface height AND its horizontal gradient `(h, ∂h/∂x, ∂h/∂z)` at `pos`.
+    ///
+    /// Same field as [`Self::surface_height_bilinear`] (which now delegates here, so there is exactly ONE
+    /// bilinear implementation on the CPU — the codebase's forked-path failure mode is what we are
+    /// avoiding). Mirrors `particle_step.wgsl::terrain_surface` by construction, including its
+    /// `mix(h10-h00, h11-h01, fz)` gradient form.
+    ///
+    /// The gradient is what makes an honest contact possible: the outward surface normal is
+    /// `(−∂h/∂x, 1, −∂h/∂z)` normalised, which is continuous across voxel edges (it never flips), so a
+    /// body on a SLOPE gets a real normal to resolve against instead of being treated as sitting on a
+    /// flat floor. Without it there is no normal load to bound Coulomb friction with — i.e. no traction.
+    pub fn surface_bilinear_grad(&self, pos: Vec3) -> (f32, f32, f32) {
         let c = self.center();
         let vx = pos.x + c.x;
         let vz = pos.z + c.z;
@@ -164,7 +179,10 @@ impl World {
         let fz = vz - cz as f32;
         let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
         let h = lerp(lerp(h00, h10, fx), lerp(h01, h11, fx), fz);
-        h - c.y - 0.5
+        // Cell spacing is 1 voxel, so the finite difference IS the derivative (no division).
+        let dhdx = lerp(h10 - h00, h11 - h01, fz);
+        let dhdz = lerp(h01 - h00, h11 - h10, fx);
+        (h - c.y - 0.5, dhdx, dhdz)
     }
 
     /// The BULK terrain surface height (centered coords) at horizontal `(x, z)` — the DEFAULT ground
@@ -697,6 +715,104 @@ fn fbm(x: f32, z: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::materials;
+
+    /// A flat test patch with one raised step, so the surface has a KNOWN gradient to check against.
+    fn stepped_world(mats: &[Material]) -> World {
+        let (w, h, d) = (8usize, 8usize, 8usize);
+        let rock = materials::index_of(mats, "basalt") as u16 + 1;
+        let mut voxels = vec![0u16; w * h * d];
+        for z in 0..d {
+            for x in 0..w {
+                // Left half 2 voxels deep, right half 3 — a single step at x == 4.
+                let top = if x < 4 { 2 } else { 3 };
+                for y in 0..top {
+                    voxels[y * w * d + z * w + x] = rock;
+                }
+            }
+        }
+        World { w, h, d, voxels, max_top: 3, water_mat: None }
+    }
+
+    /// The refactor that added `surface_bilinear_grad` must not have moved the surface: the height it
+    /// returns is byte-identical to what `surface_height_bilinear` reports (which now delegates to it).
+    /// Grains collide against this field on the GPU, so a shift here would silently move the ground.
+    #[test]
+    fn surface_grad_height_agrees_with_surface_height_bilinear() {
+        let mats = materials::load();
+        let w = stepped_world(&mats);
+        for i in 0..40 {
+            let p = Vec3::new(-3.0 + i as f32 * 0.17, 0.0, -2.0 + i as f32 * 0.11);
+            let (h, _, _) = w.surface_bilinear_grad(p);
+            assert_eq!(h, w.surface_height_bilinear(p), "height moved at {p:?}");
+        }
+    }
+
+    /// The gradient must actually differentiate the height field it is paired with — otherwise the
+    /// surface normal `(−∂h/∂x, 1, −∂h/∂z)` is wrong and every contact resolved against it is wrong.
+    /// Checked against a central difference of the SAME function (spacing 1 voxel ⇒ the finite
+    /// difference IS the derivative), away from the cell seams where the bilinear gradient is
+    /// piecewise-constant and a centred stencil would straddle two cells.
+    #[test]
+    fn surface_grad_matches_finite_difference_of_its_own_height() {
+        let mats = materials::load();
+        let w = stepped_world(&mats);
+        let hq = |x: f32, z: f32| w.surface_bilinear_grad(Vec3::new(x, 0.0, z)).0;
+        for &(x, z) in &[(-2.5f32, -1.5f32), (0.3, 0.25), (1.5, -0.75), (-0.4, 1.2)] {
+            let (_, dhdx, dhdz) = w.surface_bilinear_grad(Vec3::new(x, 0.0, z));
+            const E: f32 = 0.02;
+            let fd_x = (hq(x + E, z) - hq(x - E, z)) / (2.0 * E);
+            let fd_z = (hq(x, z + E) - hq(x, z - E)) / (2.0 * E);
+            assert!((dhdx - fd_x).abs() < 1e-3, "∂h/∂x {dhdx} vs fd {fd_x} at ({x},{z})");
+            assert!((dhdz - fd_z).abs() < 1e-3, "∂h/∂z {dhdz} vs fd {fd_z} at ({x},{z})");
+        }
+    }
+
+    /// A flat surface must report ZERO gradient, so the normal is straight up and a body resting on
+    /// level ground gets no spurious sideways push from the contact.
+    #[test]
+    fn flat_surface_has_zero_gradient() {
+        let mats = materials::load();
+        let w = stepped_world(&mats);
+        // Well inside the left (uniformly 2-deep) half, away from the step at x == 4.
+        let (_, dhdx, dhdz) = w.surface_bilinear_grad(Vec3::new(-2.5, 0.0, -1.5));
+        assert!(dhdx.abs() < 1e-6 && dhdz.abs() < 1e-6, "flat ground sloped: {dhdx}, {dhdz}");
+    }
+
+    /// TRACTION — the property the old `vel.x *= 0.5` fudge could not express at any μ.
+    /// Same slope, same approach velocity, two materials: ice (μ=0.05) must retain far more downslope
+    /// speed than basalt (μ=0.7), because Coulomb friction is bounded by μ·jn. A velocity multiply is
+    /// blind to μ and would give both the identical answer.
+    #[test]
+    fn friction_depends_on_material_mu_not_a_fixed_multiplier() {
+        let mats = materials::load();
+        let mu_ice = mats[materials::index_of(&mats, "ice")].friction_coefficient as f64;
+        let mu_rock = mats[materials::index_of(&mats, "basalt")].friction_coefficient as f64;
+        assert!(mu_ice < mu_rock, "test premise: ice must be slipperier than basalt");
+
+        // A body sliding along a 1:1 slope, driven into it (so there IS a normal impulse to bound
+        // friction with). dhdx = 1 ⇒ the surface climbs with +x.
+        let run = |mu: f64| {
+            let c = crate::granular::terrain_contact_resolve(
+                glam::DVec3::new(0.0, 0.0, 0.0),
+                glam::DVec3::new(2.0, -1.0, 0.0), // moving downslope-ish and into the surface
+                0.05, // surface just above the body's base ⇒ penetrating
+                1.0,
+                0.0,
+                0.0,
+                mu,
+                0.01,
+                f64::INFINITY,
+            );
+            assert!(c.hit, "test premise: the body must actually be in contact");
+            c.vel.length()
+        };
+        let v_ice = run(mu_ice);
+        let v_rock = run(mu_rock);
+        assert!(
+            v_ice > v_rock,
+            "ice (μ={mu_ice}) should keep more speed than basalt (μ={mu_rock}): {v_ice} vs {v_rock}"
+        );
+    }
 
     /// The declared cantilever reach for a material at gravity `g` (voxels ≈ m): the SAME derivation the
     /// support model uses, so the tests assert against the real physics, not a copied literal.
