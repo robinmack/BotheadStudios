@@ -9,3 +9,16 @@
 .idea/
 .vscode/
 *.log
+
+# Claude Code — MACHINE-LOCAL ONLY. Deliberately NOT a blanket `.claude/` ignore: shared config
+# (settings.json, skills/, commands/, agents/) is useful to anyone working on this repo with Claude
+# and SHOULD stay committable. Only the two machine-specific things are excluded:
+#   • worktrees/ are full recursive checkouts of this repo inside itself, complete with build
+#     artifacts. They are untracked, so a stray `git add -A` from the main checkout would stage the
+#     lot — this ignore is the guard against that.
+#   • settings.local.json is per-machine by Claude Code's own `.local.` convention (an accumulated
+#     Bash permission allowlist); on a PUBLIC repo it can also leak local paths and service names.
+# Neither is left unprotected: both are captured for disaster recovery by the PRIVATE infra repo
+# (~/workspace/domain_management/backup-infra.sh). Ignored here, backed up there.
+.claude/worktrees/
+.claude/settings.local.json
