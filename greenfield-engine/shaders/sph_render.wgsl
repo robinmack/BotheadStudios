@@ -6,7 +6,8 @@
 struct Cam {
   view_proj: mat4x4<f32>,
   origin: vec4<f32>, // xyz = Earth's display-space position ((earth_world − focus)·DISPLAY_SCALE)
-  params: vec4<f32>, // x = DISPLAY_SCALE (m → display units), y = billboard half-size (clip-space), z = unused
+  params: vec4<f32>, // x = DISPLAY_SCALE (m → display units), y = billboard half-size, z = ejecta radius (m),
+                     //   w = ejecta mote half-size (docs/42 Phase 3: thrown-off matter glows even at the pretty end)
 };
 @group(0) @binding(0) var<uniform> cam: Cam;
 
@@ -30,18 +31,26 @@ fn vs_main(@builtin(vertex_index) vi: u32,
   // Earth-relative metres → display units, offset to Earth's display position.
   let display = cam.origin.xyz + inst_pos * cam.params.x;
   var clip = cam.view_proj * vec4<f32>(display, 1.0);
-  // Billboard: offset the corner in clip space so every particle is a constant on-screen size.
-  clip.x = clip.x + c.x * cam.params.y * clip.w;
-  clip.y = clip.y + c.y * cam.params.y * clip.w;
+  // docs/42 Phase 3 — EJECTA: matter thrown beyond the remnant (radius > params.z) glows as a mote even at the
+  // pretty end, so the pretty sphere is wrapped in a real physics-driven ejecta plume. Remnant particles keep the
+  // blend-scaled size (params.y → 0 at the pretty end, so they hide behind the sphere). The mote size (params.w)
+  // wins for ejecta; a smooth ramp avoids a hard shell edge.
+  let ejecta = smoothstep(cam.params.z * 0.85, cam.params.z * 1.25, length(inst_pos));
+  let half = mix(cam.params.y, max(cam.params.y, cam.params.w), ejecta);
+  clip.x = clip.x + c.x * half * clip.w;
+  clip.y = clip.y + c.y * half * clip.w;
   var o: VOut;
   o.clip = clip;
   o.uv = c;
   // Provenance colour: Earth (prov 0) = warm rock, Theia (prov 1) = cool steel — so the mixing is visible.
+  var base: vec3<f32>;
   if (prov == 0u) {
-    o.color = vec3<f32>(0.72, 0.48, 0.30);
+    base = vec3<f32>(0.72, 0.48, 0.30);
   } else {
-    o.color = vec3<f32>(0.42, 0.55, 0.78);
+    base = vec3<f32>(0.42, 0.55, 0.78);
   }
+  // Freshly-ejected matter is incandescent — ramp toward a hot glow with the ejecta factor.
+  o.color = mix(base, vec3<f32>(1.6, 0.85, 0.35), ejecta * 0.7);
   return o;
 }
 

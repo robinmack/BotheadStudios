@@ -3849,9 +3849,11 @@ mod app {
                 let cam = crate::gpu_sph::SphCam {
                     view_proj: view_proj.to_cols_array_2d(),
                     origin: [origin.x, origin.y, origin.z, 0.0],
-                    // billboard half-size fades with the render blend (docs/42): 0 at the pretty end, full at
-                    // the physics end — the size cross-fade against the pretty Earth shell.
-                    params: [SPH_VIS_SCALE as f32, 0.013 * self.render_blend as f32, 0.0, 0.0],
+                    // billboard half-size fades with the render blend (docs/42): 0 at the pretty end, full at the
+                    // physics end. z/w (Phase 3): matter beyond ~6.5e6 m (just past the sub-scale remnant) is
+                    // EJECTA — it keeps a glowing mote size (0.006) even at the pretty end, so the sphere wears a
+                    // real ejecta plume.
+                    params: [SPH_VIS_SCALE as f32, 0.013 * self.render_blend as f32, 6.5e6, 0.006],
                 };
                 self.queue.write_buffer(&self.sph_cam.buf, 0, bytemuck::bytes_of(&cam));
             }
@@ -3875,6 +3877,13 @@ mod app {
                 (DISPLAY_SCALE, EARTH_RADIUS_M)
             };
             let pretty_fade = if self.sph_active { (1.0 - self.render_blend) as f32 } else { 1.0 };
+            // docs/42 Phase 3 — atmosphere MIST: the giant impact vaporizes rock into a thick, shocked vapor
+            // atmosphere, so the Rayleigh veil is boosted while the impact is live → a hazy, glowing limb.
+            let atm_tau_eff = if self.sph_active {
+                [self.atm_tau[0] * 2.6, self.atm_tau[1] * 2.6, self.atm_tau[2] * 2.6]
+            } else {
+                self.atm_tau
+            };
             let shell_spacing = pretty_r_surf * (4.0 * std::f64::consts::PI / SHELL_N as f64).sqrt();
             // Grains overlap MORE while the GPU impact is live (0.90 vs 0.62 of the spacing) so the crust reads
             // as opaque — the glowing interior then shows ONLY through the actual crater hole, not every crevice.
@@ -3965,8 +3974,8 @@ mod app {
                 let mu_v = dir.dot(v_dir);
                 let mu_s = dir.dot(sun_dir_earth);
                 let cos_th = v_dir.dot(sun_dir_earth);
-                let veil = crate::atmosphere::rayleigh_veil(mu_v, mu_s, cos_th, self.atm_tau, 22.0);
-                let tr = crate::atmosphere::rayleigh_transmit(mu_v, mu_s, self.atm_tau);
+                let veil = crate::atmosphere::rayleigh_veil(mu_v, mu_s, cos_th, atm_tau_eff, 22.0);
+                let tr = crate::atmosphere::rayleigh_transmit(mu_v, mu_s, atm_tau_eff);
                 let tint = [m.albedo[0] * tr[0], m.albedo[1] * tr[1], m.albedo[2] * tr[2], 1.0];
                 write_space_uniform(
                     &self.queue,
