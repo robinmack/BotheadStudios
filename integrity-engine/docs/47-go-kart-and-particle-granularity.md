@@ -45,6 +45,37 @@ distribution needs several, not one). The same rule at both ends:
 Nothing forces one number on the scene. The kart brings its own, the crater keeps its own, and the
 banishment path (§5) is what stops either from accumulating.
 
+### The acceleration structure has the same bug, and it must not be patched
+
+The spatial hash is `cell_size = 2.0 * CONTACT_RADIUS` (`lib.rs:1291`), one global value, with the
+invariant *"≥ contact diameter so contacts stay within ±1 cell"* (`particle_step.wgsl:32`). The obvious
+way to admit mixed sizes is to make that cell track the LARGEST grain. **Do not.** It survives a 2×
+ratio and collapses at 100×: a 1 m cell packed with 1 cm grains holds ~10⁶ of them, so every small
+grain's ±1-cell scan degenerates to O(N). That does not merely run slowly — it defeats the acceleration
+structure entirely, and at the span docs/46 commits to (a raindrop and a photosphere) it is absurd.
+
+It is the same mistake as a global particle size, one level up: **there is no global cell size either.**
+
+**The fix — a hierarchical hash, one grid per size class.** `cell_size(level) = base · 2^level`; a grain
+is inserted into the level whose cell is ≥ its own contact diameter. A pair is discovered exactly ONCE,
+at the finer of the two levels: each grain scans its own level ±1 cell and every **coarser** level ±1
+cell, never finer. O(1) per pair, no double-counting, no pair missed.
+
+**Why this stays affordable across the whole span, and why it is principled rather than a trick:** the
+cost is set by the number of POPULATED levels near a point, not by the size range the engine can
+represent — and that number is small (2–3) *because of* docs/13 and docs/44. Resolution follows the
+interaction, so centimetre grains exist only where something centimetre-scale is happening; 15 orders of
+magnitude are never live in one neighbourhood. The acceleration structure therefore ends up expressing
+docs/13's own sentence — *cost scales with what is observable from the current viewpoint, not with the
+size or contents of the universe* — instead of fighting it.
+
+**On the GPU this is smaller than it sounds:** fold `level` into the hash key — `hash(level, ix, iy, iz)`
+— keeping ONE table and the existing `cs_grid_clear`/`cs_grid_insert`/scan passes nearly intact, rather
+than N separate buffers. Each particle derives its level from its own radius. Note the convergence with
+the parked O(table) grid-clear item (`cs_grid_clear` already dispatches the full 262,144-cell table every
+substep regardless of N): the epoch/generation-tag fix already identified makes the clear free, which is
+what keeps a multi-level table from multiplying that fixed cost.
+
 ## 2. The kart at its own scale
 
 Real dimensions: 1.9 m long, 1.3 m wide, wheels 0.28 m diameter, tread ~12 cm wide.
