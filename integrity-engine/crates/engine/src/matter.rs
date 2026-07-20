@@ -1005,14 +1005,7 @@ mod tests {
 
         // Dig a single voxel of `mat` (an 8³ air world with one solid cell) and count detached grains.
         let dig_one = |mat: usize| -> usize {
-            let mut w = World {
-                w: 8,
-                h: 8,
-                d: 8,
-                voxels: vec![0; 8 * 8 * 8],
-                max_top: 4,
-                water_mat: None,
-            };
+            let mut w = World::from_voxels(8, 8, 8, vec![0; 8 * 8 * 8], 4, None);
             w.set_voxel(4, 3, 4, Some(mat));
             let hit = Vec3::new(4.5, 3.5, 4.5) - w.center(); // centered coords of that voxel
             let mut sim = MatterSim::new(64);
@@ -1032,14 +1025,7 @@ mod tests {
         let mats = materials::load();
         let basalt = materials::index_of(&mats, "basalt");
         // 8³ world, one solid basalt voxel at (4,3,4): the column's air-start is y=4.
-        let mut w = World {
-            w: 8,
-            h: 8,
-            d: 8,
-            voxels: vec![0; 8 * 8 * 8],
-            max_top: 4,
-            water_mat: None,
-        };
+        let mut w = World::from_voxels(8, 8, 8, vec![0; 8 * 8 * 8], 4, None);
         w.set_voxel(4, 3, 4, Some(basalt));
         let before = w.solid_count();
         let c = w.center();
@@ -1771,14 +1757,7 @@ mod tests {
         let grass = materials::index_of(&mats, "grass");
         // A support wall (column to base at x=0) with a 6-voxel grass overhang jutting over air at y0.
         let (w_, h_, d_) = (48usize, 24usize, 8usize);
-        let mut w = World {
-            w: w_,
-            h: h_,
-            d: d_,
-            voxels: vec![0u16; w_ * h_ * d_],
-            max_top: 16,
-            water_mat: None,
-        };
+        let mut w = World::from_voxels(w_, h_, d_, vec![0u16; w_ * h_ * d_], 16, None);
         let (y0, z0, len) = (15i32, 4i32, 6i32);
         for y in 0..=y0 {
             w.set_voxel(0, y, z0, Some(grass));
@@ -1845,14 +1824,7 @@ mod tests {
                 }
             }
         }
-        let mut w = World {
-            w: n,
-            h: n,
-            d: n,
-            voxels,
-            max_top: 2,
-            water_mat: None,
-        };
+        let mut w = World::from_voxels(n, n, n, voxels, 2, None);
         let mats = materials::load();
         let field = gravity::MassField::build(&w, &mats, 4);
 
@@ -1944,14 +1916,7 @@ mod tests {
         // Liquid: a pond yields to even a gentle impact (pebble in a pond) — σ≈0, so it splashes.
         let water = materials::index_of(&mats, "water");
         let n = 12usize;
-        let mut pond = World {
-            w: n,
-            h: n,
-            d: n,
-            voxels: vec![water as u16 + 1; n * n * n],
-            max_top: n,
-            water_mat: None,
-        };
+        let mut pond = World::from_voxels(n, n, n, vec![water as u16 + 1; n * n * n], n, None);
         let mut sp = MatterSim::new(200_000);
         let splash = sp.impact(&mut pond, &mats, Vec3::ZERO, Vec3::NEG_Y, 50.0);
         assert!(
@@ -1971,14 +1936,7 @@ mod tests {
         let sigma = mats[gi].fracture_strength; // Pa
         let n = 40usize;
         // Uniform granite, so the energy budget (not geometry) sets the crater — a clean bridge test.
-        let mut w = World {
-            w: n,
-            h: n,
-            d: n,
-            voxels: vec![gi as u16 + 1; n * n * n],
-            max_top: n,
-            water_mat: None,
-        };
+        let mut w = World::from_voxels(n, n, n, vec![gi as u16 + 1; n * n * n], n, None);
         let energy = 200.0 * sigma; // enough to excavate ~200 voxels
         let mut sim = MatterSim::new(200_000);
         let carved = sim.impact(&mut w, &mats, Vec3::ZERO, Vec3::NEG_Y, energy);
@@ -1998,14 +1956,7 @@ mod tests {
         let bi = materials::index_of(&mats, "basalt");
         let melt = mats[bi].thermal.as_ref().unwrap().melt_point;
         let n = 40usize;
-        let mut w = World {
-            w: n,
-            h: n,
-            d: n,
-            voxels: vec![bi as u16 + 1; n * n * n],
-            max_top: n,
-            water_mat: None,
-        };
+        let mut w = World::from_voxels(n, n, n, vec![bi as u16 + 1; n * n * n], n, None);
         let mut sim = MatterSim::new(500_000);
         // Enough energy that the concentrated core exceeds basalt's melting point.
         sim.impact(&mut w, &mats, Vec3::ZERO, Vec3::NEG_Y, 1.5e11);
@@ -2038,14 +1989,7 @@ mod tests {
         let bi = materials::index_of(&mats, "basalt");
         let boil = mats[bi].thermal.as_ref().unwrap().boil_point;
         let n = 40usize;
-        let mut w = World {
-            w: n,
-            h: n,
-            d: n,
-            voxels: vec![bi as u16 + 1; n * n * n],
-            max_top: n,
-            water_mat: None,
-        };
+        let mut w = World::from_voxels(n, n, n, vec![bi as u16 + 1; n * n * n], n, None);
         let mut sim = MatterSim::new(500_000);
         sim.impact(&mut w, &mats, Vec3::ZERO, Vec3::NEG_Y, 1.0e12);
         let hottest = sim

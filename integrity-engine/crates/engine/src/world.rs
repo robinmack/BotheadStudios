@@ -66,9 +66,37 @@ pub struct World {
     /// queries, and the terrain strata all continue to mean the solid ground beneath the sea. `None`
     /// for hand-built worlds (tests) and any world without an ocean.
     pub water_mat: Option<usize>,
+    /// **T0 — the persistent bulk field** (`w × d`, metres, added to the procedural relief).
+    ///
+    /// [`terrain_height`] is a PURE FUNCTION of position — procedural fbm, no state. That made T0
+    /// unwritable, which is why de-resolution had nowhere to put its result and `patch_resolved` could
+    /// only ever go one way: dig once and the whole 96 m patch stays voxels for the session
+    /// (docs/46 ledger item 6). docs/39 requires the opposite — *"T0 is a renderable persistent field —
+    /// bake-back writes real displacement/normals; a crater stays a crater."*
+    ///
+    /// This raster is that field: `bulk_height = terrain_height + displacement`. A crater baked back
+    /// here PERSISTS in the cheap representation after its voxels are freed, so the ground a body stands
+    /// on is the same ground whether or not that region is currently resolved.
+    ///
+    /// Zero-initialised, so an untouched world is exactly the procedural surface as before.
+    pub displacement: Vec<f32>,
 }
 
 impl World {
+    /// Assemble a world from an already-built voxel array, with T0 flat (an unmodified procedural
+    /// surface). Exists so that adding a field to `World` — as the T0 `displacement` raster was — does
+    /// not break every construction site; prefer this over a struct literal.
+    pub fn from_voxels(
+        w: usize,
+        h: usize,
+        d: usize,
+        voxels: Vec<u16>,
+        max_top: usize,
+        water_mat: Option<usize>,
+    ) -> Self {
+        World { w, h, d, voxels, max_top, water_mat, displacement: vec![0.0; w * d] }
+    }
+
     #[inline]
     pub fn idx(&self, x: usize, y: usize, z: usize) -> usize {
         (y * self.d + z) * self.w + x
@@ -194,7 +222,89 @@ impl World {
     /// the void. Smooth (no voxel rounding); the on-demand voxels only refine it locally around an impact.
     pub fn bulk_height(&self, x: f32, z: f32) -> f32 {
         let c = self.center();
-        terrain_height(x + c.x, z + c.z) - c.y
+        let (vx, vz) = (x + c.x, z + c.z);
+        terrain_height(vx, vz) + self.displacement_at(vx, vz) - c.y
+    }
+
+    /// The T0 displacement at a VOXEL-frame position, bilinearly sampled so the baked field is as smooth
+    /// as the procedural relief it adds to (a nearest-neighbour lookup would put a 1 m step at every cell
+    /// edge and the contact normal would flip across it). Zero outside the patch: the bulk continues
+    /// unmodified beyond the finite footprint.
+    pub fn displacement_at(&self, vx: f32, vz: f32) -> f32 {
+        if self.displacement.is_empty() {
+            return 0.0;
+        }
+        // Samples live at CELL CENTRES: entry (x,z) is the displacement at (x+0.5, z+0.5). Shift by half
+        // a cell before flooring so a lookup exactly at a cell centre returns that cell's value alone.
+        // Without this, sampling the centre of a freshly-baked column blends it 50/50 with a neighbour
+        // still at zero, and the ground drops by half the bake — a silent terrain shift.
+        let (sx, sz) = (vx - 0.5, vz - 0.5);
+        let (cx, cz) = (sx.floor() as i32, sz.floor() as i32);
+        let at = |x: i32, z: i32| -> f32 {
+            if x < 0 || z < 0 || x as usize >= self.w || z as usize >= self.d {
+                return 0.0;
+            }
+            self.displacement[z as usize * self.w + x as usize]
+        };
+        let (fx, fz) = (sx - cx as f32, sz - cz as f32);
+        let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+        lerp(
+            lerp(at(cx, cz), at(cx + 1, cz), fx),
+            lerp(at(cx, cz + 1), at(cx + 1, cz + 1), fx),
+            fz,
+        )
+    }
+
+    /// **Demote a column from voxels (T1) to the persistent field (T0).**
+    ///
+    /// Writes the column's current surface into `displacement` so `bulk_height` reproduces it EXACTLY,
+    /// then clears the voxels. The crater stays a crater; the compute does not.
+    ///
+    /// Returns the number of voxels freed, or `None` if the column is not bakeable (see
+    /// [`Self::column_is_bakeable`]) — a caller must not treat a refusal as "nothing to do", because the
+    /// column is still resolved and still costing.
+    ///
+    /// THE INVARIANT: the surface must not move. `displacement` is set to exactly the difference between
+    /// the voxel surface and the procedural relief, so a body resting on this ground before demotion
+    /// rests at the same height after it. Demotion is a change of REPRESENTATION, never of state — the
+    /// same discipline as `deposit_resting_grain`, which never deletes matter to lower a count.
+    pub fn demote_column_to_field(&mut self, x: i32, z: i32) -> Option<usize> {
+        if !self.column_is_bakeable(x, z) {
+            return None;
+        }
+        if x < 0 || z < 0 || x as usize >= self.w || z as usize >= self.d {
+            return None;
+        }
+        let top = self.surface_top_voxel(x, z).unwrap_or(0);
+        // The surface the voxels present (the same `-0.5` iso the mesher and the contact use).
+        let voxel_surface = top as f32 - 0.5;
+        // What the procedural relief alone would say here. The residual IS the displacement.
+        let procedural = terrain_height(x as f32 + 0.5, z as f32 + 0.5);
+        self.displacement[z as usize * self.w + x as usize] = voxel_surface - procedural;
+        let mut freed = 0usize;
+        for y in 0..top {
+            if self.material_at(x, y, z).is_some() {
+                self.set_voxel(x, y, z, None);
+                freed += 1;
+            }
+        }
+        Some(freed)
+    }
+
+    /// Can this column be DEMOTED to T0 — i.e. can the cheap heightfield represent its state?
+    ///
+    /// The mirror of docs/44's promotion test. Promotion asks "does the cheap model provably DIFFER from
+    /// the honest one?"; demotion asks "can the cheap model represent this WITHIN the bound?" A single
+    /// surface per column can be baked exactly. A column with a void beneath its top — a cave, an
+    /// overhang, an undercut crater lip — CANNOT: a heightfield has one height per column, so collapsing
+    /// it would silently delete the void and the matter bounding it. Those columns stay resolved, which
+    /// is the honest answer rather than a lossy one.
+    pub fn column_is_bakeable(&self, x: i32, z: i32) -> bool {
+        let Some(top) = self.surface_top_voxel(x, z) else {
+            return true; // empty column: nothing to bake, trivially representable
+        };
+        // Solid from the base up to `top` with no gaps ⇒ one surface ⇒ a heightfield can hold it.
+        (0..top).all(|y| self.is_solid(x, y, z))
     }
 
     /// Is a camera `eye` (in CENTERED coordinates, the frame `center()` maps to voxel space) in free
@@ -666,6 +776,9 @@ pub fn generate(materials: &[Material]) -> World {
         voxels,
         max_top,
         water_mat: Some(water_idx),
+        // T0 starts flat: a fresh world IS the procedural relief, unmodified. Every non-zero entry
+        // hereafter is a real, persisted deformation baked back from voxels.
+        displacement: vec![0.0; W * D],
     }
 }
 
@@ -716,6 +829,61 @@ mod tests {
     use super::*;
     use crate::materials;
 
+    /// DEMOTION MUST NOT MOVE THE GROUND. Bake a column into T0, free its voxels, and the bulk field
+    /// must report the SAME surface it did as voxels — otherwise a body standing there would step or
+    /// sink the instant its patch de-resolved, and "a world is a world" would be false across the
+    /// resolution boundary (docs/46).
+    #[test]
+    fn demoting_a_column_preserves_the_surface_it_presented() {
+        let mats = materials::load();
+        let mut w = generate(&mats);
+        let c = w.center();
+        for &(x, z) in &[(30i32, 30i32), (48, 48), (12, 70), (80, 20)] {
+            let before_top = w.surface_top_voxel(x, z).expect("column has ground");
+            let voxel_surface = before_top as f32 - 0.5 - c.y;
+            let freed = w.demote_column_to_field(x, z).expect("a generated column is bakeable");
+            assert!(freed > 0, "demotion should free the column's voxels");
+            assert!(w.surface_top_voxel(x, z).is_none(), "voxels must be gone after demotion");
+            // Sample the BULK field at the column centre, in centered coords.
+            let after = w.bulk_height(x as f32 + 0.5 - c.x, z as f32 + 0.5 - c.z);
+            assert!(
+                (after - voxel_surface).abs() < 1.0e-3,
+                "surface moved at ({x},{z}): voxels said {voxel_surface:.4}, field says {after:.4}"
+            );
+        }
+    }
+
+    /// A column the heightfield CANNOT represent — one with a void under its top (a cave, an undercut
+    /// crater lip) — must refuse to demote. Collapsing it would silently delete the void and the matter
+    /// bounding it, which is a lossy change of STATE masquerading as a change of representation.
+    #[test]
+    fn a_column_with_a_void_refuses_to_demote() {
+        let mats = materials::load();
+        let mut w = generate(&mats);
+        let (x, z) = (40, 40);
+        let top = w.surface_top_voxel(x, z).unwrap();
+        assert!(w.column_is_bakeable(x, z), "an intact generated column is bakeable");
+        // Hollow out a cell well below the surface -> a void the single-height field cannot express.
+        w.set_voxel(x, top - 4, z, None);
+        assert!(!w.column_is_bakeable(x, z), "a column with a void is NOT bakeable");
+        assert!(w.demote_column_to_field(x, z).is_none(), "demotion must refuse, not silently flatten");
+        assert!(w.surface_top_voxel(x, z).is_some(), "the refused column keeps its voxels");
+    }
+
+    /// T0 starts flat: an untouched world is EXACTLY the procedural relief, so adding the field changed
+    /// nothing until something is baked into it.
+    #[test]
+    fn untouched_world_bulk_equals_procedural_relief() {
+        let mats = materials::load();
+        let w = generate(&mats);
+        let c = w.center();
+        for i in 0..25 {
+            let (x, z) = (-30.0 + i as f32 * 2.4, 20.0 - i as f32 * 1.7);
+            let expect = terrain_height(x + c.x, z + c.z) - c.y;
+            assert_eq!(w.bulk_height(x, z), expect, "T0 must start flat at ({x},{z})");
+        }
+    }
+
     /// A flat test patch with one raised step, so the surface has a KNOWN gradient to check against.
     fn stepped_world(mats: &[Material]) -> World {
         let (w, h, d) = (8usize, 8usize, 8usize);
@@ -730,7 +898,7 @@ mod tests {
                 }
             }
         }
-        World { w, h, d, voxels, max_top: 3, water_mat: None }
+        World::from_voxels(w, h, d, voxels, 3, None)
     }
 
     /// The refactor that added `surface_bilinear_grad` must not have moved the surface: the height it
@@ -824,14 +992,7 @@ mod tests {
     /// horizontal cantilever beam of `mat`, `len` voxels long, jutting in +x at height `y0` over air.
     fn overhang_world(mat: usize, len: i32, y0: i32) -> World {
         let (w, h, d) = (48usize, 24usize, 8usize);
-        let mut world = World {
-            w,
-            h,
-            d,
-            voxels: vec![0u16; w * h * d],
-            max_top: y0 as usize + 1,
-            water_mat: None,
-        };
+        let mut world = World::from_voxels(w, h, d, vec![0u16; w * h * d], y0 as usize + 1, None);
         let z0 = (d / 2) as i32;
         // Support wall: a full column to the base at x=0, so its top voxel at y0 is DIRECTLY supported.
         for y in 0..=y0 {
@@ -1430,7 +1591,7 @@ mod tests {
 
         // A pure x-slope: column x=3 tops out low (voxel top = 5), x=4 tops out high (voxel top = 10).
         let (w, h, d) = (8usize, 16usize, 8usize);
-        let mut world = World { w, h, d, voxels: vec![0u16; w * h * d], max_top: 10, water_mat: None };
+        let mut world = World::from_voxels(w, h, d, vec![0u16; w * h * d], 10, None);
         for z in 0..d as i32 {
             for y in 0..5 {
                 world.set_voxel(3, y, z, Some(0)); // solid 0..=4 ⇒ surface_top_voxel = 5

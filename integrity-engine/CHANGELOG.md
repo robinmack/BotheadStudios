@@ -9,6 +9,11 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **T0 is now a persistent field** — `World.displacement` (a `w × d` raster) is added to the procedural
+  relief, so terrain deformation can be baked back and PERSIST after its voxels are freed. Adds
+  `demote_column_to_field`, `column_is_bakeable` (refuses columns with voids, which a heightfield cannot
+  represent), and `World::from_voxels`. Untouched worlds are byte-identical to before. Substrate only —
+  no caller yet.
 - **NEW material: `rubber`** (tyre tread compound) — ρ=1150, E=7 MPa, ν=0.49 (nearly incompressible, so a
   contact patch spreads rather than compresses), μ=0.9, restitution 0.5, ductility 4.5. Deliberately
   carries **no `thermal` block**: rubber does not melt, it pyrolyses, so melt point has no honest value

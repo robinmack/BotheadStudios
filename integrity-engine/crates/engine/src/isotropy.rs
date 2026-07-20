@@ -37,27 +37,14 @@ fn ball_world(n: usize, radius: f32, mat: usize) -> World {
             }
         }
     }
-    World {
-        w: n,
-        h: n,
-        d: n,
-        voxels,
-        max_top: n, // makes center() = (n/2, n/2, n/2): a symmetric frame
-        water_mat: None,
-    }
+    // max_top = n makes center() = (n/2, n/2, n/2): a symmetric frame.
+    World::from_voxels(n, n, n, voxels, n, None)
 }
 
 /// A fully solid cube world of `mat` (`n`³). `max_top = n` puts the centre at the cube's middle, so
 /// a dig at centered-coords origin lands on the symmetric lattice point `n/2`.
 fn solid_world(n: usize, mat: usize) -> World {
-    World {
-        w: n,
-        h: n,
-        d: n,
-        voxels: vec![mat as u16 + 1; n * n * n],
-        max_top: n,
-        water_mat: None,
-    }
+    World::from_voxels(n, n, n, vec![mat as u16 + 1; n * n * n], n, None)
 }
 
 /// Unit sample directions: the six face axes plus the edge- and corner-diagonals. If the field were

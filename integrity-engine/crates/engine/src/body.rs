@@ -132,14 +132,7 @@ mod tests {
                 }
             }
         }
-        World {
-            w,
-            h,
-            d,
-            voxels,
-            max_top: 4,
-            water_mat: None,
-        }
+        World::from_voxels(w, h, d, voxels, 4, None)
     }
 
     /// A world that is solid for x < 4 (a wall / half-space), air elsewhere.
@@ -153,14 +146,7 @@ mod tests {
                 }
             }
         }
-        World {
-            w,
-            h,
-            d,
-            voxels,
-            max_top: 8,
-            water_mat: None,
-        }
+        World::from_voxels(w, h, d, voxels, 8, None)
     }
 
     /// Deepest penetration of the sphere into any solid voxel (0 = not overlapping).
