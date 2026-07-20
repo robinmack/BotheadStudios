@@ -1,5 +1,9 @@
 # Scale-relative simulation — observer-relative fidelity
 
+> **The promise this serves now lives in `docs/46` (the charter), which states the span it commits to —
+> a star's photosphere and a raindrop on a flower petal, same engine, and the user can see both. This doc
+> is the ARCHITECTURE for meeting it; the charter is where the commitment is read before adding physics.**
+>
 > The engine's north-star architecture. Both **simulation** and **rendering** cost should scale with
 > what is *observable from the current viewpoint*, not with the size or contents of the universe. You
 > drill in and detail appears; you pull back and it collapses into a summary. You never need the exact

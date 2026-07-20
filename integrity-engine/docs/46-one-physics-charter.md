@@ -4,6 +4,28 @@
 > This is the product, not an aesthetic preference about code structure. An engine that answers the same
 > physical question two different ways in two different scenes has broken its promise, however good each
 > answer looks on its own.
+>
+> **The span that promise commits to, stated as the acceptance test:** simulate a **star's photosphere
+> and generate a solar flare**, or **a raindrop on a flower petal**, with the *same engine* — without
+> reinventing or re-coding anything. It should fall out of the scale a scene is viewed at and the action
+> occurring in it. **And the player must be able to SEE both.** That is ~15 orders of magnitude with no
+> scene-specific branch on either the physics side or the render side.
+>
+> Judge every change against it: **if it would need re-coding to work at another scale, it is the wrong
+> change** — however good the result looks in the scene it was written for. A new per-scene code path is
+> a failure even when it ships something beautiful.
+
+The mechanism for this is `docs/13-scale-relative-simulation.md` (*"both simulation and rendering cost
+should scale with what is observable from the current viewpoint … detail emerges continuously: star
+field → planet disk → landscape → terrain → the rock → its grains"*), with `docs/44` (resolution
+EXTENT — how much to resolve) and `docs/47` §1 (resolution GRANULARITY — how fine). This charter states
+the promise; those state how it is met, and the split is deliberate — restating their content here would
+itself be two answers to one question. **Neither axis is built yet**, and that is the single largest gap
+between this promise and the code: docs/44 self-audits as unimplemented (`MATERIALIZE_CAP = 14.0` still
+clips the derived footprint at `lib.rs:878`), and granularity is design-only — the GPU `Particle` struct
+has no size field and `part_half` is a per-dispatch uniform, so two grain scales cannot coexist in one
+scene. A tyre contact patch needs centimetre grains in the same world a meteor uses metre grains; until
+that lands, the span above is a promise the code cannot yet keep.
 
 This doc exists so the ledger below is **read, not rediscovered**. Every session so far has re-derived
 some part of it from scratch. `docs/32 §4` maps the forks structurally; this doc states the *rule* that
