@@ -3,6 +3,35 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-20 — binding a repr(C) mirror to the shader that actually reads the bytes (docs/47 Hazard 0)
+
+**What.** `tools/gpu-verify` now has a test that parses `shaders/particle_step.wgsl` and asserts its
+`#[repr(C)] Particle` matches the shader's `struct Particle` field-for-field, in order, plus a 64-byte
+stride check. Partial: this binds ONE of the two Rust mirrors.
+
+**Why.** Per-particle radius (docs/47 item 3) grows the particle struct from 64 to 80 bytes, and that
+layout is declared three times with disjoint coverage — `GpuParticle` inside `#[cfg(wasm32)] mod app`
+(native `cargo test` never compiles it), `gpu-verify`'s standalone replica (native only), and the WGSL
+(the runtime authority, checked by neither). A change can pass the native suite AND gpu-verify and still
+be wrong in the browser. `cargo check --target wasm32-unknown-unknown` does not close it: rustc never
+sees the shader, so field ORDER drifts silently. **This has already fired** — `gpu-verify`'s own comment
+records `drag_cd` arriving as 0.0 from a drifted mirror, drag quietly a no-op.
+
+**A plan correction, found by reading the file rather than reasoning about it.** The version merged in
+#28 said to delete gpu-verify's replica and import the engine's declaration. Its Cargo.toml says why that
+is wrong: gpu-verify is deliberately NOT a workspace member, carrying its own `[workspace]` table so its
+native Vulkan `wgpu` build cannot leak into the engine's WebGPU-only wasm build via cargo feature
+unification. So two mirrors are PERMANENT — which is safe precisely because each is pinned to the same
+authority. Pinned to one shader, they cannot drift from each other.
+
+**Verified.** The test passes; and it was confirmed to have teeth by swapping `vel`/`resting` in the
+mirror list, which fails it, then reverting. gpu-verify's suite green.
+
+**Open — the plan is NOT finished.** Still to do: move `GpuParticle`/`GpuStepParams` out of
+`#[cfg(wasm32)] mod app` into a natively-compiled module so the PRODUCTION mirror is under `cargo test`
+at all, then give it the same shader cross-check. Only after both mirrors are bound should the struct
+grow to 80 bytes. The engine-side mirror — the one that actually ships — remains unbound today.
+
 ## 2026-07-19 — the axle: a wheel that spins without the engine knowing what rotation is (docs/47 §2)
 
 **What.** New `crate::axle` — the revolute joint docs/47 §3 specified, as a constraint rather than a

@@ -1420,3 +1420,59 @@ fn pass(ok: bool) -> &'static str {
 fn min_max(it: impl Iterator<Item = f32>) -> (f32, f32) {
     it.fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)))
 }
+
+#[cfg(test)]
+mod layout_tests {
+    //! **Bind this crate's `#[repr(C)]` mirror to the shader that actually interprets the bytes.**
+    //!
+    //! `shaders/particle_step.wgsl` is the authority: the GPU reads the buffer through ITS `struct
+    //! Particle`, and no compiler checks any Rust declaration against it. A mirror that drifts fails
+    //! SILENTLY — no error, just wrong physics. That is not hypothetical here; see the `drag_cd` note in
+    //! `Params` above, where a drifted field arrived as 0.0 and drag became a quiet no-op.
+    //!
+    //! The engine keeps its own separate mirror (`GpuParticle`, inside `#[cfg(wasm32)] mod app`), and it
+    //! must stay separate: this crate is deliberately NOT a workspace member, so its native Vulkan wgpu
+    //! build cannot leak into the engine's WebGPU-only wasm build through cargo feature unification.
+    //! Two mirrors are therefore permanent — which is safe precisely because each is pinned to the SAME
+    //! authority. Pinned to one shader, they cannot drift from each other (docs/47 "Hazard 0").
+
+    /// Field names, in declaration order, of a `struct <name>` block in the WGSL source.
+    fn wgsl_struct_fields(src: &str, name: &str) -> Vec<String> {
+        let head = format!("struct {name} {{");
+        let start = src.find(&head).unwrap_or_else(|| panic!("no `{head}` in the shader"));
+        let body = &src[start + head.len()..];
+        let end = body.find('}').expect("unterminated struct in the shader");
+        body[..end]
+            .lines()
+            .filter_map(|l| {
+                // Strip comments, then take `name : type,` — the field name is before the colon.
+                let l = l.split("//").next().unwrap_or("").trim();
+                let (field, _) = l.split_once(':')?;
+                let field = field.trim();
+                (!field.is_empty()).then(|| field.to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_particle_mirror_matches_the_shader_field_for_field() {
+        let src = include_str!("../../../shaders/particle_step.wgsl");
+        let shader = wgsl_struct_fields(src, "Particle");
+        // This crate's `#[repr(C)] struct Particle`, in declaration order. Update BOTH or neither.
+        let mirror = ["offset", "u", "vel", "resting", "color", "material", "emission", "rho"];
+        assert_eq!(
+            shader,
+            mirror,
+            "the repr(C) mirror has drifted from shaders/particle_step.wgsl. Field ORDER is what \
+             matters: the GPU reinterprets the bytes silently, so a swap here is wrong physics with \
+             no error. Fix the mirror and this list together."
+        );
+        // Size is the other half: 8 fields packed as four vec4s = 64 bytes. A field added without a
+        // matching pad changes the stride and every particle after the first reads shifted memory.
+        assert_eq!(
+            std::mem::size_of::<crate::Particle>(),
+            64,
+            "particle stride changed; the shader's struct and this mirror must grow together"
+        );
+    }
+}
