@@ -62,10 +62,22 @@ express a slope between 0° and 45°, so enforcing repose at one cell with no al
 soil in the DB flat. Over `r` cells it dilutes to `1/r` — at the 8-cell baseline, ~3.6° above gravel's
 true 40°. The sub-voxel surface retires it; a bigger baseline only buys O(r²) sandpaper.
 
+**Measured against `regolith-horizon` itself (docs/45 §8), and it corrects this entry's own first claim.**
+Stacking regolith's `world.rs` on this work and stabilising repeatedly gives **`[1466, 0, 0, 0, 0, 0]`** —
+converges on the first call, zero on every later one, mass conserved. The unbounded slide is gone, and the
+law discriminates by material exactly as it should: of 1,466 grains, **870 dirt, 580 grass, 16 gravel** —
+dirt (φ=28.8°) fails where the cohesionless gravel beneath it (φ=40°) holds. **But regolith is still not
+mergeable, for a different reason:** those grains come off *undisturbed* ground. A slope census finds
+8-cell drops to **10 m (51°)** against gravel's 7.72 m allowance, while the profile lays a uniform 6 m
+mantle over all of it. A uniform soil mantle is not physical on ground steeper than the soil's repose —
+regolith's own comment says "thin on steep or glaciated ground"; the generator does not implement it.
+**The blocker moved from "terrain cannot hold a slope" to "the generator places soil that cannot stand",**
+and the fix is slope-tapered thickness in world generation, not here. Burial on that world is 2.00 m
+(101/1,466), the same symptom.
+
 **Open.** docs/45 §6's *emergent agreement* test (grain pile vs terrain slope reaching the same angle)
 stays blocked on grain-side rolling resistance, per the doc. Nothing was tuned to make the halves agree.
-On the live meteor scene this is near a no-op (76 → 0 grains) because that world is genuinely stable; it
-earns its keep on the cohesionless material `regolith-horizon` introduces, which it now unblocks.
+On the live meteor scene this is near a no-op (76 → 0 grains) because that world is genuinely stable.
 
 ## 2026-07-19 — the architecture map had gone stale enough to assert that existing physics was absent
 

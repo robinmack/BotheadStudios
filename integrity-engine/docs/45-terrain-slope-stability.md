@@ -191,6 +191,40 @@ a no-op (76 grains shed before, 0 now), because that world is a 1 m grass skin o
 are genuinely stable — which is §2's own point. The change earns its keep on cohesionless material, which
 is precisely what `regolith-horizon` introduces.
 
+## 8. Measured against `regolith-horizon` — the landslide is gone, but regolith is NOT yet mergeable
+
+Verified directly, by stacking regolith's `world.rs` (the graded profile; its `matter.rs`
+cascading-slump half is superseded by this doc) on top of this work and measuring. **The claim "docs/45
+unblocks regolith" was too strong, and this is the corrected version.**
+
+**What this doc delivers, confirmed on the real profile.** Repeated stabilisation of the regolith world
+gives `[1466, 0, 0, 0, 0, 0]` grains — **it converges on the first call and every later call is exactly
+zero**, with mass conserved. The unbounded slide the regolith branch hit (308→339 and climbing, 8-voxel
+face after 12 rounds) does not happen. The law also discriminates *correctly by material*: of the 1,466
+grains shed, **870 are dirt, 580 grass, and only 16 gravel** — dirt (φ = 28.8°) fails exactly where the
+cohesionless gravel beneath it (φ = 40°) holds, which is the right ordering and is strong evidence the φ
+term is doing real work rather than firing indiscriminately.
+
+**What still blocks regolith, and it is not this doc.** Those 1,466 grains come off **undisturbed
+ground**: the world is generated *out of equilibrium*. A slope census of the natural relief shows 8-cell
+drops up to **10 m (51°)**, with 22 at 9 m and 34 at 8 m, against gravel's allowance of 7.72 m — and the
+profile lays a uniform 6 m mantle (grass 1 / dirt 2 / gravel 3) over all of it regardless of slope. A
+uniform-thickness soil mantle is not a physical object on ground steeper than the soil's own repose
+angle. **The regolith commit's own comment already knows this** — "thin on steep or glaciated ground" —
+the generator just does not implement it.
+
+**The fix belongs in world generation, not here:** regolith thickness should taper with slope (soil
+production versus transport), so material is never *placed* where it cannot stand. Two alternatives were
+considered and are worse: running a settling pass at generation time dumps ~1,466 grains into a debris
+shower on load, and simply accepting the shedding means every scene begins by relaxing terrain the
+generator should not have built. Related: grain burial on this world is **2.00 m** (101 of 1,466 grains),
+over the 1.2 m tolerance — a symptom of the same thing, since material shed from a mantle lands where
+neighbouring columns still stand.
+
+So the ledger reads: **the landslide is fixed and regolith's blocker has moved** — from "terrain cannot
+hold a slope" to "the generator places soil on slopes that cannot hold it", which is a smaller and much
+better-specified problem than the one this doc was written to solve.
+
 ---
 
 **Related:** docs/22 (de-resolution), docs/23 (granular contact — where μ already IS the repose angle),
