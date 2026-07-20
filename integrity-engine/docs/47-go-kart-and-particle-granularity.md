@@ -61,13 +61,25 @@ is inserted into the level whose cell is ≥ its own contact diameter. A pair is
 at the finer of the two levels: each grain scans its own level ±1 cell and every **coarser** level ±1
 cell, never finer. O(1) per pair, no double-counting, no pair missed.
 
-**Why this stays affordable across the whole span, and why it is principled rather than a trick:** the
-cost is set by the number of POPULATED levels near a point, not by the size range the engine can
-represent — and that number is small (2–3) *because of* docs/13 and docs/44. Resolution follows the
-interaction, so centimetre grains exist only where something centimetre-scale is happening; 15 orders of
-magnitude are never live in one neighbourhood. The acceleration structure therefore ends up expressing
-docs/13's own sentence — *cost scales with what is observable from the current viewpoint, not with the
-size or contents of the universe* — instead of fighting it.
+**Why this stays affordable across the whole span.** Cost is set by the number of NON-EMPTY levels in
+range, not by the size range the engine can represent. **Do not assume that number is small.** An
+earlier draft of this section claimed "2–3", which was asserted and never measured; a scene with a
+planet, terrain, regolith, a chassis and a tyre patch is already at five or six, and nothing bounds it
+there. The structure must be O(non-empty levels) with **no hardcoded cap**, and must skip an empty level
+in O(1) via per-level occupancy. If a scene wants ten levels, ten levels must work.
+
+**What actually bounds it is the REPRESENTATION LADDER, not a scarcity of scales.** Extreme size ratios
+never meet inside the contact solver. A 1 cm grain never contact-tests against a 10⁶ m body, because at
+that separation of scale the large thing is not particles at all — it is a T0 field, a heightfield, or
+an orbital body. They interact across representation boundaries (grain ↔ voxel ↔ field ↔ body), each
+crossing a bounded ratio. **The hash only ever sees the ratios that coexist as PARTICLES at the same
+instant**, which is set by the resolution policy (docs/13, docs/44), not by the span of the universe.
+An infinite universe has infinite scales; the particle representation holds only the ones something is
+actively doing physics at. That is docs/13's real claim — *cost scales with what is observable from the
+current viewpoint, not with the size or contents of the universe* — and it is load-bearing here.
+
+**Measure it, do not assert it.** Instrument the populated-level count per region in a real scene before
+sizing anything around it. The number above was guessed once already and was wrong.
 
 **The levels are DYNAMIC, because the observer moves.** This is not a fixed two-tier scheme for "big
 grains and small grains" — it is the structure that lets docs/13's descent work: *"falling from orbit,
