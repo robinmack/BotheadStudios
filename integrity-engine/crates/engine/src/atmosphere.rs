@@ -88,6 +88,51 @@ pub fn gas_column_accel(spacing: f64, rs_t: f64) -> f64 {
     rs_t / spacing.max(1.0e-9)
 }
 
+/// **Air density at altitude `h` above the surface** (kg/m³) — the barometric profile, derived.
+///
+/// `ρ(h) = ρ₀·exp(−h/H)` with `ρ₀ = P₀/(R_s·T)` and `H = R_s·T/g`. Nothing here is chosen:
+/// - `P₀` is [`crate::planet::Planet::surface_pressure`], which is **emergent** — the declared
+///   atmosphere's own mass times gravity, over the planet's area (`5.15e18 kg` for Earth, its real value).
+/// - `R_s` comes from air's real molar mass in the material DB.
+/// - `H` is [`scale_height`], the same function the settling-column test proves the dynamics converge to.
+///
+/// This is the DECLARED (docs/46 §1) static form of the atmosphere: isothermal, hydrostatic, no weather.
+/// **The resolved computation it stands in for is [`AirField`]** — SPH gas parcels whose density is
+/// whatever the flow makes it — so it is deletable exactly when parcels are affordable in the region
+/// concerned. Until then it gives a body something real to move through, rather than the vacuum that
+/// followed deleting the old `DRAG` fudge.
+pub fn air_density_at(surface_pressure: f64, air: &Material, temp_k: f64, g: f64, h: f64) -> f64 {
+    let rs = specific_gas_constant(air);
+    if rs <= 0.0 || temp_k <= 0.0 || surface_pressure <= 0.0 {
+        return 0.0; // airless body, or air with no characterised molar mass — vacuum, honestly
+    }
+    let rho0 = surface_pressure / (rs * temp_k);
+    let scale_h = scale_height(air, temp_k, g);
+    if scale_h <= 0.0 {
+        return rho0;
+    }
+    rho0 * (-h.max(0.0) / scale_h).exp()
+}
+
+/// **Drag acceleration** (m/s², opposing motion) on a body of cross-section `area` and mass `mass`
+/// moving at `vel` through air of density `rho`: the quadratic law `F = ½·ρ·v²·C_d·A`.
+///
+/// Quadratic (not linear) because everything this engine throws around — ejecta, meteors, a kart — is
+/// firmly in the high-Reynolds regime where inertial drag dominates viscous. Returns an ACCELERATION so
+/// it composes with the per-mass force convention the granular law already uses.
+///
+/// `c_d` is a DECLARED shape factor with its IOU: the resolved computation is the pressure field of
+/// [`AirField`] parcels flowing around the body, which yields the same force without anyone naming a
+/// coefficient. Deletable when the flow around that body is resolved.
+pub fn drag_accel(rho: f64, vel: glam::DVec3, area: f64, mass: f64, c_d: f64) -> glam::DVec3 {
+    let speed = vel.length();
+    if speed <= 1.0e-12 || rho <= 0.0 || mass <= 0.0 {
+        return glam::DVec3::ZERO;
+    }
+    let f = 0.5 * rho * speed * speed * c_d * area; // N, along −v̂
+    -(f / mass) * (vel / speed)
+}
+
 /// The 3D generalization of the column (docs/26): an SPH air FIELD. Density is estimated by a cubic
 /// spline kernel over neighbours, pressure is the ideal gas P = ρ·R_s·T (isothermal v0, flagged), and
 /// the symmetric pressure force  a_i = −Σ_j m_j (P_i/ρ_i² + P_j/ρ_j²) ∇W  conserves momentum exactly by
@@ -401,6 +446,77 @@ mod tests {
     }
 
     #[test]
+    /// The derived barometric profile must reproduce the REAL atmosphere, at altitudes anyone can check.
+    /// Nothing here is fitted: surface pressure is the declared air mass's own weight (planet.rs), R_s is
+    /// air's real molar mass, and H is the same scale_height the settling-column test converges to. If
+    /// this matches the standard atmosphere to within the isothermal approximation's honest error, the
+    /// engine has a real medium rather than a number.
+    #[test]
+    fn the_derived_air_density_profile_matches_the_real_atmosphere() {
+        let mats = materials::load();
+        let air = &mats[materials::index_of(&mats, "air")];
+        let earth = crate::planet::earth();
+        let p0 = earth.surface_pressure();
+        let g = earth.gravity_at(earth.radius());
+        let t = 288.0; // ISA sea-level temperature
+
+        // Sea level: the real value is 1.225 kg/m^3.
+        let rho0 = air_density_at(p0, air, t, g, 0.0);
+        assert!(
+            (rho0 - 1.225).abs() < 0.06,
+            "sea-level air density {rho0:.3} should be ~1.225 kg/m^3 (from {p0:.0} Pa emergent surface pressure)"
+        );
+
+        // One scale height up, density must fall by exactly 1/e — that IS the barometric law.
+        let h = scale_height(air, t, g);
+        assert!((7500.0..9500.0).contains(&h), "Earth scale height {h:.0} m should be ~8.4 km");
+        let rho_h = air_density_at(p0, air, t, g, h);
+        assert!(
+            (rho_h / rho0 - std::f64::consts::E.recip()).abs() < 1.0e-9,
+            "one scale height must be exactly 1/e"
+        );
+
+        // Monotone decreasing, and effectively vacuum by the Karman line.
+        let mut prev = rho0;
+        for km in 1..=20 {
+            let r = air_density_at(p0, air, t, g, km as f64 * 1000.0);
+            assert!(r < prev, "density must fall monotonically with altitude");
+            prev = r;
+        }
+        assert!(air_density_at(p0, air, t, g, 100_000.0) < 1.0e-4, "≈vacuum at the Karman line");
+    }
+
+    /// An AIRLESS body gives exactly zero density and therefore exactly zero drag — the Moon
+    /// (`atmosphere_mass: 0.0`) must not acquire an atmosphere by accident.
+    #[test]
+    fn an_airless_body_has_no_air_and_no_drag() {
+        let mats = materials::load();
+        let air = &mats[materials::index_of(&mats, "air")];
+        let moon = crate::planet::moon();
+        let rho = air_density_at(moon.surface_pressure(), air, 288.0, moon.gravity_at(moon.radius()), 0.0);
+        assert_eq!(rho, 0.0, "an airless body must have zero air density");
+        let a = drag_accel(rho, glam::DVec3::new(1000.0, 0.0, 0.0), 1.0, 10.0, 1.0);
+        assert_eq!(a, glam::DVec3::ZERO, "no air ⇒ no drag, exactly");
+    }
+
+    /// Drag opposes motion, scales as v², and never adds energy — the property the deleted `DRAG` fudge
+    /// could not guarantee (it was a blanket per-step multiply).
+    #[test]
+    fn drag_opposes_motion_scales_quadratically_and_only_removes_energy() {
+        let v = glam::DVec3::new(30.0, -10.0, 5.0);
+        let a1 = drag_accel(1.225, v, 1.0, 100.0, 1.0);
+        assert!(a1.dot(v) < 0.0, "drag must oppose motion");
+        // Double the speed ⇒ four times the force.
+        let a2 = drag_accel(1.225, v * 2.0, 1.0, 100.0, 1.0);
+        assert!(
+            (a2.length() / a1.length() - 4.0).abs() < 1.0e-9,
+            "quadratic: {}x for 2x speed", a2.length() / a1.length()
+        );
+        // Applied over any positive dt, speed strictly decreases — never a rebound, never a gain.
+        let after = v + a1 * 0.01;
+        assert!(after.length() < v.length(), "drag must only remove kinetic energy");
+    }
+
     fn airs_declared_constants_give_the_real_gas_constant_and_scale_height() {
         let mats = materials::load();
         let air = &mats[materials::index_of(&mats, "air")];

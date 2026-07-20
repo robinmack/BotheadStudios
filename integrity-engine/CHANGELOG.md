@@ -9,6 +9,11 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Air is now something to move through** — `atmosphere::air_density_at` (barometric profile, derived
+  from the planet's *emergent* surface pressure, air's real molar mass and the verified `scale_height`)
+  and `atmosphere::drag_accel` (quadratic `½ρv²C_dA`). Sea level reproduces 1.225 kg/m³; an airless body
+  gets exactly zero drag. Not yet wired into any scene — see JOURNAL for the two-source pressure bug that
+  must be fixed first.
 - **T0 is now a persistent field** — `World.displacement` (a `w × d` raster) is added to the procedural
   relief, so terrain deformation can be baked back and PERSIST after its voxels are freed. Adds
   `demote_column_to_field`, `column_is_bakeable` (refuses columns with voids, which a heightfield cannot
