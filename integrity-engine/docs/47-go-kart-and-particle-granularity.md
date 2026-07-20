@@ -180,6 +180,19 @@ atomicAdd force to both), which restores the coarser-only scan — but float `at
 race-decided and would undo the determinism fix. Deterministic scatter (per-cell reduction or
 sort-then-segment) is the real next step; until then mixed-size is correct and gated off by default.
 
+**`max_level` is PER-FRAME and DYNAMIC — not a mode, and NOT a limit on changing size over time.** This
+is the point most likely to be misread (it was, in review): it is the number of size classes coexisting
+in one neighbourhood at one instant, recomputed every frame. Descending orbit→ground changes particle
+size FREELY — the resolution policy demotes coarse grains and resolves finer ones under the camera, so
+the live set is ~one scale per frame and `max_level` stays low (the cheap path). The bench's slow case is
+a WIDE size ratio interacting AS CONTACTS at the same time and place (a 1 cm tyre patch on 0.5 m debris),
+which the descent does not produce — even the coarse↔fine resolution boundary only puts ADJACENT levels
+(2×, ~1 level) in contact, benched at ~3× not 21×. So the grid does not lock particle size; it makes
+size-change-over-time cheap and only wide simultaneous ratios expensive. Caveat, and it is NOT the grid:
+the resolution POLICY that drives the descent (demote coarse / resolve fine per view, docs/13 + docs/44)
+is largely unbuilt — demotion is safe but nothing triggers it, and extent still clips at
+`MATERIALIZE_CAP`. The grid is ready for the descent; the policy is the missing piece.
+
 **On the GPU this is smaller than it sounds:** fold `level` into the hash key — `hash(level, ix, iy, iz)`
 — keeping ONE table and the existing `cs_grid_clear`/`cs_grid_insert`/scan passes nearly intact, rather
 than N separate buffers. Each particle derives its level from its own radius. Note the convergence with

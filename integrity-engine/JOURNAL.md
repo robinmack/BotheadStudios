@@ -36,7 +36,7 @@ and coarser — the O(1)-per-pair cost `grid::pairs_within` achieves on the CPU.
 fixed hours ago.** Deterministic scatter is possible (per-cell reduction, or sort-then-segment) but is a
 real design task, not a patch.
 
-**Status, stated honestly.** Uniform-size is production-ready and free. Multi-level is CORRECT (G0) and
+**Status, stated honestly.** Single-scale-per-frame (max_level low) is production-ready and free. Multi-level is CORRECT (G0) and
 now MEASURABLE, but too slow for wide size ratios until the gather is replaced. It ships behind
 `max_level = 0` (every live scene), so nothing in production pays the cost today. The next step is the
 deterministic-scatter design, scoped by these numbers rather than guessed.
