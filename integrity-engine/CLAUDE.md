@@ -45,7 +45,12 @@ is being refactored toward is [`docs/33-architecture-realignment.md`](docs/33-ar
 
 ## Hard rules (do not violate)
 
-1. **Work in your worktree** (`.claude/worktrees/.../integrity-engine`), never the main checkout.
+1. **Work directly in the main checkout on a feature branch** — `~/workspace/BotheadStudios`. Do NOT
+   create git worktrees. (This reversed on 2026-07-19: worktrees existed to isolate parallel agents, and
+   this is a single-developer project that is not doing multi-agent work. They cost a duplicated
+   `node_modules` per tree, a shared stash stack that different sessions can pop out from under each
+   other, and branches that quietly diverge in directories nobody is looking at.) Branch, commit, push,
+   PR — never commit to `main` directly.
 2. **NEVER run `cargo fmt`** — the crate isn't rustfmt-conformant; it reformats the whole tree. Edit by
    hand. (`CONTRIBUTING.md` says otherwise for outside contributors; the working rule is do-not-run.)
 3. **Test:** `bash scripts/test.sh --fast [filter]` (inner loop) · full `bash scripts/test.sh` before any
