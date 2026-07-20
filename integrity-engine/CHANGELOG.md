@@ -9,6 +9,16 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Hierarchical spatial hash on the GPU (docs/47 §1) — grains of different size can now find each
+  other.** `cell_size(level) = base_cell·2^level`, one table, level folded into the hash key; the force
+  gather walks every populated level. `Params` gains `base_cell`/`max_level` with **no struct-size
+  change** (reuses reserved padding; layout guards confirm). At `max_level = 0` — every live scene — the
+  walk collapses to the old ±1 scan and output is **bit-identical** to the flat grid. `gpu-verify` gains a
+  cross-level contact scene (G0) and a production-N mixed-size bench. **Measured limitation:** the
+  multi-level gather is ~21× slower at 5 levels / N=60k (117 ms vs 5.5 ms uniform, RTX 5060 Ti), because a
+  big grain must scan the fine level to find its neighbours; the fix (deterministic symmetric scatter) is
+  scoped but not built, so mixed-size is correct-but-slow and gated off by default.
+
 - **The GPU granular step is now RUN-TO-RUN DETERMINISTIC.** New `cs_grid_sort` pass orders each spatial-
   hash bucket by particle index between insert and force accumulation. `cs_grid_insert` took its slot from
   `atomicAdd`, so bucket order was decided by thread race; `cs_forces` summed contacts in that order and

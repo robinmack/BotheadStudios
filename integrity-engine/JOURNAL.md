@@ -3,6 +3,48 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-20 — the hierarchical grid on the GPU: correct at every scale, and measured to be slow
+
+**What.** `particle_step.wgsl` gained a hierarchical spatial hash — `cell_size(level) = base_cell·2^level`,
+level folded into the hash key, one table. Insert at the grain's own level; the force GATHER walks every
+populated level. `Params` gained `base_cell`/`max_level` (reusing the reserved `_hp1`/`_hp2` slots, so NO
+struct-size change — the layout guards confirm it). `gpu-verify` gained scene **G0** (boulder vs pebble,
+3 levels apart) and a **production-N mixed-granularity BENCH**.
+
+**Why plumbing became capability here.** With `max_level = 0` the level walk collapses to the old ±1 scan
+and the output is **bit-identical** to the flat grid (verified end-to-end, only possible because
+determinism landed first). Above 0, grains of different size find each other for the first time.
+
+**The measurement, which changed the conclusion.** I was about to call this "mixed granularity works". The
+bench says: correct, but the multi-level GATHER is expensive, and the cost is inherent, not a bug.
+Fine-dominated distribution (half the grains at each successive coarser level), RTX 5060 Ti, 24 reps,
+per-frame GPU time (SUBSTEPS batched into one encoder, the engine's pattern):
+
+| N | uniform (max_level 0) | 3 levels | 5 levels |
+|---|---|---|---|
+| 10,000 | 2.6 ms | 7.3 ms | 49 ms |
+| 60,000 | 5.5 ms | 16.4 ms | **117 ms** |
+
+Uniform matches the pre-hierarchy grid (~0.09 µs/particle at 60k). Five levels is **~21× slower**.
+
+**The cause, understood.** In a gather each grain finds its own neighbours, so a BIG grain must scan the
+FINE level to see its many small neighbours — `(r_big/r_fine)³` cells, most of them empty or inside the
+big grain. That is intrinsic to gather + wide size ratio. The cheaper route is symmetric SCATTER (compute
+each pair once from the fine grain, write force to both), which lets a big grain scan only its own level
+and coarser — the O(1)-per-pair cost `grid::pairs_within` achieves on the CPU. **But scatter needs float
+`atomicAdd` into the force buffer, whose order is race-decided — reintroducing exactly the nondeterminism
+fixed hours ago.** Deterministic scatter is possible (per-cell reduction, or sort-then-segment) but is a
+real design task, not a patch.
+
+**Status, stated honestly.** Single-scale-per-frame (max_level low) is production-ready and free. Multi-level is CORRECT (G0) and
+now MEASURABLE, but too slow for wide size ratios until the gather is replaced. It ships behind
+`max_level = 0` (every live scene), so nothing in production pays the cost today. The next step is the
+deterministic-scatter design, scoped by these numbers rather than guessed.
+
+**Verified.** Engine 223/223; wasm clean; `gpu-verify` D0 + G0 pass, uniform scenes bit-identical to the
+flat grid, run-to-run bit-identical; shader runs on the RTX 5060 Ti. G0 confirmed to have teeth (setting
+`max_level = 0` makes the cross-level contact vanish and the scene fail).
+
 ## 2026-07-20 — GPU determinism: the spatial hash was summing forces in race order
 
 **What.** New `cs_grid_sort` pass puts every hash bucket in a canonical (particle-index) order between

@@ -1312,8 +1312,11 @@ mod app {
                 c_tangent_damp: CONTACT_TANGENT_DAMP,
                 specific_heat: GRAIN_SPECIFIC_HEAT,
                 drag_cd: DRAG_CD_CUBE,
-                _hp1: 0.0,
-                _hp2: 0.0,
+                // docs/47 §1: level-0 cell = today's single cell size, and max_level 0 because every
+                // grain is currently the same size — so the hierarchical walk collapses to the old
+                // ±1 scan bit-identically. Mixed sizes raise max_level.
+                base_cell: 2.0 * CONTACT_RADIUS,
+                max_level: 0,
             }
         }
 
@@ -2546,8 +2549,11 @@ mod app {
                 // run a different thermodynamic conversion than the engine it is measuring.
                 specific_heat: GRAIN_SPECIFIC_HEAT,
                 drag_cd: DRAG_CD_CUBE,
-                _hp1: 0.0,
-                _hp2: 0.0,
+                // docs/47 §1: level-0 cell = today's single cell size, and max_level 0 because every
+                // grain is currently the same size — so the hierarchical walk collapses to the old
+                // ±1 scan bit-identically. Mixed sizes raise max_level.
+                base_cell: 2.0 * CONTACT_RADIUS,
+                max_level: 0,
             }
         }
     }
