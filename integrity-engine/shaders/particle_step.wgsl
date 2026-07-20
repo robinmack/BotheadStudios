@@ -66,6 +66,10 @@ struct Particle {
     material : f32,
     emission : vec3<f32>,
     rho      : f32,       // density (kg/m³) — the other Tillotson input. Placeholder ρ₀ until 4b.2 computes it.
+    radius   : f32,       // THIS grain's contact radius (m) — docs/47 §1. Not a global constant: granularity
+                          // follows the interaction (metre grains for ejecta, ~1 cm for a tyre patch), so the
+                          // size must travel WITH the particle rather than in the per-dispatch uniform.
+    _p0 : f32, _p1 : f32, _p2 : f32,  // pad to a 5th 16-byte row; reserved (a cached grid level goes here)
 };
 
 // Per-grain contact accumulation for the directional implicit velocity solve: the total contact force,
@@ -144,11 +148,11 @@ fn accum_tensor(acc : ptr<function, Accum>, n : vec3<f32>, g : f32) {
 // attraction that fades over a small gap. Sets how far a bonded pair can be pulled before the bond lets go.
 const COH_RANGE : f32 = 0.15;
 
-fn contact_accel(pi : vec3<f32>, vi : vec3<f32>, pj : vec3<f32>, vj : vec3<f32>) -> Accum {
+fn contact_accel(pi : vec3<f32>, vi : vec3<f32>, ri : f32, pj : vec3<f32>, vj : vec3<f32>, rj : f32) -> Accum {
     var acc = zero_accum();
     let d = pi - pj;
     let dist = length(d);
-    let touch = 2.0 * P.c_radius;
+    let touch = ri + rj; // NOT 2*radius: the pair may differ in size (mirrors granular::contact_force)
     // Cohesion EXTENDS the interaction range: grains attract within COH_RANGE of touching, not only when
     // overlapping. Beyond that the bond has let go (separated).
     if (dist >= touch + COH_RANGE || dist < 1.0e-9) { return acc; }
@@ -216,6 +220,7 @@ fn cs_forces(@builtin(global_invocation_id) gid : vec3<u32>) {
     if (i >= P.count) { return; }
     let pi = particles[i].offset;
     let vi = particles[i].vel;
+    let r_i = particles[i].radius;
     let base = cell_of(pi);
     var acc = zero_accum();
     // HEADROOM: the free gap (m) to the nearest grain resting ABOVE this one, measured along the terrain
@@ -236,7 +241,7 @@ fn cs_forces(@builtin(global_invocation_id) gid : vec3<u32>) {
                     let j = grid_bucket[h * P.bucket_k + s];
                     if (j == i) { continue; }
                     let pj = particles[j].offset;
-                    let c = contact_accel(pi, vi, pj, particles[j].vel);
+                    let c = contact_accel(pi, vi, r_i, pj, particles[j].vel, particles[j].radius);
                     acc.force = acc.force + c.force;
                     acc.s_diag = acc.s_diag + c.s_diag;
                     acc.s_off = acc.s_off + c.s_off;
@@ -246,7 +251,7 @@ fn cs_forces(@builtin(global_invocation_id) gid : vec3<u32>) {
                     // centre distance), so it never lets the projection open a new overlap.
                     let dj = pj - pi;
                     if (dot(dj, tn) > 0.0) {
-                        headroom = min(headroom, max(length(dj) - 2.0 * P.c_radius, 0.0));
+                        headroom = min(headroom, max(length(dj) - (r_i + particles[j].radius), 0.0));
                     }
                 }
             }
@@ -345,9 +350,9 @@ struct TerrainHit {
     dpos : vec3<f32>, // position correction along the surface normal (bounded, no velocity written)
     hit  : f32,       // 1.0 if in contact, else 0.0
 };
-fn terrain_resolve(pos : vec3<f32>, vel : vec3<f32>, headroom : f32) -> TerrainHit {
+fn terrain_resolve(pos : vec3<f32>, vel : vec3<f32>, r_self : f32, headroom : f32) -> TerrainHit {
     let s = terrain_surface(pos);
-    let penetration = s.x - (pos.y - P.part_half);
+    let penetration = s.x - (pos.y - r_self);
     if (penetration <= 0.0) {
         return TerrainHit(vel, vec3<f32>(0.0), 0.0);
     }
@@ -425,7 +430,7 @@ fn cs_integrate(@builtin(global_invocation_id) gid : vec3<u32>) {
     var a = P.gravity + acc.force;
     let sp = length(pt.vel);
     if (P.air_rho > 0.0 && sp > 1.0e-9) {
-        let s_grain = max(2.0 * P.part_half, 1.0e-6);
+        let s_grain = max(2.0 * pt.radius, 1.0e-6);
         let a_drag = 0.5 * P.air_rho * sp * sp * P.drag_cd / (max(pt.rho, 1.0e-6) * s_grain);
         a = a - (a_drag / sp) * pt.vel;   // opposes motion; can only remove energy
     }
@@ -470,7 +475,7 @@ fn cs_integrate(@builtin(global_invocation_id) gid : vec3<u32>) {
     // grain) plus a velocity-decoupled geometric position projection (reconciles penetration without
     // writing velocity ⇒ still no KE, even when the SURFACE jumped under the grain). No penalty spring,
     // so no store-and-release launch. See `terrain_resolve`.
-    let th = terrain_resolve(pos, vel, acc.headroom);
+    let th = terrain_resolve(pos, vel, pt.radius, acc.headroom);
     if (th.hit > 0.5) {
         vel = th.dvel;
         pos = pos + th.dpos;
@@ -489,7 +494,7 @@ fn cs_integrate(@builtin(global_invocation_id) gid : vec3<u32>) {
     // read as "at rest" — so the CPU deposits any grain grounded for enough frames regardless of speed.
     // The de-resolution readback (lib.rs) deposits a grounded grain once this counter crosses its
     // threshold OR its horizontal speed is below SETTLE_SPEED — the SAME dual criterion as the CPU.
-    if (pos.y - P.part_half <= terrain_h(pos) + 0.1) {
+    if (pos.y - pt.radius <= terrain_h(pos) + 0.1) {
         pt.resting = pt.resting + 1.0;
     } else {
         pt.resting = 0.0;

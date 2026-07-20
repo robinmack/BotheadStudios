@@ -17,7 +17,7 @@
 //! engine's WebGPU-only wasm build through cargo feature unification. Safety comes from both mirrors
 //! being pinned to the SAME authority — pinned to one shader, they cannot drift from each other.
 
-/// One GPU particle — 64 bytes, four 16-byte rows. Layout matches `particle_step.wgsl`'s `Particle`
+/// One GPU particle — 80 bytes, five 16-byte rows. Layout matches `particle_step.wgsl`'s `Particle`
 /// and is read directly by the renderer (offset @0, color @32, emission @48).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -30,6 +30,13 @@ pub(crate) struct GpuParticle {
     pub(crate) material: f32,      // material index (informational)
     pub(crate) emission: [f32; 3], // incandescent glow (written by the compute step)
     pub(crate) rho: f32, // density (kg/m³) — Tillotson input; ρ₀ placeholder until 4b.2 (was `_pad`)
+    /// THIS grain's contact radius (m) — `docs/47` §1. Granularity follows the interaction (metre grains
+    /// for ejecta, ~1 cm for a tyre contact patch), so size travels WITH the particle instead of sitting
+    /// in the per-dispatch uniform where only one value can exist.
+    pub(crate) radius: f32,
+    pub(crate) _p0: f32, // pad to a 5th 16-byte row; reserved (a cached grid level belongs here)
+    pub(crate) _p1: f32,
+    pub(crate) _p2: f32,
 }
 
 /// Per-dispatch uniforms for the compute step — matches `particle_step.wgsl`'s `Params`.
@@ -125,7 +132,10 @@ mod tests {
     /// human reading two files side by side.
     #[test]
     fn gpu_particle_matches_the_shader_field_for_field() {
-        let rust = offsets!(GpuParticle, offset, u, vel, resting, color, material, emission, rho);
+        let rust = offsets!(
+            GpuParticle, offset, u, vel, resting, color, material, emission, rho, radius, _p0, _p1,
+            _p2,
+        );
         let shader = wgsl_offsets(&wgsl_typed(SHADER, "Particle"));
         assert_eq!(
             rust, shader,
@@ -134,7 +144,7 @@ mod tests {
         );
         assert_eq!(
             std::mem::size_of::<GpuParticle>(),
-            64,
+            80,
             "particle stride changed — the renderer reads offset @0, color @32, emission @48, and \
              every particle after the first would read shifted memory"
         );
@@ -180,7 +190,7 @@ mod tests {
     /// test means "found nothing to compare" rather than "they agree".
     #[test]
     fn the_wgsl_parser_actually_reads_fields() {
-        assert_eq!(wgsl_typed(SHADER, "Particle").len(), 8);
+        assert_eq!(wgsl_typed(SHADER, "Particle").len(), 12);
         // The comma-split case: two fields sharing one line at the very end of Params.
         let p = wgsl_typed(SHADER, "Params");
         let tail: Vec<&str> = p[p.len() - 2..].iter().map(|(n, _)| n.as_str()).collect();

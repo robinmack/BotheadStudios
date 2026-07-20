@@ -3,6 +3,39 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-20 — per-particle radius on the GPU, and the harness that cannot tell if it mattered (docs/47 §1)
+
+**What.** `Particle` grows to 80 bytes with a per-particle `radius` (plus a padded 5th row reserved for a
+cached grid level). The shader reads THIS grain's radius everywhere a global grain size was assumed:
+contact `touch = ri + rj`, headroom `length(dj) − (ri + rj)`, terrain penetration, drag cross-section,
+and the resting test. `P.part_half` and `P.c_radius` — two constants that were both 0.5 and described the
+same physical quantity — no longer drive per-grain behaviour.
+
+**Plumbing, not capability.** Every grain is still given the same radius by the CPU, so mixed sizes are
+not yet enabled; the hierarchical grid (`crate::grid`, landed, not yet mirrored in WGSL) is what makes
+them correct, because a flat grid's ±1-cell invariant breaks the moment radii differ.
+
+**Verified — and the interesting part is what could NOT be verified.**
+- Both layout guards passed after the growth, which is the whole point of having landed them first: the
+  80-byte struct is confirmed field-for-field against the shader in the engine AND in `gpu-verify`.
+- Engine 223/223, gpu-verify 2/2, wasm clean.
+- **The shader really compiles and runs** — `cargo build` does NOT validate WGSL (it is compiled at
+  device creation), so this was checked by running `gpu-verify` on the RTX 5060 Ti.
+- `gpu-verify`: **1 scene fails, and `main` fails exactly the same one** (scene D, repose — the
+  pre-existing spherical-grain rolling-resistance deficiency). Measured on both branches rather than
+  assumed from memory.
+
+**What the harness could not answer.** The numeric diff between `main` and this change is real but
+**smaller than the harness's own run-to-run noise**. Same code, same card, two runs: scene E spread
+33.5 → 35.1 m, while baseline→change moved it 33.1 → 33.5 m. Scene I (the FUDGE DETECTOR) drifts
+−6622 / −6807 / −6798 across runs of identical code. So the honest claim is **"no new failures and no
+difference exceeding the noise floor"** — NOT "behaviour identical", which this harness cannot establish.
+
+That is queue item 1 (determinism) blocking a real verification decision for the first time, exactly as
+it warned. Free data for item 2 while we are here: **scene E spread varies ~6% (33.1 / 33.5 / 35.1 m)
+across three runs of identical code on one card.** Until that floor is fixed, any change of this size is
+unfalsifiable on the GPU side.
+
 ## 2026-07-20 — the layout guard that could not fail, and the one that can (docs/47 Hazard 0)
 
 **What.** `GpuParticle`/`GpuStepParams` moved out of `#[cfg(target_arch = "wasm32")] mod app` into a new

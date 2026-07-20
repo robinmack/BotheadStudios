@@ -1068,7 +1068,13 @@ mod app {
                     color: self.mats[p.material].albedo,
                     material: p.material as f32,
                     emission: emission::incandescence(p.temp_k),
-                    rho: self.mats[p.material].density, // ρ₀ at spawn (placeholder until 4b.2 computes it)
+                    rho: self.mats[p.material].density,
+                    // docs/47 §1: size travels WITH the grain. Uniform today (every debris grain is
+                    // the same 1 m ejecta scale); the hierarchical grid is what makes mixed sizes correct.
+                    radius: CONTACT_RADIUS,
+                    _p0: 0.0,
+                    _p1: 0.0,
+                    _p2: 0.0, // ρ₀ at spawn (placeholder until 4b.2 computes it)
                 })
                 .collect();
             self.gpu_particles.append(&self.queue, &gpu);
@@ -1207,7 +1213,13 @@ mod app {
                         color: albedo,
                         material: mat,
                         emission,
-                        rho: 0.0, // render-only: unread by the renderer
+                        rho: 0.0,
+                        // docs/47 §1: size travels WITH the grain. Uniform today (every debris grain is
+                        // the same 1 m ejecta scale); the hierarchical grid is what makes mixed sizes correct.
+                        radius: CONTACT_RADIUS,
+                        _p0: 0.0,
+                        _p1: 0.0,
+                        _p2: 0.0, // render-only: unread by the renderer
                     })
                 })
                 .collect();
@@ -2389,7 +2401,13 @@ mod app {
                     color: [0.5, 0.5, 0.5],
                     material: 0.0,
                     emission: [0.0; 3],
-                    rho: rho0, // ρ₀ at spawn, from the real material (docs/38 4b.2 will compute it)
+                    rho: rho0,
+                    // docs/47 §1: size travels WITH the grain. Uniform today (every debris grain is
+                    // the same 1 m ejecta scale); the hierarchical grid is what makes mixed sizes correct.
+                    radius: CONTACT_RADIUS,
+                    _p0: 0.0,
+                    _p1: 0.0,
+                    _p2: 0.0, // ρ₀ at spawn, from the real material (docs/38 4b.2 will compute it)
                 });
             }
             parts.append(&self.queue, &grains);

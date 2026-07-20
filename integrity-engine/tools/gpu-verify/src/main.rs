@@ -24,6 +24,10 @@ struct Particle {
     material: f32,
     emission: [f32; 3],
     rho: f32, // density (kg/m³); ρ₀ placeholder (was `_pad`)
+    radius: f32, // THIS grain's contact radius (m) — docs/47 §1; size travels with the particle
+    _p0: f32,
+    _p1: f32,
+    _p2: f32,
 }
 impl Particle {
     fn at(x: f32, y: f32, z: f32) -> Self {
@@ -36,6 +40,10 @@ impl Particle {
             material: 0.0,
             emission: [0.0; 3],
             rho: 2700.0, // basalt ρ₀ (placeholder)
+            radius: PART_HALF, // uniform for now; the hierarchical grid is what makes mixed sizes correct
+            _p0: 0.0,
+            _p1: 0.0,
+            _p2: 0.0,
         }
     }
 }
@@ -1484,7 +1492,8 @@ mod layout_tests {
     fn the_particle_mirror_matches_the_shader_field_for_field() {
         let src = include_str!("../../../shaders/particle_step.wgsl");
         let rust = offsets!(
-            crate::Particle, offset, u, vel, resting, color, material, emission, rho
+            crate::Particle, offset, u, vel, resting, color, material, emission, rho, radius, _p0,
+            _p1, _p2,
         );
         assert_eq!(
             rust,
@@ -1495,7 +1504,7 @@ mod layout_tests {
         );
         assert_eq!(
             std::mem::size_of::<crate::Particle>(),
-            64,
+            80,
             "particle stride changed; the shader's struct and this mirror must grow together"
         );
     }

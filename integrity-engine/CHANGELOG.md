@@ -9,6 +9,16 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **GPU particles carry their own radius (docs/47 §1).** `Particle` grows 64 → 80 bytes with a
+  per-particle `radius` (plus a reserved padded row). The shader now uses THIS grain's size wherever a
+  global one was assumed — contact `touch = ri + rj`, headroom, terrain penetration, drag cross-section,
+  the resting test — so `P.part_half`/`P.c_radius` no longer set per-grain behaviour. **Plumbing only:**
+  the CPU still gives every grain the same radius, and mixed sizes need the hierarchical grid mirrored
+  into WGSL first, since a flat grid's ±1-cell invariant breaks as soon as radii differ. Verified against
+  the shader by both layout guards; `gpu-verify` shows no new scene failures (the one failure, scene D
+  repose, fails identically on `main`), and the numeric difference is below the harness's own
+  run-to-run noise.
+
 - **NEW `grid` module — the hierarchical spatial hash (docs/47 §1).** Neighbour finding that does not
   assume one grain size: `cell_size(level) = base·2^level`, each item at the level whose cell is at least
   its own contact diameter, each pair enumerated exactly once by scanning own + COARSER levels only.
