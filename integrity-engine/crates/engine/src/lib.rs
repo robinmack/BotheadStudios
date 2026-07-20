@@ -38,6 +38,7 @@ mod gravity;
 mod hydrostatic;
 mod impact;
 mod planet;
+mod resolution; // docs/44 — resolution by necessity: the quasi-static admission test
 mod tides;
 #[cfg(test)]
 mod isotropy;

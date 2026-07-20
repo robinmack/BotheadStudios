@@ -9,6 +9,13 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Quasi-static admission test (docs/44 §4b) — `resolution.rs`.** Sizes the region a resting/rolling load
+  must resolve from the material's own yield: `resolved_depth(pressure, patch_radius, yield)` returns the
+  depth the contact stress reaches yield (closed-form Boussinesq root), and **0 when the load is below
+  yield** — a car on basalt resolves zero particles, exactly. Verified against docs/44's worked table
+  (basalt 0, regolith 0.096 m, sand 0.409 m). The LAW only; nothing wires it into a scene yet. Boussinesq
+  is a conservative sizing envelope, never a force law (flagged, docs/44 §4b).
+
 - **Hierarchical spatial hash on the GPU (docs/47 §1) — grains of different size can now find each
   other.** `cell_size(level) = base_cell·2^level`, one table, level folded into the hash key; the force
   gather walks every populated level. `Params` gains `base_cell`/`max_level` with **no struct-size

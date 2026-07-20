@@ -3,6 +3,39 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-20 — the quasi-static admission law: a car on basalt resolves exactly zero particles (docs/44)
+
+**What.** New `resolution.rs` — the quasi-static admission test docs/44 §4b specifies and its §8 status
+table lists as "does not exist". Given a contact pressure `p` over a patch of radius `a`, `resolved_depth`
+returns the depth `z*` to which the load still reaches the material's yield — the region that must be
+resolved into particles — and **0 when the surface pressure is below yield**, which is the whole point:
+the test's main job is to say *no*.
+
+**Why it is the vehicle unlock.** docs/44 §3: everywhere the material provably cannot move, the cheap
+bulk model is not an approximation, it is the correct answer. So a 1500 kg car on basalt (p ≈ 184 kPa,
+yield ≥ 10 MPa) resolves **nothing** — exactly, not nearly — while the same car on loose sand resolves
+0.41 m deep. The footprint is small because the physics says so, not because a constant capped it.
+
+**Closed form, not iteration.** `σ_z(z) = p·[1 − (1+(a/z)²)^(−3/2)]` is monotone in z, so the root
+`σ_z(z*) = σ_yield` inverts exactly: `(a/z*)² = (1−yield/p)^(−2/3) − 1`. Verified self-consistent (the
+Boussinesq stress at the returned depth equals the yield it was solved for).
+
+**Honesty flags carried from the doc.** Boussinesq is an elastic-half-space result and granular media are
+not elastic half-spaces; it is used ONLY as a conservative sizing *envelope*, never as a force law (forces
+stay `granular::contact_accel` + `terrain_contact_resolve`). Per docs/44 §5 the bias is toward resolving:
+`admission_depth` expands `z*` by one patch radius, because under-resolving loses physics silently while
+over-resolving only costs frame time.
+
+**Verified.** 227/227 (+4), wasm clean. Pinned to docs/44 §4b's worked table to the millimetre: basalt 0,
+regolith 0.096 m, sand 0.409 m. The null case is asserted as EXACTLY zero, since it is the cheap half of
+the whole idea.
+
+**Open — this is the LAW, not the wired policy.** Nothing calls it. The full resolution policy is docs/44
+§9's five steps; this is §9.3's law only. Wiring it (a resting load materializes the ground under its
+patch when `admission_depth > 0`) is the next visible step and touches the terrain scene + GPU. Deploying
+today ships the tested law but changes no live behaviour — deliberately, since a visual scene change
+cannot be rig-verified in this environment (WebGPU does not composite headlessly here).
+
 ## 2026-07-20 — the hierarchical grid on the GPU: correct at every scale, and measured to be slow
 
 **What.** `particle_step.wgsl` gained a hierarchical spatial hash — `cell_size(level) = base_cell·2^level`,
