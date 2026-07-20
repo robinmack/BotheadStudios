@@ -12,6 +12,12 @@ because **we are our own first customers** and pin exact engine versions in our 
 - **BREAKING (API): `mesher::build_earth_cap` takes a `field: Option<&World>`.** Pass the world and the
   bulk cap follows the persistent T0 `displacement`, so a de-resolved crater renders as a crater instead
   of pristine relief. `None` keeps the old pure-procedural behaviour.
+- **FIX: demotion no longer strands the sea.** `column_is_bakeable` now refuses columns under water — a
+  sea column has two surfaces (seabed and waterline) while the T0 field stores one height per column, so
+  baking one recorded the seabed, freed the ground beneath, and left 1,514 water voxels floating. Adds
+  `World::demote_patch_to_field` (atomic — a half-demoted patch cannot be rendered). Consequence worth
+  knowing: whole-patch demotion cannot fire on a world with a sea (7.4% of columns wet, scattered across
+  the patch), so per-column demotion is a prerequisite rather than a refinement.
 - **One authoritative ground query — `World::ground_top_voxel`.** Returns a column's voxel top while it
   is resolved and the SAME top after it is demoted to the T0 field, so de-resolution is invisible to
   whoever asks where the ground is. The GPU grain heightfield, the CPU bilinear contact surface and the

@@ -336,6 +336,36 @@ impl World {
         Some(freed)
     }
 
+    /// **Demote the WHOLE patch to T0 — all columns or none.** Returns the voxels freed, or `None` if
+    /// any column refuses (see [`Self::column_is_bakeable`]), having changed nothing.
+    ///
+    /// All-or-nothing is not timidity, it is what the current representation can express. `patch_resolved`
+    /// is ONE bool for the entire 96 m footprint — it decides whether the voxel mesh is drawn at all and
+    /// whether the bulk cap leaves a hole — so a half-demoted patch has no consistent rendering: the
+    /// demoted columns produce no surface-nets geometry while the cap still holds its hole open over
+    /// them, and you would see straight through the ground. Demoting atomically keeps the one flag
+    /// meaningful (`docs/47` §6).
+    ///
+    /// **The honest cost, and it is real:** a single unbakeable column — one cave, one undercut crater
+    /// lip — pins the entire patch resolved. Per-column demotion needs `patch_resolved` to become a
+    /// per-column mask and the cap's hole to follow it; that is the next increment, not this one.
+    pub fn demote_patch_to_field(&mut self) -> Option<usize> {
+        for z in 0..self.d as i32 {
+            for x in 0..self.w as i32 {
+                if !self.column_is_bakeable(x, z) {
+                    return None; // checked BEFORE mutating: a refusal must leave the patch untouched
+                }
+            }
+        }
+        let mut freed = 0usize;
+        for z in 0..self.d as i32 {
+            for x in 0..self.w as i32 {
+                freed += self.demote_column_to_field(x, z).unwrap_or(0);
+            }
+        }
+        Some(freed)
+    }
+
     /// Can this column be DEMOTED to T0 — i.e. can the cheap heightfield represent its state?
     ///
     /// The mirror of docs/44's promotion test. Promotion asks "does the cheap model provably DIFFER from
@@ -348,6 +378,15 @@ impl World {
         let Some(top) = self.surface_top_voxel(x, z) else {
             return true; // empty column: nothing to bake, trivially representable
         };
+        // WATER refuses for the same reason a void does: the field stores ONE height per column, and a
+        // sea column has two surfaces — the seabed and the waterline. `surface_top_voxel` deliberately
+        // means SOLID ground (water is matter but not load-bearing), so baking such a column would record
+        // the seabed, free the ground beneath, and leave the sea sitting on nothing.
+        if let Some(wm) = self.water_mat {
+            if (0..self.h as i32).any(|y| self.material_at(x, y, z) == Some(wm)) {
+                return false;
+            }
+        }
         // Solid from the base up to `top` with no gaps ⇒ one surface ⇒ a heightfield can hold it.
         (0..top).all(|y| self.is_solid(x, y, z))
     }
@@ -889,7 +928,7 @@ mod tests {
     #[test]
     fn demoting_a_column_preserves_the_surface_it_presented() {
         let mats = materials::load();
-        let mut w = generate(&mats);
+        let mut w = dry_world(&mats);
         let c = w.center();
         for &(x, z) in &[(30i32, 30i32), (48, 48), (12, 70), (80, 20)] {
             let before_top = w.surface_top_voxel(x, z).expect("column has ground");
@@ -906,6 +945,28 @@ mod tests {
         }
     }
 
+
+    /// A patch with no sea, for demotion tests. Water columns are legitimately unbakeable (a sea column
+    /// has two surfaces, the field stores one), so a generated world — 7.4% of whose columns are wet,
+    /// scattered across a bounding box spanning almost the whole 96 m patch — cannot exercise the
+    /// demotion path at all. Drying it isolates the property under test from that separate limitation.
+    fn dry_world(mats: &[Material]) -> World {
+        let mut w = generate(mats);
+        if let Some(wm) = w.water_mat {
+            for z in 0..w.d as i32 {
+                for x in 0..w.w as i32 {
+                    for y in 0..w.h as i32 {
+                        if w.material_at(x, y, z) == Some(wm) {
+                            w.set_voxel(x, y, z, None);
+                        }
+                    }
+                }
+            }
+        }
+        w.water_mat = None;
+        w
+    }
+
     /// **Demotion must be INVISIBLE to whoever asks where the ground is** (`docs/47` §5). The surface
     /// is preserved exactly by `demote_column_to_field`, and that surface is already voxel-quantised —
     /// so the authoritative query hands back the IDENTICAL integer top after the voxels are gone. This
@@ -914,7 +975,7 @@ mod tests {
     #[test]
     fn ground_top_survives_demotion_exactly() {
         let mats = materials::load();
-        let mut w = generate(&mats);
+        let mut w = dry_world(&mats);
         for &(x, z) in &[(30i32, 30i32), (48, 48), (12, 70), (80, 20), (5, 5)] {
             let before = w.ground_top_voxel(x, z).expect("column has ground");
             assert_eq!(before, w.surface_top_voxel(x, z).unwrap(), "resolved: voxels answer");
@@ -935,7 +996,7 @@ mod tests {
     #[test]
     fn an_excavated_column_has_no_ground_but_a_demoted_one_does() {
         let mats = materials::load();
-        let mut w = generate(&mats);
+        let mut w = dry_world(&mats);
         let (dug, kept) = ((33i32, 44i32), (34i32, 44i32));
         let top = w.surface_top_voxel(dug.0, dug.1).unwrap();
         for y in 0..top {
@@ -957,7 +1018,7 @@ mod tests {
     #[test]
     fn putting_matter_back_re_resolves_a_demoted_column() {
         let mats = materials::load();
-        let mut w = generate(&mats);
+        let mut w = dry_world(&mats);
         let (x, z) = (60, 60);
         let grass = index_of(&mats, "grass");
         let before = w.ground_top_voxel(x, z).unwrap();
@@ -969,6 +1030,72 @@ mod tests {
             w.ground_top_voxel(x, z),
             Some(4),
             "the voxels are authoritative again — the query must not keep reading the field"
+        );
+    }
+
+    /// Demoting the whole patch must leave every ground query saying exactly what it said before — that
+    /// is the entire promise of a representation change (docs/46: a world is a world, across the
+    /// resolution boundary too). Checked over the whole footprint, not a sample.
+    #[test]
+    fn demoting_the_whole_patch_moves_no_ground_anywhere() {
+        let mats = materials::load();
+        let mut w = dry_world(&mats);
+        let before: Vec<Option<i32>> = (0..w.d as i32)
+            .flat_map(|z| (0..w.w as i32).map(move |x| (x, z)))
+            .map(|(x, z)| w.ground_top_voxel(x, z))
+            .collect();
+        let freed = w.demote_patch_to_field().expect("a pristine patch is bakeable");
+        assert!(freed > 0, "demotion should free the patch's voxels");
+        assert_eq!(w.solid_count(), 0, "every column's voxels are gone");
+        let after: Vec<Option<i32>> = (0..w.d as i32)
+            .flat_map(|z| (0..w.w as i32).map(move |x| (x, z)))
+            .map(|(x, z)| w.ground_top_voxel(x, z))
+            .collect();
+        assert_eq!(before, after, "the ground moved somewhere in the patch when it de-resolved");
+    }
+
+    /// All-or-nothing, and it must be atomic: a refusal has to leave the patch EXACTLY as it was. A
+    /// partial demotion is unrenderable — `patch_resolved` is one bool for the whole footprint, so the
+    /// demoted columns would have no mesh while the cap still holds its hole open over them.
+    #[test]
+    fn one_unbakeable_column_refuses_the_whole_patch_without_touching_it() {
+        let mats = materials::load();
+        let mut w = dry_world(&mats);
+        let (x, z) = (40, 40);
+        let top = w.surface_top_voxel(x, z).unwrap();
+        w.set_voxel(x, top - 4, z, None); // one cave, anywhere in the 96 m patch
+        let solid_before = w.solid_count();
+        assert!(w.demote_patch_to_field().is_none(), "an unbakeable column must refuse the patch");
+        assert_eq!(
+            w.solid_count(),
+            solid_before,
+            "a refused demotion freed voxels anyway — the patch is now half-resolved and unrenderable"
+        );
+        assert!(w.demoted.iter().all(|&d| !d), "and no column may be left flagged as demoted");
+    }
+
+
+    /// **The sea refuses to demote, and that is the finding that blocks the whole-patch trigger.** A
+    /// column under water has TWO surfaces — seabed and waterline — and the field stores one per column.
+    /// Baking it would record the seabed, free the ground beneath, and leave the sea resting on nothing.
+    /// Measured on the generated world: **680 of 9,216 columns are wet (7.4%), in a bounding box
+    /// spanning x[0..78] z[0..87] of a 96×96 patch** — scattered, not pooled in a corner — so an
+    /// all-or-nothing patch demotion is pinned essentially anywhere. Per-column demotion is required,
+    /// not a refinement (docs/47 §6).
+    #[test]
+    fn a_sea_column_refuses_to_demote_and_pins_the_patch() {
+        let mats = materials::load();
+        let mut w = generate(&mats);
+        let wm = w.water_mat.expect("the generated world has a sea");
+        let wet = (0..w.d as i32)
+            .flat_map(|z| (0..w.w as i32).map(move |x| (x, z)))
+            .find(|&(x, z)| (0..w.h as i32).any(|y| w.material_at(x, y, z) == Some(wm)))
+            .expect("some column is under water");
+        assert!(!w.column_is_bakeable(wet.0, wet.1), "a column under the sea is not bakeable");
+        assert!(w.demote_column_to_field(wet.0, wet.1).is_none(), "it must refuse, not strand the sea");
+        assert!(
+            w.demote_patch_to_field().is_none(),
+            "and one wet column pins the whole patch — the reason the trigger needs per-column demotion"
         );
     }
 
