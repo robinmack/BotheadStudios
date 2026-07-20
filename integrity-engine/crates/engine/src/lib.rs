@@ -912,7 +912,7 @@ mod app {
                 // grains too — a heightfield can't represent a vertical wall conservatively. Now the
                 // terrain the debris touches is either grains or a gentle bilinear surface — both conservative.
                 self.matter
-                    .materialize_steep_terrain(&mut self.world, &self.mats, hit, mat_r * 2.0, 3);
+                    .materialize_steep_terrain(&mut self.world, &self.mats, hit, mat_r * 2.0);
                 // Heat = impact energy minus the bulk KE the shared ejection lofted (most of a fast
                 // impactor's ½mv² is heat — the incandescent core glows because it genuinely is that hot).
                 let bulk_ke: f32 = self.matter.particles[start..]

@@ -3,6 +3,70 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-19 — terrain learned the half of Mohr–Coulomb the grains always had (docs/45)
+
+**What.** Terrain slope stability now carries the **friction term**. `granular::face_stable` is the law —
+a face stands if friction holds the slope (`drop ≤ μ·r + quantum`) OR cohesion holds the bank
+(`run ≤ c/ρg`) — and `matter::materialize_steep_terrain` applies it per voxel against every neighbour out
+to 8 cells, iterating to a fixpoint. `steep_drop = 3` is retired. +7 tests (199 total, wasm clean).
+
+**Why.** `τ = c + σ·tan φ`, and terrain implemented only `c`. The φ half was hidden behind a constant that
+tolerated a **72° face for every material** while gravel fails above 40°. With a grass skin on basalt that
+never showed, because basalt's `h_crit ≈ 510 m` holds anything this world can build; a cohesionless
+horizon has `h_crit = 0` and the missing term becomes load-bearing instantly. The datum was never
+missing — `friction_coefficient` is in `data/materials.json` for every material and the grain side has
+read it since docs/23. Ground and grain were answering the same question two ways, which is the thing
+docs/46 exists to forbid.
+
+**Three corrections the design doc did not have, each found by measuring:**
+
+1. **The φ term alone does not converge; the removal TARGET was the real bug.** The old rule cut a failing
+   face down to its lowest neighbour, which moves a cliff rather than relieving it — the column behind
+   becomes the new face at nearly the same height. Measured on a cohesionless horizon: **106, 148, 214,
+   285, 339, 387, 433, 468, 504, 542, 577, 622 grains per pass — monotonically increasing** over 12
+   passes, 13-voxel face still standing. Cutting to the *stable* height instead grows a talus ramp that
+   climbs one column per pass and stops at the plateau.
+2. **Cohesion must judge the material's own bank, not the drop.** A 1 m grass veneer over basalt on a 2 m
+   step is not a 2 m grass bank. Judging it against the full drop **shed 470 grains from a pristine world
+   nothing had touched** — every hillside steeper than the skin is thin trips it. Cohesion now uses the
+   contiguous same-material run; friction still uses the drop, because slope is a property of the surface.
+3. **Faces fail from the base.** Stopping the walk at the first voxel that holds lets a self-supporting sod
+   skin shield the failing 10 m bank beneath it. The lowest failing voxel is found first and everything
+   above goes with it.
+
+**Verified.**
+- **Convergence** — a cohesionless horizon with a 7×7×10 pit reaches a fixpoint inside one call; a second
+  call sheds **exactly 0**. Bounded by geometry (4,159 grains vs a 6,157 wedge bound derived from the ramp's
+  reach), and terrain 25 cells out is byte-unchanged: the slide does not march inland.
+- **End state is repose** — the settled slope is asserted against gravel's **DB μ**, not a literal:
+  no 8 m baseline exceeds `μ·8 + quantum`. The test also asserts the terrain developed a real slope
+  (> 1 m), so a flat world cannot pass it vacuously.
+- **Rock cliffs stand** — basalt sheds no grains at any pit depth; the new steep grains were 100% grass
+  before fix (2), 0 after.
+- **Pristine terrain is a no-op** — 470 → **0** grains, solid count unchanged.
+- **Burial (docs/45 §5)** — worst penetration against the bilinear collision surface **2.75 m → 0.50 m**,
+  1.2% of grains penetrating at all (the regolith branch had worsened it to 3.75 m). Resolved as a side
+  effect of correction 1: grains now come off the wedge above the ramp, not from a column cut to the floor.
+- 199/199 native, `cargo check --target wasm32-unknown-unknown` clean.
+
+**Two existing tests were passing without testing their own names, and are now honest.**
+`a_granite_cliff_holds_while_the_dirt_above_it_slumps` asserted "no granite grains" against a world that
+contains **no granite and no dirt** — it is a 1-voxel grass skin directly on basalt — and its "the weak
+dirt slumps" was the grass skin moving for the buggy reason in (2). It now builds the layered cap it
+describes. `materialize_steep_terrain_turns_cliffs_into_grains_conserving_mass` dug into basalt and
+asserted the walls **must** materialize, which docs/45 §6 explicitly reverses ("a rock cliff still stands
+… this must not flatten canyons"); its conservation checks moved to material that genuinely fails.
+
+**Flagged, not hidden.** `SLOPE_QUANTUM_M = 1.0` is a **resolution IOU**: an integer heightfield cannot
+express a slope between 0° and 45°, so enforcing repose at one cell with no allowance would force every
+soil in the DB flat. Over `r` cells it dilutes to `1/r` — at the 8-cell baseline, ~3.6° above gravel's
+true 40°. The sub-voxel surface retires it; a bigger baseline only buys O(r²) sandpaper.
+
+**Open.** docs/45 §6's *emergent agreement* test (grain pile vs terrain slope reaching the same angle)
+stays blocked on grain-side rolling resistance, per the doc. Nothing was tuned to make the halves agree.
+On the live meteor scene this is near a no-op (76 → 0 grains) because that world is genuinely stable; it
+earns its keep on the cohesionless material `regolith-horizon` introduces, which it now unblocks.
+
 ## 2026-07-19 — the architecture map had gone stale enough to assert that existing physics was absent
 
 **What.** Refreshed `docs/32-architecture-map.md` and docs/33's status block against the code on `main`

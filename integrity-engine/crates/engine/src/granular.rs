@@ -343,9 +343,121 @@ pub fn terrain_contact_resolve(
     TerrainContact { vel: v, dpos, hit: true }
 }
 
+/// **The heightfield's slope quantum** (metres). An integer voxel heightfield can represent a column
+/// top only to whole voxels, so the shallowest NON-FLAT slope it can express over one 1 m cell is a
+/// 1 m step — 45°. Every soil in the material DB reposes BELOW that (gravel 40°, sand 34°, dirt 29°),
+/// so enforcing repose at a one-cell baseline with no allowance would force cohesionless terrain
+/// perfectly FLAT — deleting the landscape rather than relaxing it.
+///
+/// This is that allowance, and it is a **resolution IOU** (`docs/24`), not a tuned dial: it is exactly
+/// one voxel, the field's own quantisation, and the continuous sub-voxel surface (deferred part (A) of
+/// the terrain-contact work) is what retires it. Note what it costs and what it does not: over a
+/// baseline of `r` cells the tolerated excess is `1/r`, so the enforced angle is `atan(μ + 1/r)` and
+/// converges on the true `atan μ` as a slope lengthens. Short faces are over-permitted by up to 45°;
+/// SUSTAINED slopes — the ones that carry a landslide — are held to repose within `1/r`.
+pub const SLOPE_QUANTUM_M: f32 = 1.0;
+
+/// **Mohr–Coulomb slope stability** (`docs/45`) — how far a terrain face may stand above a neighbour
+/// `r` metres away before it fails. This is the **φ term terrain never had**: shear strength is
+/// `τ = c + σ·tan φ`, and terrain stability implemented only `c` (`h_crit = fracture_strength/(ρg)`),
+/// hidden behind a constant `steep_drop = 3` that silently tolerated a 72° face. The grains have
+/// carried φ all along — the Coulomb cap in [`Contact::friction`] IS what gives a pile its angle of
+/// repose — so this makes ground and grain answer the slope question with ONE law.
+///
+/// Either term alone holds a face:
+///
+/// ```text
+/// stable  ⇔  drop ≤ μ·r + QUANT      (friction: the slope is at or below repose, tan φ = μ)
+///         ∨  drop ≤ c/(ρg)           (cohesion: a bank or a rock wall stands vertically)
+/// ```
+///
+/// so the allowance is the MAX of the two — which is why cohesionless gravel (`h_crit = 0`) cannot
+/// stand a vertical face at any height yet is perfectly stable as a 40° slope, while basalt
+/// (`h_crit ≈ 510 m`) keeps its cliffs unchanged. Both are the physical answer, neither is tuned.
+///
+/// `mu` is the material's own DB datum (`Material::friction_coefficient`) and `r` the horizontal
+/// baseline in metres. Returns the permitted drop, in metres.
+pub fn repose_allowance(mu: f32, r: f32) -> f32 {
+    mu * r + SLOPE_QUANTUM_M
+}
+
+/// **Is this face held up?** (`docs/45` §3) — the full Mohr–Coulomb test, and the reason the two terms
+/// are an OR over *different measurements* rather than a max over one.
+///
+/// - **Friction** acts on the SLOPE, which is a property of the surface: `drop` over baseline `r`,
+///   compared against [`repose_allowance`]. A veneer on a steep hillside slides if the hillside is
+///   steeper than the veneer's repose angle, however thin the veneer is.
+/// - **Cohesion** acts on the BANK this material must hold up by itself: `run_height`, the contiguous
+///   vertical run of the *same* material in the exposed face — NOT the full drop to the neighbour.
+///
+/// Conflating those two heights is subtly wrong in exactly the case a layered world is made of. A 1 m
+/// grass skin over basalt, on ground that steps down 2 m, is not a 2 m grass bank: grass holds its own
+/// 1 m (`h_crit ≈ 1.09 m`) and the basalt below holds the rest (`h_crit ≈ 510 m`). Judging the grass
+/// against the whole 2 m drop condemns a veneer that is in fact supported, and strips undisturbed
+/// hillsides — measured, 470 grains shed from a world nothing had touched.
+pub fn face_stable(drop: f32, r: f32, run_height: f32, mu: f32, h_crit: f32) -> bool {
+    drop <= repose_allowance(mu, r) || run_height <= h_crit
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repose_allowance_carries_the_friction_term() {
+        // docs/45 §3. Gravel is cohesionless (h_crit = 0) with φ = 40°, so friction is the ONLY thing
+        // holding it — the term terrain stability did not have. The allowance therefore grows with the
+        // baseline at exactly tan φ, and its intercept is the field's quantum and nothing else.
+        let mu = 0.84_f32; // the DB datum for gravel: tan 40°
+        assert!((repose_allowance(mu, 1.0) - (mu + SLOPE_QUANTUM_M)).abs() < 1.0e-6);
+        assert!((repose_allowance(mu, 4.0) - (4.0 * mu + SLOPE_QUANTUM_M)).abs() < 1.0e-6);
+
+        // What the quantum costs, stated as a bound rather than hidden: the slope it permits starts
+        // over-steep and converges on the material's real repose angle as the face lengthens. This is
+        // the claim `SLOPE_BASELINE_CELLS` is chosen against.
+        let phi = mu.atan().to_degrees();
+        let angle_at = |r: f32| (repose_allowance(mu, r) / r).atan().to_degrees();
+        assert!(angle_at(1.0) > 55.0, "one cell cannot resolve repose at all");
+        assert!(
+            angle_at(8.0) - phi < 4.0,
+            "an 8-cell baseline holds gravel within 4° of its 40° repose, got {:.1}°",
+            angle_at(8.0)
+        );
+        assert!(
+            angle_at(8.0) > phi,
+            "the allowance must never fall BELOW repose — that would slump stable ground"
+        );
+        assert!(angle_at(64.0) - phi < 0.6, "and it keeps converging on φ, not on some floor");
+    }
+
+    #[test]
+    fn either_mohr_coulomb_term_alone_holds_a_face() {
+        // Cohesion is the other half, and it is what keeps rock cliffs standing: basalt's h_crit ≈ 510 m
+        // holds a 50 m vertical face with no help from friction whatsoever.
+        assert!(face_stable(50.0, 1.0, 50.0, 0.7, 510.0), "a basalt cliff stands on cohesion alone");
+        // Cohesionless gravel gets nothing from that term at any height — friction is all it has...
+        assert!(!face_stable(4.0, 1.0, 4.0, 0.84, 0.0), "gravel cannot stand a 4 m vertical face");
+        // ...but the SAME gravel is perfectly stable once the slope is at repose. Both are docs/45 §3.
+        assert!(face_stable(6.0, 8.0, 6.0, 0.84, 0.0), "and is stable as a slope below its repose angle");
+    }
+
+    #[test]
+    fn cohesion_judges_the_material_bank_not_the_whole_drop() {
+        // The layered-world case, and the bug that made this a separate function. A 1 m grass skin over
+        // basalt on ground that steps down 2 m: the grass must hold only ITS OWN 1 m run (h_crit ≈ 1.09 m),
+        // not the 2 m drop — the basalt beneath holds that. Measuring cohesion against the full drop
+        // strips veneers off hillsides nothing has disturbed.
+        let (mu_grass, h_grass) = (0.7_f32, 1.09_f32);
+        assert!(
+            face_stable(2.0, 1.0, 1.0, mu_grass, h_grass),
+            "a 1 m grass veneer on a 2 m step is supported by the rock under it"
+        );
+        // A real 2 m grass BANK is a different object and it fails, because now the run IS the drop.
+        assert!(
+            !face_stable(2.0, 1.0, 2.0, mu_grass, h_grass),
+            "a free-standing 2 m grass bank exceeds grass's own critical height and slumps"
+        );
+    }
 
     #[test]
     fn contact_mix_is_idempotent_and_bounded() {

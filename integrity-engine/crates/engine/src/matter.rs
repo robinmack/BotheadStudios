@@ -15,12 +15,24 @@
 //! micro-gravity physics, viewed via the time-scale.
 
 use crate::body::Sphere;
+use crate::granular;
 use crate::gravity::MassField;
 use crate::materials::Material;
 use crate::world::World;
 use glam::Vec3;
 
 pub const PARTICLE_HALF: f32 = 0.45; // rendered/collision half-extent (voxel-ish)
+
+/// How far out (in cells) terrain slope stability measures a face against its neighbours (`docs/45`).
+///
+/// It exists because the field quantises height: a one-cell baseline can only express 0° or 45°, so
+/// repose is unresolvable there and [`granular::SLOPE_QUANTUM_M`] has to forgive a whole voxel. Over `r`
+/// cells that forgiveness dilutes to `1/r`, so a LONGER baseline enforces the material's real φ — this
+/// is the length over which the engine claims to hold a slope to repose, and the residual is `atan(μ +
+/// 1/8) − atan(μ)` ≈ 3.6° for gravel. Raising it costs O(r²) per column and lets a single pit re-grade
+/// further out; the honest way to shrink the residual to zero is the sub-voxel surface, not a bigger
+/// number here.
+const SLOPE_BASELINE_CELLS: i32 = 8;
 
 // `DRAG` IS GONE (2026-07-19). It was a per-step velocity multiply that bled 62%/s from a particle in
 // vacuum — a fudge, deleted to 1.0 (a no-op) with the instruction left behind: "when [an atmosphere] is
@@ -483,28 +495,95 @@ impl MatterSim {
         self.particles.len() - start
     }
 
-    /// **Materialize STEEP terrain into grains** (`docs/24` Path B). A heightfield represents gentle
-    /// slopes conservatively (a smooth bilinear surface → an exact −∇U penalty), but NOT vertical walls:
-    /// a cliff smoothed over one voxel becomes a ~N:1 gradient, a huge non-conservative force that
-    /// explodes energetic grains (and was the last thing the `drag` fudge masked). The honest fix is to
-    /// make steep terrain what it physically is — loose matter (talus/scree). Any column within `radius`
-    /// of `site` whose highest solid voxel stands `steep_drop`+ above its LOWEST neighbour is a cliff
-    /// face; its exposed voxels (down to that neighbour) become grains at rest, and the heightfield
-    /// settles to a gentle slope the contact can handle. Same conservation as [`Self::materialize_region`]
-    /// (mass + potential energy; zero injected kinetic energy). Returns the count materialized.
+    /// **Materialize UNSTABLE terrain into grains** (`docs/24` Path B + `docs/45`). Two jobs, one law.
+    ///
+    /// A heightfield represents gentle slopes conservatively (a smooth bilinear surface → an exact −∇U
+    /// penalty) but NOT vertical walls: a cliff smoothed over one voxel becomes a ~N:1 gradient, a huge
+    /// non-conservative force that explodes energetic grains. And a face steeper than its material's
+    /// **angle of repose** is not terrain at all — it is loose matter that has not fallen yet. Both are
+    /// answered by asking one question of every face: *does Mohr–Coulomb hold it up?*
+    ///
+    /// Each exposed voxel stands or slumps by [`granular::face_stable`] — friction (`μ·r`, the φ term)
+    /// OR cohesion (the material's own bank against `c/(ρg)`), either alone sufficient — evaluated
+    /// against EVERY neighbouring column out to [`SLOPE_BASELINE_CELLS`], using that voxel's OWN
+    /// material. The LOWEST failing voxel is found first and everything above it goes with it: slopes
+    /// fail at the base, and a self-supporting skin must not shield the failing bank beneath it.
+    /// Slumped voxels become grains at rest.
+    ///
+    /// **What this replaced, and why it was a landslide** (`docs/45` §2): the old rule looked at a column
+    /// only when it stood `steep_drop = 3` voxels above its lowest neighbour — a 72° face, tolerated for
+    /// every material — and then removed the face ALL THE WAY DOWN to that neighbour. Removing to the
+    /// neighbour's level does not relieve the slope, it MOVES it: the column uphill is now the cliff, at
+    /// nearly the same height. Each pass shed a fresh ~330 grains and the face marched inland, bounded
+    /// only by a pass limit. Cutting to the *stable* height instead turns a cliff into a talus ramp that
+    /// climbs one column per pass and STOPS when it meets the plateau — the end state is the repose
+    /// slope, so convergence is by construction (Σ column tops strictly decreases and is bounded below).
+    ///
+    /// Same conservation as [`Self::materialize_region`]: mass and potential energy, zero injected KE.
+    /// Iterates to a fixpoint and returns the total count materialized.
     pub fn materialize_steep_terrain(
         &mut self,
         world: &mut World,
         materials: &[Material],
         site: Vec3,
         radius: f32,
-        steep_drop: i32,
+    ) -> usize {
+        let start = self.particles.len();
+        // Slumping CASCADES — relieving one face undercuts the column behind it — so a single pass is
+        // not a stable answer, only a step toward one. The cap is a safety net, never the mechanism that
+        // stops it: termination is guaranteed above, and
+        // `slope_stability_reaches_a_fixpoint_without_eating_the_terrain` proves it by calling this a
+        // SECOND time and requiring exactly zero grains. Hitting the cap is a bug report, not a dial.
+        const MAX_PASSES: usize = 256;
+        for _ in 0..MAX_PASSES {
+            if self.slump_unstable_faces(world, materials, site, radius) == 0 {
+                break;
+            }
+        }
+        if self.particles.len() > start {
+            self.dirty = true;
+        }
+        self.particles.len() - start
+    }
+
+    /// One stabilisation pass for [`Self::materialize_steep_terrain`] — scans the heightfield read-only,
+    /// then mutates. Returns the number of voxels materialized this pass (0 ⇒ the terrain is stable).
+    fn slump_unstable_faces(
+        &mut self,
+        world: &mut World,
+        materials: &[Material],
+        site: Vec3,
+        radius: f32,
     ) -> usize {
         let center = world.center();
         let sv = site + center;
         let ri = radius.ceil() as i32;
         let (cx, cz) = (sv.x.floor() as i32, sv.z.floor() as i32);
-        // 1. Find the exposed cliff-face voxels (scan the heightfield read-only, then mutate).
+        // Cache every column top the pass will consult (the mutated disc PLUS the baseline margin around
+        // it, which is read-only). `surface_top_voxel` walks a column from the sky down, so sampling it
+        // per-neighbour per-voxel would re-scan the same columns hundreds of times.
+        let pad = ri + SLOPE_BASELINE_CELLS;
+        let span = (2 * pad + 1) as usize;
+        let mut tops = vec![i32::MIN; span * span];
+        let top_at = |tops: &[i32], x: i32, z: i32| -> Option<i32> {
+            let (ix, iz) = (x - cx + pad, z - cz + pad);
+            if ix < 0 || iz < 0 || ix as usize >= span || iz as usize >= span {
+                return None;
+            }
+            match tops[iz as usize * span + ix as usize] {
+                i32::MIN => None,
+                t => Some(t),
+            }
+        };
+        for iz in 0..span as i32 {
+            for ix in 0..span as i32 {
+                let (x, z) = (cx + ix - pad, cz + iz - pad);
+                if let Some(t) = world.surface_top_voxel(x, z) {
+                    tops[iz as usize * span + ix as usize] = t - 1; // highest SOLID voxel
+                }
+            }
+        }
+        // 1. Decide which voxels fail Mohr–Coulomb (read-only against the snapshot above).
         let mut faces: Vec<(i32, i32, i32)> = Vec::new();
         for dz in -ri..=ri {
             for dx in -ri..=ri {
@@ -512,38 +591,89 @@ impl MatterSim {
                 if (((dx * dx + dz * dz) as f32).sqrt()) > radius {
                     continue;
                 }
-                let Some(top) = world.surface_top_voxel(x, z) else {
+                let Some(solid_top) = top_at(&tops, x, z) else {
                     continue;
                 };
-                let solid_top = top - 1; // highest solid voxel in this column
-                let mut min_nbr = solid_top; // lowest neighbouring solid top
-                for (nx, nz) in [(x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)] {
-                    if let Some(nt) = world.surface_top_voxel(nx, nz) {
-                        min_nbr = min_nbr.min(nt - 1);
+                // The neighbourhood this column must stand against: (baseline r in metres, their top).
+                // Gathered once per column, then re-used for every voxel down the face.
+                let mut nbrs: Vec<(f32, i32)> = Vec::new();
+                let mut lowest = solid_top;
+                for nz in -SLOPE_BASELINE_CELLS..=SLOPE_BASELINE_CELLS {
+                    for nx in -SLOPE_BASELINE_CELLS..=SLOPE_BASELINE_CELLS {
+                        if nx == 0 && nz == 0 {
+                            continue;
+                        }
+                        let r2 = (nx * nx + nz * nz) as f32;
+                        if r2 > (SLOPE_BASELINE_CELLS * SLOPE_BASELINE_CELLS) as f32 {
+                            continue; // a disc, so the baseline is isotropic (no square-corner bias)
+                        }
+                        if let Some(nt) = top_at(&tops, x + nx, z + nz) {
+                            nbrs.push((r2.sqrt(), nt));
+                            lowest = lowest.min(nt);
+                        }
                     }
                 }
-                let face_height = (solid_top - min_nbr) as f32;
-                if solid_top - min_nbr >= steep_drop {
-                    for y in (min_nbr + 1)..=solid_top {
-                        // A HARD material HOLDS a steep face — a real granite cliff, which we see standing
-                        // in nature (Robin). Only material too WEAK to support its own cliff slumps to
-                        // talus. Critical vertical-cliff height ≈ strength / (ρ·g); above it the face can't
-                        // hold. Granite (~1.2e7 Pa) holds ~450 m; dirt (~5e3 Pa) holds <0.4 m. So a granite
-                        // cliff stays rigid terrain; a dirt/sand bank becomes grains — emergent from
-                        // strength, not a rule. (A granite cliff that a heightfield still can't contact
-                        // conservatively is the case for COHESIVE-aggregate materialization — flagged next.)
-                        if let Some(mat) = world.material_at(x, y, z) {
-                            let m = &materials[mat];
-                            let h_crit = m.fracture_strength / (m.density.max(1.0) * 9.81);
-                            if face_height > h_crit {
-                                faces.push((x, y, z)); // too weak to hold this cliff ⇒ slumps
-                            }
+                // 2. The exposed face, and the contiguous same-material RUN each of its voxels belongs
+                // to. Cohesion is judged on the run — the bank a material must hold up by itself — so it
+                // has to be known BEFORE the walk: the top voxel of a 3 m grass bank is part of 3 m of
+                // grass, not of 1 m, and would otherwise be waved through and end the walk under it.
+                let lo = lowest + 1;
+                if lo > solid_top {
+                    continue; // nothing stands above the lowest neighbour: no face to judge
+                }
+                let n = (solid_top - lo + 1) as usize;
+                let mut face_mat: Vec<Option<usize>> = Vec::with_capacity(n);
+                for y in lo..=solid_top {
+                    face_mat.push(world.material_at(x, y, z));
+                }
+                let mut run_h: Vec<f32> = vec![1.0; n];
+                let mut i = 0usize;
+                while i < n {
+                    let mut j = i;
+                    while j + 1 < n && face_mat[j + 1] == face_mat[i] {
+                        j += 1;
+                    }
+                    let len = (j - i + 1) as f32;
+                    run_h[i..=j].fill(len);
+                    i = j + 1;
+                }
+                // 3. Find the LOWEST voxel of the face that neither friction nor cohesion can hold —
+                // then everything from there up goes with it. Slopes fail at the base: undermine the
+                // bottom of a face and the material above slides whether or not it could have stood on
+                // its own. Scanning from the top and stopping at the first voxel that holds gets this
+                // backwards, and a layered world exposes it immediately — a 1 m sod skin is held by its
+                // own cohesion, so it would shield the 10 m dirt bank beneath it from ever being asked.
+                let mut basal_failure: Option<usize> = None;
+                for idx in 0..n {
+                    let Some(mat) = face_mat[idx] else {
+                        continue; // a void in the face; `collapse` owns unsupported overhangs (docs/45 §4)
+                    };
+                    let m = &materials[mat];
+                    let h_crit = m.fracture_strength / (m.density.max(1.0) * 9.81);
+                    let stable = nbrs.iter().all(|&(r, nt)| {
+                        granular::face_stable(
+                            (lo + idx as i32 - nt) as f32,
+                            r,
+                            run_h[idx],
+                            m.friction_coefficient,
+                            h_crit,
+                        )
+                    });
+                    if !stable {
+                        basal_failure = Some(idx);
+                        break;
+                    }
+                }
+                if let Some(base) = basal_failure {
+                    for idx in base..n {
+                        if face_mat[idx].is_some() {
+                            faces.push((x, lo + idx as i32, z));
                         }
                     }
                 }
             }
         }
-        // 2. Materialize the faces (voxel → grain at rest at its own centre — mass + PE conserved).
+        // 3. Materialize them (voxel → grain at rest at its own centre — mass + PE conserved).
         let start = self.particles.len();
         for (x, y, z) in faces {
             if self.particles.len() >= self.max_particles {
@@ -561,9 +691,6 @@ impl MatterSim {
                 temp_k: REF_TEMP_K,
                 resting_frames: 0,
             });
-        }
-        if self.particles.len() > start {
-            self.dirty = true;
         }
         self.particles.len() - start
     }
@@ -1396,7 +1523,7 @@ mod tests {
         // grains (`materialize_steep_terrain`) — a 1-voxel-wide rim-to-floor cliff is exactly the steep
         // face a bilinear heightfield can't represent conservatively. Mirror that here so the collision
         // surface the grains see is the same one the real scene builds.
-        sim.materialize_steep_terrain(&mut w, &mats, Vec3::new(0.0, surf, 0.0), 24.0, 3);
+        sim.materialize_steep_terrain(&mut w, &mats, Vec3::new(0.0, surf, 0.0), 24.0);
 
         // For every grain, penetration against the post-excavation bilinear surface (the SAME surface the
         // GPU debris step collides against) must not exceed one grain radius + a sub-voxel slack.
@@ -1414,27 +1541,158 @@ mod tests {
         );
     }
 
-    #[test]
-    fn materialize_steep_terrain_turns_cliffs_into_grains_conserving_mass() {
-        // docs/24 Path B: a vertical cliff a heightfield can't represent conservatively becomes loose
-        // grains (talus) — mass conserved, grains at rest, and the terrain left behind is gentler.
-        let mats = materials::load();
-        let mut w = world::generate(&mats);
+    /// Lay a COHESIONLESS regolith horizon (gravel, `h_crit = 0`) over the generated world and carve a
+    /// pit with vertical walls through it. This is the configuration that made the missing φ term
+    /// load-bearing: gravel cannot hold *any* vertical face on the cohesion term, so friction is the
+    /// only thing that can stabilise this surface. Returns the world, the pit-lip surface height, and
+    /// the solid count after digging.
+    fn cohesionless_horizon_with_a_pit(
+        mats: &[Material],
+        horizon: i32,
+        pit_half: i32,
+        pit_depth: i32,
+    ) -> (World, i32, usize) {
+        let gravel = materials::index_of(mats, "gravel");
+        let mut w = world::generate(mats);
         let c = w.center();
         let (px, pz) = (c.x as i32, c.z as i32);
+        for dz in -40..=40 {
+            for dx in -40..=40 {
+                let (x, z) = (px + dx, pz + dz);
+                let Some(top) = w.surface_top_voxel(x, z) else {
+                    continue;
+                };
+                for y in (top - horizon).max(0)..top {
+                    if w.material_at(x, y, z).is_some() {
+                        w.set_voxel(x, y, z, Some(gravel));
+                    }
+                }
+            }
+        }
         let surf = w.surface_top_voxel(px, pz).unwrap();
-        // Carve a deep narrow pit → steep walls around it (a cliff the bilinear penalty would explode on).
-        for y in (surf - 6)..surf {
-            for (x, z) in [(px, pz), (px + 1, pz), (px, pz + 1), (px + 1, pz + 1)] {
-                w.set_voxel(x, y, z, None);
+        for y in (surf - pit_depth)..surf {
+            for dz in -pit_half..=pit_half {
+                for dx in -pit_half..=pit_half {
+                    w.set_voxel(px + dx, y, pz + dz, None);
+                }
             }
         }
         let after_dig = w.solid_count();
+        (w, surf, after_dig)
+    }
+
+    #[test]
+    fn slope_stability_reaches_a_fixpoint_without_eating_the_terrain() {
+        // docs/45 §6 acceptance 1 — THE check the old criterion failed outright. `steep_drop = 3` cut a
+        // failing face all the way down to its lowest neighbour, which does not relieve the slope, it
+        // MOVES it: the column behind becomes the new cliff at nearly the same height. Measured on this
+        // world: 308, 313, 314, 327, 326, 339, 335, 342, 350, 338, 332, 339 grains on successive passes —
+        // no convergence, an 8-voxel face still standing after 12 rounds. A landslide that eats terrain.
+        let mats = materials::load();
+        let (mut w, surf, after_dig) = cohesionless_horizon_with_a_pit(&mats, 14, 3, 10);
+        let c = w.center();
+        let (px, pz) = (c.x as i32, c.z as i32);
+        let far_before = w.surface_top_voxel(px + 25, pz).unwrap();
+
+        let mut sim = MatterSim::new(200_000);
+        let site = Vec3::new(0.0, surf as f32 - c.y, 0.0);
+        let first = sim.materialize_steep_terrain(&mut w, &mats, site, 28.0);
+        assert!(first > 0, "vertical walls in a cohesionless horizon are unstable and must slump");
+
+        // The fixpoint. Stabilising an already-relaxed surface must produce NOTHING — the property that
+        // separates "relaxed to repose" from "still sliding, just slower".
+        let second = sim.materialize_steep_terrain(&mut w, &mats, site, 28.0);
+        assert_eq!(second, 0, "terrain already at repose is stable; it shed {second} more grains");
+
+        // Bounded by GEOMETRY rather than by a pass limit — the distinction that matters. The slide can
+        // only re-grade what the talus ramp reaches: the ramp climbs at most one voxel per cell (the
+        // field's quantum), so a `depth`-deep pit is met by a ramp about `depth` cells long and nothing
+        // outside a disc of radius `pit_half + depth + 1` is touched. Removing the FULL depth over that
+        // entire disc is a deliberately generous over-count of the wedge; a runaway slide sails past it.
+        let reach = (3 + 10 + 1) as f32;
+        let wedge_bound = (std::f32::consts::PI * reach * reach * 10.0) as usize;
+        assert!(
+            first < wedge_bound,
+            "slumping is a local talus wedge, not a runaway slide ({first} grains, bound {wedge_bound})"
+        );
+        assert_eq!(
+            w.surface_top_voxel(px + 25, pz).unwrap(),
+            far_before,
+            "terrain a baseline beyond the disturbance is untouched — the slide does not march inland"
+        );
+        // docs/45 §6: no matter deleted. Every voxel that stopped being terrain became a grain.
+        assert_eq!(after_dig - w.solid_count(), sim.particle_count());
+    }
+
+    #[test]
+    fn the_stabilised_slope_is_the_materials_own_angle_of_repose() {
+        // docs/45 §6 acceptance 2. The end state is not "no 3-voxel steps" — a shape nothing in nature is
+        // trying to reach — it is the material's REPOSE SLOPE, asserted against the DB datum rather than
+        // a literal. The bound carries the field's quantum honestly: over a baseline of r cells the
+        // heightfield can over-permit by one voxel (granular::SLOPE_QUANTUM_M), so the claim is
+        // `drop ≤ μ·r + 1`, and it tightens toward pure repose as r grows.
+        let mats = materials::load();
+        let (mut w, surf, _) = cohesionless_horizon_with_a_pit(&mats, 14, 3, 10);
+        let c = w.center();
+        let (px, pz) = (c.x as i32, c.z as i32);
+        let mut sim = MatterSim::new(200_000);
+        sim.materialize_steep_terrain(
+            &mut w,
+            &mats,
+            Vec3::new(0.0, surf as f32 - c.y, 0.0),
+            28.0,
+        );
+
+        let mu = mats[materials::index_of(&mats, "gravel")].friction_coefficient;
+        let r = 8.0_f32; // the baseline the engine claims to enforce over (SLOPE_BASELINE_CELLS)
+        let allowed = mu * r + crate::granular::SLOPE_QUANTUM_M;
+        let mut worst = 0.0_f32;
+        for dz in -16..=16 {
+            for dx in -16..=16 {
+                let (x, z) = (px + dx, pz + dz);
+                let Some(top) = w.surface_top_voxel(x, z) else {
+                    continue;
+                };
+                // Sample the four axis-aligned baselines of length r out of this column.
+                for (nx, nz) in [(8, 0), (-8, 0), (0, 8), (0, -8)] {
+                    if let Some(nt) = w.surface_top_voxel(x + nx, z + nz) {
+                        worst = worst.max((top - nt) as f32);
+                    }
+                }
+            }
+        }
+        assert!(
+            worst <= allowed,
+            "a cohesionless horizon settled steeper than gravel's own repose: {worst:.1} m over {r} m \
+             exceeds μ·r + quantum = {allowed:.1} m (μ = {mu} ⇒ φ = {:.1}°)",
+            mu.atan().to_degrees()
+        );
+        // And the criterion must have teeth — a bound this loose would pass on flat ground too.
+        assert!(
+            worst > 1.0,
+            "the test terrain never developed a real slope ({worst:.1} m), so it proves nothing"
+        );
+    }
+
+
+    #[test]
+    fn materialize_steep_terrain_turns_unstable_cliffs_into_grains_conserving_mass() {
+        // docs/24 Path B: a face that cannot hold itself becomes loose grains (talus) — mass conserved,
+        // grains at rest, and the terrain left behind is gentler.
+        //
+        // The pit is cut in a COHESIONLESS horizon on purpose. This test used to dig into the generated
+        // world's basalt and assert the walls MUST materialize, which docs/45 §6 explicitly reverses:
+        // "a rock cliff still stands … this must not flatten canyons". Rock faces are now left alone
+        // (`a_thin_veneer_on_a_rock_cliff_is_not_shed` pins that). What is worth keeping here is the
+        // CONSERVATION guarantee, so the scenario moved to material that genuinely fails.
+        let mats = materials::load();
+        let (mut w, surf, after_dig) = cohesionless_horizon_with_a_pit(&mats, 14, 2, 6);
+        let c = w.center();
 
         let mut sim = MatterSim::new(50_000);
         let site = Vec3::new(0.0, surf as f32 - c.y, 0.0);
-        let n = sim.materialize_steep_terrain(&mut w, &mats, site, 6.0, 3);
-        assert!(n > 0, "the steep pit walls materialize into grains");
+        let n = sim.materialize_steep_terrain(&mut w, &mats, site, 6.0);
+        assert!(n > 0, "the unstable pit walls materialize into grains");
         assert_eq!(n, sim.particle_count());
         // Mass conserved by the materialize step: solid lost == grains gained.
         assert_eq!(after_dig - w.solid_count(), sim.particle_count());
@@ -1445,11 +1703,67 @@ mod tests {
     }
 
     #[test]
-    fn a_granite_cliff_holds_while_the_dirt_above_it_slumps() {
-        // Robin's antithesis: granite is strong enough to STAND as a cliff (we see them in nature). A pit
-        // dug through the dirt cap INTO the granite bulk makes a wall that is weak dirt on top, granite
-        // below. The dirt slumps to talus; the GRANITE HOLDS — no granite grains are shed. Emergent from
-        // strength (critical cliff height ≈ σ/ρg): dirt ~0.4 m, granite ~450 m.
+    fn a_rock_cliff_holds_while_the_weak_cap_above_it_slumps() {
+        // Robin's antithesis, and docs/45 §6's "a rock cliff still stands". A pit dug through a weak cap
+        // INTO the rock bulk leaves a wall that is soil on top, rock below. The soil slumps to talus; the
+        // ROCK HOLDS — emergent from each material's own critical height (dirt ≈ 0.36 m, basalt ≈ 510 m),
+        // never a rule about which material is which.
+        //
+        // The cap is built explicitly because the generated world does NOT have one: it is a 1-voxel
+        // GRASS skin directly on basalt, with no dirt and no granite anywhere. The version of this test
+        // that stood here before asserted "no granite grains" against a world containing none, and its
+        // "the weak dirt slumps" was really the grass skin moving — for the wrong reason (cohesion judged
+        // against the full 16 m drop instead of the skin's own 1 m run). It passed without testing its
+        // own name.
+        let mats = materials::load();
+        let dirt = materials::index_of(&mats, "dirt");
+        let basalt = materials::index_of(&mats, "basalt");
+        let mut w = world::generate(&mats);
+        let c = w.center();
+        let (px, pz) = (c.x as i32, c.z as i32);
+        for dz in -12..=12 {
+            for dx in -12..=12 {
+                let (x, z) = (px + dx, pz + dz);
+                let Some(top) = w.surface_top_voxel(x, z) else {
+                    continue;
+                };
+                for y in (top - 10).max(0)..top {
+                    if w.material_at(x, y, z).is_some() {
+                        w.set_voxel(x, y, z, Some(dirt)); // a 10 m weak cap over the basalt bulk
+                    }
+                }
+            }
+        }
+        let surf = w.surface_top_voxel(px, pz).unwrap();
+        for y in (surf - 16)..surf {
+            for (x, z) in [(px, pz), (px + 1, pz), (px, pz + 1), (px + 1, pz + 1)] {
+                w.set_voxel(x, y, z, None); // pit through the cap into the rock
+            }
+        }
+        let mut sim = MatterSim::new(50_000);
+        let site = Vec3::new(0.0, surf as f32 - c.y, 0.0);
+        let n = sim.materialize_steep_terrain(&mut w, &mats, site, 6.0);
+        assert!(n > 0, "the weak cap above the cliff slumps to grains");
+        assert!(
+            sim.particles.iter().all(|p| p.material != basalt),
+            "the basalt cliff HOLDS — no rock grains slump, however deep the pit is cut"
+        );
+        assert!(
+            sim.particles.iter().any(|p| p.material == dirt),
+            "...and what came off is the weak cap, which is the half that should fail"
+        );
+    }
+
+    #[test]
+    fn a_thin_veneer_on_a_rock_cliff_is_not_shed() {
+        // The behaviour docs/45's cohesion term forces, pinned so it cannot regress quietly. The
+        // generated world is a 1 m grass skin on basalt, so a 16 m pit through it leaves sod at the lip
+        // of a rock wall. The sod STANDS: the bank it has to hold up is its own 1 m run against
+        // h_crit ≈ 1.09 m, and the basalt beneath holds the wall on its own 510 m.
+        //
+        // The old criterion measured that skin against the whole 16 m drop and shed it. That is not a
+        // harmless extra: the same conflation stripped 470 grains off a pristine world, because every
+        // natural hillside steeper than the skin is thin has a "drop" larger than a veneer's h_crit.
         let mats = materials::load();
         let mut w = world::generate(&mats);
         let c = w.center();
@@ -1457,18 +1771,29 @@ mod tests {
         let surf = w.surface_top_voxel(px, pz).unwrap();
         for y in (surf - 16)..surf {
             for (x, z) in [(px, pz), (px + 1, pz), (px, pz + 1), (px + 1, pz + 1)] {
-                w.set_voxel(x, y, z, None); // pit through the ~10 m dirt into the granite
+                w.set_voxel(x, y, z, None);
             }
         }
         let mut sim = MatterSim::new(50_000);
         let site = Vec3::new(0.0, surf as f32 - c.y, 0.0);
-        let n = sim.materialize_steep_terrain(&mut w, &mats, site, 6.0, 3);
-        assert!(n > 0, "the weak dirt above the cliff slumps to grains");
-        let granite = materials::index_of(&mats, "granite");
-        assert!(
-            sim.particles.iter().all(|p| p.material != granite),
-            "the granite cliff HOLDS — no granite grains slump (only the dirt above does)"
-        );
+        let n = sim.materialize_steep_terrain(&mut w, &mats, site, 6.0);
+        assert_eq!(n, 0, "a supported veneer on a standing rock wall is not loose matter");
+    }
+
+    #[test]
+    fn stabilising_undisturbed_terrain_changes_nothing() {
+        // The sharpest statement of the same property, and the one that would have caught the veneer bug
+        // on its own: a world nothing has touched is ALREADY at rest. If stabilisation sheds grains from
+        // pristine ground, the criterion is manufacturing matter out of the generator's own relief.
+        let mats = materials::load();
+        let mut w = world::generate(&mats);
+        let c = w.center();
+        let surf = w.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
+        let before = w.solid_count();
+        let mut sim = MatterSim::new(200_000);
+        let n = sim.materialize_steep_terrain(&mut w, &mats, Vec3::new(0.0, surf, 0.0), 28.0);
+        assert_eq!(n, 0, "undisturbed terrain shed {n} grains — stability is over-firing");
+        assert_eq!(w.solid_count(), before, "and the terrain itself is untouched");
     }
 
     #[test]

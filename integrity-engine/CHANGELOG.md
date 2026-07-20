@@ -9,6 +9,22 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **BREAKING (API): `MatterSim::materialize_steep_terrain` drops its `steep_drop` argument.** Terrain
+  stability is now Mohr–Coulomb — a face stands if friction holds the slope OR cohesion holds the bank —
+  so there is no step-height threshold left to pass. Call sites just delete the trailing integer.
+- **Terrain has a friction term (docs/45).** Slope stability implemented only cohesion
+  (`h_crit = fracture_strength/ρg`) behind a constant that tolerated a 72° face for every material, while
+  the grains have derived their angle of repose from `friction_coefficient` since docs/23. Ground and
+  grain now answer the slope question with one law, `granular::face_stable`, reading the same DB datum.
+  Cohesionless material (gravel, sand) can no longer stand a vertical face at any height but is stable as
+  a slope at its own repose angle; **rock cliffs are unchanged and canyons do not flatten**. Stabilisation
+  converges to a fixpoint instead of shedding grains without bound (measured: 106→622 grains/pass and
+  rising, versus 0 on a second pass now), and undisturbed terrain is left alone (470 → 0 grains).
+- **Slumped material no longer hangs inside the collision surface.** Faces are cut to their *stable*
+  height rather than down to the neighbouring column, so grains come off the wedge above the resulting
+  talus ramp: worst penetration against the bilinear surface 2.75 m → 0.50 m. Known limit, flagged as a
+  resolution IOU: an integer heightfield cannot express a slope between 0° and 45°, so repose is enforced
+  to within `1/r` over an `r`-cell baseline (~3.6° at the 8-cell default).
 - **BREAKING (world schema): atmospheres declare MASS, not pressure.** `atmosphere.surface_pressure_pa`
   is removed; declare `atmosphere.mass_kg` (and optionally `composition`) and surface pressure is DERIVED
   as the weight of that column, `P = M·g/(4πR²)`. Earth's world file previously declared 101,325 Pa

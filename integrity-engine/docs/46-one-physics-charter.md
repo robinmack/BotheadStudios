@@ -51,8 +51,8 @@ that co-motion is the physical maximum so there is no coefficient to tune; `Furr
 velocity SCALE honest and its distribution SHAPE an explicit resolution IOU *"to be DELETED once particle
 count is high enough for the flow to emerge on its own."*
 
-Compare the fudges: `MAX_EJECT = 0.045`, `steep_drop = 3`, a hardcoded damping ζ. None names a resolved
-computation; none would converge to anything.
+Compare the fudges: `MAX_EJECT = 0.045`, `steep_drop = 3` (retired 2026-07-19, docs/45), a hardcoded
+damping ζ. None names a resolved computation; none would converge to anything.
 
 ### The horizon — write IOUs so a descendant can delete them
 
@@ -91,7 +91,7 @@ docs/32 §4's; the rest were found since and are recorded here so they are not r
 | 2 | **Four integrators over one law** | docs/32 §4.2 | docs/38 (partly legitimate — see §1) |
 | 3 | **Rigid-boundary fork** — in an impact Earth is simultaneously materialized grains AND a rigid boundary | docs/32 §4.3 | docs/33 |
 | 4 | **Two rigid-body reps** — `body::Sphere` vs the cohesive-`Aggregate` probe | docs/32 §4.4 | docs/38 4c′ |
-| 5 | **Slope stability is half a law.** Shear strength is `τ = c + σ·tan(φ)`. Grains carry both terms; terrain carries only `c` — there is no φ term in terrain stability at all | `granular.rs:73` (μ "produces the angle of repose") vs `matter.rs:538` (`h_crit = c/ρg`, alone); measured non-convergence: 308→339 grains/pass, 8-voxel face after 12 rounds | **docs/45** |
+| 5 | ~~**Slope stability is half a law.**~~ **CLOSED 2026-07-19.** Terrain and grains now read the same `friction_coefficient` through one law, `granular::face_stable`; `steep_drop` is retired | was: `granular.rs:73` vs `matter.rs:538` (`h_crit = c/ρg` alone), non-convergent at 106→622 grains/pass. Now: fixpoint on the second pass, settled slope asserted against the DB μ, pristine terrain a no-op (470→0 grains) | **docs/45 §7** |
 | 6 | **The de-resolution ladder stops one rung short.** grain→voxel works; voxel→field does not exist | measured: meteor peak 3,605 grains → 78, **98% returned**; but `patch_resolved` is set `true` once and **never** set back — grep shows no writer of `false` after init | docs/39 item #4 (deferred) |
 | 7 | **Promotion is gated visually in one doc, physically in another.** docs/30: the trigger must be "a physical error bound … never a visual one". docs/39: gate on "camera-visible ∧ interacting" | the two docs, directly | **docs/44** |
 | 8 | **The honest footprint is computed, then discarded.** `crater_radius` from `V = E/σ` is derived, then clipped by `MATERIALIZE_CAP = 14.0`, and `resolve_patch` resolves the whole 96 m patch regardless | `lib.rs:858`, `lib.rs:992` (self-flagged) | **docs/44** |
@@ -143,7 +143,7 @@ That is the shape of most remaining work: **not new physics — the same law, ru
   implemented correctly would disagree with grain repose, because the grain side under-predicts for its
   own flagged reason (spherical grains roll). Making them agree by adjusting the correct half would look
   consistent and be wrong.
-- Constants that read as physics. `steep_drop = 3` (a 72° slope), `MATERIALIZE_CAP = 14.0`,
+- Constants that read as physics. `steep_drop = 3` (a 72° slope — RETIRED, docs/45), `MATERIALIZE_CAP = 14.0`,
   `MAX_EJECT = 0.045`, a hardcoded damping ζ. Each was defensible when written and each silently became a
   lie when the world around it changed. A number is either derived from a material datum / conservation
   law, or explicitly flagged as a budget with an IOU (docs/24).
