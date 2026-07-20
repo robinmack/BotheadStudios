@@ -1764,10 +1764,31 @@ mod tests {
         // The old criterion measured that skin against the whole 16 m drop and shed it. That is not a
         // harmless extra: the same conflation stripped 470 grains off a pristine world, because every
         // natural hillside steeper than the skin is thin has a "drop" larger than a veneer's h_crit.
+        //
+        // The stratigraphy is built explicitly rather than taken from the generator. This test is ABOUT a
+        // 1 m skin on rock, and `world::generate` is free to grow a deeper profile — it gains a 6 m
+        // graded regolith the moment docs/45 unblocks `regolith-horizon`, which would silently turn this
+        // into a test of a cohesionless horizon instead. A test should not depend on world generation to
+        // supply the material stack whose behaviour it is asserting.
         let mats = materials::load();
+        let grass = materials::index_of(&mats, "grass");
+        let rock = materials::index_of(&mats, "basalt");
         let mut w = world::generate(&mats);
         let c = w.center();
         let (px, pz) = (c.x as i32, c.z as i32);
+        for dz in -20..=20 {
+            for dx in -20..=20 {
+                let (x, z) = (px + dx, pz + dz);
+                let Some(top) = w.surface_top_voxel(x, z) else {
+                    continue;
+                };
+                for y in (top - 10).max(0)..top {
+                    if w.material_at(x, y, z).is_some() {
+                        w.set_voxel(x, y, z, Some(if y == top - 1 { grass } else { rock }));
+                    }
+                }
+            }
+        }
         let surf = w.surface_top_voxel(px, pz).unwrap();
         for y in (surf - 16)..surf {
             for (x, z) in [(px, pz), (px + 1, pz), (px, pz + 1), (px + 1, pz + 1)] {
