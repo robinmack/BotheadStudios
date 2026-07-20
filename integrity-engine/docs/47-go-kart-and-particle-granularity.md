@@ -169,6 +169,17 @@ monotonicity must hold at mixed sizes; a new scene should place a boulder among 
 same pair set the CPU reference finds. Note the harness silently selects the WRONG GPU on this box — check
 which adapter it bound before reading any number.
 
+**MEASURED 2026-07-20 — the WGSL mirror is correct but the multi-level GATHER is slow, and here is why.**
+The CPU reference `grid::pairs_within` gets O(1) per pair by scanning own + COARSER levels only — legal
+because it ENUMERATES pairs (compute once, both sides know). The GPU force pass is a GATHER: each grain
+independently finds its own neighbours, so a big grain MUST scan the FINE level to see its small
+neighbours — `(r_big/r_fine)³` cells. Benched on an RTX 5060 Ti (fine-dominated mix, per-frame GPU time):
+uniform 5.5 ms → 5 levels 117 ms at N=60k (~21×). Uniform (`max_level = 0`) is bit-identical to the flat
+grid and free. The cheaper route is symmetric SCATTER (compute each pair once from the finer grain,
+atomicAdd force to both), which restores the coarser-only scan — but float `atomicAdd` order is
+race-decided and would undo the determinism fix. Deterministic scatter (per-cell reduction or
+sort-then-segment) is the real next step; until then mixed-size is correct and gated off by default.
+
 **On the GPU this is smaller than it sounds:** fold `level` into the hash key — `hash(level, ix, iy, iz)`
 — keeping ONE table and the existing `cs_grid_clear`/`cs_grid_insert`/scan passes nearly intact, rather
 than N separate buffers. Each particle derives its level from its own radius. Note the convergence with

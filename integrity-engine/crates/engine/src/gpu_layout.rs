@@ -66,8 +66,13 @@ pub(crate) struct GpuStepParams {
     pub(crate) c_tangent_damp: f32,
     pub(crate) specific_heat: f32, // J/(kg·K) — grain temp↔u (docs/38)
     pub(crate) drag_cd: f32,
-    pub(crate) _hp1: f32,
-    pub(crate) _hp2: f32,
+    /// Level-0 cell edge (m) — the FINEST granularity this scene resolves. The hierarchical hash uses
+    /// `cell_size(level) = base_cell * 2^level` (`docs/47` §1); there is no global cell size any more
+    /// than there is a global particle size.
+    pub(crate) base_cell: f32,
+    /// Highest populated grid level. 0 ⇒ every grain is one size and the walk collapses to the old
+    /// single-level ±1 scan, bit-identically.
+    pub(crate) max_level: u32,
 }
 
 #[cfg(test)]
@@ -157,7 +162,7 @@ mod tests {
         let rust = offsets!(
             GpuStepParams, gravity, dt, center, c_cohesion, air_rho, contact_damp, settle_speed,
             part_half, cool_rate, count, world_w, world_d, cell_size, table_mask, bucket_k, c_radius,
-            c_stiffness, c_normal_damp, c_friction, c_tangent_damp, specific_heat, drag_cd, _hp1, _hp2,
+            c_stiffness, c_normal_damp, c_friction, c_tangent_damp, specific_heat, drag_cd, base_cell, max_level,
         );
         let shader = wgsl_offsets(&wgsl_typed(SHADER, "Params"));
         assert_eq!(
@@ -194,6 +199,6 @@ mod tests {
         // The comma-split case: two fields sharing one line at the very end of Params.
         let p = wgsl_typed(SHADER, "Params");
         let tail: Vec<&str> = p[p.len() - 2..].iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(tail, ["_hp1", "_hp2"], "the one-line pair must both be seen");
+        assert_eq!(tail, ["base_cell", "max_level"], "the tail pair must both be seen");
     }
 }

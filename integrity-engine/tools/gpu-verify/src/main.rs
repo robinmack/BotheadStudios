@@ -76,8 +76,8 @@ struct Params {
     // `drag_cd`, so the coefficient arrived as 0.0 and drag was silently a no-op. A repr(C) mirror that
     // drifts from its shader fails SILENTLY: no error, just wrong physics.
     drag_cd: f32,
-    _hp1: f32,
-    _hp2: f32,
+    base_cell: f32, // level-0 cell edge (m) — hierarchical hash, docs/47 §1
+    max_level: u32, // highest populated level; 0 ⇒ collapses to the old single-size ±1 scan
 }
 
 // DECOUPLED SCALE (docs/23): the PHYSICS particle is one per 1 m voxel (spacing 1.0, radius 0.5); the
@@ -123,6 +123,11 @@ struct Scene {
     gravity_y: Option<f32>,
     air_rho: Option<f32>,
     cohesion: Option<f32>, // attractive adhesion between grains (None ⇒ 0, cohesionless)
+    // HIERARCHICAL GRID (docs/47 §1). None ⇒ one level, cell = the old uniform size, which the
+    // hierarchy reproduces bit-identically. A mixed-granularity scene sets the FINEST cell as
+    // `base_cell` and the highest populated level as `max_level`.
+    base_cell: Option<f32>,
+    max_level: Option<u32>,
 }
 impl Scene {
     fn flat(world_w: u32, world_d: u32, top: i32, friction: f32) -> Self {
@@ -136,6 +141,8 @@ impl Scene {
             gravity_y: None,
             air_rho: None,
             cohesion: None,
+            base_cell: None,
+            max_level: None,
         }
     }
     fn params(&self, count: u32) -> Params {
@@ -162,8 +169,8 @@ impl Scene {
             c_tangent_damp: C_TANGENT_DAMP,
             specific_heat: GRAIN_SPECIFIC_HEAT,
             drag_cd: 1.05, // tumbling cube — matches lib.rs DRAG_CD_CUBE
-            _hp1: 0.0,
-            _hp2: 0.0,
+            base_cell: self.base_cell.unwrap_or(2.0 * PART_HALF),
+            max_level: self.max_level.unwrap_or(0),
         }
     }
 }
@@ -177,6 +184,7 @@ struct Gpu {
     forces: wgpu::ComputePipeline,
     integrate: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
+    adapter_name: String,
 }
 
 fn init_gpu() -> Gpu {
@@ -242,6 +250,7 @@ fn init_gpu_src(shader_src: &str) -> Gpu {
         ..Default::default()
     });
     let adapter = pick_adapter(&instance);
+    let adapter_name = adapter.get_info().name;
     let (device, queue) = pollster::block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {
             label: Some("gpu-verify"),
@@ -312,6 +321,7 @@ fn init_gpu_src(shader_src: &str) -> Gpu {
         layout,
         device,
         queue,
+        adapter_name,
     }
 }
 
@@ -523,6 +533,10 @@ fn column(rad: f32, h: f32, y0: f32) -> Vec<Particle> {
 
 fn main() {
     let gpu = init_gpu();
+    if std::env::var("GPU_VERIFY_BENCH").is_ok() {
+        bench(&gpu);
+        return;
+    }
     let mut failures = 0;
 
     // ── DETERMINISM: the same input, twice, must give the same bytes. ─────────────────────────────
@@ -568,6 +582,62 @@ fn main() {
         }
     }
 
+
+    // ── MULTI-GRANULARITY: does the hierarchical hash find contacts ACROSS size classes? ─────────
+    // The point of docs/47 §1, and the thing a single global cell size cannot do. A boulder and a pebble
+    // sit in different grid LEVELS; if the level walk in `cs_forces` is wrong they never see each other
+    // and the pebble falls straight through the boulder with no error anywhere.
+    //
+    // This tests NEIGHBOUR FINDING, not mixed-mass dynamics: the GPU contact law still returns a
+    // symmetric per-mass acceleration, so unequal masses do not yet exchange momentum correctly (the CPU
+    // `granular::contact_force` is the reference for that, and wiring it is the next step). What must be
+    // true here is that the contact is DETECTED at all.
+    {
+        let big_r = 1.0f32; // level 3 when base_cell = 0.25
+        let small_r = 0.125f32; // level 0
+        let mut scene = Scene::flat(24, 24, 0, 0.6);
+        scene.gravity_y = Some(0.0); // no gravity: isolate contact detection from falling
+        scene.base_cell = Some(2.0 * small_r);
+        scene.max_level = Some(3);
+
+        // A pebble OVERLAPPING the boulder, and a second pebble clearly clear of it. Same input, two
+        // very different correct answers — so a pass cannot come from "everything repels" either.
+        // Two INDEPENDENT runs. A single scene with both pebbles is not a valid test: the boulder
+        // recoils off the overlapping pebble and drifts into the "clear" one, which then moves for a
+        // perfectly correct reason and looks like a false positive. (Observed, before this was split.)
+        let run = |gap: f32| -> (f32, f32) {
+            let sized = |x: f32, r: f32| {
+                let mut p = Particle::at(x, 8.0, 0.0);
+                p.radius = r;
+                p
+            };
+            let start = vec![sized(0.0, big_r), sized(big_r + small_r + gap, small_r)];
+            let out = simulate(&gpu, start.clone(), 6, &scene);
+            let d = |i: usize| {
+                ((out[i].offset[0] - start[i].offset[0]).powi(2)
+                    + (out[i].offset[1] - start[i].offset[1]).powi(2)
+                    + (out[i].offset[2] - start[i].offset[2]).powi(2))
+                .sqrt()
+            };
+            (d(0), d(1))
+        };
+        let (_, overlapping) = run(-0.05); // inside touch ⇒ must repel
+        let (_, separated) = run(0.60); // well beyond touch + cohesion ⇒ must not
+        let lv_span = 3; // levels between the two size classes
+        let ok = overlapping > 1.0e-4 && separated < 1.0e-6;
+        println!(
+            "\nG0 cross-level contact (boulder r={big_r} vs pebble r={small_r}, {lv_span} levels apart):\n   \
+             overlapping pebble moved {overlapping:.4e} m (want > 0), clear pebble moved {separated:.4e} m (want 0)  {}",
+            if ok { "PASS" } else { "FAIL" }
+        );
+        if !ok {
+            println!(
+                "   → the level walk in cs_forces is not finding contacts across size classes. A single\n   \
+                   global cell size cannot express this, which is the whole reason for the hierarchy."
+            );
+            failures += 1;
+        }
+    }
 
     // ── FOUNDATIONS: verify the LITTLE STUFF — single- and two-particle Newton's laws in a true VACUUM.
     // (Robin's manifesto: a meteor is just an exaggerated test of these. Get a force on one particle,
@@ -894,6 +964,8 @@ fn main() {
             gravity_y: None,
             air_rho: None,
             cohesion: None,
+            base_cell: None,
+            max_level: None,
         };
         // Pour a block above the pit centre.
         let mut ps = Vec::new();
@@ -959,7 +1031,7 @@ fn main() {
                 }
             }
         }
-        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: plain as f32, friction: 0.7, normal_damp: None, gravity_y: None, air_rho: None, cohesion: None };
+        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: plain as f32, friction: 0.7, normal_damp: None, gravity_y: None, air_rho: None, cohesion: None, base_cell: None, max_level: None};
         let mut ps = Vec::new();
         let s = 1.0f32;
         let j = 0.02 * s;
@@ -1015,7 +1087,7 @@ fn main() {
             }
         }
         // center_y = low ⇒ low floor at y=0, wall top at y=12.
-        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: low as f32, friction: 0.6, normal_damp: None, gravity_y: None, air_rho: None, cohesion: None };
+        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: low as f32, friction: 0.6, normal_damp: None, gravity_y: None, air_rho: None, cohesion: None, base_cell: None, max_level: None};
         // Grains sitting on the low floor just left of the cliff (cliff at centered x=0, i.e. voxel 15),
         // shoved toward it at a healthy speed.
         // A single LOW layer of grains on the floor (y≈part_half), so ANY height gain = wall-climbing.
@@ -1054,7 +1126,7 @@ fn main() {
                 }
             }
         }
-        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: low as f32, friction: 0.6, normal_damp: None, gravity_y: None, air_rho: None, cohesion: None };
+        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: low as f32, friction: 0.6, normal_damp: None, gravity_y: None, air_rho: None, cohesion: None, base_cell: None, max_level: None};
         // A pile of grains on the LOW side (centered x < 0 = voxel < 12), stacked so its weight presses
         // the bottom rows hard against the step face at x = 0.
         let mut ps = Vec::new();
@@ -1105,7 +1177,7 @@ fn main() {
                 hf[(z * w as i32 + x) as usize] = top;
             }
         }
-        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: plain as f32, friction: 0.6, normal_damp: None, gravity_y: None, air_rho: None, cohesion: None };
+        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: plain as f32, friction: 0.6, normal_damp: None, gravity_y: None, air_rho: None, cohesion: None, base_cell: None, max_level: None};
         let mut ps = Vec::new();
         for ix in -3..=3 {
             for iz in -3..=3 {
@@ -1564,3 +1636,145 @@ mod layout_tests {
         assert_ne!(honest, swapped, "the guard cannot see field order");
     }
 }
+
+/// **Production-N mixed-granularity bench** (docs/47 §1, gpu-perf skill). Answers the question the scene
+/// suite cannot: what does the hierarchical grid COST at real particle counts, uniform vs mixed size?
+///
+/// Follows the skill's recipe rather than `simulate`'s: SUBSTEPS batched into ONE encoder per frame (the
+/// engine's pattern, not per-substep), pipelines built once, a hash table sized to N (a fixed small table
+/// overflows its buckets at large N and silently falls back to O(N) — measuring the wrong thing), 3 warmup
+/// frames for shader cache + clock boost, then timed reps with the run-to-run spread reported. Native
+/// Vulkan — structural costs transfer to the browser, absolute frame times do not (skill §9).
+fn bench(gpu: &Gpu) {
+    use wgpu::util::DeviceExt;
+    let info = gpu.adapter_name.clone();
+    println!("# mixed-granularity bench — adapter: {info}");
+    println!("# N      levels  ms/frame (mean±spread)   us/particle   config");
+
+    let reps = 24u32;
+    let warmup = 3u32;
+    let ns = [1_000u32, 10_000, 30_000, 60_000];
+
+    // Deterministic layout: a dense cube of grains so contacts actually happen (empty space = no work).
+    let build = |n: u32, levels: u32| -> (Vec<Particle>, f32, u32) {
+        let base_r = 0.5f32;
+        // side of a cube holding ~n grains at ~1 diameter spacing
+        let side = (n as f32).cbrt().ceil() as u32;
+        let mut v = Vec::with_capacity(n as usize);
+        let mut k = 0u32;
+        'outer: for x in 0..side {
+            for y in 0..side {
+                for z in 0..side {
+                    if k >= n { break 'outer; }
+                    // Distribute sizes REALISTICALLY: level L has radius base_r * 2^L, and each
+                    // coarser level is exponentially rarer (~half the population per level). A real
+                    // scene is fine-dominated with a few big aggregates — NOT an even mix, and
+                    // certainly not coarse-dominated. `lvl = trailing_zeros` gives exactly that:
+                    // half the grains at level 0, a quarter at 1, an eighth at 2, ...
+                    let lvl = if levels <= 1 { 0 } else { (k | (1 << (levels - 1))).trailing_zeros().min(levels - 1) };
+                    let r = base_r * (1u32 << lvl) as f32;
+                    let sp = 1.05 * 2.0 * base_r; // spacing at the FINE scale so fine grains touch
+                    let mut p = Particle::at(
+                        x as f32 * sp + 0.13 * jitter(k, 1),
+                        4.0 + y as f32 * sp,
+                        z as f32 * sp + 0.13 * jitter(k, 3),
+                    );
+                    p.radius = r;
+                    v.push(p);
+                    k += 1;
+                }
+            }
+        }
+        (v, base_r, (levels.max(1)) - 1)
+    };
+
+    for &n in &ns {
+        for &levels in &[1u32, 3, 5] {
+            let (particles, base_r, max_level) = build(n, levels);
+            let count = particles.len() as u32;
+
+            // Table sized like the engine: next pow2 >= 4*N, so buckets stay short (skill §7).
+            let mut table = 1u32 << 15;
+            while table < count * 4 { table <<= 1; }
+
+            let mut params = Scene::flat(64, 64, -8, 0.6).params(count);
+            params.gravity = [0.0, -9.81, 0.0]; // real load so contacts carry force
+            params.base_cell = 2.0 * base_r;
+            params.max_level = max_level;
+            params.table_mask = table - 1;
+
+            let pbuf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None, contents: bytemuck::cast_slice(&particles),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            });
+            let ubuf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None, contents: bytemuck::bytes_of(&params), usage: wgpu::BufferUsages::UNIFORM,
+            });
+            let hf = vec![-8i32; 64 * 64];
+            let hbuf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None, contents: bytemuck::cast_slice(&hf), usage: wgpu::BufferUsages::STORAGE,
+            });
+            let store = |sz: u64| gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: None, size: sz, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
+            let gcount = store(table as u64 * 4);
+            let gbucket = store(table as u64 * BUCKET_K as u64 * 4);
+            let fbuf = store(count as u64 * 64);
+            let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None, layout: &gpu.layout, entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: pbuf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: hbuf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: gcount.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: gbucket.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 5, resource: fbuf.as_entire_binding() },
+                ],
+            });
+            let ceil = |x: u32| x.div_ceil(64);
+            let frame = || {
+                let mut enc = gpu.device.create_command_encoder(&Default::default());
+                for _ in 0..SUBSTEPS {
+                    for (pl, th) in [
+                        (&gpu.clear, table), (&gpu.insert, count), (&gpu.sort, table),
+                        (&gpu.forces, count), (&gpu.integrate, count),
+                    ] {
+                        let mut ps = enc.begin_compute_pass(&Default::default());
+                        ps.set_pipeline(pl);
+                        ps.set_bind_group(0, &bind, &[]);
+                        ps.dispatch_workgroups(ceil(th), 1, 1);
+                    }
+                }
+                gpu.queue.submit(Some(enc.finish()));
+                gpu.device.poll(wgpu::Maintain::Wait);
+            };
+            for _ in 0..warmup { frame(); }
+            // No Instant::now in this environment? std::time is fine in a native binary.
+            let mut times = Vec::with_capacity(reps as usize);
+            for _ in 0..reps {
+                let t = std::time::Instant::now();
+                frame();
+                times.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let mean = times.iter().sum::<f64>() / reps as f64;
+            let spread = times[times.len() - 1] - times[0];
+            let mut hist = vec![0u32; (max_level + 1) as usize];
+            for p in &particles {
+                let l = (2.0 * p.radius / (2.0 * base_r)).log2().round() as usize;
+                hist[l.min(max_level as usize)] += 1;
+            }
+            let cfg = if levels == 1 {
+                "uniform (flat-equivalent)".to_string()
+            } else {
+                format!("mixed, per-level counts {hist:?}")
+            };
+            println!(
+                "{count:<7} {levels:<7} {mean:>7.3} ±{spread:<6.3}          {:>7.3}       {cfg}",
+                mean * 1000.0 / count as f64
+            );
+        }
+        println!();
+    }
+    println!("# NOTE: native Vulkan. Structural costs (dispatch shape, level walk) transfer to the browser;");
+    println!("# absolute frame times do not (gpu-perf §9). uniform rows should ~match the pre-hierarchy grid.");
+}
+

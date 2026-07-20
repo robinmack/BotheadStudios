@@ -40,7 +40,8 @@ struct Params {
     // --- thermodynamic state (docs/35 increment 4b, docs/38) ---
     specific_heat : f32,      // J/(kg·K): the grain carries u = c·T, so temp = u/specific_heat (matches hydrostatic.rs)
     drag_cd : f32,            // drag coefficient (declared shape factor; IOU = resolved flow, docs/46)
-    _hp1 : f32, _hp2 : f32,   // pad the uniform tail to a full 16-byte row
+    base_cell : f32,          // level-0 cell edge (m) — the FINEST granularity this scene resolves
+    max_level : u32,          // highest populated grid level; levels are base_cell*2^level (docs/47 §1)
 };
 
 // θ-method blend for the directional implicit contact solve (docs/24 Stage 0+1). θ=0.5 is the
@@ -116,11 +117,26 @@ fn incandescence(t : f32) -> vec3<f32> {
 }
 
 // --- spatial hash ---------------------------------------------------------------------------------
-fn cell_of(pos : vec3<f32>) -> vec3<i32> {
-    return vec3<i32>(floor(pos / P.cell_size));
+// HIERARCHICAL spatial hash (docs/47 §1). There is no global cell size any more than there is a global
+// particle size: growing one cell to fit the largest grain makes a small grain's scan degenerate to O(N)
+// (a 1 m cell packed with 1 cm grains holds ~1e6 of them). Instead, one grid per size class —
+// cell_size(level) = base_cell * 2^level — with the level folded into the hash key, so a SINGLE table and
+// the existing clear/insert/sort passes serve every level.
+fn cell_size_at(level : u32) -> f32 {
+    return P.base_cell * exp2(f32(level));
 }
-fn hash_cell(c : vec3<i32>) -> u32 {
-    let h = (u32(c.x) * 73856093u) ^ (u32(c.y) * 19349663u) ^ (u32(c.z) * 83492791u);
+fn cell_at(pos : vec3<f32>, level : u32) -> vec3<i32> {
+    return vec3<i32>(floor(pos / cell_size_at(level)));
+}
+// The level whose cell can hold this grain's contact diameter — the invariant the +/-1 scan rests on.
+fn level_for(radius : f32) -> u32 {
+    let d = 2.0 * radius;
+    if (d <= P.base_cell || P.base_cell <= 0.0) { return 0u; }
+    return u32(ceil(log2(d / P.base_cell)));
+}
+fn hash_cell(level : u32, c : vec3<i32>) -> u32 {
+    let h = (u32(c.x) * 73856093u) ^ (u32(c.y) * 19349663u) ^ (u32(c.z) * 83492791u)
+          ^ (level * 2654435761u);
     return h & P.table_mask;
 }
 
@@ -206,7 +222,8 @@ fn cs_grid_clear(@builtin(global_invocation_id) gid : vec3<u32>) {
 fn cs_grid_insert(@builtin(global_invocation_id) gid : vec3<u32>) {
     let i = gid.x;
     if (i >= P.count) { return; }
-    let h = hash_cell(cell_of(particles[i].offset));
+    let lv = level_for(particles[i].radius);
+    let h = hash_cell(lv, cell_at(particles[i].offset, lv));
     let slot = atomicAdd(&grid_count[h], 1u);
     if (slot < P.bucket_k) {
         grid_bucket[h * P.bucket_k + slot] = i;
@@ -259,7 +276,7 @@ fn cs_forces(@builtin(global_invocation_id) gid : vec3<u32>) {
     let pi = particles[i].offset;
     let vi = particles[i].vel;
     let r_i = particles[i].radius;
-    let base = cell_of(pi);
+    let lv_i = level_for(r_i);
     var acc = zero_accum();
     // HEADROOM: the free gap (m) to the nearest grain resting ABOVE this one, measured along the terrain
     // surface normal. The terrain position projection (cs_integrate) is capped by this so it can push a
@@ -270,10 +287,26 @@ fn cs_forces(@builtin(global_invocation_id) gid : vec3<u32>) {
     // above shifts: the ground can't teleport a rigid stack upward. 1e30 ⇒ open sky above.
     let tn = normalize(vec3<f32>(-terrain_surface(pi).y, 1.0, -terrain_surface(pi).z));
     var headroom = 1.0e30;
-    for (var dz = -1; dz <= 1; dz = dz + 1) {
-        for (var dy = -1; dy <= 1; dy = dy + 1) {
-            for (var dx = -1; dx <= 1; dx = dx + 1) {
-                let h = hash_cell(base + vec3<i32>(dx, dy, dz));
+    // GATHER, not pair enumeration. Each j lives in exactly ONE bucket (its own level), so walking every
+    // level finds each neighbour exactly once and no tie-break is needed — the once-only rule that
+    // `grid::pairs_within` uses is for building a pair LIST, and applying it here would silently give
+    // each grain only half its contacts.
+    for (var l = 0u; l <= P.max_level; l = l + 1u) {
+        let cs = cell_size_at(l);
+        // At a level AT OR ABOVE this grain's own, one cell already spans the contact reach (a level-l
+        // grain has radius <= cs/2, and r_i <= cs/2 too), so +/-1 suffices — the same convention the
+        // single-size grid used, kept deliberately so uniform-size scenes are bit-identical. Scanning a
+        // FINER level needs more cells, because a big grain genuinely touches many small ones; that cost
+        // is real contacts, not waste.
+        var rad = 1;
+        if (l < lv_i) {
+            rad = max(1, i32(ceil((r_i + 0.5 * cs) / cs)));
+        }
+        let base = cell_at(pi, l);
+    for (var dz = -rad; dz <= rad; dz = dz + 1) {
+        for (var dy = -rad; dy <= rad; dy = dy + 1) {
+            for (var dx = -rad; dx <= rad; dx = dx + 1) {
+                let h = hash_cell(l, base + vec3<i32>(dx, dy, dz));
                 let n = min(atomicLoad(&grid_count[h]), P.bucket_k);
                 for (var s = 0u; s < n; s = s + 1u) {
                     let j = grid_bucket[h * P.bucket_k + s];
@@ -294,6 +327,7 @@ fn cs_forces(@builtin(global_invocation_id) gid : vec3<u32>) {
                 }
             }
         }
+    }
     }
     // Terrain contact is NOT a force here. It is resolved as a non-injecting constraint (velocity clamp
     // + velocity-decoupled position projection) AFTER the grain-grain velocity solve, in cs_integrate —
