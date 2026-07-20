@@ -5752,8 +5752,14 @@ mod tests {
     #[test]
     fn material_database_loads() {
         let mats = materials::load();
-        assert_eq!(mats.len(), 23, "seed database should have 23 materials");
-        for id in ["granite", "dirt", "grass", "iron", "nickel"] {
+        assert_eq!(mats.len(), 24, "seed database should have 24 materials");
+        // `rubber` (2026-07-19) — the tyre compound; the go-kart's grip, damping and hysteresis all live
+        // in this datum. Deliberately carries NO `thermal` block: rubber does not melt, it pyrolyses, so
+        // melt_point/latent_fusion have no honest value and the schema's optional thermal is how it says
+        // "not characterised" (oak, concrete and ice do the same). `damage.rs` then returns Fractured
+        // rather than ever claiming melt — the guard tested at damage.rs:190.
+        assert!(mats[materials::index_of(&mats, "rubber")].thermal.is_none());
+        for id in ["granite", "dirt", "grass", "iron", "nickel", "rubber"] {
             let i = materials::index_of(&mats, id);
             assert!(mats[i].density > 0.0, "{id} must have positive density");
         }

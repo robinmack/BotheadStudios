@@ -9,6 +9,11 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **NEW material: `rubber`** (tyre tread compound) — ρ=1150, E=7 MPa, ν=0.49 (nearly incompressible, so a
+  contact patch spreads rather than compresses), μ=0.9, restitution 0.5, ductility 4.5. Deliberately
+  carries **no `thermal` block**: rubber does not melt, it pyrolyses, so melt point has no honest value
+  and `damage.rs` returns Fractured rather than claiming melt. μ is flagged in the datum as a first-order
+  stand-in — real grip is hysteretic and falls with temperature and slip speed.
 - **Bodies get real ground friction (traction)** — `Engine::collide_probe_with_terrain` now resolves
   against `granular::terrain_contact_resolve`, the same non-injecting constraint the GPU debris uses,
   replacing a tangential `vel *= 0.5` velocity multiply that was blind to normal load, μ and slope. μ is
