@@ -95,6 +95,40 @@ column demotes; a grain crossing a level boundary, or a region promoting to fine
 camera descends, must likewise not step, pop or inject energy. If the zoom is visible as a discontinuity,
 the resolution machinery has become a fudge — the seam is exactly where "a world is a world" gets broken.
 
+### The WGSL mirror — spec, hazards first (NOT YET WRITTEN)
+
+`crates/engine/src/grid.rs` is the CPU reference, pinned to brute force. The shader mirrors it; the two
+are not written in parallel, because parallel authorship is how this codebase acquired four ledger rows.
+
+**Hazard 1 — there is no spare pad in `struct Particle`.** It is exactly 64 bytes, four `vec4`s packed
+`offset+u`, `vel+resting`, `color+material`, `emission+rho`; docs/38 consumed the last slot when `_pad`
+became `rho`. Per-particle radius therefore GROWS the struct to 80 bytes and must be changed in lockstep
+with the `#[repr(C)]` `GpuParticle` in `lib.rs` and with `tools/gpu-verify`'s replica. A layout mismatch
+here does not fail loudly — it silently reinterprets fields. Change all three in one commit and re-run
+`gpu-verify` before believing anything.
+
+**Hazard 2 — `cs_forces` interleaves the `headroom` scan with the contact scan** inside the same 27-cell
+loop. Wrapping a level loop around it changes how many times headroom is evaluated. Headroom must remain
+a MINIMUM over all levels, computed once per grain, or the terrain projection cap silently changes and
+the stack-ram it exists to prevent comes back.
+
+**The change, in order:**
+1. `Params`: add `base_cell : f32` and `max_level : u32`; keep `cell_size` until the flat path is gone
+   so the two can be diffed against each other on the same scene.
+2. `cell_of(pos, level)` → `floor(pos / (P.base_cell * exp2(f32(level))))`; `hash_cell(level, c)` folds
+   the level into the key exactly as `grid::hash_cell` does. ONE table, so `cs_grid_clear` is untouched.
+3. `cs_grid_insert`: derive the level from the particle's own radius (`grid::level_for`) and insert once,
+   at that level only.
+4. `cs_forces`: loop `l` from the grain's own level to `P.max_level`, 27 cells each. Enumerate a pair
+   only when `l > own_level`, or `l == own_level && j > i` — the same once-only rule the reference proves.
+5. Contact maths switches to `granular::contact_force`'s form: touch at `ri + rj`, force not
+   acceleration, divided by each grain's own mass.
+
+**Verification, and it is not optional:** `tools/gpu-verify` scene I is the fudge detector and its energy
+monotonicity must hold at mixed sizes; a new scene should place a boulder among pebbles and assert the
+same pair set the CPU reference finds. Note the harness silently selects the WRONG GPU on this box — check
+which adapter it bound before reading any number.
+
 **On the GPU this is smaller than it sounds:** fold `level` into the hash key — `hash(level, ix, iy, iz)`
 — keeping ONE table and the existing `cs_grid_clear`/`cs_grid_insert`/scan passes nearly intact, rather
 than N separate buffers. Each particle derives its level from its own radius. Note the convergence with
