@@ -173,6 +173,7 @@ struct Gpu {
     queue: wgpu::Queue,
     clear: wgpu::ComputePipeline,
     insert: wgpu::ComputePipeline,
+    sort: wgpu::ComputePipeline,
     forces: wgpu::ComputePipeline,
     integrate: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
@@ -305,6 +306,7 @@ fn init_gpu_src(shader_src: &str) -> Gpu {
     Gpu {
         clear: mk("cs_grid_clear"),
         insert: mk("cs_grid_insert"),
+        sort: mk("cs_grid_sort"),
         forces: mk("cs_forces"),
         integrate: mk("cs_integrate"),
         layout,
@@ -384,6 +386,7 @@ fn simulate(gpu: &Gpu, particles: Vec<Particle>, frames: u32, scene: &Scene) -> 
             for (pipeline, threads) in [
                 (&gpu.clear, TABLE_SIZE),
                 (&gpu.insert, count),
+                (&gpu.sort, TABLE_SIZE), // canonical bucket order ⇒ deterministic force accumulation
                 (&gpu.forces, count),
                 (&gpu.integrate, count),
             ] {
@@ -521,6 +524,50 @@ fn column(rad: f32, h: f32, y0: f32) -> Vec<Particle> {
 fn main() {
     let gpu = init_gpu();
     let mut failures = 0;
+
+    // ── DETERMINISM: the same input, twice, must give the same bytes. ─────────────────────────────
+    // This gates every other scene here. If the harness is not reproducible, no scene's margin means
+    // anything: a real regression and float drift are indistinguishable, and the FUDGE DETECTOR (I) has
+    // a tolerance wider than its own noise. Measured 2026-07-20 before this check existed: scene E's
+    // spread read 33.1 / 33.5 / 35.1 m across three runs of IDENTICAL code on one card (~6%).
+    //
+    // Run with GPU_VERIFY_DETERMINISM=1 to get the divergence report instead of just pass/fail.
+    {
+        let scene = Scene::flat(24, 24, 0, 0.6);
+        let start = column(3.0, 6.0, 2.0); // a pile deep enough that grains share hash cells
+        let a = simulate(&gpu, start.clone(), 40, &scene);
+        let b = simulate(&gpu, start.clone(), 40, &scene);
+        let mut worst = 0.0f32;
+        let mut worst_i = usize::MAX;
+        let mut differing = 0usize;
+        for (i, (p, q)) in a.iter().zip(b.iter()).enumerate() {
+            let d = ((p.offset[0] - q.offset[0]).powi(2)
+                + (p.offset[1] - q.offset[1]).powi(2)
+                + (p.offset[2] - q.offset[2]).powi(2))
+            .sqrt();
+            if d > 0.0 {
+                differing += 1;
+            }
+            if d > worst {
+                worst = d;
+                worst_i = i;
+            }
+        }
+        let ok = worst == 0.0;
+        println!(
+            "\nD0 determinism (same input twice, same card): {differing}/{} grains differ, worst {worst:.6e} m{}  {}",
+            a.len(),
+            if worst_i == usize::MAX { String::new() } else { format!(" (grain {worst_i})") },
+            if ok { "PASS" } else { "FAIL" }
+        );
+        if !ok {
+            println!(
+                "   → the harness cannot tell a regression from drift. Every tolerance below is\n                      unfalsifiable until this passes. Likely source: bucket order in the spatial hash is\n                      set by atomicAdd race order, so float sums accumulate in a different sequence."
+            );
+            failures += 1;
+        }
+    }
+
 
     // ── FOUNDATIONS: verify the LITTLE STUFF — single- and two-particle Newton's laws in a true VACUUM.
     // (Robin's manifesto: a meteor is just an exaggerated test of these. Get a force on one particle,

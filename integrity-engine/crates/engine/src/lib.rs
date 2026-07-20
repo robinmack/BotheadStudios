@@ -1943,6 +1943,7 @@ mod app {
         forces: wgpu::Buffer,     // STORAGE — accumulated contact acceleration per particle
         clear: wgpu::ComputePipeline,
         insert: wgpu::ComputePipeline,
+        sort: wgpu::ComputePipeline,
         force_pass: wgpu::ComputePipeline,
         integrate: wgpu::ComputePipeline,
         expand: wgpu::ComputePipeline, // 1 grain → 8 render sub-cubes
@@ -2072,6 +2073,7 @@ mod app {
             };
             let clear = mk("cs_grid_clear");
             let insert = mk("cs_grid_insert");
+            let sort = mk("cs_grid_sort");
             let force_pass = mk("cs_forces");
             let integrate = mk("cs_integrate");
             let expand = mk("cs_expand");
@@ -2120,6 +2122,7 @@ mod app {
                 forces,
                 clear,
                 insert,
+                sort,
                 force_pass,
                 integrate,
                 expand,
@@ -2151,8 +2154,9 @@ mod app {
         }
 
         /// Record one substep into `encoder`: rebuild the spatial hash, accumulate granular contact
-        /// forces, then integrate (gravity + contact + terrain). Four passes so force-accumulation
-        /// (positions read-only) never races integration (docs/23). Params already written this frame.
+        /// SORT the buckets into a canonical order, accumulate granular contact forces, then integrate
+        /// (gravity + contact + terrain). Five passes so force-accumulation (positions read-only) never
+        /// races integration (docs/23). Params already written this frame.
         fn dispatch(&self, encoder: &mut wgpu::CommandEncoder) {
             if self.count == 0 {
                 return;
@@ -2163,9 +2167,16 @@ mod app {
             // Four dispatches in one pass happened to work on desktop Vulkan (the 2070) but can RACE on
             // other backends (e.g. Metal / the M4) — reading a half-built grid or stale forces injects
             // energy (a "matter fountain"). Separate passes force the barrier on every backend (docs/23).
-            let stages: [(&wgpu::ComputePipeline, u32); 4] = [
+            let stages: [(&wgpu::ComputePipeline, u32); 5] = [
                 (&self.clear, GRID_TABLE_SIZE),
                 (&self.insert, self.count),
+                // DETERMINISM (docs/47): `insert` takes its slot from `atomicAdd`, so bucket ORDER is
+                // whichever thread won the race. `force_pass` then sums contacts in that order and float
+                // addition is not associative, so identical input gave different output run to run —
+                // measured at ~6% on gpu-verify scene E, which left the FUDGE DETECTOR's tolerance wider
+                // than its own reproducibility. Sorting the buckets makes the reduction a function of the
+                // data alone. It is also its own pass for the same barrier reason as the rest.
+                (&self.sort, GRID_TABLE_SIZE),
                 (&self.force_pass, self.count),
                 (&self.integrate, self.count),
             ];

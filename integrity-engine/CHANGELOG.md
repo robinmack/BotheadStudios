@@ -9,6 +9,17 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The GPU granular step is now RUN-TO-RUN DETERMINISTIC.** New `cs_grid_sort` pass orders each spatial-
+  hash bucket by particle index between insert and force accumulation. `cs_grid_insert` took its slot from
+  `atomicAdd`, so bucket order was decided by thread race; `cs_forces` summed contacts in that order and
+  float addition is not associative, so identical input gave different output (measured: 7/174 grains
+  diverging by up to 8.3e-5 m after 40 frames, amplifying to ~6% on `gpu-verify` scene E). The full
+  `gpu-verify` suite is now **bit-identical across runs**, and gains scene **D0** which asserts it. This
+  matters beyond tidiness: scene I is the fudge detector, and its tolerance was previously wider than its
+  own reproducibility, so any regression smaller than the drift was invisible. Adds one dispatch per
+  substep over the hash table — the same fixed shape as `cs_grid_clear`, and removable by the same
+  occupied-cells-only fix.
+
 - **GPU particles carry their own radius (docs/47 §1).** `Particle` grows 64 → 80 bytes with a
   per-particle `radius` (plus a reserved padded row). The shader now uses THIS grain's size wherever a
   global one was assumed — contact `touch = ri + rj`, headroom, terrain penetration, drag cross-section,

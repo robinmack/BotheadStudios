@@ -3,6 +3,43 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-20 — GPU determinism: the spatial hash was summing forces in race order
+
+**What.** New `cs_grid_sort` pass puts every hash bucket in a canonical (particle-index) order between
+`cs_grid_insert` and `cs_forces`, in BOTH the engine and `gpu-verify`. `gpu-verify` gains scene **D0**,
+which runs one input twice and compares — the check that gates every other tolerance in the harness.
+
+**The cause, confirmed rather than assumed.** `cs_grid_insert` takes its slot from `atomicAdd`, so a
+bucket holds the same SET of particles every run but in whatever ORDER the threads won the race.
+`cs_forces` then sums contact forces in that order, and float addition is not associative. Identical
+input therefore produced different output. Reproduced under control before touching anything: **7 of 174
+grains diverged, worst 8.3e-5 m after 40 frames** — the seed that amplified into the ~6% spread measured
+yesterday on scene E (33.1 / 33.5 / 35.1 m across three runs of identical code).
+
+**Why it mattered more than a cosmetic wobble.** Scene I is the FUDGE DETECTOR, and its tolerance was
+**wider than its own reproducibility**. Any regression smaller than the drift was invisible, and — as the
+per-particle-radius change demonstrated the day before — a real change could not be distinguished from
+noise. Every margin in the harness was unfalsifiable.
+
+**Verified.**
+- D0: **0/174 grains differ, worst 0.0 m** — bit-exact.
+- **The FULL SUITE is now bit-identical across two runs** (diffed end to end). It was not before.
+- Scene D (repose) still fails, on this branch and on `main` alike — pre-existing, unrelated, measured on
+  both rather than recalled.
+- Engine 223/223, wasm clean, shader confirmed compiling on the RTX 5060 Ti.
+
+**Residual, and empirically covered rather than argued away.** If a cell OVERFLOWS `bucket_k` (16), which
+particles won slots is still race-decided, so sorting cannot canonicalise the set. `grid_count` keeps the
+true unclamped count, so it is detectable. It is not occurring anywhere in the suite today — that is what
+a bit-identical full-suite diff demonstrates, since an overflow race would show up as exactly the
+nondeterminism D0 tests for.
+
+**Cost, flagged and deliberately NOT quantified here.** `cs_grid_sort` dispatches over the whole table
+every substep — the same shape as `cs_grid_clear`, which was measured at ~0.52 ms/frame and is queue item
+3. A similar fixed cost should be expected, but I am not quoting a number I have not measured
+([[use-gpu-perf-skill]]). The mitigation is shared with item 3: touch only occupied cells (epoch/
+generation tags), which removes the fixed dispatch from both passes at once.
+
 ## 2026-07-20 — per-particle radius on the GPU, and the harness that cannot tell if it mattered (docs/47 §1)
 
 **What.** `Particle` grows to 80 bytes with a per-particle `radius` (plus a padded 5th row reserved for a

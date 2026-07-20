@@ -213,6 +213,44 @@ fn cs_grid_insert(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
 }
 
+// --- pass 2b: put each bucket in a CANONICAL order -------------------------------------------------
+//
+// DETERMINISM. `cs_grid_insert` takes its slot from `atomicAdd`, so which particle lands at which slot
+// is decided by whichever thread wins the race — the bucket holds the same SET every run but in a
+// different ORDER. `cs_forces` then sums contact forces in that order, and float addition is not
+// associative, so identical input produced different output run to run. Measured before this pass
+// existed: 7 of 174 grains diverged by up to 8.3e-5 m after 40 frames, which amplified to ~6% spread in
+// scene E and left the FUDGE DETECTOR's tolerance wider than its own reproducibility.
+//
+// Sorting each bucket by particle index makes the accumulation sequence a function of the data alone.
+// The 27-cell walk in `cs_forces` is already a fixed nesting, so with sorted buckets the whole reduction
+// is canonical. Insertion sort: `bucket_k` is 16, buckets are usually far shorter, and it is branch-cheap
+// and stable on the near-sorted input the previous frame tends to leave.
+//
+// NOT fixed here, and detectable rather than assumed: if a cell OVERFLOWS `bucket_k`, which particles
+// won slots is still race-decided, so the SET itself varies. `grid_count` keeps the true (unclamped)
+// count, so a caller can check for it — `gpu-verify` does.
+@compute @workgroup_size(64)
+fn cs_grid_sort(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let cell = gid.x;
+    if (cell > P.table_mask) { return; }
+    let n = min(atomicLoad(&grid_count[cell]), P.bucket_k);
+    if (n < 2u) { return; }
+    let base = cell * P.bucket_k;
+    for (var a = 1u; a < n; a = a + 1u) {
+        let key = grid_bucket[base + a];
+        var b = a;
+        loop {
+            if (b == 0u) { break; }
+            let prev = grid_bucket[base + b - 1u];
+            if (prev <= key) { break; }
+            grid_bucket[base + b] = prev;
+            b = b - 1u;
+        }
+        grid_bucket[base + b] = key;
+    }
+}
+
 // --- pass 3: accumulate contact forces from the 27 neighbouring cells -----------------------------
 @compute @workgroup_size(64)
 fn cs_forces(@builtin(global_invocation_id) gid : vec3<u32>) {
