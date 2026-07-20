@@ -505,6 +505,54 @@ impl MatterSim {
         let sv = site + center;
         let ri = radius.ceil() as i32;
         let (cx, cz) = (sv.x.floor() as i32, sv.z.floor() as i32);
+        let start_all = self.particles.len();
+        // SLUMPING CASCADES — run to a fixpoint, the same way `collapse` does for unsupported voxels.
+        //
+        // A single scan-then-mutate pass is only correct when slumps are one voxel deep. When column A
+        // slumps, it EXPOSES a fresh face on its neighbour B that did not qualify during the scan; B must
+        // then be re-examined, and so on until no face anywhere exceeds its material's critical height.
+        // With a 1-voxel grass skin over basalt that never mattered — basalt holds (h_crit ≈ 510 m), so
+        // only the skin moved and one pass reached the answer. With a cohesionless horizon it matters
+        // enormously: gravel has ZERO tensile strength, so h_crit = 0 and it cannot hold ANY face. One
+        // pass left a column dropped 6 voxels while its neighbours still stood 6 higher, and the bilinear
+        // collision surface (the average of four column tops) then read the resulting talus as buried
+        // 2.75 m below ground — which the terrain contact would launch (the debris storm).
+        //
+        // Iterating is not a workaround for that symptom; it is the physics. Loose material keeps failing
+        // until nothing is left standing steeper than it can support. The bound is the number of ROUNDS,
+        // not an energy or distance cap, so nothing is silently clipped: each round strictly lowers at
+        // least one column, and the terrain is finite, so it terminates.
+        const MAX_SLUMP_ROUNDS: usize = 64;
+        for _round in 0..MAX_SLUMP_ROUNDS {
+            let made = self.slump_one_pass(world, materials, cx, cz, ri, radius, steep_drop);
+            if made == 0 {
+                break; // fixpoint: nothing left too steep to stand
+            }
+            if self.particles.len() >= self.max_particles {
+                break;
+            }
+        }
+        if self.particles.len() > start_all {
+            self.dirty = true;
+        }
+        self.particles.len() - start_all
+    }
+
+    /// One slumping pass: find every cliff face too steep for its own material to hold, and turn it into
+    /// grains. Returns how many grains were made, so [`Self::materialize_steep_terrain`] can iterate to a
+    /// fixpoint. Scans read-only, then mutates — so within a pass the decision is consistent.
+    #[allow(clippy::too_many_arguments)]
+    fn slump_one_pass(
+        &mut self,
+        world: &mut World,
+        materials: &[Material],
+        cx: i32,
+        cz: i32,
+        ri: i32,
+        radius: f32,
+        steep_drop: i32,
+    ) -> usize {
+        let center = world.center();
         // 1. Find the exposed cliff-face voxels (scan the heightfield read-only, then mutate).
         let mut faces: Vec<(i32, i32, i32)> = Vec::new();
         for dz in -ri..=ri {
@@ -562,9 +610,6 @@ impl MatterSim {
                 temp_k: REF_TEMP_K,
                 resting_frames: 0,
             });
-        }
-        if self.particles.len() > start {
-            self.dirty = true;
         }
         self.particles.len() - start
     }
@@ -2059,3 +2104,6 @@ mod tests {
         );
     }
 }
+
+
+
