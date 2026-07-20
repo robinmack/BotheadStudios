@@ -69,6 +69,20 @@ magnitude are never live in one neighbourhood. The acceleration structure theref
 docs/13's own sentence — *cost scales with what is observable from the current viewpoint, not with the
 size or contents of the universe* — instead of fighting it.
 
+**The levels are DYNAMIC, because the observer moves.** This is not a fixed two-tier scheme for "big
+grains and small grains" — it is the structure that lets docs/13's descent work: *"falling from orbit,
+detail emerges continuously: star field → planet disk → landscape → terrain → the rock → its grains."*
+Watch a kart from orbit and only coarse levels are populated; zoom to the contact patch and finer levels
+populate under you while the orbital ones depopulate. So the hash must support levels appearing and
+retiring at runtime with no fixed count — a grain's level is derived from its own radius each step, and
+an empty level costs nothing to skip.
+
+That imposes the same discipline the T0 demotion work already answers to: **a change of representation
+must not move the world.** `World::ground_top_voxel` returns the identical surface before and after a
+column demotes; a grain crossing a level boundary, or a region promoting to finer granularity as the
+camera descends, must likewise not step, pop or inject energy. If the zoom is visible as a discontinuity,
+the resolution machinery has become a fudge — the seam is exactly where "a world is a world" gets broken.
+
 **On the GPU this is smaller than it sounds:** fold `level` into the hash key — `hash(level, ix, iy, iz)`
 — keeping ONE table and the existing `cs_grid_clear`/`cs_grid_insert`/scan passes nearly intact, rather
 than N separate buffers. Each particle derives its level from its own radius. Note the convergence with
