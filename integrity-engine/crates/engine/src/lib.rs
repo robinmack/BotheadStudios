@@ -23,6 +23,7 @@
 mod accretion;
 mod aggregate;
 mod atmosphere;
+mod axle; // docs/47 §3 — the revolute joint: holds a wheel's hub, frees ONE spin axis
 mod bhtree;
 mod body;
 mod damage;

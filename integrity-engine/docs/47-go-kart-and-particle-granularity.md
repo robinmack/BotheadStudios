@@ -143,7 +143,30 @@ polish item.
    unresolved: `bulk_height` still returns pure procedural relief for a column that has been dug but not
    demoted, so the field/voxel seam is consistent only because `patch_resolved` gates which one is asked.
 2. **The axle constraint.** The one genuinely new mechanism; test it on a single free-spinning wheel
-   before any vehicle exists.
+   before any vehicle exists. **LANDED 2026-07-19 — `crate::axle`, 5 tests, no vehicle yet.**
+
+   Built exactly as §3 proposed: a constraint, not a spring. `axle::resolve` does three things per
+   substep — a velocity-decoupled position projection putting the hub back on its anchor (zero injected
+   KE however far the chassis moved), a COM-velocity match reported as an impulse, and an angular split
+   that preserves spin about the axle axis exactly while refusing everything else.
+
+   The piece §3 left implicit and which turned out to carry the argument: **the wheel's angular velocity
+   is recovered from linear momenta alone**, `ω = I⁻¹L` over the particle cloud. That is the mass-weighted
+   least-squares rigid rotation, which is *why* the constraint is provably non-injecting — subtracting a
+   least-squares projection can only reduce the residual. No rotational DOF is added anywhere, so §3's
+   claim holds in code: a force couple spins the wheel and the axle passes the torque through untouched.
+
+   Two properties worth naming because they are what a penalty joint could not give:
+   - **An axle must not brake its own wheel.** A wheel already spinning freely and centred on its anchor
+     is fully compliant, so `resolve` is a bit-level no-op on it. A joint that bled spin here would look
+     like bearing friction while being a numerical artifact — and would be indistinguishable from the
+     DECLARED bearing-friction model §4 owes a derivation for.
+   - **It does not rigidify the wheel.** Only the best-fit rigid rotation is touched; deformation passes
+     through, which is the whole point of a rubber tyre that has to spread a contact patch and rut.
+
+   Reaction impulses are returned rather than applied, so the chassis receives the equal and opposite
+   ones — a caller that drops them has an axle that creates momentum. Nothing calls it yet: there is no
+   chassis to bolt it to until item 4.
 3. **Multi-granularity particalization** — one scene, two particle scales, per §1.
 4. **The kart**: chassis + four wheels + declared motor/battery/steering.
 

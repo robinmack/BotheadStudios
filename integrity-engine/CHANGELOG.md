@@ -12,6 +12,14 @@ because **we are our own first customers** and pin exact engine versions in our 
 - **BREAKING (API): `mesher::build_earth_cap` takes a `field: Option<&World>`.** Pass the world and the
   bulk cap follows the persistent T0 `displacement`, so a de-resolved crater renders as a crater instead
   of pristine relief. `None` keeps the old pure-procedural behaviour.
+- **NEW `axle` module — the revolute joint (docs/47 §3).** Holds a wheel's hub on a chassis anchor while
+  leaving rotation about ONE axis free, as a CONSTRAINT rather than a spring: a penalty joint stiff enough
+  to hold a wheel on is also stiff enough to launch it. `axle::resolve` projects the hub back onto its
+  anchor without writing velocity (zero injected energy), matches COM velocity as a reported impulse, and
+  preserves spin about the axle axis exactly while refusing wobble. `axle::angular_velocity` recovers a
+  particle cloud's spin from linear momenta alone (`ω = I⁻¹L`) — **no rotational degree of freedom is
+  added anywhere**, so a force couple spins a wheel and the axle passes the torque through. Reactions are
+  returned for the caller to apply to the chassis. No vehicle uses it yet.
 - **FIX: demotion no longer strands the sea.** `column_is_bakeable` now refuses columns under water — a
   sea column has two surfaces (seabed and waterline) while the T0 field stores one height per column, so
   baking one recorded the seabed, freed the ground beneath, and left 1,514 water voxels floating. Adds

@@ -3,6 +3,42 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-19 — the axle: a wheel that spins without the engine knowing what rotation is (docs/47 §2)
+
+**What.** New `crate::axle` — the revolute joint docs/47 §3 specified, as a constraint rather than a
+spring. `axle::resolve` per substep: (1) a velocity-decoupled position projection putting the hub back on
+its anchor, (2) a COM-velocity match returned as an impulse, (3) an angular split preserving spin about
+the axle axis exactly and refusing everything else. 5 tests; 211 total, wasm clean.
+
+**Why a constraint.** `Bond` is a distance spring, and a penalty joint stiff enough to hold a wheel on is
+stiff enough to launch it — the same mechanism as the terrain settling storm, which went away by moving
+from a penalty to a constraint. The axle is the same shape as `granular::terrain_contact_resolve`.
+
+**The piece §3 left implicit, and it carries the whole argument:** the wheel's angular velocity is
+recovered from the particles' LINEAR momenta alone, `ω = I⁻¹L` over the cloud. That is the mass-weighted
+least-squares rigid rotation, which is *why* the constraint is provably non-injecting — subtracting a
+least-squares projection can only reduce the residual, never grow it. No orientation, angular velocity or
+inertia tensor is stored anywhere; §3's claim that torque emerges from forces holds in code.
+
+**Verified.**
+- `a_freely_spinning_wheel_is_left_completely_alone` — the test an axle has to pass. A compliant wheel
+  comes back bit-identical, and its spin is recovered as exactly the 37 rad/s it was given. A joint that
+  bled spin here would look like bearing friction while being a numerical artifact, and would be
+  indistinguishable from the DECLARED bearing-friction model docs/47 §4 owes a derivation for.
+- `wobble_is_refused_the_axle_spin_survives_and_the_reaction_is_reported` — a 9 rad/s tumble about X is
+  removed while 25 rad/s about Z survives untouched; the reaction opposes the wobble and is exactly zero
+  about the free axis.
+- `the_hub_is_pulled_back_to_its_anchor_injecting_no_energy` · `the_axle_never_increases_energy` (four
+  perturbed cases: drift, tumble and pure deformation at once) · `a_force_couple_spins_the_wheel_and_the_
+  axle_lets_it` — zero net force, torques adding, and the axle passes the drive torque through.
+
+**What it deliberately does NOT do: rigidify the wheel.** Only the best-fit rigid rotation is touched, so
+deformation passes through — the reason a tyre is rubber and can spread a contact patch.
+
+**Open.** Nothing calls it: there is no chassis to bolt it to until docs/47 item 4. Reactions are
+returned, not applied, so whoever wires it must hand the negatives to the chassis or the joint creates
+momentum.
+
 ## 2026-07-19 — one answer to "where is the ground", so a patch can de-resolve (docs/47 step 1a)
 
 **What.** `World::ground_top_voxel` is now the single authoritative ground query: it returns the voxel
