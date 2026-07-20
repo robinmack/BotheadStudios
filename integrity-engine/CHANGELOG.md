@@ -9,6 +9,16 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **NEW `grid` module — the hierarchical spatial hash (docs/47 §1).** Neighbour finding that does not
+  assume one grain size: `cell_size(level) = base·2^level`, each item at the level whose cell is at least
+  its own contact diameter, each pair enumerated exactly once by scanning own + COARSER levels only.
+  Replaces the reasoning behind a single global `cell_size` — growing that cell to the largest grain
+  survives a 2× ratio and collapses at 100× (a 1 m cell packed with 1 cm grains holds ~10⁶ of them, so a
+  ±1-cell scan degenerates to O(N)). Cost follows NON-EMPTY levels with no cap; an unused level is an
+  O(1) skip. `pairs_within` is the reference, **pinned to brute force by test** across a 100× size range
+  and on a boulder-among-pebbles fixture. CPU reference only — the WGSL mirror is not written yet, and
+  the live GPU path still uses the flat single-size grid.
+
 - **Contact is now SIZE-AWARE and force-based — the prerequisite for multi-granularity (docs/47 §1).**
   `granular::contact_force` returns the FORCE on a grain (its partner receives exactly the negative), so
   grains of different size and mass each accelerate by `F/m` and **momentum is conserved exactly**. The
