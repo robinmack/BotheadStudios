@@ -153,7 +153,7 @@ tight as that noise floor, so the determinism work is a prerequisite for stating
 | `V = E/σ` energy→extent | **exists** (`damage.rs`), used for outcome only |
 | impact footprint sized by it | **no** — clipped by `MATERIALIZE_CAP = 14.0` (`lib.rs:858`) |
 | resolved region local to the event | **no** — whole 96 m patch (`lib.rs:992`, self-flagged) |
-| quasi-static admission test | **does not exist** |
+| quasi-static admission test | **the LAW exists** (`resolution.rs`, verified vs the §4b table); NOT wired into a scene yet |
 | object-side (internal) admission | **does not exist** |
 | promotion gate | interest (docs/39), should be necessity (docs/30) |
 | demotion / bake-back | **proven at planetary scale**; terrain instance not built |
@@ -168,7 +168,11 @@ Ordered by leverage, each independently verifiable:
 2. **Local resolution rects.** `resolve_patch` takes an extent instead of flipping the whole footprint —
    the refinement its own comment already asks for.
 3. **The quasi-static admission test**, which is what unlocks a vehicle: contact pressure vs `σ_yield`,
-   defaulting to zero particles on competent rock.
+   defaulting to zero particles on competent rock. **The LAW landed 2026-07-20** (`resolution.rs`:
+   `resolved_depth`, `admission_depth`, closed-form Boussinesq root, verified against the §4b table to the
+   millimetre — basalt 0, regolith 0.096 m, sand 0.409 m). Still to do: WIRE it — a resting/rolling load
+   samples the surface material, and `admission_depth > 0` triggers materialization of the ground under
+   the patch (and `= 0` resolves nothing, the null case). Nothing calls it yet.
 4. **Close the demotion loop for terrain** (voxel→bulk on quiescence), making banishment real.
 5. **Object-side admission** — resolve a body's interior only where its own stress nears its own yield.
 
