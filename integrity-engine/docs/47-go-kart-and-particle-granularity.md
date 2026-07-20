@@ -121,10 +121,19 @@ ORDER can still drift silently.
 1. **Move the GPU-facing POD types out of `mod app`** into a natively-compiled module. They are plain
    `#[repr(C)]` structs with no wasm-only dependencies; the only reason they are unreachable from native
    tests is where they happen to sit. This alone puts them under `cargo test`.
-2. **Delete `gpu-verify`'s replica** and import the same Rust declaration. Three copies become one.
-3. **Add a native test that parses `particle_step.wgsl` and cross-checks the Rust struct field-for-field**
-   (name, type, order, total size). Rust cannot see the shader, so this is the only mechanism that
-   catches drift against the authority — and it is exactly what would have caught the `drag_cd` bug.
+2. **Do NOT try to delete `gpu-verify`'s replica by importing the engine's.** `tools/gpu-verify` is
+   deliberately NOT a workspace member — it carries its own `[workspace]` table precisely so its native
+   Vulkan `wgpu` build cannot leak into the engine's browser (WebGPU-only) wasm build through cargo
+   feature unification. Making it depend on the engine crate would reintroduce the exact problem that
+   isolation exists to prevent. Its replica must therefore stay a replica — and be BOUND by step 3
+   instead of removed.
+3. **Cross-check each Rust mirror against the WGSL, in BOTH places.** A test that parses
+   `shaders/particle_step.wgsl` and asserts the Rust struct matches field-for-field (name, type, order,
+   total size) — once in the engine's native suite, once inside `gpu-verify`. Rust cannot see the shader,
+   so this is the only mechanism that catches drift against the authority, and it is exactly what would
+   have caught the `drag_cd` bug. Because both mirrors are pinned to the SAME authority they cannot drift
+   from each other either, which is what makes keeping two declarations safe rather than merely tolerated.
+   This step carries the whole guarantee; steps 1 and 2 only decide who it protects.
 4. Only then grow the struct for per-particle radius, changing ONE Rust declaration and one WGSL block,
    with the test failing loudly if they disagree.
 
