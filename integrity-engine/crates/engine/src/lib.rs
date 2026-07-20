@@ -29,6 +29,7 @@ mod body;
 mod damage;
 mod emission;
 mod eos;
+mod gpu_layout; // docs/47 — GPU repr(C) layouts, pinned to the shader by test
 mod granular;
 mod grid; // docs/47 §1 — the hierarchical spatial hash: no global cell size
 #[cfg(target_arch = "wasm32")] // WebGPU host for sph_step.wgsl; only the browser scene uses it (mod app is
@@ -1915,51 +1916,7 @@ mod app {
     // engine's north-star architecture and the fix for the single-digit FPS after a big impact.
     // ============================================================================================
 
-    /// One GPU particle — 64 bytes, four 16-byte rows. Layout matches `particle_step.wgsl`'s `Particle`
-    /// and is read directly by the renderer (offset @0, color @32, emission @48).
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct GpuParticle {
-        offset: [f32; 3], // position (centered coords) = the render instance offset
-        u: f32,           // specific internal energy (J/kg); temp = u/c is derived (docs/38, was `temp` in K)
-        vel: [f32; 3],
-        resting: f32,       // 0 in flight, 1 settled
-        color: [f32; 3],    // material albedo (set on spawn)
-        material: f32,      // material index (informational)
-        emission: [f32; 3], // incandescent glow (written by the compute step)
-        rho: f32,           // density (kg/m³) — Tillotson input; ρ₀ placeholder until 4b.2 (was `_pad`)
-    }
-
-    /// Per-dispatch uniforms for the compute step — matches `particle_step.wgsl`'s `Params` (80 bytes).
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct GpuStepParams {
-        gravity: [f32; 3], // uniform planetary surface gravity (m/s²)
-        dt: f32,
-        center: [f32; 3],
-        c_cohesion: f32, // attractive adhesion between touching grains (docs/24)
-        air_rho: f32,
-        contact_damp: f32,
-        settle_speed: f32,
-        part_half: f32,
-        cool_rate: f32,
-        count: u32,
-        world_w: u32,
-        world_d: u32,
-        // Granular spatial hash + contact (docs/23) — mirrors particle_step.wgsl's Params tail.
-        cell_size: f32,
-        table_mask: u32,
-        bucket_k: u32,
-        c_radius: f32,
-        c_stiffness: f32,
-        c_normal_damp: f32,
-        c_friction: f32,
-        c_tangent_damp: f32,
-        specific_heat: f32, // J/(kg·K) — grain temp↔u (docs/38)
-        drag_cd: f32,
-        _hp1: f32,
-        _hp2: f32,
-    }
+    use crate::gpu_layout::{GpuParticle, GpuStepParams};
 
     /// GPU-resident debris: a storage+vertex buffer of `GpuParticle`, a compute pipeline that steps it,
     /// and a heightfield the step collides against. The CPU only appends new particles (on fracture)

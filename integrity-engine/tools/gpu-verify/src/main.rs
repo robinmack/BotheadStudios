@@ -1437,42 +1437,74 @@ mod layout_tests {
     //! authority. Pinned to one shader, they cannot drift from each other (docs/47 "Hazard 0").
 
     /// Field names, in declaration order, of a `struct <name>` block in the WGSL source.
-    fn wgsl_struct_fields(src: &str, name: &str) -> Vec<String> {
+    fn wgsl_struct_fields(src: &str, name: &str) -> Vec<(String, &'static str)> {
         let head = format!("struct {name} {{");
         let start = src.find(&head).unwrap_or_else(|| panic!("no `{head}` in the shader"));
         let body = &src[start + head.len()..];
         let end = body.find('}').expect("unterminated struct in the shader");
         body[..end]
             .lines()
-            .filter_map(|l| {
-                // Strip comments, then take `name : type,` — the field name is before the colon.
-                let l = l.split("//").next().unwrap_or("").trim();
-                let (field, _) = l.split_once(':')?;
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .split(',')
+            .filter_map(|chunk| {
+                let (field, ty) = chunk.split_once(':')?;
                 let field = field.trim();
-                (!field.is_empty()).then(|| field.to_string())
+                let ty = if ty.trim().starts_with("vec3") { "vec3" } else { "scalar" };
+                (!field.is_empty()).then(|| (field.to_string(), ty))
             })
             .collect()
+    }
+
+    /// Byte offsets of the REAL struct. The first version of this test compared the shader against a
+    /// hardcoded name list and never read `Particle` at all — so reordering two Rust fields left it
+    /// green. A layout guard that passes while the layout drifts is worse than none, because it turns
+    /// an unchecked risk into a believed-checked one.
+    macro_rules! offsets {
+        ($t:ty, $($f:ident),+ $(,)?) => {
+            vec![$((stringify!($f).to_string(), std::mem::offset_of!($t, $f))),+]
+        };
+    }
+
+    /// WGSL byte offsets: `vec3<f32>` is 12 bytes aligned to 16, scalars are 4.
+    fn wgsl_offsets(fields: &[(String, &'static str)]) -> Vec<(String, usize)> {
+        let mut off = 0usize;
+        let mut out = Vec::new();
+        for (name, ty) in fields {
+            let (size, align) = if ty.starts_with("vec3") { (12, 16) } else { (4, 4) };
+            off = off.div_ceil(align) * align;
+            out.push((name.clone(), off));
+            off += size;
+        }
+        out
     }
 
     #[test]
     fn the_particle_mirror_matches_the_shader_field_for_field() {
         let src = include_str!("../../../shaders/particle_step.wgsl");
-        let shader = wgsl_struct_fields(src, "Particle");
-        // This crate's `#[repr(C)] struct Particle`, in declaration order. Update BOTH or neither.
-        let mirror = ["offset", "u", "vel", "resting", "color", "material", "emission", "rho"];
+        let rust = offsets!(
+            crate::Particle, offset, u, vel, resting, color, material, emission, rho
+        );
         assert_eq!(
-            shader,
-            mirror,
+            rust,
+            wgsl_offsets(&wgsl_struct_fields(src, "Particle")),
             "the repr(C) mirror has drifted from shaders/particle_step.wgsl. Field ORDER is what \
              matters: the GPU reinterprets the bytes silently, so a swap here is wrong physics with \
-             no error. Fix the mirror and this list together."
+             no error."
         );
-        // Size is the other half: 8 fields packed as four vec4s = 64 bytes. A field added without a
-        // matching pad changes the stride and every particle after the first reads shifted memory.
         assert_eq!(
             std::mem::size_of::<crate::Particle>(),
             64,
             "particle stride changed; the shader's struct and this mirror must grow together"
         );
+    }
+
+    /// The guard must be able to fail.
+    #[test]
+    fn the_guard_detects_a_reordered_struct() {
+        let honest = offsets!(crate::Particle, offset, u, vel, resting);
+        let swapped = offsets!(crate::Particle, offset, u, resting, vel);
+        assert_ne!(honest, swapped, "the guard cannot see field order");
     }
 }

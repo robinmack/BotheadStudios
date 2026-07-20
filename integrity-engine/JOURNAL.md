@@ -3,6 +3,37 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-20 — the layout guard that could not fail, and the one that can (docs/47 Hazard 0)
+
+**What.** `GpuParticle`/`GpuStepParams` moved out of `#[cfg(target_arch = "wasm32")] mod app` into a new
+natively-compiled `gpu_layout` module, and BOTH Rust mirrors (engine + `tools/gpu-verify`) are now pinned
+to `shaders/particle_step.wgsl` by **byte offset**. 223 tests, gpu-verify green, wasm clean.
+
+**Why the move.** The mirror that actually SHIPS lived inside a module native `cargo check`/`cargo test`
+do not compile at all — so the production layout was verified by nothing but a human reading two files
+side by side. Nothing kept it there but its location: it is plain POD, and `bytemuck` is an ungated
+dependency.
+
+**The part worth recording: my first guard was fake, and it passed.** It compared the WGSL field list
+against a HARDCODED array and never read the Rust struct. Pinning the shader to a literal proves
+nothing — reorder two Rust fields and it stays green. I only found it by deliberately swapping
+`vel`/`resting` to check the guard had teeth; it did not. **The same defect had already shipped in #29**
+for `gpu-verify`. Both are now rewritten around `std::mem::offset_of!`, so the assertion is tied to the
+real layout, and both were re-verified by swapping fields and watching them fail.
+
+A layout guard that passes while the layout drifts is worse than no guard: it converts an unchecked risk
+into a believed-checked one. Each file now also carries a `the_guard_detects_a_reordered_struct` test, so
+the ability to fail is itself asserted rather than assumed.
+
+**Verified.** Engine 223/223; gpu-verify 2/2; wasm clean; both guards confirmed failing on a swapped
+field pair and passing again on revert. The WGSL parser splits on COMMAS, not lines — the shader declares
+`_hp1 : f32, _hp2 : f32,` on one line and a line-based parser silently drops the second, in exactly the
+padding region the struct will grow into.
+
+**Open.** Both mirrors are now bound, which was the prerequisite. Growing the struct to 80 bytes for
+per-particle radius (docs/47 item 3) is next, and the guards will now fail loudly if the three
+declarations disagree.
+
 ## 2026-07-20 — binding a repr(C) mirror to the shader that actually reads the bytes (docs/47 Hazard 0)
 
 **What.** `tools/gpu-verify` now has a test that parses `shaders/particle_step.wgsl` and asserts its
