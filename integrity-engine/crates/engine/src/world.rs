@@ -15,7 +15,43 @@ pub const W: usize = 96;
 pub const H: usize = 96;
 pub const D: usize = 96;
 
-const GRASS_THICKNESS: usize = 1; // thin fragile biosphere skin over the crust
+// ── The REGOLITH profile: the loose, unconsolidated mantle between the air and intact rock ──────────
+//
+// Exposed bedrock is rare on a weathered planet; nearly everywhere, competent rock is covered by its own
+// broken-down products. Modelling grass directly on basalt gave the ground only TWO possible answers to
+// "does this yield?" — 50 kPa or 266 MPa, a 5000× cliff with nothing between. A graded profile makes
+// that a real question, which is what a wheel, a boot or a spade actually interrogate.
+//
+// SURFACE-CONFORMAL, unlike the flat crust/mantle planes below, and that distinction is physical: crust
+// and mantle are stratigraphic layers of the planet, whereas regolith is produced BY weathering of the
+// present-day surface, so it follows the relief that made it.
+//
+// DECLARED VERTICAL LOD (same flag as the crust/mantle bands): thicknesses are compressed into the
+// 96-voxel patch. Real regolith on stable terrain runs metres to tens of metres and varies hugely with
+// climate, slope and age — thin on steep or glaciated ground, deep in tropical weathering profiles. 6 m
+// is deliberately on the THIN side of honest. The horizon ORDER (organic → fines → coarse fragments →
+// rock) is the real one; the depths are a declared budget, not a measurement.
+// VEGETATION IS STRUCTURAL, not decoration. Roots act as tensile fibres in a soil matrix, so a
+// vegetated horizon is genuinely stronger and far more dissipative than the bare fines below it — and
+// the material DB already carries this: grass has 3× dirt's tensile strength (15 vs 5 kPa) and 2.7× its
+// ductility (0.8 vs 0.3), and grass's own note names the mechanism outright ("signature property is
+// added ROOT cohesion ~1-20 kPa over few-kPa base soil"). This layer is therefore best read as the
+// ROOT-BOUND zone, not the blades: it is why turf carries a wheel that a ploughed field would swallow.
+const GRASS_THICKNESS: usize = 1; // organic skin (O/A horizon) — the root-bound, root-reinforced zone
+const FINES_VOX: i32 = 2; // dirt: cohesive weathered fines (B horizon) — 10 kPa cohesion, holds a wall
+const COARSE_VOX: i32 = 3; // gravel: angular COHESIONLESS fragments (C horizon) — 0 cohesion, μ 0.84
+/// Total loose depth above intact rock. The docs/44 admission test bottoms out here: below it the
+/// bedrock's 266 MPa rejects any wheel-scale load outright, so this is also the deepest a driving
+/// contact can ever need to resolve.
+const REGOLITH_VOX: i32 = GRASS_THICKNESS as i32 + FINES_VOX + COARSE_VOX;
+
+// FLAGGED, not modelled: root reinforcement is a COUPLING between horizons — real roots bind the top
+// ~0.1-0.5 m of the soil BENEATH them, so vegetated fines are stronger than the same fines bare. Here
+// each voxel gets only its own material's properties, so the grass horizon is reinforced and the dirt
+// under it is not. Representing it needs per-voxel property modulation on top of the material id — the
+// SAME missing capability that snow compaction needs (local ρ raising local strength via
+// (ρ_snow/ρ_ice)²). Two independent physical effects wanting one mechanism is a good sign it is the
+// right mechanism to build; recorded here so it is not rediscovered a third time.
 
 /// Highest possible surface top (voxel-y ≈ metres): leaves 8 voxels of headroom above the terrain.
 const BASE_TOP: f32 = (H - 8) as f32;
@@ -706,6 +742,8 @@ pub fn generate(materials: &[Material]) -> World {
     // this surface frame (Robin: "see Theia impact from this perspective"). Depths are compressed —
     // flagged; 1 voxel = 1 m holds only for the near-surface probe/dig physics.
     let grass = index_of(materials, "grass") as u16 + 1;
+    let fines = index_of(materials, "dirt") as u16 + 1; // cohesive weathered fines
+    let coarse = index_of(materials, "gravel") as u16 + 1; // cohesionless angular fragments
     let crust = index_of(materials, "basalt") as u16 + 1;
     let mantle = index_of(materials, "peridotite") as u16 + 1;
     let core = index_of(materials, "iron") as u16 + 1;
@@ -729,12 +767,20 @@ pub fn generate(materials: &[Material]) -> World {
     for z in 0..D {
         for x in 0..W {
             // Fill up to the SHARED continuous heightfield (the same function the Earth cap samples).
+            // Clamp leaves room for the WHOLE regolith profile, so no column is so shallow that a
+            // horizon would be cut off and a wheel would meet bedrock where it should meet soil.
             let top = (terrain_height(x as f32, z as f32).round() as i32)
-                .clamp(GRASS_THICKNESS as i32 + 1, H as i32 - 1);
+                .clamp(REGOLITH_VOX + 1, H as i32 - 1);
             let grass_start = top - GRASS_THICKNESS as i32;
+            let fines_start = grass_start - FINES_VOX;
+            let coarse_start = fines_start - COARSE_VOX;
             for y in 0..top {
                 let v = if y >= grass_start {
                     grass
+                } else if y >= fines_start {
+                    fines
+                } else if y >= coarse_start {
+                    coarse
                 } else if y >= crust_bottom {
                     crust
                 } else if y >= mantle_bottom {
