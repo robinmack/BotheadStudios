@@ -98,6 +98,28 @@ docs/32 §4's; the rest were found since and are recorded here so they are not r
 | 9 | **Matter leaks at the seam.** ~2% of debris never returns to the field (deposition refused inside a dynamic body; the water branch is a self-flagged static-sea placeholder) | measured: 78 of 3,605 grains stranded per event, monotonic | this doc |
 | 10 | **Vehicle/probe never contacts debris.** The probe is a CPU `Aggregate`; grains live in a GPU buffer. Coupling is a bounding-sphere exclusion, not contact | `lib.rs` settle path; `matter::couple_body` exists but is called only from tests | docs/38 4c′ |
 | 11 | **An asteroid-era constant still runs in an Earth-g scene.** `MAX_EJECT = 0.045` m/s, capped "below the world's ~7 cm/s escape velocity" — a 0.1 mm ballistic hop at 9.81 m/s² | `matter.rs:41` | this doc |
+| 12 | **The render asserts a physical state the simulation does not have.** Every Earth scene draws an honest Rayleigh sky over a **vacuum**: `atmosphere::AirField` — pressure-layered, with verified hydrostatic balance, momentum-conserving drag and hypersonic entry heating — is instantiated in **no scene** | `grep AirField crates/engine/src/lib.rs` → nothing; 11 atmosphere tests pass regardless | **docs/48** |
+
+**A distinct violation class (item 12).** Rows 1–11 are *one question, two answers*. Row 12 is different:
+the optics are honest and the world beneath them is empty. It inverts *physics drives the render* — not
+by faking the picture, but by leaving the picture's subject unbuilt. It is invisible to every existing
+check, because the atmosphere tests pass, the sky tests pass, and nothing asks whether anything
+**instantiates** what they describe.
+
+### The wiring pattern — look for this before building anything
+
+Three independent cases now share one shape: **the law is built and proven, then wired into one place or
+none.**
+
+| verified physics | wired into |
+|---|---|
+| docs/39 JIT particalization (conserving to <1e-12) | planetary scale only; terrain **never** |
+| `granular::terrain_contact_resolve` (energy-monotone, hardware-verified) | GPU grains only; bodies **never**, until PR #15 |
+| `atmosphere::AirField` (hydrostatic, drag, entry heating) | **nothing** |
+
+The instinct on finding a gap has been "we need to build X". The evidence says the likelier truth is "X
+exists, verified, and nothing calls it." **Grep for the primitive before writing one** — the
+second-cheapest move after reading the docs.
 
 Items 5, 6, 9 and 11 are the ones a "same in every scene" reading makes urgent: they are places where the
 *same matter* behaves differently depending on which scene or which rung of the resolution ladder it is
