@@ -219,6 +219,110 @@ pub fn contact_accel(pi: DVec3, vi: DVec3, pj: DVec3, vj: DVec3, c: &Contact) ->
     a_n + a_t
 }
 
+/// **How fine must grains be here?** (`docs/47` §1) — `particle_size ≈ L_contact / n_across`.
+///
+/// There is no global particle size, and treating one as global is a bug. `PROBE_LATTICE = 1 m` and
+/// `DEBRIS_PART_HALF = 0.5 m` are the resolution the *terrain-debris instance* happens to use, because
+/// meteor ejecta interacts at metre scale — reading them as the engine's floor produces the absurd
+/// conclusion that a go-kart (1.9 m long, 0.28 m wheels) is "too small for the engine".
+///
+/// `l_contact` is the smallest length the interaction must distinguish (a tyre contact patch ~6 cm, a
+/// 14 m crater ~metres); `n_across` is how many grains it takes to REPRESENT that length — a contact
+/// patch that has to develop a pressure distribution, spread and rut needs several across it, not one.
+/// Returns the grain RADIUS.
+pub fn grain_radius_for(l_contact: f64, n_across: f64) -> f64 {
+    if n_across <= 0.0 || l_contact <= 0.0 {
+        return 0.0;
+    }
+    0.5 * l_contact / n_across
+}
+
+/// The effective contact radius of a pair that may differ in size — the harmonic mean
+/// `2*ri*rj/(ri+rj)`, which reduces EXACTLY to `r` when both grains are `r`.
+///
+/// Harmonic rather than arithmetic because contact stiffness follows the *reduced* geometry of the pair:
+/// a pebble pressed against a boulder deforms like a pebble, not like the average of the two. Choosing
+/// the mean that collapses to the single-radius case is what lets the size-aware law replace the
+/// equal-size one without changing a single existing answer.
+pub fn effective_radius(ri: f64, rj: f64) -> f64 {
+    let s = ri + rj;
+    if s <= 0.0 {
+        return 0.0;
+    }
+    2.0 * ri * rj / s
+}
+
+/// **The size-aware contact: returns the FORCE on `i`** (grain `j` receives exactly `-force`), so grains
+/// of different size and mass each accelerate by `F/m` and **momentum is conserved exactly**.
+///
+/// This is the refinement the module header has owed from the start — *"the GPU step has no
+/// per-particle mass, so we model all debris as equal-mass grains ... Per-material mass is a later
+/// refinement."* That approximation is harmless only while every grain is identical. The moment sizes
+/// differ, masses differ, and returning a per-mass ACCELERATION to be applied as `+a` to one grain and
+/// `-a` to the other makes the pair exert unequal and opposite FORCES — Newton's third law broken and
+/// momentum manufactured at every contact. Multi-granularity cannot be built on that, which is why the
+/// force law comes first (`docs/47` §1).
+///
+/// Reduces to [`contact_accel`] exactly for equal grains. Two means make that true: [`effective_radius`],
+/// and the harmonic mass `mh = 2*mi*mj/(mi+mj)` — the pair's damping is set by the oscillator it actually
+/// forms, and `mh` collapses to `m` when the grains match. `c` supplies the per-mass constants exactly as
+/// [`contact_from_material`] built them, rescaled here for this pair's geometry (`k_f = E*r` linear in
+/// radius, cohesion `sigma*pi*r^2` quadratic) and multiplied back into force units by `mh`. ONE
+/// calibration, one law — not two.
+pub fn contact_force(
+    pi: DVec3,
+    vi: DVec3,
+    ri: f64,
+    mi: f64,
+    pj: DVec3,
+    vj: DVec3,
+    rj: f64,
+    mj: f64,
+    c: &Contact,
+) -> DVec3 {
+    let d = pi - pj;
+    let dist = d.length();
+    let touch = ri + rj; // NOT 2*radius: this pair may be a pebble against a boulder
+    let r_eff = effective_radius(ri, rj);
+    let m_h = if mi + mj > 0.0 { 2.0 * mi * mj / (mi + mj) } else { 0.0 };
+    let scale = if c.radius > 0.0 { r_eff / c.radius } else { 1.0 };
+    let coh_range = c.coh_range * scale;
+    if dist >= touch + coh_range || dist < 1.0e-9 {
+        return DVec3::ZERO;
+    }
+    let n = d / dist;
+    let overlap = touch - dist;
+    let v_rel = vi - vj;
+    let v_n = v_rel.dot(n);
+
+    let k_f = c.stiffness * scale * m_h; // E*r_eff, in force units
+    let damp_f = c.normal_damp * scale.sqrt() * m_h; // 2*zeta*sqrt(k_f*mh)
+    let shock_f = c.shock * v_n.abs() / (4.0 * r_eff.max(1.0e-30)) * m_h;
+    let f_rep = if overlap > 0.0 {
+        (k_f * overlap - (damp_f + shock_f) * v_n).max(0.0)
+    } else {
+        0.0
+    };
+    let sep = (-overlap).max(0.0);
+    let f_coh = if c.cohesion > 0.0 && coh_range > 0.0 {
+        c.cohesion * scale * scale * m_h * (1.0 - sep / coh_range).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let f_n = n * (f_rep - f_coh);
+
+    let normal_load = f_rep + f_coh;
+    let v_t = v_rel - n * v_n;
+    let vt_mag = v_t.length();
+    let f_t = if vt_mag > 1.0e-9 {
+        let mag = (c.tangent_damp * scale.sqrt() * m_h * vt_mag).min(c.friction * normal_load);
+        -(v_t / vt_mag) * mag
+    } else {
+        DVec3::ZERO
+    };
+    f_n + f_t
+}
+
 /// Specific DISSIPATED POWER (W/kg) of a contact pair — the mechanical energy the damping and friction
 /// terms of `contact_accel` remove per second, per unit particle mass. Energy is conserved, not
 /// destroyed (docs/20): what contact dissipation removes from motion MUST reappear as heat, and this is
@@ -402,6 +506,120 @@ pub fn face_stable(drop: f32, r: f32, run_height: f32, mu: f32, h_crit: f32) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// docs/47 §1's sizing rule, at the two ends it exists to reconcile. A go-kart tyre patch and a
+    /// 14 m crater are the SAME engine at different granularity — the absurdity the rule kills is
+    /// reading `DEBRIS_PART_HALF = 0.5 m` as a floor, which makes a 0.28 m wheel smaller than a grain.
+    #[test]
+    fn grain_radius_follows_the_interaction_not_a_global_constant() {
+        // A tyre contact patch ~6 cm, needing ~4 grains across to develop a pressure distribution.
+        let tyre = grain_radius_for(0.06, 4.0);
+        assert!((tyre - 0.0075).abs() < 1.0e-12, "got {tyre}");
+        assert!(tyre < 0.28 / 2.0, "a wheel must be many grains, not a fraction of one");
+        // The same rule at metre scale returns what the debris path already uses, which is why this is
+        // one rule rather than a special case bolted on for vehicles.
+        let crater = grain_radius_for(4.0, 4.0);
+        assert!((crater - 0.5).abs() < 1.0e-12, "got {crater}");
+        assert_eq!(grain_radius_for(0.0, 4.0), 0.0);
+        assert_eq!(grain_radius_for(1.0, 0.0), 0.0);
+    }
+
+    /// **The no-regression proof.** The size-aware force law must reproduce the equal-grain law it
+    /// replaces, exactly — otherwise adding granularity silently re-answers a settled question for
+    /// every existing scene (docs/46). `F/m` must equal the acceleration `contact_accel` returns.
+    #[test]
+    fn equal_grains_reproduce_the_existing_contact_law_exactly() {
+        let mats = crate::materials::load();
+        let basalt = &mats[crate::materials::index_of(&mats, "basalt")];
+        let (r, m) = (0.5, 1350.0);
+        let c = contact_from_material(basalt, r, m);
+        // Overlapping, approaching, and sliding — so normal, damping, cohesion and friction all engage.
+        let cases = [
+            (DVec3::new(0.9, 0.0, 0.0), DVec3::new(-2.0, 1.5, 0.0)),
+            (DVec3::new(0.6, 0.3, 0.1), DVec3::new(3.0, -1.0, 0.5)),
+            (DVec3::new(1.04, 0.0, 0.0), DVec3::ZERO), // just past touch: cohesion range
+        ];
+        for (d, v) in cases {
+            let (pi, pj) = (d, DVec3::ZERO);
+            let (vi, vj) = (v, DVec3::ZERO);
+            let a_old = contact_accel(pi, vi, pj, vj, &c);
+            let f_new = contact_force(pi, vi, r, m, pj, vj, r, m, &c);
+            let a_new = f_new / m;
+            assert!(
+                (a_new - a_old).length() <= 1.0e-9 * a_old.length().max(1.0),
+                "size-aware law disagrees with the equal-grain law at d={d:?}: {a_old:?} vs {a_new:?}"
+            );
+        }
+    }
+
+    /// **Why the force law was a prerequisite, not a refactor.** Grains of different size have different
+    /// mass. The old per-mass law hands back ONE acceleration to apply as `+a` and `-a`, which for
+    /// unequal masses means unequal and opposite forces — momentum manufactured at every contact. The
+    /// force law conserves it exactly, and this test measures the difference between the two.
+    #[test]
+    fn a_pebble_against_a_boulder_conserves_momentum() {
+        let mats = crate::materials::load();
+        let basalt = &mats[crate::materials::index_of(&mats, "basalt")];
+        let rho = basalt.density as f64;
+        let vol = |r: f64| 4.0 / 3.0 * std::f64::consts::PI * r * r * r;
+        let (r_small, r_big) = (0.02, 0.5); // 2 cm pebble, 0.5 m boulder — a 25x size ratio
+        let (m_small, m_big) = (rho * vol(r_small), rho * vol(r_big));
+        let c = contact_from_material(basalt, r_big, m_big);
+
+        // Touching and compressing along x.
+        let overlap = 0.004;
+        let pi = DVec3::new(r_small + r_big - overlap, 0.0, 0.0);
+        let (vi, vj) = (DVec3::new(-3.0, 0.4, 0.0), DVec3::ZERO);
+        let f = contact_force(pi, vi, r_small, m_small, DVec3::ZERO, vj, r_big, m_big, &c);
+        assert!(f.length() > 0.0, "grains this close must be in contact");
+
+        // Newton's third law is structural here: one force, applied to both with opposite sign.
+        let (a_i, a_j) = (f / m_small, -f / m_big);
+        let dp = m_small * a_i + m_big * a_j;
+        assert!(dp.length() < 1.0e-9, "momentum was not conserved: {dp:?}");
+        // The pebble is flung and the boulder barely notices — the mass ratio, not a rule.
+        assert!(a_i.length() > 100.0 * a_j.length(), "the small grain must react far harder");
+
+        // What the OLD law would have done in the same configuration: equal and opposite ACCELERATIONS,
+        // so the momentum change is non-zero and scales with the mass difference.
+        let a_old = contact_accel(pi, vi, DVec3::ZERO, vj, &c);
+        let dp_old = m_small * a_old + m_big * -a_old;
+        assert!(
+            dp_old.length() > 1.0,
+            "the old law should visibly violate momentum here, else this test proves nothing"
+        );
+    }
+
+    /// Contact must begin at `ri + rj`, not at `2*radius`. Getting this wrong is silent: a small grain
+    /// would either float above a big one or sink into it, and a mixed-granularity pile would settle to
+    /// a wrong density with nothing obviously broken.
+    #[test]
+    fn unequal_grains_touch_at_the_sum_of_their_radii() {
+        let mats = crate::materials::load();
+        let basalt = &mats[crate::materials::index_of(&mats, "basalt")];
+        let (r_small, r_big) = (0.05, 0.5);
+        let (m_small, m_big) = (1.0, 100.0);
+        let c = contact_from_material(basalt, r_big, m_big);
+        let at = |gap: f64| {
+            let pi = DVec3::new(r_small + r_big + gap, 0.0, 0.0);
+            contact_force(pi, DVec3::ZERO, r_small, m_small, DVec3::ZERO, DVec3::ZERO, r_big, m_big, &c)
+        };
+        // `gap` is measured from touch: negative = overlapping, positive = separated.
+        assert!(at(-0.02).length() > 0.0, "overlapping ⇒ a real repulsion");
+        assert!(at(1.0).length() == 0.0, "far apart ⇒ no force at all");
+        // The repulsion grows with overlap, as a spring must.
+        let (a, b) = (at(-0.01).length(), at(-0.05).length());
+        assert!(b > a, "deeper overlap must push harder: {a} then {b}");
+        // Contact begins at ri+rj, NOT at 2*radius. If the law still used the big grain's diameter the
+        // pair would be judged overlapping while 0.45 m apart; if it used the small one's, they would
+        // float. Straddle the true touch distance to pin it.
+        let touch = r_small + r_big;
+        assert!(at(-0.001).length() > 0.0, "just inside ri+rj ⇒ in contact");
+        assert!(
+            at(2.0 * r_big - touch + 0.01).length() == 0.0,
+            "a separation of the BIG grain's diameter must be well clear of contact"
+        );
+    }
 
     #[test]
     fn repose_allowance_carries_the_friction_term() {

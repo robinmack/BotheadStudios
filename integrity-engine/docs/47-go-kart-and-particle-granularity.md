@@ -45,6 +45,97 @@ distribution needs several, not one). The same rule at both ends:
 Nothing forces one number on the scene. The kart brings its own, the crater keeps its own, and the
 banishment path (§5) is what stops either from accumulating.
 
+### The acceleration structure has the same bug, and it must not be patched
+
+The spatial hash is `cell_size = 2.0 * CONTACT_RADIUS` (`lib.rs:1291`), one global value, with the
+invariant *"≥ contact diameter so contacts stay within ±1 cell"* (`particle_step.wgsl:32`). The obvious
+way to admit mixed sizes is to make that cell track the LARGEST grain. **Do not.** It survives a 2×
+ratio and collapses at 100×: a 1 m cell packed with 1 cm grains holds ~10⁶ of them, so every small
+grain's ±1-cell scan degenerates to O(N). That does not merely run slowly — it defeats the acceleration
+structure entirely, and at the span docs/46 commits to (a raindrop and a photosphere) it is absurd.
+
+It is the same mistake as a global particle size, one level up: **there is no global cell size either.**
+
+**The fix — a hierarchical hash, one grid per size class.** `cell_size(level) = base · 2^level`; a grain
+is inserted into the level whose cell is ≥ its own contact diameter. A pair is discovered exactly ONCE,
+at the finer of the two levels: each grain scans its own level ±1 cell and every **coarser** level ±1
+cell, never finer. O(1) per pair, no double-counting, no pair missed.
+
+**Why this stays affordable across the whole span.** Cost is set by the number of NON-EMPTY levels in
+range, not by the size range the engine can represent. **Do not assume that number is small.** An
+earlier draft of this section claimed "2–3", which was asserted and never measured; a scene with a
+planet, terrain, regolith, a chassis and a tyre patch is already at five or six, and nothing bounds it
+there. The structure must be O(non-empty levels) with **no hardcoded cap**, and must skip an empty level
+in O(1) via per-level occupancy. If a scene wants ten levels, ten levels must work.
+
+**What actually bounds it is the REPRESENTATION LADDER, not a scarcity of scales.** Extreme size ratios
+never meet inside the contact solver. A 1 cm grain never contact-tests against a 10⁶ m body, because at
+that separation of scale the large thing is not particles at all — it is a T0 field, a heightfield, or
+an orbital body. They interact across representation boundaries (grain ↔ voxel ↔ field ↔ body), each
+crossing a bounded ratio. **The hash only ever sees the ratios that coexist as PARTICLES at the same
+instant**, which is set by the resolution policy (docs/13, docs/44), not by the span of the universe.
+An infinite universe has infinite scales; the particle representation holds only the ones something is
+actively doing physics at. That is docs/13's real claim — *cost scales with what is observable from the
+current viewpoint, not with the size or contents of the universe* — and it is load-bearing here.
+
+**Measure it, do not assert it.** Instrument the populated-level count per region in a real scene before
+sizing anything around it. The number above was guessed once already and was wrong.
+
+**The levels are DYNAMIC, because the observer moves.** This is not a fixed two-tier scheme for "big
+grains and small grains" — it is the structure that lets docs/13's descent work: *"falling from orbit,
+detail emerges continuously: star field → planet disk → landscape → terrain → the rock → its grains."*
+Watch a kart from orbit and only coarse levels are populated; zoom to the contact patch and finer levels
+populate under you while the orbital ones depopulate. So the hash must support levels appearing and
+retiring at runtime with no fixed count — a grain's level is derived from its own radius each step, and
+an empty level costs nothing to skip.
+
+That imposes the same discipline the T0 demotion work already answers to: **a change of representation
+must not move the world.** `World::ground_top_voxel` returns the identical surface before and after a
+column demotes; a grain crossing a level boundary, or a region promoting to finer granularity as the
+camera descends, must likewise not step, pop or inject energy. If the zoom is visible as a discontinuity,
+the resolution machinery has become a fudge — the seam is exactly where "a world is a world" gets broken.
+
+### The WGSL mirror — spec, hazards first (NOT YET WRITTEN)
+
+`crates/engine/src/grid.rs` is the CPU reference, pinned to brute force. The shader mirrors it; the two
+are not written in parallel, because parallel authorship is how this codebase acquired four ledger rows.
+
+**Hazard 1 — there is no spare pad in `struct Particle`.** It is exactly 64 bytes, four `vec4`s packed
+`offset+u`, `vel+resting`, `color+material`, `emission+rho`; docs/38 consumed the last slot when `_pad`
+became `rho`. Per-particle radius therefore GROWS the struct to 80 bytes and must be changed in lockstep
+with the `#[repr(C)]` `GpuParticle` in `lib.rs` and with `tools/gpu-verify`'s replica. A layout mismatch
+here does not fail loudly — it silently reinterprets fields. Change all three in one commit and re-run
+`gpu-verify` before believing anything.
+
+**Hazard 2 — `cs_forces` interleaves the `headroom` scan with the contact scan** inside the same 27-cell
+loop. Wrapping a level loop around it changes how many times headroom is evaluated. Headroom must remain
+a MINIMUM over all levels, computed once per grain, or the terrain projection cap silently changes and
+the stack-ram it exists to prevent comes back.
+
+**The change, in order:**
+1. `Params`: add `base_cell : f32` and `max_level : u32`; keep `cell_size` until the flat path is gone
+   so the two can be diffed against each other on the same scene.
+2. `cell_of(pos, level)` → `floor(pos / (P.base_cell * exp2(f32(level))))`; `hash_cell(level, c)` folds
+   the level into the key exactly as `grid::hash_cell` does. ONE table, so `cs_grid_clear` is untouched.
+3. `cs_grid_insert`: derive the level from the particle's own radius (`grid::level_for`) and insert once,
+   at that level only.
+4. `cs_forces`: loop `l` from the grain's own level to `P.max_level`, 27 cells each. Enumerate a pair
+   only when `l > own_level`, or `l == own_level && j > i` — the same once-only rule the reference proves.
+5. Contact maths switches to `granular::contact_force`'s form: touch at `ri + rj`, force not
+   acceleration, divided by each grain's own mass.
+
+**Verification, and it is not optional:** `tools/gpu-verify` scene I is the fudge detector and its energy
+monotonicity must hold at mixed sizes; a new scene should place a boulder among pebbles and assert the
+same pair set the CPU reference finds. Note the harness silently selects the WRONG GPU on this box — check
+which adapter it bound before reading any number.
+
+**On the GPU this is smaller than it sounds:** fold `level` into the hash key — `hash(level, ix, iy, iz)`
+— keeping ONE table and the existing `cs_grid_clear`/`cs_grid_insert`/scan passes nearly intact, rather
+than N separate buffers. Each particle derives its level from its own radius. Note the convergence with
+the parked O(table) grid-clear item (`cs_grid_clear` already dispatches the full 262,144-cell table every
+substep regardless of N): the epoch/generation-tag fix already identified makes the clear free, which is
+what keeps a multi-level table from multiplying that fixed cost.
+
 ## 2. The kart at its own scale
 
 Real dimensions: 1.9 m long, 1.3 m wide, wheels 0.28 m diameter, tread ~12 cm wide.

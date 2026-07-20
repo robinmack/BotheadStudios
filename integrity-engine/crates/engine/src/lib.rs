@@ -30,6 +30,7 @@ mod damage;
 mod emission;
 mod eos;
 mod granular;
+mod grid; // docs/47 §1 — the hierarchical spatial hash: no global cell size
 #[cfg(target_arch = "wasm32")] // WebGPU host for sph_step.wgsl; only the browser scene uses it (mod app is
 mod gpu_sph; //                    wasm-only). The native SPH reference lives in tools/sph-verify + impact-run.
 mod gravity;
