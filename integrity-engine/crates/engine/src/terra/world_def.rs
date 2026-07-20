@@ -92,12 +92,44 @@ pub struct Surface {
     pub biomes: HashMap<String, String>,
 }
 
+/// A world's atmosphere, DECLARED AS MATTER — its mass and what it is made of.
+///
+/// **Surface pressure is deliberately not a field here.** `planet::LayeredBody::atmosphere_mass` states
+/// the invariant: *"The surface pressure is never declared: it EMERGES as the weight of this column,
+/// P = M·g/(4πR²)."* This schema previously carried `surface_pressure_pa`, and Earth's world file
+/// declared `101325` while the emergent value is `99,049 Pa` — so Terra rendered a 2.2%-different
+/// atmosphere from the terrain and orbit scenes, which read the emergent one. One physical quantity,
+/// two answers, differing per scene (docs/46). Declaring MASS instead makes that impossible: there is
+/// one source and pressure is computed from it.
+///
+/// This is also what makes other worlds data rather than code — Mars is CO₂ at a smaller mass, the Moon
+/// is `mass_kg: 0.0` and provably airless (its zero-drag case is already tested).
 #[derive(Debug, Clone, Deserialize)]
 pub struct Atmosphere {
     #[serde(default)]
     pub profile: Option<String>, // "rayleigh"
+    /// Total atmosphere mass (kg) — the DECLARED quantity. Earth: 5.15e18 (measured). `0.0` = airless.
     #[serde(default)]
-    pub surface_pressure_pa: Option<f64>,
+    pub mass_kg: Option<f64>,
+    /// What the air is made of: material ids from the DB with mass fractions, e.g.
+    /// `[["air", 1.0]]` for Earth. Absent ⇒ Earth air. Mars would be `[["co2", 0.95], …]` once those
+    /// materials exist — the specific gas constant, and hence the scale height, then follow from the
+    /// composition rather than from a constant.
+    #[serde(default)]
+    pub composition: Option<Vec<(String, f64)>>,
+}
+
+impl Atmosphere {
+    /// Surface pressure (Pa) DERIVED from the declared mass: the weight of the column over the planet's
+    /// area, `P = M·g/(4πR²)`. Returns `None` when no mass is declared, so the caller falls back to the
+    /// planet profile's own atmosphere rather than inventing a number.
+    pub fn surface_pressure(&self, radius_m: f64, g: f64) -> Option<f64> {
+        let m = self.mass_kg?;
+        if radius_m <= 0.0 {
+            return Some(0.0);
+        }
+        Some(m * g / (4.0 * std::f64::consts::PI * radius_m * radius_m))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -156,6 +188,83 @@ impl World {
 }
 
 #[cfg(test)]
+mod atmosphere_source_tests {
+    use super::*;
+
+    /// ONE EARTH, ONE ATMOSPHERE. The shipped Earth world must derive the SAME surface pressure the
+    /// planet profile computes — because both now weigh the same declared air mass, rather than one
+    /// reading a literal. Before this, `world.json` declared 101,325 Pa against an emergent 99,049 Pa,
+    /// so Terra's sky was a 2.2%-different atmosphere from the terrain and orbit scenes (docs/46).
+    #[test]
+    fn the_world_file_and_the_planet_profile_agree_on_earths_air() {
+        let json = std::fs::read_to_string(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/public/worlds/earth/world.json"),
+        )
+        .expect("shipped Earth world");
+        let w = World::parse(&json).expect("Earth world parses");
+        let planet = w.planet.as_ref().expect("Earth world has a planet");
+        let atm = w.atmosphere.as_ref().expect("Earth world declares an atmosphere");
+
+        let earth = crate::planet::earth();
+        let g = earth.gravity_at(planet.radius_m);
+        let from_world = atm.surface_pressure(planet.radius_m, g).expect("mass is declared");
+        let from_profile = earth.surface_pressure();
+
+        let rel = (from_world - from_profile).abs() / from_profile;
+        assert!(
+            rel < 0.02,
+            "one Earth must have one atmosphere: world file says {from_world:.0} Pa, \
+             planet profile says {from_profile:.0} Pa ({:.1}% apart)",
+            rel * 100.0
+        );
+    }
+
+    /// Pressure is DERIVED, never declared: the schema must not carry a surface-pressure field, or the
+    /// two-source bug can walk straight back in. A compile-time guarantee would be better; this is the
+    /// next best thing, and it names the invariant so a future edit trips over it.
+    #[test]
+    fn the_schema_does_not_let_a_world_declare_its_surface_pressure() {
+        // Scope the search to the struct BODY. Searching the whole file matches this test's own source
+        // (include_str! includes it), which is a false positive, not a violation.
+        let src = include_str!("world_def.rs");
+        let start = src.find("pub struct Atmosphere {").expect("Atmosphere struct");
+        let body = &src[start..start + src[start..].find("\n}").expect("struct end")];
+        let banned = concat!("surface_", "pressure_pa"); // split so this line is not itself a match
+        assert!(
+            !body.contains(banned),
+            "the Atmosphere schema must not carry a declared surface pressure — declare mass instead, \
+             so there is ONE source and pressure is derived from it"
+        );
+    }
+
+    /// An AIRLESS world is expressible and gives exactly zero pressure — the Moon, and every vacuum body
+    /// a Solar System Cup would add, are data rather than a code path.
+    #[test]
+    fn an_airless_world_is_expressible_and_gives_zero_pressure() {
+        let w = World::parse(
+            r#"{"name":"luna","planet":{"radius_m":1737400.0},"atmosphere":{"mass_kg":0.0}}"#,
+        )
+        .expect("airless world parses");
+        let atm = w.atmosphere.as_ref().unwrap();
+        assert_eq!(atm.surface_pressure(1_737_400.0, 1.62), Some(0.0), "no air ⇒ no pressure");
+    }
+
+    /// Composition is declarable, so the specific gas constant (hence scale height) can follow from what
+    /// the air IS rather than from a constant — the hook a CO₂ world needs.
+    #[test]
+    fn composition_is_declarable() {
+        let w = World::parse(
+            r#"{"name":"m","planet":{"radius_m":3389500.0},
+                "atmosphere":{"mass_kg":2.5e16,"composition":[["air",1.0]]}}"#,
+        )
+        .expect("world with composition parses");
+        let c = w.atmosphere.as_ref().unwrap().composition.as_ref().expect("composition present");
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].0, "air");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -174,7 +283,7 @@ mod tests {
             "surface":{"landmask_url":"landmask.png","elevation_url":"elevation.png",
                 "elevation_range_m":[-11000,9000],"landcover_url":"landcover.png","sea_level_m":0,
                 "biomes":{"0":"water","1":"grass","2":"sand"}},
-            "atmosphere":{"profile":"rayleigh","surface_pressure_pa":101325},
+            "atmosphere":{"profile":"rayleigh","mass_kg":5.15e18,"composition":[["air",1.0]]},
             "camera":{"mode":"fly","lat":20,"lon":0,"alt_m":8000000,"look":{"yaw":0,"pitch":-1.2},
                 "min_alt_m":2,"max_alt_m":40000000},
             "time":{"rotation":false,"scale":1}

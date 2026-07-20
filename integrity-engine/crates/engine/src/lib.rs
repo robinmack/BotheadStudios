@@ -5339,12 +5339,17 @@ mod app {
                 .as_ref()
                 .ok_or_else(|| JsValue::from_str("Terra world is missing a `planet` section"))?;
             self.planet_radius = planet.radius_m;
+            // ONE SOURCE for surface pressure: the declared atmosphere MASS, weighed. Reading a declared
+            // `surface_pressure_pa` here was a docs/46 violation with a measured cost — Earth's world file
+            // said 101,325 Pa while the emergent value is 99,049 Pa, so Terra's sky was a 2.2%-different
+            // atmosphere from the one the terrain and orbit scenes render. Same planet, two airs.
+            let g_surface = crate::planet::earth().gravity_at(planet.radius_m);
             let p_ratio = w
                 .atmosphere
                 .as_ref()
-                .and_then(|a| a.surface_pressure_pa)
-                .map(|pa| pa / 101_325.0)
-                .unwrap_or_else(|| crate::planet::earth().surface_pressure() / 101_325.0);
+                .and_then(|a| a.surface_pressure(planet.radius_m, g_surface))
+                .unwrap_or_else(|| crate::planet::earth().surface_pressure())
+                / 101_325.0;
             self.atm_tau = crate::atmosphere::rayleigh_tau(p_ratio);
             self.world_name = w.name.clone();
 
