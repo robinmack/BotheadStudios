@@ -3,14 +3,17 @@
   "type": "planet",
   "planet": {
     "radius_m": 6371000,
-    "mass_kg": 5.972e24,
+    "mass_kg": 5.972e+24,
     "rotation_period_s": 86400,
     "profile": "earth"
   },
   "surface": {
     "landmask_url": "landmask.png",
     "elevation_url": "elevation.png",
-    "elevation_range_m": [-11000, 9000],
+    "elevation_range_m": [
+      -11000,
+      9000
+    ],
     "relief_exaggeration": 1.0,
     "landcover_url": "landcover.png",
     "sea_level_m": 0,
@@ -25,26 +28,56 @@
   },
   "atmosphere": {
     "profile": "rayleigh",
-    "surface_pressure_pa": 101325
+    "mass_kg": 5.15e+18,
+    "composition": [
+      [
+        "air",
+        1.0
+      ]
+    ]
   },
   "camera": {
     "mode": "fly",
     "lat": 20,
     "lon": 0,
     "alt_m": 8000000,
-    "look": { "yaw": 0, "pitch": -1.2 },
+    "look": {
+      "yaw": 0,
+      "pitch": -1.2
+    },
     "min_alt_m": 2,
     "max_alt_m": 40000000
   },
   "controls": {
     "keys": [
-      { "code": "KeyW", "action": "forward" },
-      { "code": "KeyS", "action": "back" },
-      { "code": "KeyA", "action": "left" },
-      { "code": "KeyD", "action": "right" },
-      { "code": "KeyR", "action": "up" },
-      { "code": "KeyF", "action": "down" }
+      {
+        "code": "KeyW",
+        "action": "forward"
+      },
+      {
+        "code": "KeyS",
+        "action": "back"
+      },
+      {
+        "code": "KeyA",
+        "action": "left"
+      },
+      {
+        "code": "KeyD",
+        "action": "right"
+      },
+      {
+        "code": "KeyR",
+        "action": "up"
+      },
+      {
+        "code": "KeyF",
+        "action": "down"
+      }
     ]
   },
-  "time": { "rotation": false, "scale": 1 }
+  "time": {
+    "rotation": false,
+    "scale": 1
+  }
 }

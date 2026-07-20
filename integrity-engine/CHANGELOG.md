@@ -9,6 +9,11 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **BREAKING (world schema): atmospheres declare MASS, not pressure.** `atmosphere.surface_pressure_pa`
+  is removed; declare `atmosphere.mass_kg` (and optionally `composition`) and surface pressure is DERIVED
+  as the weight of that column, `P = M·g/(4πR²)`. Earth's world file previously declared 101,325 Pa
+  against an emergent 99,049 Pa, so Terra rendered a 2.2%-different atmosphere from the terrain and orbit
+  scenes. One planet now has one atmosphere, and an airless world is just `mass_kg: 0.0`.
 - **Drag is a force now, and `matter::DRAG` is gone.** The GPU particle step applies
   `a = ½ρ_air v² C_d/(ρ_grain·s)` against an air density derived from the planet's declared atmosphere
   mass; the `drag` multiplier uniform becomes `air_rho` (0 = vacuum). A grain's own density and size set
