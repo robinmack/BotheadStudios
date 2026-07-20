@@ -100,6 +100,37 @@ the resolution machinery has become a fudge — the seam is exactly where "a wor
 `crates/engine/src/grid.rs` is the CPU reference, pinned to brute force. The shader mirrors it; the two
 are not written in parallel, because parallel authorship is how this codebase acquired four ledger rows.
 
+**Hazard 0 — the layout is declared THREE times and nothing checks them against each other. Fix this
+BEFORE growing the struct, not during.** This is a docs/46 violation in its own right (one question,
+three answers) and it has already fired once: `gpu-verify/src/main.rs:68` records `drag_cd` arriving as
+0.0 because a mirror drifted, so drag was silently a no-op — *"a repr(C) mirror that drifts from its
+shader fails SILENTLY: no error, just wrong physics."*
+
+| declaration | compiled by |
+|---|---|
+| `GpuParticle` — `lib.rs:1922`, INSIDE `#[cfg(target_arch = "wasm32")] mod app` | **wasm only; native `cargo test` never builds it** |
+| `Particle` — `tools/gpu-verify/src/main.rs:18` | native only |
+| `struct Particle` — `shaders/particle_step.wgsl` | neither — validated at device creation, i.e. at runtime |
+
+A layout change can therefore pass the native suite, pass `gpu-verify`, and still be wrong in the
+browser — the three artifacts have disjoint coverage. `cargo check --target wasm32-unknown-unknown` is
+necessary but NOT sufficient: it type-checks `mod app`, and rustc never sees the WGSL at all, so field
+ORDER can still drift silently.
+
+**The safe sequence:**
+1. **Move the GPU-facing POD types out of `mod app`** into a natively-compiled module. They are plain
+   `#[repr(C)]` structs with no wasm-only dependencies; the only reason they are unreachable from native
+   tests is where they happen to sit. This alone puts them under `cargo test`.
+2. **Delete `gpu-verify`'s replica** and import the same Rust declaration. Three copies become one.
+3. **Add a native test that parses `particle_step.wgsl` and cross-checks the Rust struct field-for-field**
+   (name, type, order, total size). Rust cannot see the shader, so this is the only mechanism that
+   catches drift against the authority — and it is exactly what would have caught the `drag_cd` bug.
+4. Only then grow the struct for per-particle radius, changing ONE Rust declaration and one WGSL block,
+   with the test failing loudly if they disagree.
+
+Doing multi-granularity without step 3 means the wasm build is verified by nothing but a human reading
+two files side by side.
+
 **Hazard 1 — there is no spare pad in `struct Particle`.** It is exactly 64 bytes, four `vec4`s packed
 `offset+u`, `vel+resting`, `color+material`, `emission+rho`; docs/38 consumed the last slot when `_pad`
 became `rho`. Per-particle radius therefore GROWS the struct to 80 bytes and must be changed in lockstep
