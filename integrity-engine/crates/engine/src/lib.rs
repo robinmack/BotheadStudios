@@ -421,6 +421,7 @@ mod app {
                 planet_radius as f32,
                 EARTH_CAP_RADIUS,
                 None,
+                Some(&world),
             );
             let earth_cap_gpu = upload_mesh(&device, "earth-cap", &earth_cap_mesh);
 
@@ -1030,6 +1031,7 @@ mod app {
                 self.planet_radius as f32,
                 EARTH_CAP_RADIUS,
                 hole,
+                Some(&self.world),
             );
             self.earth_cap_gpu = upload_mesh(&self.device, "earth-cap", &mesh);
         }
@@ -1217,9 +1219,12 @@ mod app {
             let mut tops = Vec::with_capacity(w * d);
             for z in 0..d {
                 for x in 0..w {
+                    // THE ground query (world.rs), not the raw voxels: a column demoted to T0 has no
+                    // voxels but still has ground, and uploading -1 for it would drop every grain
+                    // resting there straight through the floor. Mirrors `surface_bilinear_grad`.
                     tops.push(
                         self.world
-                            .surface_top_voxel(x as i32, z as i32)
+                            .ground_top_voxel(x as i32, z as i32)
                             .unwrap_or(-1),
                     );
                 }

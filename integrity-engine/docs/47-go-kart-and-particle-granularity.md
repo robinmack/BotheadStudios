@@ -122,6 +122,26 @@ polish item.
 ## 6. Order of work
 
 1. **Voxel → field demotion** (docs/46 item 6). Without it, driving accumulates cost without bound.
+   **Step 1a landed 2026-07-19 — the mechanism is SAFE, but nothing triggers it yet.** §5 called this
+   "not new machinery", which was true of `demote_column_to_field` itself and false of everything around
+   it: the engine held **three different answers to "how high is the ground here?"**, so demoting a
+   column had three silent consequences — the GPU grain heightfield read raw voxels and would have
+   dropped every grain resting there through the floor; the rendered bulk cap read raw `terrain_height`
+   and would have drawn a de-resolved crater as untouched ground; and `demote_column_to_field` sits on
+   `World`, bypassing `MatterSim`, so the remesh dirty flag never rose. There is now ONE query,
+   `World::ground_top_voxel`, and the GPU heightfield, the CPU bilinear surface and the cap all read it.
+   A `demoted` flag disambiguates "baked into the field" from "excavated to nothing", which a zero
+   displacement cannot.
+
+   The useful discovery: **demotion needs no sub-voxel heightfield.** Because the bake preserves the
+   surface exactly and that surface is already voxel-quantised, the field hands back the *identical*
+   integer top, so the GPU's `array<i32>` is untouched. This deliberately does NOT entangle demotion with
+   the deferred f32-surface refactor (docs/45's `SLOPE_QUANTUM_M` IOU).
+
+   **Still open for 1b:** the quiescence TRIGGER (nothing calls demotion), and `patch_resolved` being a
+   single bool for the whole 96 m patch while demotion is per-column — they do not compose. Also
+   unresolved: `bulk_height` still returns pure procedural relief for a column that has been dug but not
+   demoted, so the field/voxel seam is consistent only because `patch_resolved` gates which one is asked.
 2. **The axle constraint.** The one genuinely new mechanism; test it on a single free-spinning wheel
    before any vehicle exists.
 3. **Multi-granularity particalization** — one scene, two particle scales, per §1.

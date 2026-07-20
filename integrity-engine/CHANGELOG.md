@@ -9,6 +9,19 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **BREAKING (API): `mesher::build_earth_cap` takes a `field: Option<&World>`.** Pass the world and the
+  bulk cap follows the persistent T0 `displacement`, so a de-resolved crater renders as a crater instead
+  of pristine relief. `None` keeps the old pure-procedural behaviour.
+- **One authoritative ground query — `World::ground_top_voxel`.** Returns a column's voxel top while it
+  is resolved and the SAME top after it is demoted to the T0 field, so de-resolution is invisible to
+  whoever asks where the ground is. The GPU grain heightfield, the CPU bilinear contact surface and the
+  bulk cap all read it; previously those three disagreed, and demoting a column would have dropped grains
+  through the floor and rendered the crater as untouched ground. Adds `World.demoted`, which separates
+  "baked into the field" from "excavated to nothing" — a zero displacement cannot. Notably this needs
+  **no sub-voxel heightfield**: the bake preserves an already-quantised surface, so the field returns the
+  identical integer top and the GPU's `array<i32>` is untouched. Nothing triggers demotion yet; this
+  makes it safe, not active.
+
 - **BREAKING (API): `MatterSim::materialize_steep_terrain` drops its `steep_drop` argument.** Terrain
   stability is now Mohr–Coulomb — a face stands if friction holds the slope OR cohesion holds the bank —
   so there is no step-height threshold left to pass. Call sites just delete the trailing integer.

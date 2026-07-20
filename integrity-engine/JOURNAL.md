@@ -3,6 +3,47 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-19 — one answer to "where is the ground", so a patch can de-resolve (docs/47 step 1a)
+
+**What.** `World::ground_top_voxel` is now the single authoritative ground query: it returns the voxel
+top while a column is resolved and keeps returning the SAME top after that column is demoted to the T0
+field. The GPU grain heightfield, the CPU bilinear contact surface and the rendered bulk cap all read it
+(the cap via `displacement_at`). A `demoted: Vec<bool>` mask disambiguates "baked into the field" from
+"excavated to nothing". +4 tests (203 total, wasm clean).
+
+**Why.** docs/47 §5 called voxel→field demotion "not new machinery" because `demote_column_to_field` and
+`column_is_bakeable` already exist, tested — with **zero non-test callers**. That was true of the
+function and false of everything around it. The engine held **three different answers to one question**:
+the GPU heightfield read raw `surface_top_voxel`, the bulk cap read raw `terrain_height` ignoring
+`displacement` entirely, and probe contact read `bulk_height`. So simply calling demotion would have
+dropped every grain resting on that column through the floor, and drawn the de-resolved crater as
+untouched ground — the render disagreeing with the physics, the one direction this engine never allows.
+
+**The useful discovery: demotion needs no sub-voxel heightfield.** The bake preserves the surface
+exactly, and that surface is already voxel-quantised (`top − 0.5`), so the field hands back the
+*identical integer top*. The GPU's `array<i32>` is untouched and demotion stays cleanly separate from
+the deferred f32-surface refactor (docs/45's `SLOPE_QUANTUM_M` IOU). I had started down the opposite
+path — continuously baking the field to track the voxels — and abandoned it on noticing it would snap
+the *smooth* procedural field onto the voxel quantisation at startup, degrading the higher-fidelity
+representation by up to 1 m. The field records DEFORMATION, not rounding.
+
+**Verified.**
+- `ground_top_survives_demotion_exactly` — over five columns, the top before demotion equals the top
+  after, exactly, once the voxels are gone.
+- `an_excavated_column_has_no_ground_but_a_demoted_one_does` — the ambiguity the mask exists for; a zero
+  displacement would otherwise pop dug-out ground back to pristine relief.
+- `putting_matter_back_re_resolves_a_demoted_column` — a de-resolving grain hands authority back to the
+  voxels instead of the column answering from a stale bake.
+- `the_bulk_cap_renders_a_de_resolved_crater` — field-blind cap vs field-aware cap over a baked 6 m pit;
+  pins render/physics agreement, which would otherwise fail silently.
+- 203/203 native, `cargo check --target wasm32-unknown-unknown` clean.
+
+**Open, and stated plainly: NOTHING TRIGGERS DEMOTION YET.** This makes it safe, not active — step 1b is
+the quiescence trigger. Two known obstacles for it: `patch_resolved` is a single bool for the whole 96 m
+patch while demotion is per-column (they do not compose), and `bulk_height` still returns pure procedural
+relief for a column dug but not demoted, so the field/voxel seam is consistent only because
+`patch_resolved` gates which of the two is asked. docs/46 ledger row 6 narrowed, not closed.
+
 ## 2026-07-19 — terrain learned the half of Mohr–Coulomb the grains always had (docs/45)
 
 **What.** Terrain slope stability now carries the **friction term**. `granular::face_stable` is the law —

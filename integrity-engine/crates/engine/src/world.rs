@@ -80,6 +80,17 @@ pub struct World {
     ///
     /// Zero-initialised, so an untouched world is exactly the procedural surface as before.
     pub displacement: Vec<f32>,
+    /// **Which columns keep their surface in T0 rather than in voxels** (`w × d`).
+    ///
+    /// Needed because "this column has no voxels" is ambiguous on its own, and the two cases want
+    /// opposite answers: a column DEMOTED by [`Self::demote_column_to_field`] still has ground — its
+    /// height moved into [`Self::displacement`] — while a column excavated to nothing genuinely has
+    /// none. Without this flag, [`Self::ground_top_voxel`] would have to read a zero displacement as
+    /// "pristine procedural relief" and pop dug-out ground back up to the untouched surface.
+    ///
+    /// Set only by demotion, cleared by any [`Self::set_voxel`] that puts matter back in the column
+    /// (re-resolving hands authority back to the voxels). Untouched worlds are all-`false`.
+    pub demoted: Vec<bool>,
 }
 
 impl World {
@@ -94,7 +105,7 @@ impl World {
         max_top: usize,
         water_mat: Option<usize>,
     ) -> Self {
-        World { w, h, d, voxels, max_top, water_mat, displacement: vec![0.0; w * d] }
+        World { w, h, d, voxels, max_top, water_mat, displacement: vec![0.0; w * d], demoted: vec![false; w * d] }
     }
 
     #[inline]
@@ -197,7 +208,9 @@ impl World {
         let top = |x: i32, z: i32| -> f32 {
             let xc = x.clamp(0, self.w as i32 - 1);
             let zc = z.clamp(0, self.d as i32 - 1);
-            self.surface_top_voxel(xc, zc).unwrap_or(-1) as f32
+            // `ground_top_voxel`, not `surface_top_voxel`: a demoted column still HAS ground, and
+            // reading the freed voxels would report -1 and open a hole under anything resting there.
+            self.ground_top_voxel(xc, zc).unwrap_or(-1) as f32
         };
         let h00 = top(cx, cz);
         let h10 = top(cx + 1, cz);
@@ -255,6 +268,35 @@ impl World {
         )
     }
 
+    /// **THE column top — the single authoritative answer to "where is the ground here?"**
+    ///
+    /// Returns the same voxel-frame top [`Self::surface_top_voxel`] does while a column is resolved, and
+    /// keeps returning it after that column has been demoted to T0, when the voxels are gone and only
+    /// the field remembers. `None` means there is genuinely no ground (an unbaked empty column, or out
+    /// of bounds).
+    ///
+    /// **Why this can be exact, and why no f32 heightfield is needed to make demotion safe:**
+    /// [`Self::demote_column_to_field`] preserves the surface *exactly*, and the surface it preserves is
+    /// already voxel-quantised (`top − 0.5`). So the field can hand back the identical integer top it
+    /// was given — demotion becomes invisible to every consumer that asks this question, with no change
+    /// to the `array<i32>` the GPU grain step samples. (Sub-voxel terrain is a separate, deferred piece
+    /// of work — `docs/45`'s `SLOPE_QUANTUM_M` IOU — and it is deliberately not entangled with this.)
+    ///
+    /// Consumers must prefer this over `surface_top_voxel`; reading the voxels directly is what makes a
+    /// demoted column read as a hole and drops whatever was standing on it through the floor.
+    pub fn ground_top_voxel(&self, x: i32, z: i32) -> Option<i32> {
+        if x < 0 || z < 0 || x as usize >= self.w || z as usize >= self.d {
+            return None;
+        }
+        if self.demoted[z as usize * self.w + x as usize] {
+            // Invert the bake: field surface = procedural + displacement = top − 0.5.
+            let surface = terrain_height(x as f32 + 0.5, z as f32 + 0.5)
+                + self.displacement[z as usize * self.w + x as usize];
+            return Some((surface + 0.5).round() as i32);
+        }
+        self.surface_top_voxel(x, z)
+    }
+
     /// **Demote a column from voxels (T1) to the persistent field (T0).**
     ///
     /// Writes the column's current surface into `displacement` so `bulk_height` reproduces it EXACTLY,
@@ -281,6 +323,9 @@ impl World {
         // What the procedural relief alone would say here. The residual IS the displacement.
         let procedural = terrain_height(x as f32 + 0.5, z as f32 + 0.5);
         self.displacement[z as usize * self.w + x as usize] = voxel_surface - procedural;
+        // The field is now the record for this column: `ground_top_voxel` must read it, not the voxels
+        // we are about to free. Set BEFORE clearing so the column is never momentarily groundless.
+        self.demoted[z as usize * self.w + x as usize] = true;
         let mut freed = 0usize;
         for y in 0..top {
             if self.material_at(x, y, z).is_some() {
@@ -412,6 +457,13 @@ impl World {
         }
         let i = self.idx(x as usize, y as usize, z as usize);
         self.voxels[i] = material.map(|m| m as u16 + 1).unwrap_or(0);
+        // Putting matter back into a demoted column hands authority back to the voxels. Without this the
+        // column keeps answering `ground_top_voxel` from its stale baked height and the new matter is
+        // invisible to everything that asks where the ground is. (Demotion re-sets the flag itself, and
+        // does so before it clears, so its own clearing pass cannot trip this.)
+        if material.is_some() {
+            self.demoted[z as usize * self.w + x as usize] = false;
+        }
     }
 
     /// Total number of solid voxels — used for matter-conservation checks (tests).
@@ -779,6 +831,7 @@ pub fn generate(materials: &[Material]) -> World {
         // T0 starts flat: a fresh world IS the procedural relief, unmodified. Every non-zero entry
         // hereafter is a real, persisted deformation baked back from voxels.
         displacement: vec![0.0; W * D],
+        demoted: vec![false; W * D],
     }
 }
 
@@ -851,6 +904,72 @@ mod tests {
                 "surface moved at ({x},{z}): voxels said {voxel_surface:.4}, field says {after:.4}"
             );
         }
+    }
+
+    /// **Demotion must be INVISIBLE to whoever asks where the ground is** (`docs/47` §5). The surface
+    /// is preserved exactly by `demote_column_to_field`, and that surface is already voxel-quantised —
+    /// so the authoritative query hands back the IDENTICAL integer top after the voxels are gone. This
+    /// is what lets the GPU grain step keep its `array<i32>` heightfield: demotion needs no sub-voxel
+    /// surface, and must not be entangled with that separate deferred work.
+    #[test]
+    fn ground_top_survives_demotion_exactly() {
+        let mats = materials::load();
+        let mut w = generate(&mats);
+        for &(x, z) in &[(30i32, 30i32), (48, 48), (12, 70), (80, 20), (5, 5)] {
+            let before = w.ground_top_voxel(x, z).expect("column has ground");
+            assert_eq!(before, w.surface_top_voxel(x, z).unwrap(), "resolved: voxels answer");
+            w.demote_column_to_field(x, z).expect("a generated column is bakeable");
+            assert!(w.surface_top_voxel(x, z).is_none(), "the voxels really are gone");
+            assert_eq!(
+                w.ground_top_voxel(x, z),
+                Some(before),
+                "the ground moved at ({x},{z}) when its representation changed — a body standing \
+                 there would drop through the floor the instant its patch de-resolved"
+            );
+        }
+    }
+
+    /// The ambiguity the `demoted` flag exists to resolve. A column with no voxels means two opposite
+    /// things: DEMOTED (its ground moved into the field) or EXCAVATED (there is genuinely no ground).
+    /// Inferring from a zero displacement would pop dug-out ground back up to the pristine surface.
+    #[test]
+    fn an_excavated_column_has_no_ground_but_a_demoted_one_does() {
+        let mats = materials::load();
+        let mut w = generate(&mats);
+        let (dug, kept) = ((33i32, 44i32), (34i32, 44i32));
+        let top = w.surface_top_voxel(dug.0, dug.1).unwrap();
+        for y in 0..top {
+            w.set_voxel(dug.0, y, dug.1, None); // excavate the whole column, never demoting it
+        }
+        assert_eq!(
+            w.ground_top_voxel(dug.0, dug.1),
+            None,
+            "an excavated column has no ground — it must not report the relief it used to have"
+        );
+        let before = w.ground_top_voxel(kept.0, kept.1).unwrap();
+        w.demote_column_to_field(kept.0, kept.1).unwrap();
+        assert_eq!(w.ground_top_voxel(kept.0, kept.1), Some(before), "a demoted column still has ground");
+    }
+
+    /// Re-resolving hands authority back to the voxels. Putting matter into a demoted column must clear
+    /// the flag, or the column keeps answering from its stale baked height and the new matter is
+    /// invisible to every ground query — including the one the GPU grains collide against.
+    #[test]
+    fn putting_matter_back_re_resolves_a_demoted_column() {
+        let mats = materials::load();
+        let mut w = generate(&mats);
+        let (x, z) = (60, 60);
+        let grass = index_of(&mats, "grass");
+        let before = w.ground_top_voxel(x, z).unwrap();
+        w.demote_column_to_field(x, z).unwrap();
+        assert_eq!(w.ground_top_voxel(x, z), Some(before));
+        // A grain de-resolves back into this column (deposit_resting_grain's job).
+        w.set_voxel(x, 3, z, Some(grass));
+        assert_eq!(
+            w.ground_top_voxel(x, z),
+            Some(4),
+            "the voxels are authoritative again — the query must not keep reading the field"
+        );
     }
 
     /// A column the heightfield CANNOT represent — one with a void under its top (a cave, an undercut

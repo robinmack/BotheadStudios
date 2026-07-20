@@ -234,15 +234,26 @@ pub fn build_earth_cap(
     radius: f32,
     r_max: f32,
     hole: Option<glam::Vec2>,
+    field: Option<&crate::world::World>,
 ) -> Mesh {
     use crate::world::terrain_height;
     use std::f32::consts::TAU;
     let grass = index_of(materials, "grass"); // the SAME surface skin the voxel patch wears
     let col = materials[grass].albedo;
-    // Surface height (centered coords) at cap point (cx, cz): shared relief minus the sphere drop.
+    // Surface height (centered coords) at cap point (cx, cz): shared relief PLUS the persistent T0
+    // displacement, minus the sphere drop.
+    //
+    // The displacement term is what makes a de-resolved crater VISIBLE. Without it the cap redraws
+    // pristine procedural relief, so a column demoted to T0 is physically correct under the probe and
+    // the grains — both read `ground_top_voxel` — while rendering as untouched ground. That is the
+    // render disagreeing with the physics, which is the one direction this engine never allows
+    // (docs/46: physics drives the render). `None` keeps the pure-procedural cap for callers with no
+    // world to sample, and an untouched world's displacement is all zeros, so nothing moves until
+    // something is actually baked back.
     let cap_y = |cx: f32, cz: f32| -> f32 {
         let d = (cx * cx + cz * cz).sqrt();
-        terrain_height(cx + center.x, cz + center.z) - center.y - d * d / (2.0 * radius)
+        let disp = field.map_or(0.0, |w| w.displacement_at(cx + center.x, cz + center.z));
+        terrain_height(cx + center.x, cz + center.z) + disp - center.y - d * d / (2.0 * radius)
     };
     // True surface normal of y = cap_y(x, z): central difference of the shared heightfield (relief +
     // curvature), so the cap shades as real rolling hills that join the patch without a seam.
@@ -713,7 +724,7 @@ mod tests {
         let center = w.center();
         let r_max = 26_000.0f32;
         // Default BULK cap (no hole): the full disk over the whole footprint and beyond.
-        let mesh = build_earth_cap(&mats, center, radius, r_max, None);
+        let mesh = build_earth_cap(&mats, center, radius, r_max, None, None);
 
         // (a) Every vertex sits EXACTLY on the shared heightfield minus the sphere drop — proving the cap
         //     is the same terrain_height surface, not an independent flat plane.
@@ -797,7 +808,7 @@ mod tests {
         let radius = planet::earth().radius() as f32;
         let w = world::generate(&mats);
         let center = w.center();
-        let mesh = build_earth_cap(&mats, center, radius, 26_000.0, None);
+        let mesh = build_earth_cap(&mats, center, radius, 26_000.0, None, None);
 
         let mut inside_count = 0usize;
         for v in &mesh.vertices {
@@ -830,7 +841,7 @@ mod tests {
         let w = world::generate(&mats);
         let center = w.center();
         // Resolve the whole footprint: hole half-extents = the patch's centre offset (its half-extents).
-        let mesh = build_earth_cap(&mats, center, radius, 26_000.0, Some(glam::Vec2::new(center.x, center.z)));
+        let mesh = build_earth_cap(&mats, center, radius, 26_000.0, Some(glam::Vec2::new(center.x, center.z)), None);
 
         // (1) HOLE: NO cap vertex may lie strictly inside the patch footprint (voxel (x,z) in 0..W, 0..D).
         //     A cap vertex there would be a lid drawn over the patch, hiding craters/digs beneath it.
@@ -869,6 +880,48 @@ mod tests {
             checked += 1;
         }
         assert_eq!(checked, SEG, "the whole seam ring must be continuity-checked");
+    }
+
+    /// **The cap must render the ground the physics reports.** A column demoted to T0 keeps its surface
+    /// in `displacement`; if the cap ignores that field it redraws pristine relief, so a de-resolved
+    /// crater is solid under the probe and the grains (both read `ground_top_voxel`) while LOOKING
+    /// untouched. Physics drives the render — never the reverse (docs/46) — so this pins the agreement.
+    #[test]
+    fn the_bulk_cap_renders_a_de_resolved_crater() {
+        let mats = materials::load();
+        let mut w = crate::world::generate(&mats);
+        let center = w.center();
+        let radius = 6.371e6_f32;
+        // Dig a pit at the patch centre, then demote those columns to the field.
+        let (px, pz) = (center.x as i32, center.z as i32);
+        const DEPTH: i32 = 6;
+        for dz in -3..=3 {
+            for dx in -3..=3 {
+                // Dig from each column's OWN top: a fixed y-range across columns of differing height
+                // leaves voxels stranded above the cut, which is a void, which correctly refuses to bake.
+                let top = w.surface_top_voxel(px + dx, pz + dz).unwrap();
+                for y in (top - DEPTH)..top {
+                    w.set_voxel(px + dx, y, pz + dz, None);
+                }
+                w.demote_column_to_field(px + dx, pz + dz).expect("bakeable");
+            }
+        }
+        let sample = |m: &Mesh| -> f32 {
+            // Lowest vertex near the patch centre — the crater floor if the cap is reading the field.
+            m.vertices
+                .iter()
+                .filter(|v| v.pos[0].abs() < 2.0 && v.pos[2].abs() < 2.0)
+                .fold(f32::MAX, |acc, v| acc.min(v.pos[1]))
+        };
+        let blind = build_earth_cap(&mats, center, radius, 26_000.0, None, None);
+        let seeing = build_earth_cap(&mats, center, radius, 26_000.0, None, Some(&w));
+        let (yb, ys) = (sample(&blind), sample(&seeing));
+        assert!(yb.is_finite() && ys.is_finite(), "the cap must have vertices over the patch centre");
+        assert!(
+            ys < yb - (DEPTH as f32 * 0.5),
+            "the cap did not follow the baked crater down: field-blind {yb:.2} m vs field-aware \
+             {ys:.2} m, for a {DEPTH} m pit — a de-resolved crater would render as untouched ground"
+        );
     }
 
     #[test]
