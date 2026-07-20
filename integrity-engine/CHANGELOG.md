@@ -9,6 +9,18 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Contact is now SIZE-AWARE and force-based — the prerequisite for multi-granularity (docs/47 §1).**
+  `granular::contact_force` returns the FORCE on a grain (its partner receives exactly the negative), so
+  grains of different size and mass each accelerate by `F/m` and **momentum is conserved exactly**. The
+  old `contact_accel` returns a per-mass acceleration applied as `+a`/`-a`, which is correct only while
+  every grain is identical: unequal masses make that unequal and opposite FORCES, manufacturing momentum
+  at every contact. This retires the approximation the module header has flagged from the start
+  ("we model all debris as equal-mass grains ... Per-material mass is a later refinement").
+  Contact now begins at `ri + rj` rather than `2·radius`. Adds `granular::grain_radius_for`
+  (docs/47's `L_contact / n_across` sizing rule) and `granular::effective_radius`. **Equal grains
+  reproduce the existing law exactly** — asserted, so no existing scene changes answer. Pure law only:
+  the GPU path still carries one grain size per dispatch.
+
 - **BREAKING (API): `mesher::build_earth_cap` takes a `field: Option<&World>`.** Pass the world and the
   bulk cap follows the persistent T0 `displacement`, so a de-resolved crater renders as a crater instead
   of pristine relief. `None` keeps the old pure-procedural behaviour.
