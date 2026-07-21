@@ -3,6 +3,51 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-21 — the engine driven by a definition; ledger row 15 CLOSED (docs/53)
+
+**What.** `crate::simulation::Simulation` — the engine builds a world, applies declared matter events
+through the SHARED primitives, and steps, with **no scene struct, no canvas and no `wasm_bindgen`**. A
+new `"ground"` world type declares the observer, the gravity analytic effects fall under, and events
+(`impact` → the shared `MatterSim::impact`; `ejecta` → an analytic `Effect` for the docs/49 hand-off).
+`crates/engine/src/bin/run-definition.rs` runs one headlessly from a file.
+
+**Why — the failure it repairs.** Deleting terrain left `MatterSim`, `ResolutionField` and the voxel
+`World` with ZERO production consumers while every test kept passing (ledger row 15). Robin's diagnosis
+was structural: *"this is why we make the engine standalone, with external definitions."* Capability was
+reachable only THROUGH a scene, so the scene's deletion took it down. The repair is not another scene —
+that reintroduces the coupling — it is making the consumer a FILE.
+
+**Verified end to end, from `definitions/ejecta-ground.json`:**
+
+    after load : 3 particles, 1 analytic effect(s), 644190 solid voxels
+    step  130  : 1 effect(s) entered view and materialised -> 257 particles
+    after 300  : 0 particles, 0 still analytic, 1 resolved in total
+    matter     : 644190 -> 644450 solid voxels (+260)
+
+**+260 is exactly the 257 materialised grains plus the 3 impact particles** — every grain de-resolved
+back into the world, none lost. The runner reports that voxel delta on purpose: "0 particles" is
+ambiguous, because de-resolution (matter conserved) and the off-world cull in `matter::step` (matter
+deleted) look identical from the particle count, and only one of them is honest.
+
+**★ The near-miss, which is the lesson.** The first run printed `materialised -> 0 particles` **with a
+green suite**, because the tests asserted an effect RESOLVED — a state change — and never that it
+PRODUCED MATTER. The cause was my own definition: `view_radius_m: 150` exceeds the 96 m patch bound
+(`bound = max(w,h,d)`), so ~250 grains spawned outside the world and were culled in the same step. Not an
+engine bug — but the tests could not tell the difference, which is exactly the hollow-green failure this
+module exists to prevent. The assertion now exists and is **proven able to fail**: moving the resolve
+point back outside the patch yields `must PRODUCE MATTER; got 0 particles`. Two earlier attempts to
+falsify it passed, because both resolve points were still INSIDE the 96 m bound — the guard was only
+trustworthy once a genuinely-outside case went red.
+
+**Ledger row 15 CLOSED.** `simulation.rs` is production code and references `MatterSim` 8×,
+`ResolutionField` 4×, `world::generate` 1×.
+
+**Verified.** 255/255 native (+5) + 19 skipped; native and wasm clean.
+
+**Still not standalone:** the two remaining scenes are `#[wasm_bindgen]` structs in the crate (row 14's
+other half); there is no native host (no window/surface/input, docs/52); and the ground world's SURFACE
+is still the procedural patch — the definition declares events, camera and gravity, not the terrain.
+
 ## 2026-07-21 — the engine holds a GPU with no browser (docs/52, standalone increment 1)
 
 **What.** `gpu_host::GpuHost::headless()` — the engine acquires a real GPU with no canvas, no surface and

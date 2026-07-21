@@ -1,0 +1,15 @@
+{
+  "name": "Ejecta over ground",
+  "type": "ground",
+  "_note": "Geometry stays inside the 96 m voxel patch: matter::step culls particles that drift off the world, so an effect resolving beyond it spawns grains that vanish the same step. view_radius_m must stay well under 96.",
+  "ground": {
+    "camera_m": [0, 20, 0],
+    "view_radius_m": 40,
+    "gravity_ms2": 9.81,
+    "events": [
+      { "kind": "impact", "at_m": [0, 0, 0], "direction": [0, -1, 0], "energy_j": 3.0e7 },
+      { "kind": "ejecta", "at_m": [80, 60, 0], "velocity_ms": [-20, 0, 0],
+        "radius_m": 4.0, "grain_radius_m": 0.5 }
+    ]
+  }
+}
