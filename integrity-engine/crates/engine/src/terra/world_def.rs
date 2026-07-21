@@ -30,6 +30,72 @@ pub struct World {
     /// An `"impact"` world (docs/51): the giant-impact initial conditions. Absent for other kinds.
     #[serde(default)]
     pub impact: Option<ImpactDef>,
+    /// A `"ground"` world (docs/53): matter events on a surface patch, driving the shared matter path
+    /// and the resolution field from DATA rather than from a scene struct.
+    #[serde(default)]
+    pub ground: Option<GroundDef>,
+}
+
+/// **A ground world: matter events, declared** (`docs/53`).
+///
+/// This exists to close docs/46 ledger row 15. Deleting the terrain scene left `matter::MatterSim`, the
+/// `resolution::ResolutionField` and the voxel `world::World` with ZERO production consumers — verified
+/// physics reachable only through a scene, and the scene was deleted. A definition re-consumes them
+/// WITHOUT reintroducing a scene struct, which is the whole point of "standalone engine, external
+/// definitions": capability is exercised by data the engine loads.
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct GroundDef {
+    /// Where the observer is (centred world coords). The camera decides REPRESENTATION, never existence
+    /// (docs/49) — an event out of view is still computed, just analytically.
+    #[serde(default)]
+    pub camera_m: [f32; 3],
+    /// How far from the camera a region counts as "in view" (m). The scene-specific frustum test reduced
+    /// to a declared number.
+    #[serde(default = "GroundDef::default_view_radius")]
+    pub view_radius_m: f32,
+    /// Surface gravity (m/s²) the analytic effects fall under.
+    #[serde(default = "GroundDef::default_gravity")]
+    pub gravity_ms2: f32,
+    /// The events that make matter happen. Order is the order they are applied.
+    #[serde(default)]
+    pub events: Vec<GroundEvent>,
+}
+
+impl GroundDef {
+    fn default_view_radius() -> f32 { 2_000.0 }
+    fn default_gravity() -> f32 { 9.81 }
+}
+
+/// One declared matter event.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GroundEvent {
+    /// An impact at a site: excavates the world and materialises the debris through the SHARED
+    /// `MatterSim::impact` — the same primitive the terrain scene used, now reached from data.
+    Impact {
+        at_m: [f32; 3],
+        #[serde(default = "GroundEvent::default_down")]
+        direction: [f32; 3],
+        energy_j: f32,
+    },
+    /// Carried matter in flight (e.g. ejecta from a far-side impact): registered as an ANALYTIC effect
+    /// that propagates by cheap math while out of view and materialises the instant it enters view
+    /// (docs/49). This is the one that exercises the resolution field end to end.
+    Ejecta {
+        at_m: [f32; 3],
+        #[serde(default)]
+        velocity_ms: [f32; 3],
+        radius_m: f32,
+        #[serde(default = "GroundEvent::default_grain")]
+        grain_radius_m: f32,
+        #[serde(default)]
+        material: usize,
+    },
+}
+
+impl GroundEvent {
+    fn default_down() -> [f32; 3] { [0.0, -1.0, 0.0] }
+    fn default_grain() -> f32 { 0.5 }
 }
 
 /// **The giant impact as DECLARED initial conditions** (`docs/51`).

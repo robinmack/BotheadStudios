@@ -9,6 +9,14 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The engine runs from a DEFINITION (docs/53).** New `engine::simulation::Simulation` builds the voxel
+  world, the shared `MatterSim` and the `ResolutionField` from a `"ground"` world and steps them — no
+  scene struct, no canvas, no `wasm_bindgen`. New `GroundDef`/`GroundEvent` schema (`impact`, `ejecta`),
+  `definitions/ejecta-ground.json`, and a headless `run-definition` binary that also reports the solid-voxel
+  delta so de-resolution (matter conserved) is distinguishable from the off-world cull (matter lost).
+  **Closes docs/46 ledger row 15** — the systems deleting terrain orphaned have a production consumer
+  again, and it is a file rather than a scene.
+
 - **The engine can acquire a GPU with no browser (docs/52).** New `engine::gpu_host::GpuHost::headless()`
   (native only) and **target-specific wgpu backends** — WebGPU for wasm32, wgpu's defaults (Vulkan on
   Linux) elsewhere. Target tables rather than a cargo feature, because features unify across a build graph

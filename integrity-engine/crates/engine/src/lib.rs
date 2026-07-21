@@ -50,7 +50,7 @@ mod grid; // docs/47 §1 — the hierarchical spatial hash: no global cell size
 // shipped a non-compiling commit. Building it natively costs nothing (wgpu's types exist without a
 // backend) and puts its shader-facing layouts under the suite. Running still needs a browser.
 mod gpu_sph;
-mod gravity;
+pub mod gravity;
 mod hydrostatic;
 mod impact;
 mod planet;
@@ -58,22 +58,26 @@ mod planet;
 /// their helpers). Lifted out of `#[cfg(wasm32)] mod app`: all three scenes use these identically, so
 /// they were never scene code, and living there kept them out of every native build.
 mod render;
-mod resolution; // docs/44 — resolution by necessity: the quasi-static admission test
+pub mod resolution; // docs/44 — resolution by necessity: the quasi-static admission test
 mod tides;
+/// docs/53 — the engine driven by a DEFINITION: builds the world, applies declared matter events through
+/// the shared primitives, and steps. No scene struct, no canvas. This is what re-consumes the systems
+/// deleting terrain orphaned (docs/46 ledger row 15).
+pub mod simulation;
 #[cfg(test)]
 mod isotropy;
-mod materials;
-mod matter;
+pub mod materials;
+pub mod matter;
 mod mesher;
 mod neighbors;
 mod orbit;
-mod terra; // docs/43 — worlds-as-data: the world schema (+ later raster/mesh/camera). The wasm `Terra` scene
+pub mod terra; // docs/43 — worlds-as-data: the world schema (+ later raster/mesh/camera). The wasm `Terra` scene
            // struct lives in `mod app` below to reuse its render helpers.
 mod texture;
 /// Test-only: the ONE WGSL↔Rust layout checker, shared by every module with a `#[repr(C)]` shader mirror.
 #[cfg(test)]
 mod wgsl_layout;
-mod world;
+pub mod world;
 
 #[cfg(target_arch = "wasm32")]
 pub use app::OrbitDemo; // terrain `Engine` deleted 2026-07-21 (docs/50) — the first scene, superseded
