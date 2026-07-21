@@ -3,6 +3,27 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-20 — headless GPU rig verification WORKS (the linchpin) — real WebGPU renders captured
+
+**What.** Solved headless visual verification — the tool that was missing, and the reason "unification"
+kept being claimed without proof. `scripts/start-render-xorg.sh` + `scripts/rigshot.sh` capture a real
+composited WebGPU render on the RTX 5060 Ti, headless. Verified: the terrain scene (green hills, the iron
+probe + its shadow, water) and Terra (Earth globe, real continents/biomes) both rendered correctly.
+
+**The two things it took, neither obvious:**
+1. **A real GPU-backed X server.** `xvfb` is software — the GPU renders but the software compositor cannot
+   read back the GPU swapchain, so `page.screenshot()` returns the DOM HUD over a BLANK canvas (the trap
+   that made prior sessions believe headless WebGPU "can't composite"). A headless `Xorg` on the 5060 Ti
+   (`PCI:2:0:0`, `AllowEmptyInitialConfiguration`, `-ac`) composites in hardware and screenshots capture
+   the render.
+2. **Match WebGPU to the compositor GPU.** Dawn defaulted to the 2070; presenting a 2070 render on the
+   5060 X server threw `VK_ERROR_DEVICE_LOST`. `MESA_VK_DEVICE_SELECT=10de:2d04` (the Mesa device-select
+   layer works for NVIDIA too) forces WebGPU onto the 5060 — adapter then reports `blackwell` and it works.
+
+**Why it matters.** Every visual claim is now verifiable, headless, on the real GPU. The Laws require
+rig-watching visual claims; until now I could not, so the scene-level realignment was unverifiable. It is
+not any more. CLAUDE.md rule 4 updated (the old `xvfb` instruction was the trap).
+
 ## 2026-07-20 — the Analytic → Resolved hand-off as ONE central system, wired (docs/49)
 
 **What.** `resolution::ResolutionField` — the single system that makes the hand-off an inherent engine

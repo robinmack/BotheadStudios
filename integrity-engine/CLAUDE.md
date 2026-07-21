@@ -83,9 +83,13 @@ is being refactored toward is [`docs/33-architecture-realignment.md`](docs/33-ar
    `hydrostatic.rs` 9, `impact.rs` 8, `aggregate.rs` 1; run `--ignored`). Accelerated code is always pinned
    to its exact/brute-force reference so speed never changes the answer. Note `gpu_sph.rs` has **no in-crate
    tests** — it is verified out-of-process by `tools/sph-verify`.
-4. **Rig-watch every visual claim:** `npm run dev` + `npm run wasm`, then
-   `xvfb-run -a node web/rig/<scene>.mjs` (headed Chromium — headless can't composite WebGPU). Look at the
-   screenshots yourself before claiming a scene works.
+4. **Rig-watch every visual claim** (Law: physics drives the render — verify the render). `npm run wasm`
+   + serve (`npx vite` in `web/`), start the GPU-backed X server ONCE with
+   `scripts/start-render-xorg.sh`, then `scripts/rigshot.sh <scene>.mjs`. That wrapper composites a real
+   headless WebGPU render on the 5060 Ti and forces WebGPU onto the same GPU as the compositor
+   (`MESA_VK_DEVICE_SELECT`) — without that, screenshots come back blank (software display can't read the
+   GPU swapchain) or die with `DEVICE_LOST` (cross-GPU present). Look at the PNGs yourself before claiming
+   a scene works. (`xvfb-run` does NOT composite WebGPU — that trap cost prior sessions.)
 5. **No-fudge:** every number traces to physics or is openly flagged (placeholder / unknown IC / resolution
    IOU). If physics disagrees with a hypothesis, record that (docs/31 is the template) — do not tune a dial
    to force the outcome.
