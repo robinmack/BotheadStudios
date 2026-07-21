@@ -9,6 +9,19 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **One GPU particle container (docs/50).** `crate::gpu_store::ParticleStore<T>` holds the particle
+  buffer, capacity/count, `append`/`replace`, and the two-phase async read-back for BOTH the granular and
+  SPH pipelines; each previously carried its own byte-for-byte copy. Solvers unchanged (docs/46 §1).
+  `GpuParticles::count`/`readback_count` are now methods, not public fields.
+- **The terrain scene (`Engine`) is REMOVED** — the first scene designed, superseded. `terrain.html`,
+  `src/main.ts`, the vite entry, the nav link and 25 terrain-only rigs go with it. `lib.rs` 5,548 → 3,794.
+  `engine::Engine` is no longer exported; `OrbitDemo` and `Terra` remain.
+- **docs/46 ledger row 14** — a scene is engine code, not data: deleting one cost 1,516 lines inside the
+  engine crate plus a public-API change, when it should have been deleting a description.
+- **`scripts/rig.sh` gains `--restart` / `--stop`** and fixes three harness bugs: a self-matching `pkill`
+  that killed the caller, a dev server that held the script's stdout open (hanging any piped invocation),
+  and a vite invocation that served 404s while logging "ready".
+
 - **`World::surface_top_voxel` is O(1)** — a cached per-column `tops` raster replaces an O(height)
   top-down scan that was **16.7% of the terrain frame**. Every `set_voxel` recomputes its own column, so
   the cache is exact by construction. **Output-neutral.** Measured: terrain 55.6 → 41.8 ms/frame

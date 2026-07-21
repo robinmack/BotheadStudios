@@ -18,7 +18,6 @@ const grab = async (url, name, waitMs) => {
   console.log('WINDOW:\n' + stats);
 };
 
-await grab('terrain.html', 'hud-terrain', 5000);
 await grab('orbit.html', 'hud-orbit', 6000);
 await grab('birth.html', 'hud-birth', 4000);
 await browser.close();

@@ -8,7 +8,6 @@ import { launch } from './_launch.mjs';
 const PORT = process.env.PORT || '5173';
 const OUT = process.env.OUT || '/tmp';
 const SCENES = [
-  ['terrain', 'terrain.html', 6000],
   ['birth',   'birth.html',   9000],
   ['terra',   'terra.html',  10000],
 ];

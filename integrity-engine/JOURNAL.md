@@ -3,6 +3,57 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-21 — one GPU particle container; terrain deleted (docs/50)
+
+**What.** `crate::gpu_store::ParticleStore<T>` — the ONE GPU particle container: the storage buffer,
+capacity/count bookkeeping, clamp-to-capacity `append`/`replace`, and the two-phase asynchronous
+read-back. Both pipelines now use it. `GpuSph` and `GpuParticles` each lost a private buffer, their own
+`capacity`/`count`, and their own read-back; both `begin_readback` bodies are three-line delegations.
+**Their solvers are untouched** — docs/46 §1 sanctions that separation (stiff granular contacts want a
+semi-implicit integrator, self-gravitating SPH a symplectic leapfrog; the physics differs, so the
+numerics do). What was never physics is the allocator.
+
+**The evidence it was duplication and not coincidence:** the read-backs were byte-for-byte identical
+apart from the element type and a debug label, and the SAME latent defect — an `Rc<Cell<bool>>` in the
+`map_async` callback, which compiles only for wasm — had to be found and fixed **twice, once in each
+file**, on 2026-07-20. One answer written down twice.
+
+**Terrain is deleted.** Robin: *"I want that old model GONE"* — the first scene designed, superseded, and
+she had asked for it in an earlier session. 1,516 lines out of `lib.rs` (5,548 → 3,794), 25 terrain-only
+rigs, the page, the vite entry, the nav link. `OrbitDemo` and `Terra` remain.
+
+**★ The finding that matters more than the refactor.** Deleting one scene required SURGERY ON THE ENGINE:
+1,516 lines inside `crates/engine/src/lib.rs`, a symbol out of the crate's public API, and a build entry
+point. Robin's standing requirement is the opposite — *"scenes should have object definitions, assembly
+definitions, coordinates, etc… but should not require special mods of the engine itself."* So the cost of
+this deletion IS the measurement of how far scenes are from disposable, and `OrbitDemo`/`Terra` are the
+same shape. Recorded as **docs/46 ledger row 14**. Until a scene is a description the engine loads,
+"delete the scene" will keep meaning "edit the engine".
+
+**Verified.** 247/247 native (+3 for the store's pure clamping arithmetic) + 18 skipped; native and wasm
+clean. **The container is exercised, not just compiled:** the granular debris lifecycle end to end —
+meteor → `debris 0 → 3,670` (append) → 2,968 → 1,941 → 940 → 201 → 111 as grains settle and de-resolve
+(read-back) — and the SPH side rendering Theia as individual particles from the physics buffer the store
+now owns, `VERTEX` usage preserved. After deletion, both remaining scenes render with zero page errors
+against the blank-page control (birth 66,934 B, terra 64,003 B, control 1,883 B).
+
+**The clamping arithmetic is pure and natively tested** (`append_span`/`replace_span`): wgpu here has the
+`webgpu` backend only so a `ParticleStore` cannot be instantiated off-browser, but the capacity boundary
+can — and that is where the silent bug lives, since an off-by-one drops particles with no error, which is
+matter vanishing that no rendering check would catch. One test asserts successive appends tile with no
+gap or overlap.
+
+**Harness, three real bugs fixed — all of which had me hand-firing commands instead of fixing the tool
+(Robin: "firing things manually repeatedly is an anti-pattern").**
+1. `pkill -f "vite --port 5173"` **matches the shell running it**, because the pattern is on that shell's
+   own command line. It killed the caller (exit 144) repeatedly before it was spotted. The kill now lives
+   inside `rig.sh` behind `--restart`/`--stop`, per Robin's suggestion, so the pattern is never typed by
+   hand, and a `[v]ite` bracket stops it matching its own text even there.
+2. The spawned dev server inherited the script's stdout, so `rig.sh … | tail` never saw EOF and the whole
+   command hung long after the rig finished. Now fully detached (own session, all three fds redirected).
+3. `npx --prefix` resolves the package but leaves the working directory, so vite answered **404 for every
+   page while logging "ready"**; and vite 6 rejects `--root`. The root is now passed positionally.
+
 ## 2026-07-21 — CORRECTION: the "~1 fps" was the harness, not the engine (and one real fix)
 
 **Retraction first.** Yesterday's entry below reported terrain and birth delivering **~1 fps** as an

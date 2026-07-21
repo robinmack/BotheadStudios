@@ -496,7 +496,11 @@ fn push_body(out: &mut Vec<SphParticle>, b: &crate::hydrostatic::HydroBody, prov
 /// GPU-resident SPH particle system + the `sph_step.wgsl` pipelines. Owns the physics buffer (which is ALSO
 /// the render vertex buffer — zero-copy instanced draw) and the grid/force scratch.
 pub struct GpuSph {
-    particles: wgpu::Buffer, // STORAGE | VERTEX | COPY_DST | COPY_SRC — pos at byte 0 is the render instance
+    /// THE shared container (`docs/50`): the particle buffer, capacity/count, and the two-phase async
+    /// read-back. Was a private buffer plus a byte-for-byte copy of `GpuParticles`' read-back — one
+    /// answer written down twice, which is how the same `Rc<Cell<bool>>` defect had to be fixed in both.
+    /// Everything BELOW this line is the SPH solver, which stays specialized (docs/46 §1).
+    store: crate::gpu_store::ParticleStore<SphParticle>,
     params_buf: wgpu::Buffer,
     eos_buf: wgpu::Buffer,
     acc: wgpu::Buffer,
@@ -512,32 +516,14 @@ pub struct GpuSph {
     kick_drift: wgpu::ComputePipeline,
     kick: wgpu::ComputePipeline,
     relax_k: wgpu::ComputePipeline,
-    capacity: u32,
-    count: u32,
     params: SphParams,
-    // Two-phase async read-back (WebGPU forbids blocking on a map, so a copy+map_async is started one frame
-    // and its result collected the next — mirrors `GpuParticles::begin_readback`/`take_readback`).
-    readback_staging: Option<wgpu::Buffer>,
-    readback_count: u32,
-    /// Set by the `map_async` callback when the staging map completes. `Arc<AtomicBool>` rather than
-    /// `Rc<Cell<bool>>` because wgpu bounds that callback by `WasmNotSend` — a no-op on wasm (single
-    /// threaded) but plain `Send` everywhere else, so the `Rc` form compiles ONLY for wasm. That one
-    /// line was the entire reason this module was `#[cfg(target_arch = "wasm32")]`, and therefore the
-    /// reason native `cargo check`/`cargo test` never compiled 700 lines of shipping GPU host code.
-    /// Release/Acquire rather than Relaxed: the callback publishes a completed mapping that
-    /// `take_readback` then reads via `get_mapped_range`, so the flag must carry that happens-before.
-    readback_ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl GpuSph {
     pub fn new(device: &wgpu::Device, capacity: u32) -> Self {
         let cap = capacity.max(1);
-        let particles = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("sph-particles"),
-            size: (cap as u64) * std::mem::size_of::<SphParticle>() as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
+        let store = crate::gpu_store::ParticleStore::<SphParticle>::new(
+            device, cap, wgpu::BufferUsages::VERTEX, "sph-particles");
         let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("sph-params"),
             size: std::mem::size_of::<SphParams>() as u64,
@@ -586,7 +572,7 @@ impl GpuSph {
             layout: &layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: params_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: particles.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: store.buffer().as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: eos_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: acc.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 4, resource: dudt.as_entire_binding() },
@@ -598,24 +584,21 @@ impl GpuSph {
         GpuSph {
             clear: mk("cs_grid_clear"), insert: mk("cs_grid_insert"), density: mk("cs_density"), forces: mk("cs_forces"),
             kick_drift: mk("cs_kick_drift"), kick: mk("cs_kick"), relax_k: mk("cs_relax"),
-            particles, params_buf, eos_buf, acc, dudt, signal, grid_count, grid_bucket, bind, capacity: cap, count: 0,
+            store, params_buf, eos_buf, acc, dudt, signal, grid_count, grid_bucket, bind,
             params: SphParams { n: 0, softening: 0.0, av_alpha: 1.0, av_beta: 2.0, cell_size: 1.0, table_mask: SPH_TABLE_SIZE - 1, bucket_k: SPH_BUCKET_K, dt: 0.0, damp: 1.0, omega: 0.0, _p1: 0.0, _p2: 0.0 },
-            readback_staging: None,
-            readback_count: 0,
-            readback_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
     /// Upload a particle set (≤ capacity) + the two EOS materials, and set the physics params. `cell_size` is
     /// the max smoothing length (set here from the particles so the 27-cell grid scan stays exact).
     pub fn upload(&mut self, queue: &wgpu::Queue, particles: &[SphParticle], eos: &[SphEos; 2], softening: f32) {
-        let n = particles.len().min(self.capacity as usize);
-        self.count = n as u32;
-        let cell_size = particles.iter().map(|p| p.h).fold(1.0f32, f32::max);
+        // Clamp-to-capacity + write-at-0 + set-count IS the shared container's `replace` (docs/50).
+        self.store.replace(queue, particles);
+        let n = self.store.count() as usize;
+        let cell_size = particles[..n].iter().map(|p| p.h).fold(1.0f32, f32::max);
         self.params.n = n as u32;
         self.params.softening = softening;
         self.params.cell_size = cell_size;
-        queue.write_buffer(&self.particles, 0, bytemuck::cast_slice(&particles[..n]));
         queue.write_buffer(&self.eos_buf, 0, bytemuck::cast_slice(eos));
         queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
     }
@@ -638,12 +621,12 @@ impl GpuSph {
     }
 
     pub fn count(&self) -> u32 {
-        self.count
+        self.store.count()
     }
     /// The particle buffer — bind as an instance vertex buffer (pos = vec3 at byte offset 0) to draw the
     /// stepped particles with no read-back.
     pub fn particle_buffer(&self) -> &wgpu::Buffer {
-        &self.particles
+        self.store.buffer()
     }
 
     fn pass(&self, enc: &mut wgpu::CommandEncoder, pipe: &wgpu::ComputePipeline, threads: u32) {
@@ -655,16 +638,16 @@ impl GpuSph {
     /// clear → insert → density → forces (one full force evaluation).
     fn force_eval(&self, enc: &mut wgpu::CommandEncoder) {
         self.pass(enc, &self.clear, SPH_TABLE_SIZE);
-        self.pass(enc, &self.insert, self.count);
-        self.pass(enc, &self.density, self.count);
-        self.pass(enc, &self.forces, self.count);
+        self.pass(enc, &self.insert, self.store.count());
+        self.pass(enc, &self.density, self.store.count());
+        self.pass(enc, &self.forces, self.store.count());
     }
 
     /// Encode `steps` damped relaxation steps (each = one force eval + `cs_relax`). Uses the current dt/damp.
     pub fn encode_relax(&self, enc: &mut wgpu::CommandEncoder, steps: u32) {
         for _ in 0..steps {
             self.force_eval(enc);
-            self.pass(enc, &self.relax_k, self.count);
+            self.pass(enc, &self.relax_k, self.store.count());
         }
     }
 
@@ -672,53 +655,23 @@ impl GpuSph {
     pub fn encode_kdk(&self, enc: &mut wgpu::CommandEncoder, substeps: u32) {
         for _ in 0..substeps {
             self.force_eval(enc);
-            self.pass(enc, &self.kick_drift, self.count);
+            self.pass(enc, &self.kick_drift, self.store.count());
             self.force_eval(enc);
-            self.pass(enc, &self.kick, self.count);
+            self.pass(enc, &self.kick, self.store.count());
         }
     }
 
     /// Phase 1 of read-back: copy the live particles into a MAP_READ staging buffer and start the async map.
     /// No-op if empty or a read-back is already in flight. WebGPU maps are non-blocking, so the result is
     /// collected a later frame via [`take_readback`](Self::take_readback).
+    /// Phase 1 of the non-blocking read-back — see [`crate::gpu_store::ParticleStore::begin_readback`].
     pub fn begin_readback(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
-        if self.count == 0 || self.readback_staging.is_some() {
-            return;
-        }
-        let size = self.count as u64 * std::mem::size_of::<SphParticle>() as u64;
-        let staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("sph-readback"),
-            size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        enc.copy_buffer_to_buffer(&self.particles, 0, &staging, 0, size);
-        queue.submit(std::iter::once(enc.finish()));
-        self.readback_ready.store(false, std::sync::atomic::Ordering::Release);
-        let flag = self.readback_ready.clone();
-        staging.slice(..).map_async(wgpu::MapMode::Read, move |res| {
-            if res.is_ok() {
-                flag.store(true, std::sync::atomic::Ordering::Release);
-            }
-        });
-        self.readback_count = self.count;
-        self.readback_staging = Some(staging);
+        self.store.begin_readback(device, queue);
     }
 
-    /// Phase 2: if the in-flight read-back completed, return the snapshotted particles and clear the state.
-    /// `None` while pending or when nothing is in flight.
+    /// Phase 2 — see [`crate::gpu_store::ParticleStore::take_readback`].
     pub fn take_readback(&mut self) -> Option<Vec<SphParticle>> {
-        if !self.readback_ready.load(std::sync::atomic::Ordering::Acquire) {
-            return None;
-        }
-        let staging = self.readback_staging.take()?;
-        let data = staging.slice(..).get_mapped_range();
-        let out = bytemuck::cast_slice::<u8, SphParticle>(&data).to_vec();
-        drop(data);
-        staging.unmap();
-        self.readback_ready.store(false, std::sync::atomic::Ordering::Release);
-        Some(out)
+        self.store.take_readback()
     }
 }
 
