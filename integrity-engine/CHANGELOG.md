@@ -9,6 +9,17 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Birth of the Moon is a DATA world (docs/51).** New `"impact"` world type (`world_def::ImpactDef`) +
+  `/worlds/birth/world.json` + `OrbitDemo::load_impact_world`. The giant impact's initial conditions —
+  body radii, softening, core-resolution factor, approach speed (×v_esc), start separation, impact
+  parameter, proto-target spin, relax separation — are declared in the file instead of compiled in. The
+  LAWS stay in the engine. **Output-neutral:** every default is the constant it replaced, asserted by test.
+  `gpu_sph::build_far_apart_from` / `assemble_from_relaxed_with` take the def; the old names remain as
+  shims on the declared defaults.
+- **docs/46 ledger row 14 NARROWED** (scene instances were already data; one scene was compiled in) and
+  **row 15 ADDED** — deleting terrain left `MatterSim`, `ResolutionField` and the voxel `World` with ZERO
+  production consumers, and the granular pipeline reachable only from a compute-only diagnostic.
+
 - **One GPU particle container (docs/50).** `crate::gpu_store::ParticleStore<T>` holds the particle
   buffer, capacity/count, `append`/`replace`, and the two-phase async read-back for BOTH the granular and
   SPH pipelines; each previously carried its own byte-for-byte copy. Solvers unchanged (docs/46 §1).

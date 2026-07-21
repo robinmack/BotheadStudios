@@ -589,6 +589,9 @@ mod app {
     /// The orbital ("space band") demo handle exposed to JavaScript.
     #[wasm_bindgen]
     pub struct OrbitDemo {
+        /// The giant impact's DECLARED initial conditions (docs/51). Defaults to the values that were
+        /// Rust constants, so the scene is unchanged until a world file says otherwise.
+        impact_def: crate::terra::world_def::ImpactDef,
         surface: wgpu::Surface<'static>,
         device: wgpu::Device,
         queue: wgpu::Queue,
@@ -933,6 +936,7 @@ mod app {
                 "orbit demo ready: Sun+Earth+{num_moons} moon(s), sun-lit, {ORBIT_TIME_SCALE:.0}x time"
             );
             Ok(OrbitDemo {
+                impact_def: Default::default(),
                 surface,
                 device,
                 queue,
@@ -1607,13 +1611,22 @@ mod app {
         /// dynamics to the GPU SPH stepper (the verified `sph_step.wgsl` kernels — same physics as the offline
         /// `tools/impact-run`). The scene then renders the live particle field instead of the rigid-Earth
         /// debris model. Call from JS on the `OrbitDemo` handle, like `drop_moon()`.
+        /// Declare the giant impact's initial conditions from a world file (`docs/51`). Call BEFORE
+        /// `start_gpu_impact`. Without it the engine uses `ImpactDef::default()`, which reproduces the
+        /// constants this replaced exactly — so an un-migrated caller is unchanged.
+        pub fn load_impact_world(&mut self, world_json: &str) -> Result<(), JsValue> {
+            let w = crate::terra::world_def::World::parse(world_json).map_err(|e| JsValue::from_str(&e))?;
+            self.impact_def = w.impact.unwrap_or_default();
+            Ok(())
+        }
+
         pub fn start_gpu_impact(&mut self) {
             // Build the two bodies UNRELAXED and FAR APART, and RELAX them on the GPU (`cs_relax`, fast — the
             // measured cure for the dispersal was proper relaxation, docs/35). `advance` runs the relax steps,
             // reads back, assembles the collision, then steps the dynamics. N is higher than the old CPU-relax
             // path could afford (GPU relax + stepping is cheap).
             let eos = [crate::gpu_sph::SphEos::basalt(), crate::gpu_sph::SphEos::iron()];
-            let (particles, softening, relax_dt) = crate::gpu_sph::build_far_apart(2400, 400);
+            let (particles, softening, relax_dt) = crate::gpu_sph::build_far_apart_from(&self.impact_def, 2400, 400);
             self.sph_soft = softening as f64;
             let cap = particles.len() as u32;
             let mut sph = crate::gpu_sph::GpuSph::new(&self.device, cap);
@@ -1721,7 +1734,7 @@ mod app {
                     SphPhase::Assembling => {
                         let relaxed = self.gpu_sph.as_mut().and_then(|s| s.take_readback());
                         if let Some(relaxed) = relaxed {
-                            let (particles, eos, softening, dt) = crate::gpu_sph::assemble_from_relaxed(&relaxed);
+                            let (particles, eos, softening, dt) = crate::gpu_sph::assemble_from_relaxed_with(&self.impact_def, &relaxed);
                             self.sph_soft = softening as f64;
                             self.sph_dt = dt; // the SMALL shock dt (resolves the collision)
                             self.sph_dt_aftermath = dt * 5.0; // switch to this once the shock has passed

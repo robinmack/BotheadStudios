@@ -3,6 +3,44 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-21 — the last code-path scene becomes data; what terrain took with it (docs/51)
+
+**What.** "Birth of the Moon" — the only scene whose setup was still compiled in — now loads its initial
+conditions from `/worlds/birth/world.json` through a new `"impact"` world type (`world_def::ImpactDef`).
+Moved into data: both bodies' core/surface radii, softening and core-resolution factor; approach speed as
+a multiple of mutual escape speed; start separation; impact parameter; proto-target spin; relax
+separation. **The laws did not move** — Tillotson, SPH, self-gravity and the leapfrog stay in the engine
+and are not selectable from a file. Initial conditions and a few dials, exactly docs/43's line.
+
+**Measured before designing, and it narrowed the claim.** docs/46 row 14 said "a scene is engine code".
+Checking the pages showed `orbit.html` and `twomoons.html` are the SAME script and SAME `OrbitDemo`
+differing only by `data-world=…`, and `terra.html` likewise — instances were already data. Exactly ONE
+scene was compiled in. The row is now narrowed to what was actually true.
+
+**Output-neutral by construction:** every field's serde default IS the constant it replaced, and a test
+asserts each against the literal value as it stood in `gpu_sph`. A world that omits `impact`, or fails to
+fetch, is bit-identical to the old path. A second test asserts the opposite direction — a smaller
+declared impactor builds fewer particles — so the file cannot be decoration.
+
+**A real bug the rig caught, that a weaker check would have passed.** `orbit.ts` handed ANY `data-world`
+to `load_world`, which requires a `bodies[]` array; an `"impact"` world has none, so birth died with
+*"system world is missing a `bodies` array"* and rendered NOTHING — while the world file fetched
+successfully and no JS error was raised. A check that only asked "did the file load?" would have been
+green. Routing is now by world type.
+
+**★ What deleting terrain took with it (Robin asked; the answer is worse than expected).** Terrain was
+the ONLY production consumer of three built-and-verified systems. Measured by grep after the deletion:
+`matter::MatterSim` and `resolution::ResolutionField` now have **ZERO references anywhere in `lib.rs`**;
+all six `world::generate` calls are inside `#[cfg(test)]`; the granular GPU pipeline is reachable only
+from `GpuProbe`, a compute-only diagnostic with no canvas. **Every test still passes**, which is exactly
+why it is easy to miss. This is docs/48's wiring pattern at its sharpest — physics wired into one place,
+and then that place deleted. Recorded as ledger row 15. It is NOT an argument to restore terrain; it is a
+requirement on the next scene: re-consume them, or delete them rather than leave green unreachable code.
+
+**Verified.** 250/250 native (+3) + 18 skipped; native, wasm and `tsc` clean. Birth rig-verified: the
+world file is FETCHED (`birth/world.json`), accepted with no errors, and the scene renders (64,891 B
+against the 1,883 B blank-page control) with the correct HUD.
+
 ## 2026-07-21 — one GPU particle container; terrain deleted (docs/50)
 
 **What.** `crate::gpu_store::ParticleStore<T>` — the ONE GPU particle container: the storage buffer,

@@ -109,43 +109,54 @@ pub struct SphCam {
 /// converged run; this is the in-browser visualization).
 /// Build the two differentiated proto-bodies UNRELAXED (Earth 5000 km, Theia 2700 km ~1/7 mass — sub-Earth,
 /// tractable, same as `tools/impact-run`). [`build_far_apart`] places them far apart for GPU relaxation.
-pub fn build_impact_bodies(n_earth: usize, _n_theia: usize) -> (crate::hydrostatic::HydroBody, crate::hydrostatic::HydroBody) {
+/// Back-compat: the far-apart relax set on the default (declared) initial conditions.
+pub fn build_far_apart(n_earth: usize, n_theia: usize) -> (Vec<SphParticle>, f32, f32) {
+    build_far_apart_from(&crate::terra::world_def::ImpactDef::default(), n_earth, n_theia)
+}
+
+/// Back-compat: assembly on the default (declared) initial conditions.
+pub fn assemble_from_relaxed(particles: &[SphParticle]) -> (Vec<SphParticle>, [SphEos; 2], f32, f32) {
+    assemble_from_relaxed_with(&crate::terra::world_def::ImpactDef::default(), particles)
+}
+
+/// Build the two bodies from DECLARED initial conditions (`docs/51`). The radii, softening and
+/// core-resolution factor come from the world file; the LAWS (Tillotson EOS, the SPH construction) stay
+/// in the engine. `ImpactDef::default()` reproduces the constants this replaced exactly.
+pub fn build_impact_bodies_from(
+    def: &crate::terra::world_def::ImpactDef,
+    n_earth: usize,
+) -> (crate::hydrostatic::HydroBody, crate::hydrostatic::HydroBody) {
     use crate::hydrostatic::HydroBody;
     const FTP: f64 = 4.0 / 3.0 * std::f64::consts::PI;
-    const CF: f64 = 8.0; // coarse-core factor (docs/41)
     let (core, mantle) = (crate::eos::Tillotson::iron(), crate::eos::Tillotson::basalt());
-    // docs/42 browser-parity: Earth is variable-resolution (coarse iron core + FINE basalt mantle) — the fine
-    // mantle sheds a real disk (uniform seeding did not). Solve m_fine so the total Earth count ≈ n_earth.
-    let (r_ic, r_surf) = (0.5 * 5.0e6_f64, 5.0e6_f64);
-    let m_mantle = mantle.rho0 * FTP * (r_surf.powi(3) - r_ic.powi(3));
-    let m_core = core.rho0 * FTP * r_ic.powi(3);
-    let m_fine = (m_mantle + m_core / CF) / n_earth as f64;
-    let earth = HydroBody::new_lod(core, mantle, r_ic, r_surf, 1.0e6, m_fine, CF);
-    // Theia: uniform-differentiated at the SAME fine particle mass (equal-mass across the system).
-    let (r_tc, r_t) = (0.5 * 2.7e6_f64, 2.7e6_f64);
-    let m_theia = core.rho0 * FTP * r_tc.powi(3) + mantle.rho0 * FTP * (r_t.powi(3) - r_tc.powi(3));
+    let (t, im) = (&def.target, &def.impactor);
+    // docs/42 browser-parity: the target is variable-resolution (coarse iron core + FINE basalt mantle) —
+    // the fine mantle sheds a real disk (uniform seeding did not). Solve m_fine so the count ≈ n_earth.
+    let m_mantle = mantle.rho0 * FTP * (t.radius_m.powi(3) - t.core_radius_m.powi(3));
+    let m_core = core.rho0 * FTP * t.core_radius_m.powi(3);
+    let m_fine = (m_mantle + m_core / t.core_lod_factor) / n_earth as f64;
+    let earth = HydroBody::new_lod(core, mantle, t.core_radius_m, t.radius_m, t.softening_m as f64, m_fine, t.core_lod_factor);
+    // The impactor: uniform-differentiated at the SAME fine particle mass (equal-mass across the system).
+    let m_theia = core.rho0 * FTP * im.core_radius_m.powi(3)
+        + mantle.rho0 * FTP * (im.radius_m.powi(3) - im.core_radius_m.powi(3));
     let theia_n = (m_theia / m_fine).round().max(50.0) as usize;
-    let theia = HydroBody::new_differentiated(core, mantle, r_tc, r_t, 1.0e6, theia_n);
+    let theia = HydroBody::new_differentiated(core, mantle, im.core_radius_m, im.radius_m, im.softening_m as f64, theia_n);
     (earth, theia)
 }
 
-/// The distance (× the initial contact radius) at which Theia sits during the GPU relax — far enough that the
-/// two bodies' MUTUAL gravity is negligible (~1/FAR² of self-gravity) so each settles under its OWN gravity in
-/// the shared buffer, but the spatial-hash grid still keeps them in separate cells.
-const RELAX_SEPARATION: f64 = 40.0;
-/// Proto-Earth pre-impact spin (rad/s about +z, the orbital-plane normal). 7e-4 (docs/41's peak sustained-disk
-/// value) is NEAR ROTATIONAL BREAKUP — it flings the near-surface disk out at ~escape speed, so the accreted
-/// Moon forms inside Roche on a near-radial escaping trajectory and leaves. 4e-4 (the cross-check's stable value,
-/// ~a 4.4 h day) still sheds a disk but keeps the Moon bound and orbiting. Applied at assembly (see there).
-const PROTO_EARTH_SPIN: f64 = 4.0e-4;
+/// Back-compat shim: the default (declared) initial conditions.
+pub fn build_impact_bodies(n_earth: usize, _n_theia: usize) -> (crate::hydrostatic::HydroBody, crate::hydrostatic::HydroBody) {
+    build_impact_bodies_from(&crate::terra::world_def::ImpactDef::default(), n_earth)
+}
+
 
 /// Build the two UNRELAXED bodies as one SPH particle set for GPU relaxation: Earth at the origin, Theia far
 /// away (`RELAX_SEPARATION`× the contact radius), both at rest. The caller relaxes this on the GPU (`cs_relax`,
 /// milliseconds — no CPU chunking), reads it back, then [`assemble_from_relaxed`] positions the collision.
 /// Returns (particles, softening, relax_dt).
-pub fn build_far_apart(n_earth: usize, n_theia: usize) -> (Vec<SphParticle>, f32, f32) {
-    let (earth, theia) = build_impact_bodies(n_earth, n_theia);
-    let far = RELAX_SEPARATION * (5.0e6 + 2.7e6);
+pub fn build_far_apart_from(def: &crate::terra::world_def::ImpactDef, n_earth: usize, n_theia: usize) -> (Vec<SphParticle>, f32, f32) {
+    let (earth, theia) = build_impact_bodies_from(def, n_earth);
+    let far = def.relax_separation * (def.target.radius_m + def.impactor.radius_m);
     let ec = com(&earth);
     let tc = com(&theia);
     let mut out = Vec::with_capacity(earth.pos.len() + theia.pos.len());
@@ -164,7 +175,7 @@ pub fn build_far_apart(n_earth: usize, n_theia: usize) -> (Vec<SphParticle>, f32
 /// recentred then offset by 1.6·contact with impact parameter b≈R_e and the inbound velocity 1.15·v_esc — the
 /// contact radius and v_esc computed from the ACTUAL relaxed radii. Returns (particles, [basalt, iron],
 /// softening, the shock-safe impact dt).
-pub fn assemble_from_relaxed(particles: &[SphParticle]) -> (Vec<SphParticle>, [SphEos; 2], f32, f32) {
+pub fn assemble_from_relaxed_with(def: &crate::terra::world_def::ImpactDef, particles: &[SphParticle]) -> (Vec<SphParticle>, [SphEos; 2], f32, f32) {
     use glam::DVec3;
     let pos = |p: &SphParticle| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
     let subset = |prov: u32| -> (Vec<&SphParticle>, DVec3, f64, f64) {
@@ -177,8 +188,8 @@ pub fn assemble_from_relaxed(particles: &[SphParticle]) -> (Vec<SphParticle>, [S
     let (earth, ec, m_earth, r_e) = subset(0);
     let (theia, tc, m_theia, r_t) = subset(1);
     let contact = r_e + r_t;
-    let v_esc = 1.15 * (2.0 * crate::orbit::G * (m_earth + m_theia) / contact).sqrt();
-    let (d0, b_param) = (1.6 * contact, r_e);
+    let v_esc = def.v_esc_multiple * (2.0 * crate::orbit::G * (m_earth + m_theia) / contact).sqrt();
+    let (d0, b_param) = (def.start_separation * contact, def.impact_parameter * r_e);
     let emit = |out: &mut Vec<SphParticle>, ps: &[&SphParticle], off: DVec3, vel: DVec3| {
         for p in ps {
             let q = pos(p) + off;
@@ -198,7 +209,7 @@ pub fn assemble_from_relaxed(particles: &[SphParticle]) -> (Vec<SphParticle>, [S
         }
     };
     let mut out = Vec::with_capacity(particles.len());
-    emit_spun(&mut out, &earth, -ec, PROTO_EARTH_SPIN);
+    emit_spun(&mut out, &earth, -ec, def.target_spin_rad_s);
     emit(&mut out, &theia, -tc + DVec3::new(d0, b_param, 0.0), DVec3::new(-v_esc, 0.0, 0.0));
     // softening = the finest (iron) spacing = min_h/4 (h = 2·(m/ρ)^⅓, softening = ½·(m/ρ)^⅓); dt is shock-safe.
     let min_h = out.iter().map(|p| p.h).fold(f32::INFINITY, f32::min);
