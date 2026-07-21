@@ -9,6 +9,13 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The core resolution controller (docs/49) — `resolution::ResolutionController`.** The decision policy
+  for camera-driven resolution as a default engine feature: CAMERA drives granularity (screen-space bound,
+  `camera_grain_radius = distance·angular_res`), NECESSITY drives existence (the admission test — an
+  unwatched wheel still sinks), and they compose with the camera able only to REFINE, never gate. One
+  fidelity dial (`angular_resolution`, a declared viewing tolerance, not a physics fudge). Decision logic
+  only — nothing wires it into a scene yet (docs/49 §5). 6 tests.
+
 - **Quasi-static admission test (docs/44 §4b) — `resolution.rs`.** Sizes the region a resting/rolling load
   must resolve from the material's own yield: `resolved_depth(pressure, patch_radius, yield)` returns the
   depth the contact stress reaches yield (closed-form Boussinesq root), and **0 when the load is below
