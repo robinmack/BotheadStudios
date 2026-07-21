@@ -3,6 +3,34 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-20 — deterministic scatter: built, MEASURED 2–12× WORSE, reverted (docs/47)
+
+**What.** Implemented the full deterministic-scatter design for the multi-level gather cost — fixed-point
+atomic accumulation (integer add is associative ⇒ order-independent, so `cs_grid_sort` dropped), each pair
+visited once from the finer grain and written to both. **It was 2×–12× slower than the gather** and is
+reverted; `main` keeps the gather.
+
+**The numbers (RTX 5060 Ti, N=60k):** uniform 5.5→13 ms (2.4× worse), 3 levels 16→198 ms (12× worse),
+5 levels 117→513 ms (4.4× worse). Correct and deterministic — D0 bit-identical, G0 cross-level contact
+passes, scene suite 30 PASS / 1 pre-existing (scene D repose). It works; it is just slow.
+
+**Why — atomic contention, which the design (mine) failed to price.** Many fine grains `atomicAdd` into
+one big grain's accumulator slots and serialize, and every contact pays ~26 atomic ops (13 slots × 2
+grains) versus the gather's register accumulation. So even the UNIFORM case — no wide ratios at all — lost
+2.4×. The gather's "wasted" scan of fine cells is CHEAPER than scatter's atomic traffic for this workload.
+This is the value of the ethos: the design reasoned scatter was O(contacts) and cheaper; the machine said
+otherwise, and the measurement is the deliverable.
+
+**Method note worth keeping:** the force-magnitude readback (`GPU_VERIFY_FORCEMAG`) measured the
+fixed-point scales from real data (force ≤2.1e4, tensors <1, sv_nbr ≤8.5e2) rather than guessing them —
+that part was right, and the scales worked (scene I energy monotonicity held). The flaw was in the cost
+model, not the numerics.
+
+**Left open:** the 21× multi-level gather cost is NOT fixed. Single-scale-per-frame (the camera-descent
+common case) is cheap and unaffected. The code is preserved on the pushed `deterministic-scatter` branch
+as an evidence dead-end (do not merge); docs/47 records the remaining options (accept it / coarse summary /
+measured hybrid).
+
 ## 2026-07-20 — the quasi-static admission law: a car on basalt resolves exactly zero particles (docs/44)
 
 **What.** New `resolution.rs` — the quasi-static admission test docs/44 §4b specifies and its §8 status
