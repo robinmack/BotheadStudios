@@ -85,6 +85,13 @@ is being refactored toward is [`docs/33-architecture-realignment.md`](docs/33-ar
    verified out-of-process by `tools/sph-verify` (which carries its own replica of the structs), but the
    module is no longer invisible to the suite: it compiles on every target since 2026-07-20, and its three
    shader-facing layouts are pinned to `sph_step.wgsl` in-crate.
+4b. **Motion is a property of the SEQUENCE, not of any frame.** A screenshot cannot see stutter, a
+   freeze, popping or a teleport. `scripts/rigvideo.sh <rig>.mjs` records the composited screen
+   losslessly while the rig drives the scene and reports freeze %, delivered fps, worst hitch, and
+   discontinuity jumps. Read it against `scripts/analyze_motion.py --selftest`, which prints the same
+   metrics for a known-smooth, a known-stuttery and a known-frozen clip. Measured 2026-07-20: terrain
+   and birth deliver **~1 fps** (their own HUD agrees) while terra runs 46–62 fps in the same session,
+   so that is workload, not capture overhead.
 4. **Rig-watch every visual claim** (Law: physics drives the render — verify the render). `npm run wasm`
    + serve (`npx vite` in `web/`), start the GPU-backed X server ONCE with
    `scripts/start-render-xorg.sh`, then `scripts/rigshot.sh <scene>.mjs`. That wrapper composites a real

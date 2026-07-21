@@ -9,6 +9,12 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Video rig — smoothness and continuity.** `scripts/rigvideo.sh <rig>.mjs` records the composited
+  screen losslessly while a rig runs; `scripts/analyze_motion.py` reports freeze %, delivered fps, worst
+  hitch, discontinuity jumps and steadiness, with `--selftest` controls (known smooth / stuttery /
+  frozen) to read them against. First finding: terrain and birth deliver **~1 fps** (their own HUDs
+  agree; terra runs 46–62 fps in the same session, so it is workload, not capture overhead).
+
 - **`crate::render`** — the scene-agnostic render scaffolding (`GpuMesh`, `UniformSlot`, `Camera`, the
   uniform PODs, `DEPTH_FORMAT`, and the generic buffer/mesh/depth helpers) lifted out of
   `#[cfg(target_arch = "wasm32")] mod app`. All three scenes used these identically. **Behavioural
