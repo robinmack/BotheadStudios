@@ -169,6 +169,46 @@ monotonicity must hold at mixed sizes; a new scene should place a boulder among 
 same pair set the CPU reference finds. Note the harness silently selects the WRONG GPU on this box — check
 which adapter it bound before reading any number.
 
+### Deterministic scatter — the design for the multi-level cost (docs/47, spec 2026-07-20, NOT built)
+
+The multi-level GATHER benched at ~21× (5 levels, N=60k) because a big grain must scan the FINE level to
+find its neighbours — `(r_big/r_fine)³` cells. It is already DETERMINISTIC (`cs_grid_sort` made it so, and
+the hierarchical grid runs bit-identical run to run), so this is a pure COST problem: get scatter's speed
+while keeping that determinism.
+
+**Scatter:** compute each pair ONCE from the finer grain — which scans only its own level and COARSER
+ones, cheap — and write the force to BOTH grains. O(actual contacts), no big-grain fine scan.
+
+**The obstacle:** scatter means many threads accumulate into one grain's force slot at once → atomic add.
+**WGSL has no atomic float** (only `atomic<u32>`/`atomic<i32>`; forces today are `array<Accum>`, written
+once per grain by the gather, no atomics).
+
+**The solution — fixed-point atomic accumulation.** Scale each accumulated component to an i32 and
+`atomicAdd`. Integer addition is ASSOCIATIVE, so the result is independent of thread order: deterministic
+by construction, and `cs_grid_sort` becomes unnecessary for the force pass (it stays only if another pass
+needs ordered buckets — check). `Accum` decomposes cleanly: the sums (`force`, `s_diag`, `s_off`,
+`sv_nbr`) become fixed-point `atomicAdd`; `headroom` is a MIN, so `atomicMin` on an i32 (with the standard
+float→ordered-int bit trick, or a fixed-point encoding since headroom ≥ 0).
+
+**The catch, stated up front: this is NOT output-neutral.** Fixed-point rounds, so the result is not
+bit-identical to the float gather — it changes the physics numbers within the fixed-point epsilon. That
+gives up the exact-equivalence property the gather has, and REQUIRES re-verification: the `gpu-verify`
+scene suite (especially I, the energy-monotonicity fudge detector) must still pass, with the epsilon
+bounded below the physics tolerances. Because the noise floor is now zero (determinism landed), the
+epsilon is cleanly measurable.
+
+**The scale factor must be MEASURED, not guessed.** Pick S so that S·|component|_max < i32::MAX ≈ 2.1e9
+without overflow, while 1/S (the resolution) sits well below the smallest force that matters. Instrument
+the actual per-substep force-component magnitudes across the bench scenes FIRST; a wrong S silently
+saturates (too large) or quantises away real forces (too small). Consider per-component scales, since the
+stiffness tensor terms and the force differ in magnitude.
+
+**Verification bar:** D0 still deterministic; G0 still finds cross-level contacts; uniform scenes match the
+float gather within the measured epsilon (not bit-identical — re-baseline); scene I energy still monotone;
+and the bench shows the multi-level cost drop from ~21× toward O(contacts). Do this with fresh full-detail
+context — a wrong scale factor is a silent physics corruption, the exact failure this engine exists to
+avoid.
+
 **MEASURED 2026-07-20 — the WGSL mirror is correct but the multi-level GATHER is slow, and here is why.**
 The CPU reference `grid::pairs_within` gets O(1) per pair by scanning own + COARSER levels only — legal
 because it ENUMERATES pairs (compute once, both sides know). The GPU force pass is a GATHER: each grain
