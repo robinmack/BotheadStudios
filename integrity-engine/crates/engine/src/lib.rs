@@ -72,7 +72,7 @@ pub(crate) fn metres_per_pixel_at(dist_m: f64, fov_y: f64, viewport_h: f64) -> f
 #[cfg(target_arch = "wasm32")]
 mod app {
     use crate::mesher::{self, Mesh, Vertex};
-    use crate::{aggregate, emission, gravity, materials, matter, texture, world};
+    use crate::{aggregate, emission, gravity, materials, matter, resolution, texture, world};
     use glam::{Mat4, Vec3};
     use wasm_bindgen::prelude::*;
     use web_sys::HtmlCanvasElement;
@@ -295,6 +295,11 @@ mod app {
         probe_acc: Vec<glam::DVec3>,
         probe_instances: wgpu::Buffer, // GpuParticle instances, drawn with the particle pipeline
         matter: matter::MatterSim,
+        /// THE central resolution system (docs/49), held by the scene like any other. Its one `update()`
+        /// call per frame is the entire wiring: active physics registered as analytic effects is
+        /// propagated by cheap math off-camera and materialised through the shared `MatterSim` the instant
+        /// it enters view. Identical mechanism for every scene; only the effect SOURCES differ.
+        resolution: resolution::ResolutionField,
         spawn: Vec3,
         time_scale: f32,
         /// The planet this terrain is a surface patch of: real Earth matter (planet::earth()). Its mass,
@@ -606,6 +611,7 @@ mod app {
 
             // Debris: a unit cube instanced per particle, tinted by material albedo.
             let matter = matter::MatterSim::new(MAX_PARTICLES);
+            let resolution = resolution::ResolutionField::new(Default::default());
 
             // GPU-compute debris (docs/22): construct the storage buffer + compute pipeline (this
             // validates `particle_step.wgsl` on the device) and upload the terrain heightfield the step
@@ -676,6 +682,7 @@ mod app {
                 probe_acc,
                 probe_instances,
                 matter,
+                resolution,
                 spawn,
                 time_scale: DEFAULT_TIME_SCALE,
                 planet_mass,
@@ -1322,6 +1329,27 @@ mod app {
         }
 
         /// Render one frame (advances the simulation first).
+        /// Register active physics happening off-camera as an analytic EFFECT (docs/49) — a region of
+        /// `material` matter at `center` (centred coords) moving at `velocity`, `radius` across, to be
+        /// resolved at `grain_radius` when it enters view. This is how a scene feeds the central hand-off:
+        /// a far-side impact's ejecta, a distant landslide, a shock front. Cheap math until it is seen.
+        pub fn register_effect(
+            &mut self,
+            cx: f32, cy: f32, cz: f32,
+            vx: f32, vy: f32, vz: f32,
+            radius: f32,
+            grain_radius: f32,
+            material: usize,
+        ) {
+            self.resolution.add(resolution::Effect {
+                center: Vec3::new(cx, cy, cz),
+                velocity: Vec3::new(vx, vy, vz),
+                radius,
+                grain_radius,
+                material,
+            });
+        }
+
         pub fn render(&mut self) -> Result<(), JsValue> {
             self.step_physics();
             // De-resolve settled GPU debris back into voxels (docs/22): grains at rest on the terrain
@@ -1331,6 +1359,26 @@ mod app {
             // the deposits it makes remesh + re-upload the heightfield this same frame.
             self.frame = self.frame.wrapping_add(1);
             self.settle_gpu_debris();
+
+            // THE Analytic -> Resolved hand-off (docs/49), one call, inherent to the engine: propagate
+            // every off-camera analytic effect by cheap math and materialise the ones that enter view,
+            // through the shared MatterSim. `eye` is the camera; a region counts as in view when it is
+            // within the terrain render radius of the eye. No effect sources are registered by default,
+            // so this is a no-op until `register_effect` is fed (e.g. a meteor's far-flung ejecta).
+            let (_vp, eye) = self.view_proj();
+            let gravity = Vec3::new(0.0, -self.surface_g, 0.0);
+            let view_r = EARTH_CAP_RADIUS.min(2_000.0);
+            let resolved = self.resolution.update(
+                &mut self.matter,
+                &self.mats,
+                eye,
+                gravity,
+                1.0 / 60.0,
+                |c, _r| (c - eye).length() < view_r,
+            );
+            if resolved > 0 {
+                self.flush_debris_to_gpu();
+            }
             if self.matter.take_dirty() {
                 self.remesh_world();
                 self.upload_heightfield_to_gpu(); // the crater changed the column tops

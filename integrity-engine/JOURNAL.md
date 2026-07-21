@@ -3,6 +3,34 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-20 — the Analytic → Resolved hand-off as ONE central system, wired (docs/49)
+
+**What.** `resolution::ResolutionField` — the single system that makes the hand-off an inherent engine
+property, not per-scene wiring. A scene registers active physics as analytic `Effect`s; one `update()` per
+frame propagates them by cheap math off-camera and materialises each the frame it enters view, through the
+SHARED matter path. Wired into the terrain `Engine`. +4 tests (236 total), wasm clean.
+
+**The correction that shaped it (Robin).** My first cut emitted opaque `ResolutionEvent`s for a per-scene
+"backend adapter" to apply — which ENTRENCHES the forked particle containers (docs/32 §4) it should be
+unifying. The charter is one particle system, one materialisation, different scales; the forks are the
+violation, not a fact to design around. Rebuilt to materialise straight through the shared `MatterSim` —
+no adapter. A scene on a different container is one that has not yet converged (docs/33), not a reason for
+a second path.
+
+**The other correction, from a failing test.** `materialize_region` EXCAVATES world voxels; an ejecta blob
+in mid-air has none, so it made nothing. Robin's Moon example is CARRIED matter arriving — a deposit, not
+an excavation. Added `MatterSim::spawn_region` (deposit carried matter as grains) as the shared primitive
+for in-flight effects.
+
+**Verified.** The Moon lifecycle end to end, native: an effect starts off-camera, propagates BALLISTICALLY
+with ZERO particles created, and the frame it enters view spawns grains via the shared path; an effect that
+never enters view is never simulated but is still TRACKED (existence is not gated by the camera). Wired
+into `Engine::render` as one `update()` call + `register_effect`; wasm clean.
+
+**Open (docs/49 §5):** no effect SOURCE feeds it yet (live scene unchanged); the other two scenes get the
+identical call once they converge on shared matter (docs/33); grain size reaches the CPU store only once
+the CPU `Particle` carries a radius.
+
 ## 2026-07-20 — resolution controller, THREE modes: math off-camera, simulate + render in view (docs/49)
 
 **What.** Refined the controller (same day it landed) from a two-state resolve/bulk decision to THREE
