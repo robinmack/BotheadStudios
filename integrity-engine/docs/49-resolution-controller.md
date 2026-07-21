@@ -3,34 +3,51 @@
 > **The principle (Robin, 2026-07-20).** Particle size changing with camera position is a **default, core
 > engine feature for every live scene**, not a per-scene frill — "absolutely vital to the realism". As the
 > camera descends orbit→ground, detail EMERGES; as it pulls back, it collapses to bulk. One controller,
-> held by every scene, decides whether matter is resolved into particles and how fine those particles are.
+> held by every scene, decides HOW each region is computed and shown.
+>
+> **The camera does not gate EXISTENCE — but it does choose MATH vs SIMULATION** (Robin). Physics that is
+> happening but not visible is computed with cheap analytic math and PROPAGATED; its effects are simulated
+> and rendered as/when they come into view. *"If the Moon slams into the planet on the opposite side from
+> the camera, we know the impact energy and can compute the effects; those effects we render as they enter
+> view."* Math is far cheaper than particles, so the invisible majority costs little.
 
 This is the decision policy. It is built and verified (`crate::resolution::ResolutionController`, natively
 tested); wiring it to drive materialization/demotion in each scene is the follow-on (§5).
 
 ---
 
-## 1. Two axes, and the one rule that keeps them honest
+## 1. Three regimes — existence is the physics', the camera chooses the representation
 
-There are two *different* questions, and conflating them is the charter violation docs/44 §1 and docs/30
-exist to prevent:
+Two *different* questions, and conflating them is the charter violation docs/44 §1 and docs/30 exist to
+prevent:
 
-- **CAMERA drives GRANULARITY** — *how finely* to resolve. A screen-space question: a grain finer than one
-  subtending the angular-resolution threshold at the camera's distance is sub-pixel and buys no visible
-  fidelity (docs/13: cost scales with what is observable). Closer camera ⇒ finer grains.
-- **NECESSITY drives EXISTENCE** — *whether* a physical response happens at all. A physics question,
-  decided by the admission test (docs/44 §4, `resolution::admission_depth`): an unwatched wheel still
-  sinks, an off-camera crater still forms (docs/30: "a physical error bound, never a visual one").
+- **NECESSITY drives EXISTENCE** — *whether* a physical response happens. A physics question, decided by
+  the admission test (docs/44 §4, `resolution::admission_depth`) or an incoming propagated effect: an
+  unwatched wheel still sinks, an off-camera crater still forms (docs/30: "a physical error bound, never a
+  visual one"). Existence is **camera-independent**.
+- **THE CAMERA chooses the REPRESENTATION** of that physics — math or simulation — and, when simulating,
+  the GRANULARITY. It never decides whether the physics happens; only how it is computed and shown.
 
-**They compose, and the camera may only REFINE, never gate:**
+The decision is `ACTIVE-PHYSICS × IN-VIEW`, giving three modes (`resolution::ResolutionMode`):
 
-```
-resolve   = necessity(region) > 0   ∨   camera_close_enough(region)
-granularity = finer_of( camera_grain(distance), physics_grain(interaction) ), clamped [floor, bulk]
-```
+| | in view | not in view |
+|---|---|---|
+| **active physics** | **Resolved** — particle simulation + render, at camera granularity | **Analytic** — cheap math, propagate the effects, no particles |
+| **no active physics** | **Bulk** (rendered at camera LOD) | **Bulk** |
 
-The load-bearing invariant, and the one test that pins it: an unwatched region where physics demands
-resolution **still resolves**, at the physics granularity — looking away must not change what is true.
+- **Camera granularity** (Resolved only): a grain finer than one subtending the angular threshold at the
+  camera distance is sub-pixel (docs/13). `camera_grain_radius = distance · angular_res`, linear. Grain is
+  the **finer** of camera and physics need, clamped `[floor, bulk]`.
+- **The load-bearing invariant, and its test:** active physics off-camera is **never Bulk** — it is at
+  least `Analytic` (computed). Looking away changes the representation, never whether it is true.
+- **The Moon example, in code:** a far-side impact is `Analytic` (energy known, ejecta propagated by math,
+  docs/28); the region its ejecta enters is active AND in view, so it flips to `Resolved` — "render the
+  effects as/when they come into view". A region is re-queried every frame, so the flip is automatic.
+
+**Corrected from the first cut:** the two-state controller resolved for camera-closeness alone, which
+would simulate undisturbed static ground just because you walked up to it. Wrong — simulation is for
+ACTIVE physics that is visible; static ground stays Bulk (rendered finely). The camera drives math-vs-sim
+for active physics and render-LOD for everything.
 
 ## 2. The camera-granularity law (not a tuned LOD curve)
 
@@ -56,12 +73,11 @@ already is the answer above that scale).
 ## 4. What is built and verified
 
 `crate::resolution::ResolutionController` — `camera_grain_radius`, `decide(RegionQuery) ->
-ResolutionDecision`, `Default`. 6 tests, all the properties above, including:
-- necessity resolves at 100 km camera distance (camera cannot gate existence);
-- the null case (far + unnecessary + bulk-looks-right ⇒ resolve nothing, exactly free);
-- camera-only visual resolution that refines with proximity;
-- composition = the finer of the two axes;
-- granularity clamped between floor and bulk.
+ResolutionMode`, `Default`. 6 tests, all the properties above, including:
+- active physics off-camera is `Analytic`, never `Bulk` (the camera cannot gate existence);
+- the Moon example directly: far-side impact `Analytic`, its ejecta `Resolved` as it enters view;
+- no active physics is always `Bulk` (static ground is not simulated just because the camera is near);
+- Resolved granularity = the finer of camera and physics need, clamped [floor, bulk].
 
 ## 5. NOT done — wiring into scenes
 
