@@ -3,6 +3,50 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-21 — the engine holds a GPU with no browser (docs/52, standalone increment 1)
+
+**What.** `gpu_host::GpuHost::headless()` — the engine acquires a real GPU with no canvas, no surface and
+no page, and the crate's GPU backends are now chosen by TARGET rather than pinned to WebGPU.
+
+**Why this was blocked.** Every path to the engine's GPU code ran through a `#[wasm_bindgen]` scene
+handed an `HtmlCanvasElement`: "the engine" and "the browser page" were the same object. And `wgpu` was
+pinned crate-wide to `features = ["webgpu", "wgsl"]` — a backend that exists only inside a browser — so
+the engine could COMPILE natively (the docs/50 lifts proved that) but could never RUN.
+
+**Why target tables, not a cargo feature.** **Features unify across a build graph; targets do not.** A
+`native-gpu` feature could leak a native backend into the browser build through unification — the exact
+hazard that pushed `tools/gpu-verify` into its own separate workspace. With
+`[target.'cfg(target_arch = "wasm32")']` / `[target.'cfg(not(...))']` it cannot happen: nothing building
+for wasm32 can see the native table. (There is no `vulkan` cargo feature in wgpu 24 — on Linux it is
+enabled by platform; `default = ["wgsl","dx12","metal","webgpu"]`.)
+
+**Adapter choice is explicit and refuses to guess.** `PowerPreference::HighPerformance` cannot
+discriminate between two discrete GPUs — it takes whichever enumerates first — and cards three
+generations apart report byte-identical limits, so there is nothing to auto-select on. CPU adapters are
+filtered out (they "work", then report software timings as hardware). With several GPUs and no hint it
+returns an error instead of picking, which is the lesson `tools/gpu-verify` already paid for. On this box
+the guard fired correctly before `INTEGRITY_ADAPTER=5060` was given.
+
+**Verified ON HARDWARE, which is the whole point.** "It builds for a native target" proves nothing —
+wgpu's types exist without a backend, which is exactly why the docs/50 lifts compiled natively all along
+while still being unable to run. The test acquires a real device and then compiles and creates a pipeline
+from the SHIPPING `shaders/sph_step.wgsl`:
+
+    adapter: NVIDIA GeForce RTX 5060 Ti (DiscreteGpu, Vulkan)
+    test gpu_host::tests::the_engine_can_run_its_own_shader_with_no_browser ... ok
+
+`#[ignore]`d so a GPU-less machine does not fail the suite.
+
+**The browser is unaffected** — the constraint this could have broken. 250/250 native + 19 skipped, wasm
+check clean, `wasm-pack` clean, and both remaining scenes rig-verified rendering (birth 67,219 B, terra
+64,003 B, against the 1,883 B blank-page control).
+
+**Honest scope.** The engine can now HOLD a GPU on its own; it is not yet standalone. The scenes are
+still `#[wasm_bindgen]` structs inside the crate (a new KIND of scene is still an engine edit — ledger
+row 14), there is no native host (no window, no surface, no input — headless compute only), and the
+systems terrain orphaned are still orphaned (row 15). The standalone shape is what will let those be
+re-consumed by a DEFINITION rather than by a scene struct.
+
 ## 2026-07-21 — the last code-path scene becomes data; what terrain took with it (docs/51)
 
 **What.** "Birth of the Moon" — the only scene whose setup was still compiled in — now loads its initial

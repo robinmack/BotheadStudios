@@ -27,8 +27,25 @@ ndshape = "0.3"
 version = "0.3"
 features = ["HtmlCanvasElement", "Window", "Document"]
 
-# WebGPU-only backend keeps the WASM small; we target modern browsers.
-[dependencies.wgpu]
+# **Target-specific GPU backends (docs/52).** The engine is not a browser program that happens to
+# compile elsewhere; it is a standalone engine of which the browser is one host. So each target gets the
+# backend it can actually RUN on:
+#
+#  * wasm32 — WebGPU only. Keeps the wasm small and is the only backend a browser has.
+#  * everything else — wgpu's defaults, which is what `tools/gpu-verify` already uses to drive real
+#    Vulkan on this box. (There is no `vulkan` cargo feature: on Linux wgpu enables it by platform.)
+#
+# Target-specific tables are used rather than a cargo feature flag because **features unify across a
+# build graph and targets do not**. That is the exact hazard `tools/gpu-verify` was pushed into its own
+# workspace to avoid — a native backend leaking into the browser build. Here it cannot: nothing that
+# builds for wasm32 can see the native table.
+[target.'cfg(target_arch = "wasm32")'.dependencies.wgpu]
 version = "24"
 default-features = false
 features = ["webgpu", "wgsl"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies.wgpu]
+version = "24"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies.pollster]
+version = "0.4"

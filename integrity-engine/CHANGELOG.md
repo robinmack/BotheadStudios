@@ -9,6 +9,14 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The engine can acquire a GPU with no browser (docs/52).** New `engine::gpu_host::GpuHost::headless()`
+  (native only) and **target-specific wgpu backends** — WebGPU for wasm32, wgpu's defaults (Vulkan on
+  Linux) elsewhere. Target tables rather than a cargo feature, because features unify across a build graph
+  and targets do not, so a native backend cannot leak into the browser build. Adapter selection is
+  explicit (`INTEGRITY_ADAPTER`), filters out CPU fallbacks, and **refuses to guess** when several GPUs
+  are present. Verified on hardware: RTX 5060 Ti over Vulkan compiling the shipping `sph_step.wgsl`.
+  **The browser build is unchanged** (wasm + wasm-pack clean, both scenes rig-verified).
+
 - **Birth of the Moon is a DATA world (docs/51).** New `"impact"` world type (`world_def::ImpactDef`) +
   `/worlds/birth/world.json` + `OrbitDemo::load_impact_world`. The giant impact's initial conditions —
   body radii, softening, core-resolution factor, approach speed (×v_esc), start separation, impact
