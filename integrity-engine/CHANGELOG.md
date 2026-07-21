@@ -9,6 +9,21 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **`gpu_sph` compiles natively; its shader layouts are pinned in-crate.** The module was
+  `#[cfg(target_arch = "wasm32")]` because of exactly one line — an `Rc<Cell<bool>>` in a `map_async`
+  callback, which wgpu bounds by `WasmNotSend` (a no-op on wasm, `Send` elsewhere). Now
+  `Arc<AtomicBool>`, so ~700 lines of shipping GPU host code are under `cargo check`/`cargo test` for the
+  first time. New in-crate guards pin `SphParticle`/`SphEos`/`SphParams` to `sph_step.wgsl` field-for-field.
+  **Behavioural change: none** — but `SphParams::_p0` is renamed **`omega`** to match the shader, which
+  reads that slot as a rigid-rotation rate for `cs_relax`'s rotating-frame relaxation. Same bytes, same
+  value (0.0); a consumer constructing `SphParams` literally must use the new field name.
+- **The WGSL↔Rust layout checker is shared** — `wgsl_layout.rs` (test-only); `gpu_layout`'s private copy
+  is gone. One parser pinned to every shader that has a Rust mirror.
+- **Rigs take `PORT` (default 5173) and `OUT` (default `/tmp/rigshot`) from `rigshot.sh`.** Replaces 13
+  hardcoded dead ports and a hardcoded dead scratchpad path in 30 rigs. `birth_shot.mjs` now defaults to
+  the LOCAL dev server instead of the public site. `web/rig/README.md` records what these rigs are: one-off
+  instruments, not a test suite.
+
 - **The central resolution system — the Analytic → Resolved hand-off, inherent (docs/49).**
   `resolution::ResolutionField` holds active physics as analytic `Effect`s, propagates them by cheap math
   while off-camera, and materialises each one the frame it enters view — through the SHARED matter path

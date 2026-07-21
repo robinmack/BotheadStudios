@@ -3,6 +3,56 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-20 — the GPU host code was never wasm-only: one line hid 700 lines from the suite
+
+**What.** `gpu_sph.rs` compiles on **every** target now, not just wasm, and its three shader-facing
+`#[repr(C)]` mirrors are pinned to `sph_step.wgsl` by in-crate tests (240 total, was 236). The single
+thing that had required wasm was one `Rc<Cell<bool>>` in a `map_async` callback: wgpu bounds that
+callback by `WasmNotSend`, a no-op on wasm but plain `Send` everywhere else. Replacing it with
+`Arc<AtomicBool>` (Release/Acquire — the flag publishes a completed mapping that `take_readback` then
+reads through `get_mapped_range`) removed the entire reason for the `#[cfg(target_arch = "wasm32")]`.
+
+**Why it matters.** CLAUDE.md rule 3 recorded the consequence as a fact of life — "`gpu_sph.rs` has **no
+in-crate tests**" — and docs/33 called it "0 in-crate tests **by design**". Neither was design. It was an
+accident of one line, and it put ~700 lines of shipping GPU host code where native `cargo check` and
+`cargo test` never compiled them. That is the same trap that once shipped a non-compiling commit claiming
+181 passing tests. `gpu_layout.rs`'s header already stated the principle for the POD types it rescued
+from `mod app` — *"nothing but their location was ever keeping them there"* — and it turns out to hold
+for the wgpu host code too, which is the premise the container-unification step of the realignment rests
+on: two containers cannot be unified while only one of them compiles in a given build.
+
+**It immediately found a real drift.** `sph_step.wgsl`'s `Params` declares `omega` at byte 36 — a
+rigid-rotation rate whose centrifugal term `ω²·(x,y,0)` the shader applies in `cs_relax` (`:253`) so a
+body relaxes to its OBLATE equilibrium. The Rust mirror called that same slot `_p0` and treated it as
+padding. **Offsets and sizes matched**, so any size/stride check passed; only a NAME-level comparison
+sees it. Not wrong physics today (the host hardcoded 0.0, and ω=0 is exactly the non-rotating relaxation
+intended) but a live latent hazard — reuse that "padding" as scratch and the body silently spins — and a
+capability the host could not reach. Renamed to `omega` and documented; zero bytes changed.
+
+**Verified.** Guard written RED first: the layout test would not compile against `_p0`, which is the
+detection working (the `offsets!` macro takes field identifiers, so a Rust-side rename breaks the build
+and a shader-side rename breaks the assert — both directions covered). Then green. Full native suite
+**240/240 + 18 skipped**, `cargo check --target wasm32-unknown-unknown` clean, `wasm-pack` build clean.
+Rig-watched on the 5060 Ti at the rebuilt wasm (`build 20260720.193215`): the birth-of-the-Moon scene
+renders Earth as a particle aggregate with the sun-lit terminator and Theia inbound, and the terrain
+reference scene renders hills + iron probe + shadow + water. **Caught mid-check:** the first rig run
+reported green against a vite server started BEFORE the wasm rebuild — the wasm URL is cache-busted with
+a build stamp vite computes at startup, so it served the OLD bytes. Restarted vite and re-ran; the
+verification above is the fresh build. That trap is now documented in `rigshot.sh` and the rig README.
+
+**One parser, not two.** The WGSL↔Rust offset checker moved out of `gpu_layout`'s test module into
+`wgsl_layout.rs` (test-only) and both shaders' guards use it. Copying a parser is how one question
+acquires two answers (docs/46, Law 2).
+
+**Rig ergonomics (Robin's ask).** Rigs hardcoded whichever port their session used — 13 different dead
+ones — and 30 of them wrote into a long-gone session's scratchpad directory. `PORT` (default 5173) and
+`OUT` (default `/tmp/rigshot`) now come from `rigshot.sh`; 56 rigs rewritten, all 61 parse, previously
+broken ones run with no env set. `birth_shot.mjs` defaulted to the PUBLIC site, so a bare run
+screenshotted production and looked like a verified local change — it defaults to local now. **Robin's
+correction, recorded in `web/rig/README.md`:** these rigs are one-off instruments built to choose a path
+or fuel a doc, **not** a test suite — do not assume any of them is still relevant or valid, and a green
+rig is not evidence. The README had also been recommending `xvfb-run`, the trap rule 4 exists to kill.
+
 ## 2026-07-20 — headless GPU rig verification WORKS (the linchpin) — real WebGPU renders captured
 
 **What.** Solved headless visual verification — the tool that was missing, and the reason "unification"

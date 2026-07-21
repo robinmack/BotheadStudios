@@ -1,8 +1,8 @@
 // Rig: verify the canonical Sim HUD is identical (banner + window frame + universal sim line) across
 // terrain / space / birth, and that the scale bar reads metres on the surface vs km/AU in space.
 import { chromium } from 'playwright';
-const out = '/tmp/claude-1000/-home-ratwood/b8643c15-d933-437e-8ec8-236cf9ecf634/scratchpad';
-const PORT = process.env.PORT || '5306';
+const out = process.env.OUT || '/tmp';
+const PORT = process.env.PORT || '5173';
 const browser = await chromium.launch({ headless: false,
   args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=vulkan', '--no-sandbox'] });
 const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });

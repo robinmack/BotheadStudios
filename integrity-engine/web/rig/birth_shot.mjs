@@ -1,15 +1,20 @@
 // Screenshot the space-band BIRTH-OF-THE-MOON scene so the agent can see the debris swarm / proto-lunar
-// disk with its own eyes (the "watch locally" rule). Headed Chromium under xvfb — WebGPU needs a real
-// swapchain, which headless cannot composite.
+// disk with its own eyes (the "watch locally" rule).
 //
-//   URL=https://integrity.bothead.net/birth.html OUT=/some/dir xvfb-run -a node rig/birth_shot.mjs
-//   # or against a local dev server:  URL=http://127.0.0.1:5307/birth.html
+//   bash scripts/rigshot.sh birth_shot.mjs           # the LOCAL dev build (the default)
+//   URL=https://integrity.bothead.net/birth.html bash scripts/rigshot.sh birth_shot.mjs   # production
+//
+// Defaults to LOCAL deliberately: it used to default to the public site, so a bare run screenshotted
+// PRODUCTION and looked exactly like a verified local change. Run it through `rigshot.sh`, not
+// `xvfb-run` — xvfb is a software compositor that cannot read back the GPU swapchain, so it returns the
+// DOM HUD over a BLANK canvas (CLAUDE.md rule 4; the trap that cost prior sessions).
 //
 // Captures a time series (pre-impact → strike → aftermath) so we can watch the disk form, not just a
 // single frame. Prints the on-screen #stats (the Sim HUD) at each mark.
 import { chromium } from 'playwright';
 
-const URL = process.env.URL || 'https://integrity.bothead.net/birth.html';
+const PORT = process.env.PORT || '5173';
+const URL = process.env.URL || `http://127.0.0.1:${PORT}/birth.html`;
 const OUT = process.env.OUT || '/tmp';
 const b = await chromium.launch({
   headless: false,

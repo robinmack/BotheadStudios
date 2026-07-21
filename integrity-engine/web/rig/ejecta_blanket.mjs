@@ -2,8 +2,8 @@
 // LOCAL blanket (a few crater radii, tens of m) or the old footprint-spanning storm (~96 m patch / sky).
 // Reads the engine's live terrain_debris_spread_m / _height_m via the scene's exposed sim handle.
 import { chromium } from 'playwright';
-const out = '/tmp/claude-1000/-home-ratwood/b8643c15-d933-437e-8ec8-236cf9ecf634/scratchpad';
-const PORT = process.env.PORT || '5307';
+const out = process.env.OUT || '/tmp';
+const PORT = process.env.PORT || '5173';
 const b = await chromium.launch({ headless: false, args: ['--enable-unsafe-webgpu','--enable-features=Vulkan','--use-angle=vulkan','--no-sandbox'] });
 const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
 p.on('console', m => { const t = m.text(); if (/spread|debris|blanket|EJECTA/.test(t)) console.log('  [page]', t); });

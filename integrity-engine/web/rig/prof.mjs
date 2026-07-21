@@ -1,8 +1,9 @@
 import { chromium } from 'playwright';
+const PORT = process.env.PORT || '5173';
 const browser = await chromium.launch({ headless: false,
   args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=vulkan', '--no-sandbox'] });
 const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-await page.goto('http://127.0.0.1:5280/birth.html', { waitUntil: 'load' });
+await page.goto(`http://127.0.0.1:${PORT}/birth.html`, { waitUntil: 'load' });
 await page.waitForTimeout(15000);
 const r = await page.evaluate(() => {
   const w = window;

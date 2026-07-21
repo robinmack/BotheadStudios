@@ -1,5 +1,6 @@
 import { chromium } from 'playwright';
-const out = '/tmp/claude-1000/-home-ratwood/b8643c15-d933-437e-8ec8-236cf9ecf634/scratchpad';
+const PORT = process.env.PORT || '5173';
+const out = process.env.OUT || '/tmp';
 const b = await chromium.launch({ headless: false, args: ['--enable-unsafe-webgpu','--enable-features=Vulkan','--use-angle=vulkan','--no-sandbox'] });
 const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
 const canvas = () => p.locator('#gpu-canvas');
@@ -7,7 +8,7 @@ async function drag(dx, dy){ const box = await canvas().boundingBox(); const cx=
   await p.mouse.move(cx,cy); await p.mouse.down(); await p.mouse.move(cx+dx,cy+dy,{steps:20}); await p.mouse.up(); }
 async function zoom(n){ const box=await canvas().boundingBox(); await p.mouse.move(box.x+box.width/2,box.y+box.height/2);
   for(let i=0;i<n;i++){ await p.mouse.wheel(0,-260); await p.waitForTimeout(60);} }
-await p.goto('http://127.0.0.1:5294/terrain.html', { waitUntil: 'load' });
+await p.goto(`http://127.0.0.1:${PORT}/terrain.html`, { waitUntil: 'load' });
 await p.waitForTimeout(2500); await p.screenshot({ path: `${out}/cv-0-start.png` });
 await zoom(10); await p.waitForTimeout(400); await p.screenshot({ path: `${out}/cv-1-zoomedin.png` });   // zoom fully in
 await drag(0, 300); await p.waitForTimeout(400); await p.screenshot({ path: `${out}/cv-2-pitchdown.png` }); // drag to pitch under ground

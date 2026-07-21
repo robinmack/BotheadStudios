@@ -32,8 +32,13 @@ mod eos;
 mod gpu_layout; // docs/47 — GPU repr(C) layouts, pinned to the shader by test
 mod granular;
 mod grid; // docs/47 §1 — the hierarchical spatial hash: no global cell size
-#[cfg(target_arch = "wasm32")] // WebGPU host for sph_step.wgsl; only the browser scene uses it (mod app is
-mod gpu_sph; //                    wasm-only). The native SPH reference lives in tools/sph-verify + impact-run.
+// WebGPU host for sph_step.wgsl. Compiled on EVERY target, deliberately: it used to be wasm-only, but the
+// only thing that actually required wasm was one `Rc<Cell<bool>>` in a `map_async` callback (see
+// `gpu_sph::GpuSph::readback_ready`). That accident hid ~700 lines of shipping GPU host code from native
+// `cargo check`/`cargo test` — the very trap CLAUDE.md rule 3 flags ("no in-crate tests") and that once
+// shipped a non-compiling commit. Building it natively costs nothing (wgpu's types exist without a
+// backend) and puts its shader-facing layouts under the suite. Running still needs a browser.
+mod gpu_sph;
 mod gravity;
 mod hydrostatic;
 mod impact;
@@ -50,6 +55,9 @@ mod orbit;
 mod terra; // docs/43 — worlds-as-data: the world schema (+ later raster/mesh/camera). The wasm `Terra` scene
            // struct lives in `mod app` below to reuse its render helpers.
 mod texture;
+/// Test-only: the ONE WGSL↔Rust layout checker, shared by every module with a `#[repr(C)]` shader mirror.
+#[cfg(test)]
+mod wgsl_layout;
 mod world;
 
 #[cfg(target_arch = "wasm32")]
