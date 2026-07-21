@@ -37,6 +37,8 @@ pub struct Simulation {
     materials: Vec<Material>,
     /// Effects materialised so far — the docs/49 Analytic→Resolved hand-off, counted.
     resolved_total: usize,
+    /// Grains ever created (impact excavation + effect materialisation).
+    created_total: usize,
 }
 
 impl Simulation {
@@ -47,7 +49,9 @@ impl Simulation {
             .ground
             .clone()
             .ok_or_else(|| "not a ground world: no `ground` block".to_string())?;
-        let world = crate::world::generate(&materials);
+        // The SURFACE comes from the definition too (docs/54) — size, relief, sea level and strata.
+        // Omitted ⇒ declared defaults, which are voxel-identical to the old hardcoded patch.
+        let world = crate::world::generate_from(&ground.surface, &materials);
         let field = MassField::build(&world, &materials, 8);
         let mut sim = Simulation {
             world,
@@ -57,6 +61,7 @@ impl Simulation {
             def: ground,
             materials,
             resolved_total: 0,
+            created_total: 0,
         };
         sim.apply_events();
         Ok(sim)
@@ -74,7 +79,7 @@ impl Simulation {
         for ev in self.def.events.clone() {
             match ev {
                 GroundEvent::Impact { at_m, direction, energy_j } => {
-                    self.matter.impact(
+                    self.created_total += self.matter.impact(
                         &mut self.world,
                         &self.materials,
                         Vec3::from_array(at_m),
@@ -101,6 +106,7 @@ impl Simulation {
         let camera = Vec3::from_array(self.def.camera_m);
         let view_r = self.def.view_radius_m;
         let gravity = Vec3::new(0.0, -self.def.gravity_ms2, 0.0);
+        let before = self.matter.particle_count();
         let resolved = self.resolution.update(
             &mut self.matter,
             &self.materials,
@@ -110,6 +116,8 @@ impl Simulation {
             |c, _r| (c - camera).length() < view_r,
         );
         self.resolved_total += resolved;
+        // Effects materialise grains inside `update`; count the increase so the accounting is complete.
+        self.created_total += self.matter.particle_count().saturating_sub(before);
         self.matter.step(&mut self.world, &self.field, &[], dt);
         resolved
     }
@@ -122,6 +130,13 @@ impl Simulation {
     pub fn analytic_count(&self) -> usize {
         self.resolution.analytic_count()
     }
+    /// Every grain this simulation has ever created — excavated by an impact or materialised from an
+    /// effect. Needed to tell "the grains went back into the world" from "the grains were culled off the
+    /// patch", which the live particle count alone cannot distinguish.
+    pub fn created_total(&self) -> usize {
+        self.created_total
+    }
+
     /// Effects handed off from analytic to resolved since construction.
     pub fn resolved_total(&self) -> usize {
         self.resolved_total
@@ -213,6 +228,27 @@ mod tests {
         assert_eq!(sim.resolved_total(), 0, "it never entered view, so it was never simulated");
         assert_eq!(sim.analytic_count(), 1, "but it is STILL TRACKED — looking away changes nothing");
         assert_eq!(sim.particle_count(), 0);
+    }
+
+    /// The SURFACE is declared too (docs/54): a definition that asks for a different ground must get
+    /// one. Without this the terrain block could be ignored and every test would still pass.
+    #[test]
+    fn the_definition_shapes_the_ground_it_runs_on() {
+        let flat = Simulation::from_json(r#"{
+          "name":"flat","type":"ground",
+          "ground":{ "surface":{ "amplitude_m":0.0, "sea_level_m":0.0 } }
+        }"#, mats()).expect("builds");
+        let tops: Vec<i32> = (0..flat.world.w as i32)
+            .map(|x| flat.world.surface_top_voxel(x, 0).unwrap_or(-1))
+            .collect();
+        assert!(tops.windows(2).all(|p| p[0] == p[1]), "a declared flat world must be flat");
+
+        let rolling = Simulation::from_json(
+            r#"{"name":"rolling","type":"ground","ground":{}}"#, mats()).expect("builds");
+        let tops: Vec<i32> = (0..rolling.world.w as i32)
+            .map(|x| rolling.world.surface_top_voxel(x, 0).unwrap_or(-1))
+            .collect();
+        assert!(tops.windows(2).any(|p| p[0] != p[1]), "the default world has real relief");
     }
 
     /// A definition with no events must do nothing. Guards against the engine quietly supplying a

@@ -827,9 +827,20 @@ fn sign(x: f32) -> i32 {
 /// map-driven land/ocean contrast isn't visible locally until that finer dataset arrives (docs/28). Do
 /// not fake continents in the meantime.
 pub fn terrain_height(world_x: f32, world_z: f32) -> f32 {
-    let n = fbm(world_x, world_z); // 0..1 procedural relief
-    let top = BASE_TOP - AMPLITUDE * (1.0 - n);
-    top.clamp(GRASS_THICKNESS as f32 + 1.0, (H - 1) as f32)
+    terrain_height_with(&crate::terra::world_def::GroundSurface::default(), world_x, world_z)
+}
+
+/// The surface height from a DECLARED terrain (`docs/54`) — the same relief law, its shape given by the
+/// definition rather than by constants. `terrain_height` is this on the defaults.
+pub fn terrain_height_with(
+    def: &crate::terra::world_def::GroundSurface,
+    world_x: f32,
+    world_z: f32,
+) -> f32 {
+    let n = fbm_with(&def.octaves, world_x, world_z); // 0..1 procedural relief
+    let skin = def.strata.first().and_then(|s| s.thickness_m).unwrap_or(1) as f32;
+    let top = def.base_top_m - def.amplitude_m * (1.0 - n);
+    top.clamp(skin + 1.0, (def.size_voxels[1] - 1) as f32)
 }
 
 /// Generate the world as a surface patch of the REAL layered Earth (planet::earth()): a grass skin over
@@ -838,6 +849,88 @@ pub fn terrain_height(world_x: f32, world_z: f32) -> f32 {
 /// dig or impact excavates). The grassy surface top follows [`terrain_height`] — the SAME continuous
 /// heightfield the distant Earth cap samples — giving real rolling relief (hills and valleys) that joins
 /// the cap without a step.
+/// Build the world from the DECLARED surface (`docs/54`). Size, relief, sea level and the material
+/// column all come from the definition; the LAWS (how strata stack, how water fills, how the
+/// heightfield is sampled) stay in the engine. `generate` is this on the declared defaults, which
+/// reproduce the constants this used to hardcode.
+pub fn generate_from(def: &crate::terra::world_def::GroundSurface, materials: &[Material]) -> World {
+    let (w, h, d) = (def.size_voxels[0], def.size_voxels[1], def.size_voxels[2]);
+    // Resolve the declared column to material indices, top-down. The LAST entry fills everything below.
+    let bands: Vec<(u16, Option<i32>)> = def
+        .strata
+        .iter()
+        .map(|st| (index_of(materials, &st.material) as u16 + 1, st.thickness_m))
+        .collect();
+    assert!(!bands.is_empty(), "a terrain must declare at least one stratum");
+    let water_idx = index_of(materials, "water");
+    let water = water_idx as u16 + 1;
+
+    let mut voxels = vec![0u16; w * h * d];
+    let base_top = def.base_top_m as i32;
+    let valley_floor = base_top - def.amplitude_m as i32;
+    let skin = bands[0].1.unwrap_or(1);
+
+    // Band BOTTOMS are level planes measured down from the lowest possible surface, so a dig anywhere
+    // hits the same deep layer at the same absolute depth — the skin alone follows the undulating top.
+    let mut bottoms: Vec<i32> = Vec::with_capacity(bands.len());
+    let mut y = valley_floor;
+    for (_, thickness) in bands.iter().skip(1) {
+        match thickness {
+            Some(t) => { y -= t; bottoms.push(y); }
+            None => bottoms.push(i32::MIN), // the last band fills the rest
+        }
+    }
+
+    let mut max_top = 0usize;
+    for z in 0..d {
+        for x in 0..w {
+            let top = (terrain_height_with(def, x as f32, z as f32).round() as i32)
+                .clamp(skin + 1, h as i32 - 1);
+            let skin_start = top - skin;
+            for yy in 0..top {
+                let v = if yy >= skin_start {
+                    bands[0].0
+                } else {
+                    // First band (after the skin) whose bottom this voxel is at or above.
+                    let mut chosen = bands[bands.len() - 1].0;
+                    for (bi, bottom) in bottoms.iter().enumerate() {
+                        if yy >= *bottom {
+                            chosen = bands[bi + 1].0;
+                            break;
+                        }
+                    }
+                    chosen
+                };
+                voxels[(yy as usize * d + z) * w + x] = v;
+            }
+            max_top = max_top.max(top as usize);
+        }
+    }
+
+    // OCEAN PASS — water as real matter: every AIR voxel below the declared datum and above the land.
+    let sea_level = def.sea_level_m.round() as i32;
+    for z in 0..d {
+        for x in 0..w {
+            for yy in 0..sea_level.min(h as i32) {
+                let i = (yy as usize * d + z) * w + x;
+                if voxels[i] == 0 {
+                    voxels[i] = water;
+                }
+            }
+        }
+    }
+
+    let mut world = World {
+        w, h, d, voxels, max_top,
+        water_mat: Some(water_idx),
+        displacement: vec![0.0; w * d],
+        demoted: vec![false; w * d],
+        tops: vec![-1; w * d],
+    };
+    world.rebuild_tops();
+    world
+}
+
 pub fn generate(materials: &[Material]) -> World {
     // Real Earth column (planet::earth(), docs/25/28): a biosphere skin over basalt CRUST, peridotite
     // MANTLE, iron CORE. This is a DECLARED VERTICAL LOD: the material order is Earth's real radial
@@ -962,14 +1055,82 @@ fn value_noise(x: f32, z: f32, freq: f32) -> f32 {
 /// result stays in 0..1; the low-frequency term is weighted heaviest to give genuine map-wide relief
 /// (not a flat plateau) rather than only local bumps.
 fn fbm(x: f32, z: f32) -> f32 {
-    let n = 0.55 * value_noise(x, z, 0.026)
-        + 0.30 * value_noise(x, z, 0.062)
-        + 0.15 * value_noise(x, z, 0.13);
+    fbm_with(&crate::terra::world_def::GroundSurface::default_octaves_pub(), x, z)
+}
+
+/// fbm from DECLARED octaves (`docs/54`). The weights are the file's; the noise is the engine's.
+fn fbm_with(octaves: &[crate::terra::world_def::Octave], x: f32, z: f32) -> f32 {
+    let n: f32 = octaves.iter().map(|o| o.weight * value_noise(x, z, o.frequency)).sum();
     n.clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::terra::world_def::{Octave, Stratum, GroundSurface};
+
+    /// **The whole safety of moving the surface into data.** `generate` still hardcodes the world via
+    /// the module constants; `generate_from` builds it from a definition. If the declared defaults drift
+    /// from those constants by even one voxel, every existing world silently becomes a different place —
+    /// different relief, different strata depths, different coastline — with nothing erroring.
+    #[test]
+    fn surface_defaults_reproduce_the_hardcoded_world() {
+        let mats = crate::materials::load();
+        let hardcoded = super::generate(&mats);
+        let declared = super::generate_from(&GroundSurface::default(), &mats);
+        assert_eq!((declared.w, declared.h, declared.d), (hardcoded.w, hardcoded.h, hardcoded.d));
+        assert_eq!(declared.max_top, hardcoded.max_top, "surface envelope must match");
+        assert_eq!(declared.water_mat, hardcoded.water_mat);
+        assert_eq!(
+            declared.voxels, hardcoded.voxels,
+            "the declared default surface must be VOXEL-IDENTICAL to the hardcoded one"
+        );
+    }
+
+    /// The definition must actually shape the ground, or the file is decoration. Each dial is changed
+    /// alone so a failure names which one stopped working.
+    #[test]
+    fn changing_the_declared_surface_changes_the_world() {
+        let mats = crate::materials::load();
+        let base = super::generate_from(&GroundSurface::default(), &mats);
+
+        let mut smaller = GroundSurface::default();
+        smaller.size_voxels = [48, 96, 48];
+        let w = super::generate_from(&smaller, &mats);
+        assert_eq!((w.w, w.d), (48, 48), "declared patch size must be honoured");
+
+        let mut flat = GroundSurface::default();
+        flat.amplitude_m = 0.0;
+        let w = super::generate_from(&flat, &mats);
+        let tops: Vec<i32> = (0..w.w as i32).map(|x| w.surface_top_voxel(x, 0).unwrap_or(-1)).collect();
+        assert!(tops.windows(2).all(|p| p[0] == p[1]), "zero declared amplitude must give a flat surface");
+
+        let mut rough = GroundSurface::default();
+        rough.octaves = vec![Octave { frequency: 0.4, weight: 1.0 }];
+        let w = super::generate_from(&rough, &mats);
+        assert_ne!(w.voxels, base.voxels, "different declared octaves must give different relief");
+
+        let mut dry = GroundSurface::default();
+        dry.sea_level_m = 0.0;
+        let w = super::generate_from(&dry, &mats);
+        let water = w.water_mat.expect("water material");
+        let wet = w.voxels.iter().filter(|&&v| v > 0 && (v - 1) as usize == water).count();
+        assert_eq!(wet, 0, "a sea level of 0 must leave no water");
+
+        let mut basalt_skin = GroundSurface::default();
+        basalt_skin.strata = vec![
+            Stratum { material: "basalt".into(), thickness_m: Some(1) },
+            Stratum { material: "iron".into(), thickness_m: None },
+        ];
+        let w = super::generate_from(&basalt_skin, &mats);
+        let top = w.surface_top_voxel(10, 10).expect("solid column");
+        let surface_mat = w.material_at(10, top - 1, 10).expect("material at the surface");
+        assert_eq!(
+            surface_mat,
+            crate::materials::index_of(&mats, "basalt"),
+            "the declared skin material must be what you stand on"
+        );
+    }
+
     /// The column-top CACHE must always equal what the authoritative top-down scan would return.
     ///
     /// `surface_top_voxel` went from an O(height) scan to an O(1) lookup because it was 16.7% of the

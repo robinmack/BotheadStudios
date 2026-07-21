@@ -9,6 +9,17 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The surface is data (docs/54).** `world_def::GroundSurface` declares patch size, fbm octaves, relief
+  band, sea level and material strata; `world::generate_from` builds it; `Simulation` uses it.
+  **Output-neutral** — the declared defaults are voxel-identical to the old hardcoded patch, asserted by
+  test, with the converse asserted per dial. `world::terrain_height_with` is the declared-relief form;
+  `terrain_height`/`generate` remain as shims on the defaults.
+- **Mistyped definition keys are refused** (`deny_unknown_fields` on the ground/impact schema). serde
+  ignores unknown fields by default, so a typo silently ran a different world than the file described.
+- **`run-definition` accounts for every grain** — created / returned to voxels / in flight / **lost
+  off-patch** — because "0 particles" cannot distinguish de-resolution (matter conserved) from the
+  off-patch cull (matter deleted). Measured: 96 m patch 0.0% lost, 48 m patch 28.8% (ledger row 9).
+
 - **The engine runs from a DEFINITION (docs/53).** New `engine::simulation::Simulation` builds the voxel
   world, the shared `MatterSim` and the `ResolutionField` from a `"ground"` world and steps them — no
   scene struct, no canvas, no `wasm_bindgen`. New `GroundDef`/`GroundEvent` schema (`impact`, `ejecta`),

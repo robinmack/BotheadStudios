@@ -44,6 +44,7 @@ pub struct World {
 /// WITHOUT reintroducing a scene struct, which is the whole point of "standalone engine, external
 /// definitions": capability is exercised by data the engine loads.
 #[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
 pub struct GroundDef {
     /// Where the observer is (centred world coords). The camera decides REPRESENTATION, never existence
     /// (docs/49) — an event out of view is still computed, just analytically.
@@ -59,6 +60,107 @@ pub struct GroundDef {
     /// The events that make matter happen. Order is the order they are applied.
     #[serde(default)]
     pub events: Vec<GroundEvent>,
+    /// The SURFACE this ground is (docs/54). Omitted ⇒ the declared defaults, which reproduce the
+    /// constants `world::generate` used to hardcode.
+    ///
+    /// Named `surface`, not `terrain`: the terrain SCENE was deleted (docs/50) and must not appear to be
+    /// coming back. This is the engine's voxel ground — a core capability the scene merely used — now
+    /// declared by data instead of hardcoded.
+    #[serde(default)]
+    pub surface: GroundSurface,
+}
+
+/// **The surface patch, declared** (`docs/54`).
+///
+/// `world::generate` hardcoded all of this: patch size, the fbm octaves, the relief band, sea level and
+/// the material strata. That made the ground a fixed artefact of the engine — you could declare what
+/// HAPPENED on it (docs/53 events) but not what it WAS. Robin's requirement is that a scene carry
+/// "object definitions, assembly definitions, coordinates", which a surface plainly is.
+///
+/// **Not the same question as `Surface`.** That one names planet-scale RASTER data (landmask/elevation
+/// URLs, biomes) for `Terra`. This is a local PROCEDURAL patch. They converge the day real bathymetry
+/// feeds the patch — noted in docs/54 so the two are not quietly grown into rivals.
+///
+/// Every field defaults to the constant it replaced; `surface_defaults_reproduce_the_hardcoded_world`
+/// asserts it, so an omitted `terrain` block is the old world exactly.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct GroundSurface {
+    /// Patch size in voxels [W, H, D]. 1 voxel = 1 metre.
+    #[serde(default = "GroundSurface::default_size")]
+    pub size_voxels: [usize; 3],
+    /// Highest possible surface top (voxel-y). Headroom above it is air.
+    #[serde(default = "GroundSurface::default_base_top")]
+    pub base_top_m: f32,
+    /// Peak-to-valley relief of the heightfield (m).
+    #[serde(default = "GroundSurface::default_amplitude")]
+    pub amplitude_m: f32,
+    /// Sea-level datum (voxel-y): water fills air below this, above the seabed.
+    #[serde(default = "GroundSurface::default_sea_level")]
+    pub sea_level_m: f32,
+    /// The fbm octaves that shape the relief. Weights should sum to 1 so the result stays in 0..1.
+    #[serde(default = "GroundSurface::default_octaves")]
+    pub octaves: Vec<Octave>,
+    /// The material column, top-down: a skin, then bands. The LAST entry fills everything beneath.
+    #[serde(default = "GroundSurface::default_strata")]
+    pub strata: Vec<Stratum>,
+}
+
+/// One fbm octave: a spatial frequency and its weight.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Octave {
+    pub frequency: f32,
+    pub weight: f32,
+}
+
+/// One material band in the column. `thickness_m` is `None` for the bottom-most, which fills the rest.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Stratum {
+    /// Material id in `data/materials.json` (e.g. "grass", "basalt", "peridotite", "iron").
+    pub material: String,
+    #[serde(default)]
+    pub thickness_m: Option<i32>,
+}
+
+impl GroundSurface {
+    /// The default octaves, reachable from `world` so the relief law has ONE definition.
+    pub fn default_octaves_pub() -> Vec<Octave> { Self::default_octaves() }
+    fn default_size() -> [usize; 3] { [96, 96, 96] }
+    fn default_base_top() -> f32 { 88.0 }   // H - 8: eight voxels of headroom
+    fn default_amplitude() -> f32 { 34.0 }
+    fn default_sea_level() -> f32 { 64.0 }
+    fn default_octaves() -> Vec<Octave> {
+        vec![
+            Octave { frequency: 0.026, weight: 0.55 }, // map-wide hills and valleys
+            Octave { frequency: 0.062, weight: 0.30 }, // individual slopes
+            Octave { frequency: 0.13,  weight: 0.15 }, // surface texture
+        ]
+    }
+    fn default_strata() -> Vec<Stratum> {
+        // Earth's real radial order as a DECLARED vertical LOD: thicknesses are compressed into the
+        // patch (real crust is 0.4% of the radius) so a dig exposes honest strata. Material ORDER is real.
+        vec![
+            Stratum { material: "grass".into(),      thickness_m: Some(1) },
+            Stratum { material: "basalt".into(),     thickness_m: Some(12) },
+            Stratum { material: "peridotite".into(), thickness_m: Some(22) },
+            Stratum { material: "iron".into(),       thickness_m: None },
+        ]
+    }
+}
+
+impl Default for GroundSurface {
+    fn default() -> Self {
+        GroundSurface {
+            size_voxels: Self::default_size(),
+            base_top_m: Self::default_base_top(),
+            amplitude_m: Self::default_amplitude(),
+            sea_level_m: Self::default_sea_level(),
+            octaves: Self::default_octaves(),
+            strata: Self::default_strata(),
+        }
+    }
 }
 
 impl GroundDef {
@@ -109,6 +211,7 @@ impl GroundEvent {
 /// **Every field defaults to the constant it replaced**, so a world that omits it is bit-identical to
 /// the old hardcoded path; `impact_defaults_reproduce_the_hardcoded_constants` pins that.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ImpactDef {
     /// The target (proto-Earth).
     #[serde(default = "ImpactDef::default_target")]
@@ -138,6 +241,7 @@ pub struct ImpactDef {
 
 /// One body in an `"impact"` world: a differentiated sphere given by its core/surface radii.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ImpactBody {
     /// Core radius (m) — the iron core boundary.
     pub core_radius_m: f64,
@@ -441,6 +545,21 @@ mod tests {
         assert_eq!(d.impactor.radius_m, 2.7e6);
         assert_eq!(d.impactor.core_radius_m, 0.5 * 2.7e6);
         assert_eq!(d.impactor.core_lod_factor, 1.0, "the impactor is uniform-resolution");
+    }
+
+    /// A MISTYPED key must be an error, not a silent fallback. serde ignores unknown fields by default,
+    /// so `"terrian"` (or a field renamed in the engine) would quietly leave the declared value at its
+    /// default and run a DIFFERENT world than the file describes — with nothing to see. This bit during
+    /// the `terrain` → `surface` rename: a test went red only because it asserted the world's SHAPE.
+    #[test]
+    fn a_mistyped_key_is_refused_rather_than_silently_defaulted() {
+        let err = World::parse(
+            r#"{"name":"typo","type":"ground","ground":{"terrian":{"amplitude_m":0.0}}}"#)
+            .expect_err("an unknown key must be rejected");
+        assert!(err.contains("terrian") || err.contains("unknown"), "the error must name it: {err}");
+        // And the correct spelling still parses.
+        World::parse(r#"{"name":"ok","type":"ground","ground":{"surface":{"amplitude_m":0.0}}}"#)
+            .expect("the real field still works");
     }
 
     /// A world file that omits `impact` entirely, or gives it partially, must still be the declared

@@ -3,6 +3,55 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-21 — the surface itself becomes data (docs/54)
+
+**What.** `world_def::GroundSurface` declares what the ground IS — patch size, the fbm octaves, the
+relief band, sea level, and the material strata — and `world::generate_from` builds it. All of that was
+hardcoded in `world::generate`, so every ground world was the same 96 m patch with the same hills.
+
+**The laws did not move.** How strata stack, how water fills air below the datum, how the heightfield is
+sampled, what makes a column collapse: still the engine's. The file says what this ground IS; the engine
+says how ground BEHAVES.
+
+**Named `GroundSurface`, not `TerrainDef`** — Robin queried "why are you working on TERRAIN?" and the
+name was the reason. The terrain SCENE is deleted and staying deleted; this is the engine's voxel ground,
+a core capability that scene merely used. When terrain is rebuilt it should be a ground DEFINITION, not a
+scene struct. Also distinct from `world_def::Surface` (Terra's planet-scale raster data) — a merge to
+make deliberately one day, not to let happen by accident.
+
+**Output-neutral, and proven to drive.** `surface_defaults_reproduce_the_hardcoded_world` asserts the
+declared defaults give a VOXEL-IDENTICAL world to `generate`; `changing_the_declared_surface_changes_the_world`
+asserts the converse per dial — size, amplitude (zero ⇒ provably flat), octaves, sea level (zero ⇒ no
+water), skin material (what you stand on). Without the second the schema could be decoration.
+
+**★ A mistyped key is now an error.** serde ignores unknown fields by default, so `"terrian"` would
+silently leave the value at its default and run a DIFFERENT world than the file describes, with nothing
+to see. This bit for real during the `terrain` → `surface` rename: the test went red ONLY because it
+asserted the world's SHAPE, not because the key was wrong. `deny_unknown_fields` now covers the ground
+and impact schema, with a test naming the failure. For a data-driven engine this is the same hollow-green
+shape as a test that asserts a state change without asserting the effect.
+
+**★ Matter accounting, and what two worlds showed.** `run-definition` now reports every grain, because
+"0 particles" is ambiguous — de-resolution (conserved) and the off-patch cull (deleted) look identical.
+
+| definition | patch | created | returned | in flight | lost |
+|---|---|---|---|---|---|
+| `ejecta-ground` | 96 m | 260 | 260 | 0 | **0 (0.0%)** |
+| `small-island` | 48 m | 6,328 | 3,535 | 971 | **1,822 (28.8%)** |
+
+The big patch conserves matter exactly. The half-size one loses ~29%: an energetic impact throws ejecta
+past the domain boundary. That is ledger row 9, previously measured at ~2% on the big patch and never at
+a small one — a property of the DOMAIN, not the physics, and now measurable per definition. A user of
+this engine can check whether their world conserves matter before trusting it.
+
+**Verified.** 259/259 native (+4) + 19 skipped; native and wasm clean; **both browser scenes rig-verified
+rendering** (birth 66,469 B, terra 64,003 B) — the browser stays first-class (Robin: wasm "is the
+beginning"; native is the longer game, not a migration).
+
+**Still headless.** Nothing here is visible, and a game engine earns users by being seen working. Next: a
+browser scene that renders a ground world FROM a definition — which also gives the granular GPU pipeline
+a visible consumer again (today it is reachable only from `GpuProbe`). That is the rebuilt terrain.
+
 ## 2026-07-21 — the engine driven by a definition; ledger row 15 CLOSED (docs/53)
 
 **What.** `crate::simulation::Simulation` — the engine builds a world, applies declared matter events
