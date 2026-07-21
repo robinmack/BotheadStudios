@@ -3,7 +3,32 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
-## 2026-07-20 — the core resolution controller: camera drives granularity, necessity drives existence (docs/49)
+## 2026-07-20 — resolution controller, THREE modes: math off-camera, simulate + render in view (docs/49)
+
+**What.** Refined the controller (same day it landed) from a two-state resolve/bulk decision to THREE
+regimes, per Robin: existence is the physics'; the camera chooses the REPRESENTATION — cheap MATH for
+active physics that is not visible, particle SIMULATION + render for active physics in view. `ACTIVE ×
+IN-VIEW → {Bulk, Analytic, Resolved}` (`resolution::ResolutionMode`). Still 233 tests (6 controller tests
+rewritten), wasm clean.
+
+**The model.** Bulk = no active physics (rendered at camera LOD). Analytic = active but off-camera:
+compute the effect with math and PROPAGATE it (docs/28's giant-impact ejection is exactly this), no
+particles. Resolved = active AND in view: simulate + render, at the finer of camera and physics
+granularity. The Moon slamming the far side of the planet is Analytic (energy known); its ejecta flips to
+Resolved the frame it arcs into view — regions are re-queried every frame, so "render the effects as they
+come into view" is automatic.
+
+**It also CORRECTED the first cut.** The two-state version resolved for camera-closeness alone, which
+would simulate undisturbed static ground just because you walked up to it. Wrong: simulation is for ACTIVE
+physics that is visible; static ground stays Bulk (rendered finely). The invariant sharpens — active
+physics off-camera is never Bulk, it is at least Analytic (computed): the camera changes the
+representation, never whether the physics is true (test: a far-side impact at 6,000 km is Analytic).
+
+**Still not wired** (docs/49 §5) — decision policy only; nothing calls `decide()` to compute/materialize
+yet. The Analytic→Resolved hand-off (materialize an incoming analytic effect as it enters view) is the
+crux of the wiring and maps onto the existing docs/28 analytic ejection + docs/39 particalization.
+
+## (superseded same day) the core resolution controller: camera drives granularity, necessity drives existence (docs/49)
 
 **What.** `crate::resolution::ResolutionController` — the decision policy Robin named a default core engine
 feature: one controller every scene holds, deciding whether matter resolves into particles and how fine.

@@ -102,10 +102,16 @@ pub fn contact_patch(load_n: f64, area_m2: f64) -> (f64, f64) {
 /// A region's inputs to the resolution decision. All SI.
 #[derive(Clone, Copy, Debug)]
 pub struct RegionQuery {
-    /// Distance from the camera to the region (m). Sets the camera-granularity term.
+    /// Distance from the camera to the region (m). Sets the camera-granularity term when Resolved.
     pub distance_to_camera: f64,
+    /// Is this region within the camera's view? The scene computes it (frustum + occlusion). This is
+    /// what chooses MATH vs SIMULATION for active physics — NOT whether the physics happens. An effect
+    /// that was Analytic off-view flips to Resolved the frame it enters view (docs/49): "render the
+    /// effects as/when they come into view".
+    pub in_view: bool,
     /// Depth the resolution is physically NECESSARY to (m), from [`admission_depth`] (quasi-static) or
-    /// the impact footprint (`damage.rs`). `> 0` => physics demands resolution here, watched or not.
+    /// the impact footprint (`damage.rs`), OR the marker of an analytically-propagated effect present
+    /// here. `> 0` => ACTIVE PHYSICS here, watched or not — existence, camera-independent.
     pub necessity_depth: f64,
     /// The grain radius the active interaction NEEDS (m), from [`crate::granular::grain_radius_for`] — a
     /// tyre patch ~1 cm, ejecta ~metres. `None` when no interaction constrains granularity (then it is
@@ -113,13 +119,18 @@ pub struct RegionQuery {
     pub interaction_grain: Option<f64>,
 }
 
-/// What the controller decided for a region.
+/// How a region is computed and shown (docs/49). Three regimes, chosen by ACTIVE-PHYSICS × IN-VIEW:
+/// existence is decided by the physics (necessity), the camera only chooses math vs simulation.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ResolutionDecision {
-    /// Resolve this region into particles at all?
-    pub resolve: bool,
-    /// If `resolve`, the grain RADIUS to resolve at (m); `0.0` when not resolving.
-    pub grain_radius: f64,
+pub enum ResolutionMode {
+    /// No active physics: the cheap bulk model IS the answer (rendered at whatever LOD the camera wants).
+    Bulk,
+    /// Active physics that is NOT in view: compute it with MATH (analytic/declared propagation — e.g.
+    /// `docs/28` giant-impact ejection), no particles, no render. The Moon slamming the far side of the
+    /// planet is here: energy known, effects propagated cheaply until they reach the camera's view.
+    Analytic,
+    /// Active physics IN VIEW: particle SIMULATION + render, at the camera-appropriate granularity.
+    Resolved { grain_radius: f64 },
 }
 
 /// The engine-level resolution controller. Default-constructed by every scene; the fidelity knob
@@ -161,33 +172,30 @@ impl ResolutionController {
         (distance.max(0.0) * self.angular_resolution).max(self.min_grain_radius)
     }
 
-    /// **The decision.** Composes the two axes with the camera-may-only-refine rule.
-    pub fn decide(&self, q: RegionQuery) -> ResolutionDecision {
-        let must_exist = q.necessity_depth > 0.0; // physics demands it — watched or not
-        let cam_grain = self.camera_grain_radius(q.distance_to_camera);
-        // The camera adds VISUAL resolution only where the bulk model is too coarse to look right from
-        // here — i.e. where a camera-acceptable grain is finer than the bulk already represents.
-        let visible_detail = cam_grain < self.bulk_grain_radius;
-
-        if !must_exist && !visible_detail {
-            // Far enough that bulk looks right, and no physical need: the cheap model IS the answer.
-            return ResolutionDecision { resolve: false, grain_radius: 0.0 };
+    /// **The decision** (docs/49). Existence is the physics'; the camera only chooses HOW to compute it.
+    ///   - no active physics                     => `Bulk`
+    ///   - active physics, NOT in view           => `Analytic` (cheap math; camera does NOT gate existence)
+    ///   - active physics, in view               => `Resolved` at the camera-appropriate granularity
+    pub fn decide(&self, q: RegionQuery) -> ResolutionMode {
+        let active = q.necessity_depth > 0.0; // existence — watched or not
+        if !active {
+            return ResolutionMode::Bulk;
         }
-
-        // Resolve. Granularity = the FINER of what each axis needs (satisfying both), never finer than the
-        // floor nor coarser than the bulk. Necessity pins granularity to the PHYSICS need even when the
-        // camera is far (an unwatched interaction resolves at the scale the physics requires), so
-        // `interaction_grain` is honoured regardless of `visible_detail`; the camera term only makes it
-        // FINER when close.
+        if !q.in_view {
+            // The far-side impact: real, but nobody is looking. Compute it with math and propagate its
+            // effects; simulate none of it. This is the win — math is far cheaper than particles, and the
+            // camera legitimately chooses it WITHOUT gating whether the physics happens.
+            return ResolutionMode::Analytic;
+        }
+        // In view AND active: simulate. Granularity is the FINER of what the interaction needs and what
+        // the camera can resolve at this distance — satisfying both — clamped to [floor, bulk].
         let mut grain = self.bulk_grain_radius;
         if let Some(g) = q.interaction_grain {
             grain = grain.min(g);
         }
-        if visible_detail {
-            grain = grain.min(cam_grain);
-        }
+        grain = grain.min(self.camera_grain_radius(q.distance_to_camera));
         grain = grain.clamp(self.min_grain_radius, self.bulk_grain_radius);
-        ResolutionDecision { resolve: true, grain_radius: grain }
+        ResolutionMode::Resolved { grain_radius: grain }
     }
 }
 
@@ -249,115 +257,93 @@ mod tests {
         assert_eq!(admission_depth(p, a, 10.0e6), 0.0, "but basalt is still exactly zero");
     }
 
-    // ---- the core resolution controller ----
+    // ---- the core resolution controller (docs/49, three modes) ----
 
-    /// **Camera drives granularity — the screen-space bound (docs/13).** A grain finer than one
-    /// subtending the angular threshold is sub-pixel; the acceptable grain grows linearly with distance.
+    fn q(dist: f64, in_view: bool, necessity: f64, grain: Option<f64>) -> RegionQuery {
+        RegionQuery { distance_to_camera: dist, in_view, necessity_depth: necessity, interaction_grain: grain }
+    }
+
+    /// **Camera drives granularity — the screen-space bound (docs/13).** Linear in distance; floored.
     #[test]
     fn camera_granularity_is_the_screen_space_bound() {
         let c = ResolutionController::default();
-        let near = c.camera_grain_radius(2.0);
-        let far = c.camera_grain_radius(200.0);
-        assert!(far > near, "twice as far must tolerate a coarser grain");
-        assert!((far / near - 100.0).abs() < 1.0e-6, "grain is LINEAR in distance (100x farther, 100x)");
+        let (near, far) = (c.camera_grain_radius(2.0), c.camera_grain_radius(200.0));
+        assert!((far / near - 100.0).abs() < 1.0e-6, "grain is LINEAR in distance");
         assert!((near - 2.0 * c.angular_resolution).abs() < 1.0e-12, "grain = distance * angular_res");
-        // The floor holds at the surface: a camera at zero distance cannot demand infinitely fine grains.
-        assert_eq!(c.camera_grain_radius(0.0), c.min_grain_radius);
+        assert_eq!(c.camera_grain_radius(0.0), c.min_grain_radius, "floored at the surface");
     }
 
-    /// **THE invariant: the camera may REFINE but never GATE existence (docs/44 section 1, docs/30).**
-    /// An unwatched region where physics demands resolution STILL resolves — looking away must not change
-    /// what is true. This is the charter rule the whole controller exists to enforce.
+    /// No active physics => Bulk, at ANY distance. Static undisturbed ground is not simulated just
+    /// because the camera is close — it is rendered from the bulk model. (The flaw the three-mode model
+    /// corrected: camera-closeness alone must NOT trigger simulation.)
     #[test]
-    fn necessity_resolves_even_when_the_camera_is_infinitely_far() {
+    fn no_active_physics_is_always_bulk() {
         let c = ResolutionController::default();
-        // A wheel is sinking (necessity_depth > 0) but the camera is 100 km away and the region is far
-        // below the visible-detail threshold — bulk would look fine from here.
-        let d = c.decide(RegionQuery {
-            distance_to_camera: 100_000.0,
-            necessity_depth: 0.1, // physics demands resolution
-            interaction_grain: Some(0.01), // a ~1 cm contact patch
-        });
-        assert!(d.resolve, "an unwatched sinking wheel MUST still resolve — the camera cannot gate physics");
-        // And it resolves at the PHYSICS granularity (1 cm), not the coarse camera grain, because
-        // necessity pins granularity to what the interaction needs regardless of viewpoint.
-        assert!((d.grain_radius - 0.01).abs() < 1.0e-9, "unwatched necessity resolves at the physics scale");
+        assert_eq!(c.decide(q(10_000.0, false, 0.0, None)), ResolutionMode::Bulk, "far, nothing happening");
+        assert_eq!(c.decide(q(0.5, true, 0.0, None)), ResolutionMode::Bulk, "camera at the surface, but static");
     }
 
-    /// The null case (docs/44 section 7), now for the controller: far away, no physical need, bulk looks
-    /// right — resolve NOTHING. The cheap half of the whole idea, and it must be exactly free.
+    /// **The invariant: the camera does not gate EXISTENCE, only representation (docs/44 §1, docs/30).**
+    /// Active physics off-camera is never Bulk — it is computed by MATH (Analytic). The physics happens;
+    /// the camera chose the cheaper representation.
     #[test]
-    fn far_and_unnecessary_resolves_nothing() {
+    fn active_physics_off_camera_is_analytic_not_bulk() {
         let c = ResolutionController::default();
-        let d = c.decide(RegionQuery {
-            distance_to_camera: 10_000.0, // camera grain here (10 m) >> bulk (0.5 m): bulk looks fine
-            necessity_depth: 0.0,
-            interaction_grain: None,
-        });
-        assert!(!d.resolve, "no necessity and bulk-looks-right ⇒ the bulk model IS the answer");
-        assert_eq!(d.grain_radius, 0.0);
+        let m = c.decide(q(100_000.0, false, 0.1, Some(0.01)));
+        assert_eq!(m, ResolutionMode::Analytic, "an unwatched sinking wheel is COMPUTED, not ignored");
+        assert_ne!(m, ResolutionMode::Bulk, "camera absence must never turn active physics into nothing");
     }
 
-    /// Camera-only resolution: no physics need, but the camera is close enough that the bulk model is
-    /// visibly too coarse. Resolve for VISUAL fidelity, at the camera granularity — and finer as it nears.
+    /// **The Moon example (Robin, 2026-07-20).** The Moon slams the FAR side of the planet — real impact,
+    /// known energy, but off-camera => Analytic (math, no particles). Its ejecta arcs over the horizon;
+    /// the region it enters is active AND in view => Resolved (simulate + render). "Render the effects
+    /// as/when they come into view."
     #[test]
-    fn a_close_camera_resolves_for_visual_fidelity_and_refines_with_proximity() {
+    fn a_far_side_impact_is_analytic_and_its_ejecta_resolves_as_it_enters_view() {
         let c = ResolutionController::default();
-        let q = |dist: f64| c.decide(RegionQuery {
-            distance_to_camera: dist,
-            necessity_depth: 0.0,
-            interaction_grain: None,
-        });
-        // At 100 m the camera grain (0.1 m) is finer than bulk (0.5 m) ⇒ resolve for visual detail.
-        let mid = q(100.0);
-        assert!(mid.resolve && (mid.grain_radius - 0.1).abs() < 1.0e-9, "visual resolve at camera grain");
-        // Closer ⇒ finer.
-        let close = q(10.0);
-        assert!(close.grain_radius < mid.grain_radius, "moving closer must refine the grain");
-        // Right at the surface, the floor caps it — not infinitely fine.
-        assert!(q(0.0).grain_radius >= c.min_grain_radius);
+        // Far side of the impact: active, not in view.
+        assert_eq!(c.decide(q(6_000_000.0, false, 500.0, None)), ResolutionMode::Analytic);
+        // The ejecta blanket, now arriving in the camera's view a few km away: active AND in view.
+        match c.decide(q(3_000.0, true, 500.0, Some(0.5))) {
+            ResolutionMode::Resolved { grain_radius } => {
+                assert!(grain_radius > 0.0 && grain_radius <= c.bulk_grain_radius);
+            }
+            other => panic!("ejecta entering view must Resolve (simulate + render), got {other:?}"),
+        }
     }
 
-    /// **Composition = the FINER of the two axes.** When both a physics interaction and a close camera
-    /// constrain granularity, the result must satisfy BOTH — i.e. be as fine as the stricter one.
+    /// Active + in view => Resolved at the FINER of camera and physics granularity (satisfying both).
     #[test]
-    fn granularity_is_the_finer_of_camera_and_physics() {
+    fn in_view_active_resolves_at_the_finer_granularity() {
         let c = ResolutionController::default();
-        // Physics wants 1 cm; camera at 100 m tolerates 10 cm. The finer (1 cm) must win.
-        let physics_stricter = c.decide(RegionQuery {
-            distance_to_camera: 100.0,
-            necessity_depth: 0.05,
-            interaction_grain: Some(0.01),
-        });
-        assert!((physics_stricter.grain_radius - 0.01).abs() < 1.0e-9, "the 1 cm physics need wins");
-        // Physics wants 20 cm; camera at 5 m tolerates 5 mm. Now the CAMERA is stricter and wins.
-        let camera_stricter = c.decide(RegionQuery {
-            distance_to_camera: 5.0,
-            necessity_depth: 0.05,
-            interaction_grain: Some(0.20),
-        });
-        assert!(camera_stricter.grain_radius < 0.20, "a close camera refines below the physics need");
-        assert!((camera_stricter.grain_radius - c.camera_grain_radius(5.0)).abs() < 1.0e-9);
+        // Physics wants 1 cm; camera at 100 m tolerates 10 cm. The finer (1 cm) wins.
+        match c.decide(q(100.0, true, 0.05, Some(0.01))) {
+            ResolutionMode::Resolved { grain_radius } => {
+                assert!((grain_radius - 0.01).abs() < 1.0e-9, "the 1 cm physics need wins")
+            }
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+        // Physics wants 20 cm; camera at 5 m tolerates 5 mm. The camera is stricter and wins.
+        match c.decide(q(5.0, true, 0.05, Some(0.20))) {
+            ResolutionMode::Resolved { grain_radius } => {
+                assert!((grain_radius - c.camera_grain_radius(5.0)).abs() < 1.0e-9, "a close camera refines")
+            }
+            other => panic!("expected Resolved, got {other:?}"),
+        }
     }
 
-    /// Grain is never coarser than the bulk (resolving coarser than the bulk buys nothing) and never
-    /// finer than the floor — the two clamps that keep the decision bounded.
+    /// Resolved granularity stays within [floor, bulk]: never coarser than the bulk (buys nothing), never
+    /// finer than the floor (a resolution IOU).
     #[test]
-    fn granularity_stays_between_the_floor_and_the_bulk_scale() {
+    fn resolved_granularity_stays_between_floor_and_bulk() {
         let c = ResolutionController::default();
-        // A huge interaction grain must not produce a grain coarser than the bulk.
-        let coarse = c.decide(RegionQuery {
-            distance_to_camera: 200.0,
-            necessity_depth: 0.05,
-            interaction_grain: Some(100.0),
-        });
-        assert!(coarse.resolve && coarse.grain_radius <= c.bulk_grain_radius + 1.0e-12);
-        // A camera pressed to the surface cannot go below the floor.
-        let fine = c.decide(RegionQuery {
-            distance_to_camera: 0.0,
-            necessity_depth: 0.05,
-            interaction_grain: Some(1.0e-9),
-        });
-        assert!(fine.grain_radius >= c.min_grain_radius - 1.0e-15);
+        match c.decide(q(200.0, true, 0.05, Some(100.0))) {
+            ResolutionMode::Resolved { grain_radius } => assert!(grain_radius <= c.bulk_grain_radius + 1e-12),
+            other => panic!("{other:?}"),
+        }
+        match c.decide(q(0.0, true, 0.05, Some(1.0e-9))) {
+            ResolutionMode::Resolved { grain_radius } => assert!(grain_radius >= c.min_grain_radius - 1e-15),
+            other => panic!("{other:?}"),
+        }
     }
 }
