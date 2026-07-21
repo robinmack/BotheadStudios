@@ -9,6 +9,19 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **`GpuParticles` is `crate::gpu_particles`** — the GPU particle container moved out of
+  `#[cfg(target_arch = "wasm32")] mod app` into a scene-agnostic module compiled on every target, and
+  took its own configuration with it: `GRID_TABLE_SIZE`, `GRID_BUCKET_K` and `MAX_PARTICLES` are now the
+  container's, not the terrain scene's. Sibling of `gpu_sph`, which is the precondition for hosting both
+  pipelines on one allocator/render path (docs/33); the solvers stay specialized (docs/46 §1).
+  **Behavioural change: none.** lib.rs 6,031 → 5,684.
+- **New `WORKGROUP` constant, pinned to the shader.** `dispatch` mirrored `@workgroup_size(64)` with a
+  bare literal in two places; a mismatch would silently under- or over-dispatch (under-dispatch = a tail
+  of grains that never steps, with no error). Now named and checked against every `@compute` entry point
+  in `particle_step.wgsl`.
+- **New rig `web/rig/debris_container.mjs`** — exercises the container end to end in the live scene
+  (meteor → append → step → readback → de-resolution), which a static terrain screenshot does not.
+
 - **`gpu_sph` compiles natively; its shader layouts are pinned in-crate.** The module was
   `#[cfg(target_arch = "wasm32")]` because of exactly one line — an `Rc<Cell<bool>>` in a `map_async`
   callback, which wgpu bounds by `WasmNotSend` (a no-op on wasm, `Send` elsewhere). Now

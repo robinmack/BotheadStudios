@@ -119,6 +119,16 @@ not exist and rebuild them; they are real, tested, and partly wired.
   `accelerations` (`:210`), `relax_step` (`:235`), `forces_and_dudt` (`:250`), `step` (`:295`, KDK),
   `courant_dt` (`:316`), `rms_radius` (`:344`). **Used only by `gpu_sph.rs`** (CPU-side build + relax before
   GPU upload) and the native tools; not referenced from `lib.rs` except through `gpu_sph`.
+- **gpu_particles.rs** (446, 2 tests) — **THE GPU particle container** (granular): a storage buffer of
+  `GpuParticle` stepped by `shaders/particle_step.wgsl` and rendered from the SAME buffer (zero-copy
+  sim↔render). `GpuParticles` — `new`, `upload_heightfield`, `append`, `dispatch` (5 stages, each its own
+  compute pass for the cross-backend barrier), `expand` (1 grain → 8 render sub-cubes), `set_params`,
+  `begin_readback`/`take_readback` (two-phase async map), `replace`. Owns the spatial-hash config
+  (`GRID_TABLE_SIZE`, `GRID_BUCKET_K`) and the capacity (`MAX_PARTICLES`) its consumers build it with, plus
+  `WORKGROUP` (pinned to every `@workgroup_size` in the shader by test). Consumers: the terrain `Engine`
+  and `GpuProbe`. **Lifted out of `#[cfg(wasm32)] mod app` 2026-07-20** — it is neither scene-specific nor
+  wasm-specific, and living there kept a general container out of every native build. Sibling of
+  `gpu_sph.rs`: the two CONTAINERS are what converge (docs/33); their solvers stay specialized (docs/46 §1).
 - **gpu_sph.rs** (720, 4 layout tests; the PHYSICS is verified out-of-process by `tools/sph-verify`) — the in-browser GPU SPH
   stepper driving `shaders/sph_step.wgsl`; the most lib.rs-wired of the four. `GpuSph` (`:492`): `new`
   (`:520`), `upload` (`:598`), `encode_relax` (`:651`), `encode_kdk` (`:659`), `begin_readback` (`:671`),

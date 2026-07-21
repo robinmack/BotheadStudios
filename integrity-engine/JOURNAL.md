@@ -3,6 +3,42 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-20 — the GPU particle CONTAINER lifted out of `mod app` (docs/33)
+
+**What.** `GpuParticles` — the granular GPU container (storage buffer of grains stepped by
+`particle_step.wgsl`, rendered from the same buffer) — is now `crate::gpu_particles`, a scene-agnostic
+module compiled on every target, instead of 351 lines inside `#[cfg(target_arch = "wasm32")] mod app`
+next to the terrain `Engine`. It brought its own configuration with it: `GRID_TABLE_SIZE`,
+`GRID_BUCKET_K` and `MAX_PARTICLES` were scene constants describing the container, and are now the
+container's. lib.rs 6,031 → 5,684. 242 tests (was 240), wasm clean.
+
+**Why.** Two containers cannot be unified while only one of them compiles in a given build. This is the
+convergence step of docs/33, and the sibling of the `gpu_sph` lift earlier the same day — the same single
+`Rc<Cell<bool>>` in a `map_async` callback was the only thing here requiring wasm, too. Nothing about
+this code is scene-specific (`GpuProbe` was already a second consumer) or wasm-specific: wgpu's types
+exist without a backend, so it type-checks natively; running it still needs a browser. **The solvers stay
+specialized** — stiff granular contacts and SPH are genuinely different physics, which docs/46 §1
+sanctions. It is the duplicated CONTAINER that is the violation, and it is now one module away from
+`gpu_sph` in the same build.
+
+**It exposed another unguarded shader mirror.** `dispatch` turned a thread count into a workgroup count
+with a bare literal `64`, mirroring `@workgroup_size(64)` on all six compute entry points with nothing
+checking it. Raise the shader's size and the host under-dispatches: a TAIL OF GRAINS SILENTLY NEVER
+STEPS — physics that quietly stops for some matter, with no error anywhere. Named `WORKGROUP` and pinned
+by test; the test also asserts it parsed a non-zero number of entry points and that every `@compute` has
+a size, so it cannot pass vacuously.
+
+**Verified.** Both new guards proven able to fail: the workgroup test goes RED when one entry point is
+changed to `@workgroup_size(128)` (restored after). 242/242 native + 18 skipped, `cargo check
+--target wasm32-unknown-unknown` clean, `wasm-pack` clean, warning count unchanged (6). **Rig-watched
+with a purpose-built rig** (`web/rig/debris_container.mjs` — a static terrain shot barely touches the
+container, so it could not have caught a broken lift): fire a meteor, and debris goes 0 → **3,516** on
+impact (append), then falls monotonically 3,516 → 3,399 → 3,222 → **2,542** over 22 s as grains settle
+and de-resolve. That is append → step → expand → readback → de-resolution, the whole container lifecycle,
+through the lifted module. Screenshots show the resolved voxel patch with individual grains and ejecta
+streaks; probe and water intact. Build stamp checked against the rebuild (`20260720.205231`), per the
+stale-wasm trap recorded below.
+
 ## 2026-07-20 — the GPU host code was never wasm-only: one line hid 700 lines from the suite
 
 **What.** `gpu_sph.rs` compiles on **every** target now, not just wasm, and its three shader-facing
