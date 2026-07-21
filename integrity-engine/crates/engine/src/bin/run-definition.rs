@@ -58,6 +58,13 @@ fn main() {
         }
     }
     let voxels_after = solids(&sim.world);
+    // Full matter accounting. "0 particles" and "+N voxels" each tell half the story; what matters is
+    // whether every grain ended up SOMEWHERE. Grains that leave the patch are culled by `matter::step`
+    // (docs/46 ledger row 9, "matter leaks at the seam") and that loss is otherwise invisible.
+    let returned = voxels_after as i64 - voxels_before as i64;
+    let in_flight = sim.particle_count() as i64;
+    let created = sim.created_total() as i64;
+    let lost = created - returned - in_flight;
     println!(
         "after {steps} : {} particles, {} still analytic, {} resolved in total",
         sim.particle_count(),
@@ -65,8 +72,9 @@ fn main() {
         sim.resolved_total()
     );
     println!(
-        "matter     : {voxels_before} -> {voxels_after} solid voxels ({:+}) — grains that de-resolved \
-         returned to the world; any shortfall left the patch and was culled",
-        voxels_after as i64 - voxels_before as i64
+        "matter     : {created} grains created | {returned} returned to voxels | {in_flight} still in \
+         flight | {lost} LOST off-patch ({:.1}%)",
+        if created > 0 { 100.0 * lost as f64 / created as f64 } else { 0.0 }
     );
+    println!("voxels     : {voxels_before} -> {voxels_after}");
 }

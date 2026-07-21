@@ -1,0 +1,79 @@
+{
+  "name": "Small island",
+  "type": "ground",
+  "_note": "A DIFFERENT surface from the same engine: half-size patch, gentler relief, higher sea level, sand over basalt. Nothing in the engine changed to make this world. Impact y is in CENTRED coords (y=0 is mid-patch, not the surface) \u2014 a buried impact does nothing visible.",
+  "ground": {
+    "camera_m": [
+      0,
+      25,
+      0
+    ],
+    "view_radius_m": 40,
+    "gravity_ms2": 9.81,
+    "surface": {
+      "size_voxels": [
+        48,
+        96,
+        48
+      ],
+      "base_top_m": 80.0,
+      "amplitude_m": 20.0,
+      "sea_level_m": 70.0,
+      "octaves": [
+        {
+          "frequency": 0.05,
+          "weight": 0.7
+        },
+        {
+          "frequency": 0.15,
+          "weight": 0.3
+        }
+      ],
+      "strata": [
+        {
+          "material": "sand",
+          "thickness_m": 2
+        },
+        {
+          "material": "basalt",
+          "thickness_m": 20
+        },
+        {
+          "material": "iron",
+          "thickness_m": null
+        }
+      ]
+    },
+    "events": [
+      {
+        "kind": "impact",
+        "at_m": [
+          0,
+          32,
+          0
+        ],
+        "direction": [
+          0,
+          -1,
+          0
+        ],
+        "energy_j": 30000000.0
+      },
+      {
+        "kind": "ejecta",
+        "at_m": [
+          30,
+          50,
+          0
+        ],
+        "velocity_ms": [
+          -12,
+          0,
+          0
+        ],
+        "radius_m": 3.0,
+        "grain_radius_m": 0.5
+      }
+    ]
+  }
+}
