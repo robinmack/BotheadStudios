@@ -3,6 +3,48 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-20 — the render scaffolding lifted out of `mod app` (docs/33)
+
+**What.** `crate::render` — `GpuMesh`, `UniformSlot`, `Camera`, `Uniforms`/`SkyUniforms`/`InstanceRaw`,
+`DEPTH_FORMAT` and the generic helpers (`draw`, `uniform_entry`, `make_uniform_buffer`, `upload_mesh`,
+`create_depth_view`, `make_buffer`, `make_dynamic_mesh`) are now one scene-agnostic module. Third and
+last of the mechanical lifts (`gpu_sph` → `gpu_particles` → here). lib.rs 5,684 → 5,548; 242/242, wasm
+clean, warnings unchanged.
+
+**Why.** All three scenes use these identically — they were never terrain code, space-band code or globe
+code. They sat in `#[cfg(target_arch = "wasm32")] mod app` only because the scene structs do, which put
+shared scaffolding out of reach of every native build and made "which of these 5,000 lines is actually
+scene-specific?" unanswerable without reading them. What is left in `mod app` after this is the part
+that genuinely is per-scene: the scene structs, and the pipeline builders that each name a specific
+shader and bind-group layout. **`Camera` is the one that matters next** — the realignment gives every
+scene a camera accessor so the resolution controller (docs/49) can ask what is in view without knowing
+which scene it is looking at, and that needs one `Camera` type in one place.
+
+**Found while doing it: a charter violation, logged not fixed (docs/46 ledger row 13).** "What colour
+does matter at temperature T glow?" has TWO answers — `emission::incandescence` (docs/20, natively
+tested, premultiplied `[r,g,b]`) and a second copy inside `mod app` for the space band (returns
+`[r,g,b,intensity]`). They agree only on the 800 K threshold: one ramps `(T−800)/2200` with blue from
+2600 K, the other `(T−800)/2400` saturating at 3200 K with blue past `x>0.55`. At 2000 K that is
+`[0.545, 0.297, 0]` versus `[1.0, 0.5, 0.0]×0.6`. NOT unified here: collapsing them changes what the
+space band looks like, which deserves its own rig verification rather than riding along in a
+mechanical lift.
+
+**Verified.** 242/242 native + 18 skipped, wasm check + `wasm-pack` clean, warnings unchanged (6).
+**All three scenes rig-watched** with a new `web/rig/all_scenes.mjs` — terrain (hills, iron probe +
+shadow, water), birth (Earth as a particle aggregate, sun-lit terminator, Theia inbound) and Terra
+(globe with real continents/biomes), zero page errors, at the rebuilt wasm (`build 20260720.212820`).
+A render-scaffolding change is the one place a single-scene check is worthless, since all three draw
+through it via different pipelines.
+
+**Method note — the guard corrected me twice.** The rig's first "is it blank?" metric counted distinct
+32-bit words at sampled PNG offsets; it returned ~`bytes/997` every time, i.e. it counted its own
+samples and could never fail. Replaced with the compressed size of a canvas-only crop. Then the FLOOR
+was wrong too: I used a corner of the terra scene as the flat control and asserted the margin was "two
+orders of magnitude" — measured, it was **39,992 B vs 64,003 B, only 1.6×**, because the crop overlapped
+the globe. The control is now a blank page cropped identically: **1,883 B against 64–137 kB real
+renders**, a 34–73× margin. Both errors were the same shape, and the shape is the point: a check that
+cannot fail reports green forever.
+
 ## 2026-07-20 — the GPU particle CONTAINER lifted out of `mod app` (docs/33)
 
 **What.** `GpuParticles` — the granular GPU container (storage buffer of grains stepped by

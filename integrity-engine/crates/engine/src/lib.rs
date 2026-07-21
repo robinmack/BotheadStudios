@@ -47,6 +47,10 @@ mod gravity;
 mod hydrostatic;
 mod impact;
 mod planet;
+/// docs/33 — scene-agnostic render scaffolding (`GpuMesh`, `UniformSlot`, `Camera`, the uniform PODs and
+/// their helpers). Lifted out of `#[cfg(wasm32)] mod app`: all three scenes use these identically, so
+/// they were never scene code, and living there kept them out of every native build.
+mod render;
 mod resolution; // docs/44 — resolution by necessity: the quasi-static admission test
 mod tides;
 #[cfg(test)]
@@ -89,7 +93,6 @@ mod app {
     use wasm_bindgen::prelude::*;
     use web_sys::HtmlCanvasElement;
 
-    const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
     // Probe / simulation parameters.
     const SPAWN_HEIGHT: f32 = 12.0; // metres of clearance above the surface at spawn
@@ -213,52 +216,9 @@ mod app {
     const METEOR_MASS: f32 = 1_000.0; // kg (~0.3 m Fe-Ni body)
     const METEOR_SPEED: f32 = 17_000.0; // m/s (typical hypervelocity impact speed)
 
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct Uniforms {
-        view_proj: [[f32; 4]; 4],
-        model: [[f32; 4]; 4],
-        light_dir: [f32; 4],
-        camera_pos: [f32; 4],
-    }
-
-    /// Sky-pass uniforms — the per-pixel view ray (inverse view-projection), the sun direction (the
-    /// SAME light the terrain is lit by), and the declared atmosphere's Rayleigh optical depth + sun
-    /// gain. Everything the honest sky needs; nothing hand-painted. Matches `sky.wgsl`'s `SkyU`.
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct SkyUniforms {
-        inv_view_proj: [[f32; 4]; 4],
-        sun_dir: [f32; 4], // xyz = direction to the sun (world), normalized
-        tau: [f32; 4],     // xyz = Rayleigh optical depth per band, w = sun gain
-        camera_pos: [f32; 4],
-    }
-
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct InstanceRaw {
-        offset: [f32; 3],
-        color: [f32; 3],
-        emission: [f32; 3], // incandescent glow from temperature (docs/20); 0 for cold debris
-    }
-
-    struct Camera {
-        yaw: f32,
-        pitch: f32,
-        zoom: f32,
-        base_distance: f32,
-    }
-
-    struct GpuMesh {
-        vertex_buf: wgpu::Buffer,
-        index_buf: wgpu::Buffer,
-        index_count: u32,
-    }
-
-    struct UniformSlot {
-        buf: wgpu::Buffer,
-        bind: wgpu::BindGroup,
-    }
+    // Render scaffolding (Camera/GpuMesh/UniformSlot/Uniforms/... + the generic helpers) moved
+    // to `crate::render` (docs/33).
+    use crate::render::*;
 
     /// The engine handle exposed to JavaScript.
     #[wasm_bindgen]
@@ -1699,34 +1659,6 @@ mod app {
         }
     }
 
-    fn draw<'a>(pass: &mut wgpu::RenderPass<'a>, uni: &'a UniformSlot, mesh: &'a GpuMesh) {
-        pass.set_bind_group(0, &uni.bind, &[]);
-        pass.set_vertex_buffer(0, mesh.vertex_buf.slice(..));
-        pass.set_index_buffer(mesh.index_buf.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..mesh.index_count, 0, 0..1);
-    }
-
-    fn uniform_entry(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
-        wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        }
-    }
-
-    fn make_uniform_buffer(device: &wgpu::Device) -> wgpu::Buffer {
-        device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("uniforms"),
-            size: std::mem::size_of::<Uniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        })
-    }
 
     fn make_world_bind(
         device: &wgpu::Device,
@@ -2338,61 +2270,6 @@ mod app {
         probe.with_gravity(glam::DVec3::new(0.0, -surface_g, 0.0))
     }
 
-    fn upload_mesh(device: &wgpu::Device, label: &str, mesh: &Mesh) -> GpuMesh {
-        GpuMesh {
-            vertex_buf: make_buffer(
-                device,
-                label,
-                bytemuck::cast_slice(&mesh.vertices),
-                wgpu::BufferUsages::VERTEX,
-            ),
-            index_buf: make_buffer(
-                device,
-                label,
-                bytemuck::cast_slice(&mesh.indices),
-                wgpu::BufferUsages::INDEX,
-            ),
-            index_count: mesh.indices.len() as u32,
-        }
-    }
-
-    fn create_depth_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("depth"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        texture.create_view(&wgpu::TextureViewDescriptor::default())
-    }
-
-    fn make_buffer(
-        device: &wgpu::Device,
-        label: &str,
-        bytes: &[u8],
-        usage: wgpu::BufferUsages,
-    ) -> wgpu::Buffer {
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(label),
-            size: bytes.len() as u64,
-            usage,
-            mapped_at_creation: true,
-        });
-        buffer
-            .slice(..)
-            .get_mapped_range_mut()
-            .copy_from_slice(bytes);
-        buffer.unmap();
-        buffer
-    }
 
     // ============================================================================================
     // Space band (scale-relative "orbit-to-ground", Step A): render the Earth + Moon as two lit
@@ -4779,19 +4656,6 @@ mod app {
         })
     }
 
-    /// A GpuMesh whose vertex buffer is writable (VERTEX | COPY_DST) and pre-sized for `vert_capacity` vertices,
-    /// with a fixed index buffer. For geometry rebuilt every frame (the ground cap) — write vertices, don't
-    /// reallocate.
-    fn make_dynamic_mesh(device: &wgpu::Device, label: &str, vert_capacity: usize, indices: &[u32]) -> GpuMesh {
-        let vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(label),
-            size: (vert_capacity * std::mem::size_of::<Vertex>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let index_buf = make_buffer(device, label, bytemuck::cast_slice(indices), wgpu::BufferUsages::INDEX);
-        GpuMesh { vertex_buf, index_buf, index_count: indices.len() as u32 }
-    }
 
     /// The instanced particle pipeline for the GPU SPH impact (docs/33 stage 4c.4). One camera-facing
     /// billboard quad per particle, generated in the vertex shader; the instance buffer is the `sph_step.wgsl`

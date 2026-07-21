@@ -9,6 +9,16 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **`crate::render`** — the scene-agnostic render scaffolding (`GpuMesh`, `UniformSlot`, `Camera`, the
+  uniform PODs, `DEPTH_FORMAT`, and the generic buffer/mesh/depth helpers) lifted out of
+  `#[cfg(target_arch = "wasm32")] mod app`. All three scenes used these identically. **Behavioural
+  change: none.** lib.rs 5,684 → 5,548. Completes the three mechanical lifts (`gpu_sph`,
+  `gpu_particles`, `render`); what remains in `mod app` is genuinely per-scene.
+- **docs/46 ledger row 13** — incandescence has two curves (`emission::incandescence` vs a private copy
+  in the space band). Logged with evidence, not unified: it is a visual change needing its own verification.
+- **New rig `web/rig/all_scenes.mjs`** — shoots terrain + birth + terra in one run with a blank-page
+  control, for changes to shared render code where a single-scene check proves nothing.
+
 - **`GpuParticles` is `crate::gpu_particles`** — the GPU particle container moved out of
   `#[cfg(target_arch = "wasm32")] mod app` into a scene-agnostic module compiled on every target, and
   took its own configuration with it: `GRID_TABLE_SIZE`, `GRID_BUCKET_K` and `MAX_PARTICLES` are now the
