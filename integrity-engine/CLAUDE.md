@@ -79,10 +79,12 @@ is being refactored toward is [`docs/33-architecture-realignment.md`](docs/33-ar
 2. **NEVER run `cargo fmt`** — the crate isn't rustfmt-conformant; it reformats the whole tree. Edit by
    hand. (`CONTRIBUTING.md` says otherwise for outside contributors; the working rule is do-not-run.)
 3. **Test:** `bash scripts/test.sh --fast [filter]` (inner loop) · full `bash scripts/test.sh` before any
-   deploy (~186 run by default, of 204 written). O(n²) measurement tests are `#[ignore]` (18 of them —
+   deploy (240 run by default). O(n²) measurement tests are `#[ignore]` (18 of them —
    `hydrostatic.rs` 9, `impact.rs` 8, `aggregate.rs` 1; run `--ignored`). Accelerated code is always pinned
-   to its exact/brute-force reference so speed never changes the answer. Note `gpu_sph.rs` has **no in-crate
-   tests** — it is verified out-of-process by `tools/sph-verify`.
+   to its exact/brute-force reference so speed never changes the answer. `gpu_sph.rs`'s PHYSICS is still
+   verified out-of-process by `tools/sph-verify` (which carries its own replica of the structs), but the
+   module is no longer invisible to the suite: it compiles on every target since 2026-07-20, and its three
+   shader-facing layouts are pinned to `sph_step.wgsl` in-crate.
 4. **Rig-watch every visual claim** (Law: physics drives the render — verify the render). `npm run wasm`
    + serve (`npx vite` in `web/`), start the GPU-backed X server ONCE with
    `scripts/start-render-xorg.sh`, then `scripts/rigshot.sh <scene>.mjs`. That wrapper composites a real

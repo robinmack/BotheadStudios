@@ -52,8 +52,10 @@ first-class question when picking up any stage.
 
 - **Stage 4c — largely landed.** `gpu_sph.rs` (710) is real and **is** wired: `OrbitDemo` owns a `GpuSph`
   (`lib.rs:2828`, ~11 call sites) driving `shaders/sph_step.wgsl` in-browser, with `sph_render.wgsl` drawing
-  the physics buffer zero-copy. Caveat: `gpu_sph.rs` has **0 in-crate tests** by design — its correctness
-  lives entirely in `tools/sph-verify`, so changes there are unguarded unless that tool is run.
+  the physics buffer zero-copy. Caveat (narrowed 2026-07-20): its PHYSICS still lives entirely in
+  `tools/sph-verify`, so behavioural changes are unguarded unless that tool is run — but the module is no
+  longer wasm-only, so its shader-facing LAYOUTS are now pinned in-crate. That gate turned out to rest on
+  a single `Rc<Cell<bool>>`, and hid a real drift: the shader's `omega` was mirrored as `_p0`.
 - **GPU Barnes–Hut — built, verified, NOT wired.** `bh_gravity.wgsl` (317) + `tools/gpu-bh-verify`
   (docs/36/37). Its own header states it was verified standalone *"before it is wired into the SPH step"* —
   `sph_step.wgsl` still runs the direct O(N²) gravity loop. The O(N log N) win is sitting on the shelf.

@@ -67,7 +67,13 @@ pub struct SphParams {
     pub bucket_k: u32,
     pub dt: f32,
     pub damp: f32,
-    pub _p0: f32,
+    /// `cs_relax` ONLY: rigid-rotation rate (rad/s) about +z for a ROTATING-frame relaxation — the shader
+    /// adds centrifugal ω²·(x,y,0) (`sph_step.wgsl:253`) so a body settles to its OBLATE equilibrium
+    /// instead of a sphere. Was named `_p0` here while the shader called it `omega`: same bytes, so every
+    /// size and offset check passed, but the host could not name the parameter and hardcoded 0.0 — the
+    /// rotating-frame relaxation the shader implements was unreachable, and anyone reusing "padding" as
+    /// scratch would have silently spun the body. 0.0 = the non-rotating relaxation used today.
+    pub omega: f32,
     pub _p1: f32,
     pub _p2: f32,
 }
@@ -513,7 +519,14 @@ pub struct GpuSph {
     // and its result collected the next — mirrors `GpuParticles::begin_readback`/`take_readback`).
     readback_staging: Option<wgpu::Buffer>,
     readback_count: u32,
-    readback_ready: std::rc::Rc<std::cell::Cell<bool>>,
+    /// Set by the `map_async` callback when the staging map completes. `Arc<AtomicBool>` rather than
+    /// `Rc<Cell<bool>>` because wgpu bounds that callback by `WasmNotSend` — a no-op on wasm (single
+    /// threaded) but plain `Send` everywhere else, so the `Rc` form compiles ONLY for wasm. That one
+    /// line was the entire reason this module was `#[cfg(target_arch = "wasm32")]`, and therefore the
+    /// reason native `cargo check`/`cargo test` never compiled 700 lines of shipping GPU host code.
+    /// Release/Acquire rather than Relaxed: the callback publishes a completed mapping that
+    /// `take_readback` then reads via `get_mapped_range`, so the flag must carry that happens-before.
+    readback_ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl GpuSph {
@@ -586,10 +599,10 @@ impl GpuSph {
             clear: mk("cs_grid_clear"), insert: mk("cs_grid_insert"), density: mk("cs_density"), forces: mk("cs_forces"),
             kick_drift: mk("cs_kick_drift"), kick: mk("cs_kick"), relax_k: mk("cs_relax"),
             particles, params_buf, eos_buf, acc, dudt, signal, grid_count, grid_bucket, bind, capacity: cap, count: 0,
-            params: SphParams { n: 0, softening: 0.0, av_alpha: 1.0, av_beta: 2.0, cell_size: 1.0, table_mask: SPH_TABLE_SIZE - 1, bucket_k: SPH_BUCKET_K, dt: 0.0, damp: 1.0, _p0: 0.0, _p1: 0.0, _p2: 0.0 },
+            params: SphParams { n: 0, softening: 0.0, av_alpha: 1.0, av_beta: 2.0, cell_size: 1.0, table_mask: SPH_TABLE_SIZE - 1, bucket_k: SPH_BUCKET_K, dt: 0.0, damp: 1.0, omega: 0.0, _p1: 0.0, _p2: 0.0 },
             readback_staging: None,
             readback_count: 0,
-            readback_ready: std::rc::Rc::new(std::cell::Cell::new(false)),
+            readback_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -682,11 +695,11 @@ impl GpuSph {
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         enc.copy_buffer_to_buffer(&self.particles, 0, &staging, 0, size);
         queue.submit(std::iter::once(enc.finish()));
-        self.readback_ready.set(false);
+        self.readback_ready.store(false, std::sync::atomic::Ordering::Release);
         let flag = self.readback_ready.clone();
         staging.slice(..).map_async(wgpu::MapMode::Read, move |res| {
             if res.is_ok() {
-                flag.set(true);
+                flag.store(true, std::sync::atomic::Ordering::Release);
             }
         });
         self.readback_count = self.count;
@@ -696,7 +709,7 @@ impl GpuSph {
     /// Phase 2: if the in-flight read-back completed, return the snapshotted particles and clear the state.
     /// `None` while pending or when nothing is in flight.
     pub fn take_readback(&mut self) -> Option<Vec<SphParticle>> {
-        if !self.readback_ready.get() {
+        if !self.readback_ready.load(std::sync::atomic::Ordering::Acquire) {
             return None;
         }
         let staging = self.readback_staging.take()?;
@@ -704,7 +717,82 @@ impl GpuSph {
         let out = bytemuck::cast_slice::<u8, SphParticle>(&data).to_vec();
         drop(data);
         staging.unmap();
-        self.readback_ready.set(false);
+        self.readback_ready.store(false, std::sync::atomic::Ordering::Release);
         Some(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wgsl_layout::{offsets, wgsl_offsets, wgsl_typed};
+
+    const SHADER: &str = include_str!("../../../shaders/sph_step.wgsl");
+
+    /// These three mirrors ship, and until this module compiled natively NOTHING could check them:
+    /// `gpu_sph` was `#[cfg(target_arch = "wasm32")]`, so `cargo test` never built the structs, and
+    /// CLAUDE.md rule 3 records the consequence ("`gpu_sph.rs` has **no in-crate tests**"). The
+    /// out-of-process `tools/sph-verify` guards the physics; it does not guard THIS layout, because it
+    /// carries its own replica. A drift here is silent: the GPU reinterprets the bytes without error.
+    #[test]
+    fn sph_particle_matches_the_shader_field_for_field() {
+        let rust = offsets!(SphParticle, pos, h, vel, u, mass, mat, rho, prov);
+        assert_eq!(
+            rust,
+            wgsl_offsets(&wgsl_typed(SHADER, "Particle")),
+            "SphParticle has drifted from sph_step.wgsl's Particle"
+        );
+        assert_eq!(
+            std::mem::size_of::<SphParticle>(),
+            48,
+            "the particle stride is the array element size; every particle after the first would read \
+             shifted memory"
+        );
+    }
+
+    #[test]
+    fn sph_eos_matches_the_shader_field_for_field() {
+        let rust = offsets!(SphEos, rho0, a, b, cap_a, cap_b, e0, e_iv, e_cv, alpha, beta, _p0, _p1);
+        assert_eq!(
+            rust,
+            wgsl_offsets(&wgsl_typed(SHADER, "Eos")),
+            "SphEos has drifted from sph_step.wgsl's Eos — these are the cited Tillotson coefficients, \
+             so a swap silently evaluates the EOS with the wrong material constants"
+        );
+    }
+
+    /// `Params` is the uniform the whole step is driven by — and where `particle_step.wgsl`'s equivalent
+    /// drift actually happened (`drag_cd` arriving as 0.0, making drag a quiet no-op).
+    #[test]
+    fn sph_params_matches_the_shader_field_for_field() {
+        let rust = offsets!(
+            SphParams, n, softening, av_alpha, av_beta, cell_size, table_mask, bucket_k, dt, damp,
+            omega, _p1, _p2,
+        );
+        assert_eq!(
+            rust,
+            wgsl_offsets(&wgsl_typed(SHADER, "Params")),
+            "SphParams has drifted from sph_step.wgsl's Params"
+        );
+        assert_eq!(
+            std::mem::size_of::<SphParams>() % 16,
+            0,
+            "a uniform buffer's size must stay 16-byte aligned; the `_p` tail exists for this"
+        );
+    }
+
+    /// The parser must survive THIS shader's real formatting, not just tidy input — otherwise a green
+    /// test means "found nothing to compare" rather than "they agree". `sph_step.wgsl` packs several
+    /// fields per line and wraps a comment across two lines inside `Params`, which is exactly the shape
+    /// that defeats a naive line-based reader.
+    #[test]
+    fn the_wgsl_parser_actually_reads_the_sph_structs() {
+        assert_eq!(wgsl_typed(SHADER, "Particle").len(), 8);
+        assert_eq!(wgsl_typed(SHADER, "Eos").len(), 12);
+        let p = wgsl_typed(SHADER, "Params");
+        assert_eq!(p.len(), 12);
+        // The two-line-comment case: `omega` is followed by a wrapped comment, then a shared line.
+        let tail: Vec<&str> = p[p.len() - 3..].iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(tail, ["omega", "_p1", "_p2"], "the wrapped-comment tail must all be seen");
     }
 }

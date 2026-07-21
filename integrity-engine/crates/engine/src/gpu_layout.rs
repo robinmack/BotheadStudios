@@ -78,58 +78,9 @@ pub(crate) struct GpuStepParams {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Field names of a `struct <name>` block in WGSL, in declaration order.
-    ///
-    /// Splits on COMMAS rather than lines: the shader declares `_hp1 : f32, _hp2 : f32,` on one line,
-    /// and a line-based parser silently drops the second — which would leave a real trailing field
-    /// unchecked, in exactly the padding region a struct grows into.
-    fn wgsl_typed(src: &str, name: &str) -> Vec<(String, &'static str)> {
-        let head = format!("struct {name} {{");
-        let start = src.find(&head).unwrap_or_else(|| panic!("no `{head}` in the shader"));
-        let body = &src[start + head.len()..];
-        let end = body.find('}').expect("unterminated struct in the shader");
-        body[..end]
-            .lines()
-            .map(|l| l.split("//").next().unwrap_or(""))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .split(',')
-            .filter_map(|chunk| {
-                let (field, ty) = chunk.split_once(':')?;
-                let field = field.trim();
-                let ty = if ty.trim().starts_with("vec3") { "vec3" } else { "scalar" };
-                (!field.is_empty()).then(|| (field.to_string(), ty))
-            })
-            .collect()
-    }
+    use crate::wgsl_layout::{offsets, wgsl_offsets, wgsl_typed};
 
     const SHADER: &str = include_str!("../../../shaders/particle_step.wgsl");
-
-    /// Byte offset of each field, tying the assertion to the REAL Rust layout rather than to a literal
-    /// list. Without this the test only pins the shader to a hardcoded array and never reads the struct
-    /// at all — reorder two Rust fields and it still passes. That mistake was live in the first version
-    /// of this file and in `gpu-verify`'s equivalent, and it is the worst kind: a layout guard that
-    /// reports green while the layout drifts.
-    macro_rules! offsets {
-        ($t:ty, $($f:ident),+ $(,)?) => {
-            vec![$((stringify!($f).to_string(), std::mem::offset_of!($t, $f))),+]
-        };
-    }
-
-    /// WGSL byte offsets for a field list, applying WGSL's rules: `vec3<f32>` occupies 12 bytes but
-    /// aligns to 16, scalars are 4. This is what the GPU will actually do with the bytes.
-    fn wgsl_offsets(fields: &[(String, &'static str)]) -> Vec<(String, usize)> {
-        let mut off = 0usize;
-        let mut out = Vec::new();
-        for (name, ty) in fields {
-            let (size, align) = if ty.starts_with("vec3") { (12, 16) } else { (4, 4) };
-            off = off.div_ceil(align) * align;
-            out.push((name.clone(), off));
-            off += size;
-        }
-        out
-    }
 
     /// The mirror that SHIPS, pinned to the shader that reads it — by OFFSET, so a reordering of either
     /// side fails. This check did not exist while `GpuParticle` lived inside `#[cfg(wasm32)] mod app`:

@@ -119,7 +119,7 @@ not exist and rebuild them; they are real, tested, and partly wired.
   `accelerations` (`:210`), `relax_step` (`:235`), `forces_and_dudt` (`:250`), `step` (`:295`, KDK),
   `courant_dt` (`:316`), `rms_radius` (`:344`). **Used only by `gpu_sph.rs`** (CPU-side build + relax before
   GPU upload) and the native tools; not referenced from `lib.rs` except through `gpu_sph`.
-- **gpu_sph.rs** (710, **0 tests** — verified out-of-process by `tools/sph-verify`) — the in-browser GPU SPH
+- **gpu_sph.rs** (720, 4 layout tests; the PHYSICS is verified out-of-process by `tools/sph-verify`) — the in-browser GPU SPH
   stepper driving `shaders/sph_step.wgsl`; the most lib.rs-wired of the four. `GpuSph` (`:492`): `new`
   (`:520`), `upload` (`:598`), `encode_relax` (`:651`), `encode_kdk` (`:659`), `begin_readback` (`:671`),
   `take_readback` (`:698`). Setup `build_impact_bodies` (`:106`), `assemble_from_relaxed` (`:161`). Analysis
