@@ -3,6 +3,32 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-20 — the core resolution controller: camera drives granularity, necessity drives existence (docs/49)
+
+**What.** `crate::resolution::ResolutionController` — the decision policy Robin named a default core engine
+feature: one controller every scene holds, deciding whether matter resolves into particles and how fine.
+New docs/49. +6 tests (233 total, wasm clean).
+
+**The two axes and the one rule.** CAMERA drives GRANULARITY (a grain finer than one subtending the
+angular threshold at the camera distance is sub-pixel — `camera_grain_radius = distance·angular_res`,
+linear per docs/13). NECESSITY drives EXISTENCE (the admission test; an unwatched wheel still sinks).
+They compose, and **the camera may only REFINE, never gate**: `resolve = necessity ∨ camera-close`,
+`grain = finer_of(camera, physics)`. Letting the camera gate existence — so looking away changes what is
+true — is the charter violation this exists to prevent (docs/44 §1, docs/30).
+
+**Verified — the load-bearing test.** `necessity_resolves_even_when_the_camera_is_infinitely_far`: a
+sinking wheel 100 km from the camera STILL resolves, at the 1 cm physics granularity, not the coarse
+camera grain. Plus: the null case (far + unnecessary ⇒ resolve nothing, exactly free); camera-only visual
+resolution that refines with proximity; composition = the finer of the two; granularity clamped
+[floor, bulk]. `angular_resolution` is the one legitimate fidelity dial (a declared viewing tolerance,
+like render resolution — not a physics fudge).
+
+**NOT wired (docs/49 §5).** This is the policy; nothing calls `decide()` to materialize/demote yet. Two
+honest blockers for a VISIBLE demo: the scene structs are in `#[cfg(wasm32)] mod app` (not natively
+testable — rig can't composite WebGPU here), and the null case is correct-but-invisible (a probe on basalt
+resolves nothing), so seeing it work needs a soft surface under load (the parked regolith) plus the
+voxel→field demotion trigger (docs/47 step 1b). Landed as the verified core; wiring sequenced behind those.
+
 ## 2026-07-20 — deterministic scatter: built, MEASURED 2–12× WORSE, reverted (docs/47)
 
 **What.** Implemented the full deterministic-scatter design for the multi-level gather cost — fixed-point
