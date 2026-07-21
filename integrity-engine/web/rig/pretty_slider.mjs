@@ -1,7 +1,7 @@
 // docs/42 Phase 1: verify the pretty⇄physics slider. Shots at blend 0 (pretty sphere), 0.5, 1 (particles).
 import { chromium } from 'playwright';
 const out = process.env.OUT || '/tmp';
-const PORT = process.env.PORT || '5307';
+const PORT = process.env.PORT || '5173';
 const b = await chromium.launch({ headless: false, args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=vulkan', '--no-sandbox'] });
 const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
 p.on('pageerror', (e) => console.log('PAGEERR:', e.message));

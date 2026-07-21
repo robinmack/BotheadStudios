@@ -1,6 +1,6 @@
 import { chromium } from 'playwright';
-const out = '/tmp/claude-1000/-home-ratwood/b8643c15-d933-437e-8ec8-236cf9ecf634/scratchpad';
-const PORT = process.env.PORT || '5304';
+const out = process.env.OUT || '/tmp';
+const PORT = process.env.PORT || '5173';
 const TAG = process.env.TAG || 'crater';
 const SPEED = +(process.env.SPEED || 4);
 const b = await chromium.launch({ headless: false, args: ['--enable-unsafe-webgpu','--enable-features=Vulkan','--use-angle=vulkan','--no-sandbox'] });

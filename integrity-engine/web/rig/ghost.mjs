@@ -1,5 +1,6 @@
 import { chromium } from 'playwright';
-const out = '/tmp/claude-1000/-home-ratwood/b8643c15-d933-437e-8ec8-236cf9ecf634/scratchpad';
+const PORT = process.env.PORT || '5173';
+const out = process.env.OUT || '/tmp';
 const browser = await chromium.launch({ headless: false,
   args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=vulkan', '--no-sandbox'] });
 const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
@@ -16,7 +17,7 @@ const zoomOut = async (n) => {
   for (let i = 0; i < n; i++) { await page.mouse.wheel(0, 240); await page.waitForTimeout(120); }
 };
 
-await page.goto('http://127.0.0.1:5280/birth.html', { waitUntil: 'load' });
+await page.goto(`http://127.0.0.1:${PORT}/birth.html`, { waitUntil: 'load' });
 await page.waitForTimeout(13500);          // through the ~5s countdown + impact + disk
 await grab('h1-post-impact');
 await page.getByText('Geologic').click().catch(e => console.log('no geologic btn', e.message));

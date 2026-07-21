@@ -1,5 +1,5 @@
 import { chromium } from 'playwright';
-const out = process.env.OUT || '/tmp'; const PORT = process.env.PORT || '5307';
+const out = process.env.OUT || '/tmp'; const PORT = process.env.PORT || '5173';
 const b = await chromium.launch({ headless: false, args: ['--enable-unsafe-webgpu','--enable-features=Vulkan','--use-angle=vulkan','--no-sandbox'] });
 const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
 await p.goto(`http://127.0.0.1:${PORT}/birth.html`, { waitUntil: 'load' });
