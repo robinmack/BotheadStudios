@@ -229,3 +229,7 @@ better-specified problem than the one this doc was written to solve.
 
 **Related:** docs/22 (de-resolution), docs/23 (granular contact — where μ already IS the repose angle),
 docs/24 (resolution IOUs), docs/38 (composite contact law), docs/44 (resolution by necessity).
+
+> **Branches retired 2026-07-20.** The evidence branches named in this doc are now annotated
+> TAGS (`archive/<name>`), not branches — same commits, `git show archive/<name>` or
+> `git checkout archive/<name>`. The branch list is kept to `main` alone; single-developer repo.

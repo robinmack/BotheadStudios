@@ -186,7 +186,7 @@ benched **2×–12× SLOWER** than the gather — N=60k: uniform 5.5→13 ms (2.
 5 levels 117→513 ms (4.4×) — because ATOMIC CONTENTION (many fine grains atomicAdd into one big grain's
 slots, plus ~26 atomic ops per contact) outweighs the gather's "wasted" fine-cell scan. Even the uniform
 case, with no wide ratios, lost 2.4×. Correct and deterministic (D0/G0 passed), but a large regression, so
-REVERTED — the gather stays. Code preserved on the pushed `deterministic-scatter` branch as an evidence
+REVERTED — the gather stays. Code preserved on the pushed `archive/deterministic-scatter` tag as an evidence
 dead-end (do not merge). The 21× is therefore NOT fixed; remaining options, none yet measured: (a) accept
 it — single-scale-per-frame (the camera-descent common case) is unaffected; (b) a coarse SUMMARY structure
 a big grain reads instead of scanning fine cells; (c) a hybrid that register-accumulates the finder's own
@@ -348,3 +348,7 @@ schema's optional `thermal` is how it says "not characterised" (oak, concrete an
 **Related:** docs/08 (adaptive resolution) · docs/13 (scale-relative simulation) · docs/23/24 (the
 one-law charter) · docs/39 (the JIT particalization primitive) · docs/44 (resolution by necessity — the
 *extent* axis) · docs/45 (slope stability) · docs/46 (the one-physics charter; declared vs fudge).
+
+> **Branches retired 2026-07-20.** The evidence branches named in this doc are now annotated
+> TAGS (`archive/<name>`), not branches — same commits, `git show archive/<name>` or
+> `git checkout archive/<name>`. The branch list is kept to `main` alone; single-developer repo.
