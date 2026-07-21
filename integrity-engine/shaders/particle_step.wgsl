@@ -97,7 +97,42 @@ struct Accum {
 @group(0) @binding(2) var<storage, read> heightfield : array<i32>;
 @group(0) @binding(3) var<storage, read_write> grid_count : array<atomic<u32>>;
 @group(0) @binding(4) var<storage, read_write> grid_bucket : array<u32>;
-@group(0) @binding(5) var<storage, read_write> forces : array<Accum>;
+// Force accumulators as FIXED-POINT ATOMIC integers (docs/47 deterministic scatter). Integer add is
+// associative, so scatter from many threads is order-independent — deterministic WITHOUT the bucket sort
+// the gather needed, and a big grain never scans the fine level (the 21x gather cost). 13 slots/grain:
+// [0..3) force, [3] headroom (a MIN, atomicMin), [4..7) s_diag, [7..10) s_off, [10..13) sv_nbr.
+@group(0) @binding(5) var<storage, read_write> force_acc : array<atomic<i32>>;
+const FSTRIDE : u32 = 13u;
+// Scale factors chosen from MEASURED per-quantity magnitudes (gpu-verify FORCEMAG, RTX 5060 Ti): force
+// <=2.1e4, tensors <1, sv_nbr <=8.5e2. Each leaves >=10x headroom under i32::MAX (2.1e9) and a resolution
+// (1/scale) far below the smallest force that matters (~7 sig figs, matching f32). A wrong scale would
+// saturate or quantise silently — these are data, not guesses.
+const SCALE_F : f32 = 1.0e4;
+const SCALE_S : f32 = 1.0e6;
+const SCALE_V : f32 = 1.0e4;
+const SCALE_H : f32 = 1.0e3;
+const HEADROOM_NONE : i32 = 2147483647; // i32::MAX ⇒ open sky (no grain resting above)
+
+fn f_add(idx : u32, base : u32, v : vec3<f32>, scale : f32) {
+    atomicAdd(&force_acc[idx * FSTRIDE + base + 0u], i32(round(v.x * scale)));
+    atomicAdd(&force_acc[idx * FSTRIDE + base + 1u], i32(round(v.y * scale)));
+    atomicAdd(&force_acc[idx * FSTRIDE + base + 2u], i32(round(v.z * scale)));
+}
+fn f_get(idx : u32, base : u32, scale : f32) -> vec3<f32> {
+    return vec3<f32>(
+        f32(atomicLoad(&force_acc[idx * FSTRIDE + base + 0u])),
+        f32(atomicLoad(&force_acc[idx * FSTRIDE + base + 1u])),
+        f32(atomicLoad(&force_acc[idx * FSTRIDE + base + 2u]))) / scale;
+}
+fn scatter_contact(idx : u32, c : Accum) {
+    f_add(idx, 0u, c.force, SCALE_F);
+    f_add(idx, 4u, c.s_diag, SCALE_S);
+    f_add(idx, 7u, c.s_off, SCALE_S);
+    f_add(idx, 10u, c.sv_nbr, SCALE_V);
+}
+fn scatter_headroom(idx : u32, gap : f32) {
+    atomicMin(&force_acc[idx * FSTRIDE + 3u], i32(round(gap * SCALE_H)));
+}
 @group(0) @binding(6) var<storage, read_write> render_out : array<Particle>; // 8× render sub-cubes
 
 // Temperature (K) derived from the grain's specific internal energy: u = c·T ⇒ T = u/c (matches the SPH
@@ -230,42 +265,17 @@ fn cs_grid_insert(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
 }
 
-// --- pass 2b: put each bucket in a CANONICAL order -------------------------------------------------
-//
-// DETERMINISM. `cs_grid_insert` takes its slot from `atomicAdd`, so which particle lands at which slot
-// is decided by whichever thread wins the race — the bucket holds the same SET every run but in a
-// different ORDER. `cs_forces` then sums contact forces in that order, and float addition is not
-// associative, so identical input produced different output run to run. Measured before this pass
-// existed: 7 of 174 grains diverged by up to 8.3e-5 m after 40 frames, which amplified to ~6% spread in
-// scene E and left the FUDGE DETECTOR's tolerance wider than its own reproducibility.
-//
-// Sorting each bucket by particle index makes the accumulation sequence a function of the data alone.
-// The 27-cell walk in `cs_forces` is already a fixed nesting, so with sorted buckets the whole reduction
-// is canonical. Insertion sort: `bucket_k` is 16, buckets are usually far shorter, and it is branch-cheap
-// and stable on the near-sorted input the previous frame tends to leave.
-//
-// NOT fixed here, and detectable rather than assumed: if a cell OVERFLOWS `bucket_k`, which particles
-// won slots is still race-decided, so the SET itself varies. `grid_count` keeps the true (unclamped)
-// count, so a caller can check for it — `gpu-verify` does.
+// --- pass 2b: clear the fixed-point force accumulators ------------------------------------------
+// Replaces the canonical bucket sort the GATHER needed for determinism. Scatter accumulates by integer
+// atomicAdd, which is order-independent, so no sort — and this clear is O(N), not the O(table) sort.
 @compute @workgroup_size(64)
-fn cs_grid_sort(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let cell = gid.x;
-    if (cell > P.table_mask) { return; }
-    let n = min(atomicLoad(&grid_count[cell]), P.bucket_k);
-    if (n < 2u) { return; }
-    let base = cell * P.bucket_k;
-    for (var a = 1u; a < n; a = a + 1u) {
-        let key = grid_bucket[base + a];
-        var b = a;
-        loop {
-            if (b == 0u) { break; }
-            let prev = grid_bucket[base + b - 1u];
-            if (prev <= key) { break; }
-            grid_bucket[base + b] = prev;
-            b = b - 1u;
-        }
-        grid_bucket[base + b] = key;
+fn cs_force_clear(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let i = gid.x;
+    if (i >= P.count) { return; }
+    for (var k = 0u; k < FSTRIDE; k = k + 1u) {
+        atomicStore(&force_acc[i * FSTRIDE + k], 0);
     }
+    atomicStore(&force_acc[i * FSTRIDE + 3u], HEADROOM_NONE); // headroom slot: open-sky sentinel for the MIN
 }
 
 // --- pass 3: accumulate contact forces from the 27 neighbouring cells -----------------------------
@@ -277,64 +287,39 @@ fn cs_forces(@builtin(global_invocation_id) gid : vec3<u32>) {
     let vi = particles[i].vel;
     let r_i = particles[i].radius;
     let lv_i = level_for(r_i);
-    var acc = zero_accum();
-    // HEADROOM: the free gap (m) to the nearest grain resting ABOVE this one, measured along the terrain
-    // surface normal. The terrain position projection (cs_integrate) is capped by this so it can push a
-    // buried grain up only into EMPTY space, never THROUGH the grain resting on it — the honest fix for
-    // the stack-ram. Without it, projecting a grain the surface rose under drives it into its stack and
-    // the (energy-conserving) grain-grain contact launches the pile. A grain with something resting on it
-    // (headroom ≈ 0) instead stays put — transiently a little embedded — until it de-resolves or the pile
-    // above shifts: the ground can't teleport a rigid stack upward. 1e30 ⇒ open sky above.
-    let tn = normalize(vec3<f32>(-terrain_surface(pi).y, 1.0, -terrain_surface(pi).z));
-    var headroom = 1.0e30;
-    // GATHER, not pair enumeration. Each j lives in exactly ONE bucket (its own level), so walking every
-    // level finds each neighbour exactly once and no tie-break is needed — the once-only rule that
-    // `grid::pairs_within` uses is for building a pair LIST, and applying it here would silently give
-    // each grain only half its contacts.
-    for (var l = 0u; l <= P.max_level; l = l + 1u) {
-        let cs = cell_size_at(l);
-        // At a level AT OR ABOVE this grain's own, one cell already spans the contact reach (a level-l
-        // grain has radius <= cs/2, and r_i <= cs/2 too), so +/-1 suffices — the same convention the
-        // single-size grid used, kept deliberately so uniform-size scenes are bit-identical. Scanning a
-        // FINER level needs more cells, because a big grain genuinely touches many small ones; that cost
-        // is real contacts, not waste.
-        var rad = 1;
-        if (l < lv_i) {
-            rad = max(1, i32(ceil((r_i + 0.5 * cs) / cs)));
-        }
+    let tn_i = normalize(vec3<f32>(-terrain_surface(pi).y, 1.0, -terrain_surface(pi).z));
+    // SCATTER. Each grain scans its OWN level and every COARSER one (never finer), ±1 cell — the cheap
+    // direction, because a coarse cell already spans the contact reach. Each pair is therefore visited
+    // exactly ONCE, from the finer grain (or the lower index at equal level), and its contact is written
+    // to BOTH grains by fixed-point atomicAdd. This is what removes the 21× multi-level gather cost (a
+    // big grain no longer scans the fine level) while staying deterministic (integer add is associative).
+    // HEADROOM (see the terrain projection in cs_integrate): the free gap to the nearest grain resting
+    // above, along each grain's OWN terrain normal — accumulated as a MIN via atomicMin.
+    for (var l = lv_i; l <= P.max_level; l = l + 1u) {
         let base = cell_at(pi, l);
-    for (var dz = -rad; dz <= rad; dz = dz + 1) {
-        for (var dy = -rad; dy <= rad; dy = dy + 1) {
-            for (var dx = -rad; dx <= rad; dx = dx + 1) {
-                let h = hash_cell(l, base + vec3<i32>(dx, dy, dz));
-                let n = min(atomicLoad(&grid_count[h]), P.bucket_k);
-                for (var s = 0u; s < n; s = s + 1u) {
-                    let j = grid_bucket[h * P.bucket_k + s];
-                    if (j == i) { continue; }
-                    let pj = particles[j].offset;
-                    let c = contact_accel(pi, vi, r_i, pj, particles[j].vel, particles[j].radius);
-                    acc.force = acc.force + c.force;
-                    acc.s_diag = acc.s_diag + c.s_diag;
-                    acc.s_off = acc.s_off + c.s_off;
-                    acc.sv_nbr = acc.sv_nbr + c.sv_nbr;
-                    // Is j resting above i (ahead along the outward normal)? If so, the free gap before
-                    // pushing i into it is (distance − diameter), clamped ≥ 0. Conservative (uses the full
-                    // centre distance), so it never lets the projection open a new overlap.
-                    let dj = pj - pi;
-                    if (dot(dj, tn) > 0.0) {
-                        headroom = min(headroom, max(length(dj) - (r_i + particles[j].radius), 0.0));
-                    }
-                }
+        for (var dz = -1; dz <= 1; dz = dz + 1) {
+        for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            let h = hash_cell(l, base + vec3<i32>(dx, dy, dz));
+            let n = min(atomicLoad(&grid_count[h]), P.bucket_k);
+            for (var sidx = 0u; sidx < n; sidx = sidx + 1u) {
+                let j = grid_bucket[h * P.bucket_k + sidx];
+                // Own level: take each unordered pair once (j > i). Coarser level: j is strictly coarser
+                // and found only from here, so always take. (i is never in a coarser bucket, so j != i.)
+                if (l == lv_i && j <= i) { continue; }
+                let pj = particles[j].offset;
+                let vj = particles[j].vel;
+                let r_j = particles[j].radius;
+                scatter_contact(i, contact_accel(pi, vi, r_i, pj, vj, r_j));
+                scatter_contact(j, contact_accel(pj, vj, r_j, pi, vi, r_i));
+                let dij = pj - pi;
+                let gap = max(length(dij) - (r_i + r_j), 0.0);
+                if (dot(dij, tn_i) > 0.0) { scatter_headroom(i, gap); }
+                let tn_j = normalize(vec3<f32>(-terrain_surface(pj).y, 1.0, -terrain_surface(pj).z));
+                if (dot(-dij, tn_j) > 0.0) { scatter_headroom(j, gap); }
             }
-        }
+        }}}
     }
-    }
-    // Terrain contact is NOT a force here. It is resolved as a non-injecting constraint (velocity clamp
-    // + velocity-decoupled position projection) AFTER the grain-grain velocity solve, in cs_integrate —
-    // see `terrain_resolve`. A penalty spring in the force sum was the settling-storm fudge (it stored
-    // penetration and released it as launch KE). So this accumulation is grain-grain only.
-    acc.headroom = headroom;
-    forces[i] = acc;
 }
 
 // A heightfield column top in centered coords, clamped to the grid edge (so the terrain extends flat
@@ -491,7 +476,14 @@ fn cs_integrate(@builtin(global_invocation_id) gid : vec3<u32>) {
     // dissipated the rebound to zero restitution. A grain with NO contacts gets S = 0 ⇒ M = I ⇒ pure
     // explicit, keeping its full free-flight/ejection velocity. Now a compressed contact RETURNS its
     // stored energy — restitution is real and set by the material's damping c (docs/24 Stage 1).
-    let acc = forces[i];
+    // Decode the fixed-point accumulators back to float (docs/47 deterministic scatter).
+    var acc : Accum;
+    acc.force = f_get(i, 0u, SCALE_F);
+    let hr = atomicLoad(&force_acc[i * FSTRIDE + 3u]);
+    acc.headroom = select(f32(hr) / SCALE_H, 1.0e30, hr == HEADROOM_NONE);
+    acc.s_diag = f_get(i, 4u, SCALE_S);
+    acc.s_off = f_get(i, 7u, SCALE_S);
+    acc.sv_nbr = f_get(i, 10u, SCALE_V);
     // AERODYNAMIC DRAG — a force from a real medium, not a velocity multiply.
     //   F = 1/2 rho_air v^2 C_d A ,  A = s^2 ,  m = rho_grain s^3  =>  a = 1/2 rho_air v^2 C_d / (rho_grain s)
     // so the grain's OWN density (docs/38's `rho`) and size set how much the air can push it: a dense iron

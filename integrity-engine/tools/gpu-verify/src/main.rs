@@ -180,7 +180,7 @@ struct Gpu {
     queue: wgpu::Queue,
     clear: wgpu::ComputePipeline,
     insert: wgpu::ComputePipeline,
-    sort: wgpu::ComputePipeline,
+    force_clear: wgpu::ComputePipeline,
     forces: wgpu::ComputePipeline,
     integrate: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
@@ -315,7 +315,7 @@ fn init_gpu_src(shader_src: &str) -> Gpu {
     Gpu {
         clear: mk("cs_grid_clear"),
         insert: mk("cs_grid_insert"),
-        sort: mk("cs_grid_sort"),
+        force_clear: mk("cs_force_clear"),
         forces: mk("cs_forces"),
         integrate: mk("cs_integrate"),
         layout,
@@ -370,7 +370,7 @@ fn simulate(gpu: &Gpu, particles: Vec<Particle>, frames: u32, scene: &Scene) -> 
     };
     let gcount = make_storage("grid_count", (TABLE_SIZE as u64) * 4);
     let gbucket = make_storage("grid_bucket", (TABLE_SIZE as u64) * (BUCKET_K as u64) * 4);
-    let fbuf = make_storage("forces", (count as u64) * 64); // Accum: force + tensor + momentum coupling
+    let fbuf = make_storage("forces", (count as u64) * 13 * 4); // 13 atomic i32/grain (docs/47 scatter)
 
     let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("bind"),
@@ -396,7 +396,7 @@ fn simulate(gpu: &Gpu, particles: Vec<Particle>, frames: u32, scene: &Scene) -> 
             for (pipeline, threads) in [
                 (&gpu.clear, TABLE_SIZE),
                 (&gpu.insert, count),
-                (&gpu.sort, TABLE_SIZE), // canonical bucket order ⇒ deterministic force accumulation
+                (&gpu.force_clear, count), // zero the fixed-point force accumulators (docs/47)
                 (&gpu.forces, count),
                 (&gpu.integrate, count),
             ] {
@@ -1718,7 +1718,11 @@ fn bench(gpu: &Gpu) {
                 label: None, size: sz, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
             let gcount = store(table as u64 * 4);
             let gbucket = store(table as u64 * BUCKET_K as u64 * 4);
-            let fbuf = store(count as u64 * 64);
+            let fbuf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: None, size: count as u64 * 13 * 4,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
             let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None, layout: &gpu.layout, entries: &[
                     wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() },
@@ -1734,7 +1738,7 @@ fn bench(gpu: &Gpu) {
                 let mut enc = gpu.device.create_command_encoder(&Default::default());
                 for _ in 0..SUBSTEPS {
                     for (pl, th) in [
-                        (&gpu.clear, table), (&gpu.insert, count), (&gpu.sort, table),
+                        (&gpu.clear, table), (&gpu.insert, count), (&gpu.force_clear, count),
                         (&gpu.forces, count), (&gpu.integrate, count),
                     ] {
                         let mut ps = enc.begin_compute_pass(&Default::default());

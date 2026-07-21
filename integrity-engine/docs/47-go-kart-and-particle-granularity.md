@@ -177,8 +177,21 @@ neighbours — `(r_big/r_fine)³` cells. Benched on an RTX 5060 Ti (fine-dominat
 uniform 5.5 ms → 5 levels 117 ms at N=60k (~21×). Uniform (`max_level = 0`) is bit-identical to the flat
 grid and free. The cheaper route is symmetric SCATTER (compute each pair once from the finer grain,
 atomicAdd force to both), which restores the coarser-only scan — but float `atomicAdd` order is
-race-decided and would undo the determinism fix. Deterministic scatter (per-cell reduction or
-sort-then-segment) is the real next step; until then mixed-size is correct and gated off by default.
+race-decided and would undo the determinism fix.
+
+**SCATTER WAS BUILT AND MEASURED WORSE (2026-07-20). Do not re-attempt naively.** Deterministic scatter
+via FIXED-POINT atomic accumulation (i32 add is associative ⇒ order-independent, avoids the float-atomic
+determinism problem; scales measured from real force magnitudes, not guessed) was implemented in full. It
+benched **2×–12× SLOWER** than the gather — N=60k: uniform 5.5→13 ms (2.4×), 3 levels 16→198 ms (12×),
+5 levels 117→513 ms (4.4×) — because ATOMIC CONTENTION (many fine grains atomicAdd into one big grain's
+slots, plus ~26 atomic ops per contact) outweighs the gather's "wasted" fine-cell scan. Even the uniform
+case, with no wide ratios, lost 2.4×. Correct and deterministic (D0/G0 passed), but a large regression, so
+REVERTED — the gather stays. Code preserved on the pushed `deterministic-scatter` branch as an evidence
+dead-end (do not merge). The 21× is therefore NOT fixed; remaining options, none yet measured: (a) accept
+it — single-scale-per-frame (the camera-descent common case) is unaffected; (b) a coarse SUMMARY structure
+a big grain reads instead of scanning fine cells; (c) a hybrid that register-accumulates the finder's own
+side and scatters only the other (halves atomics but leaves big-grain contention — measure, don't assume).
+Until one lands, mixed-size is correct and gated off by default.
 
 **`max_level` is PER-FRAME and DYNAMIC — not a mode, and NOT a limit on changing size over time.** This
 is the point most likely to be misread (it was, in review): it is the number of size classes coexisting
