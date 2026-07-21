@@ -44,7 +44,10 @@ use crate::gpu_layout::{GpuParticle, GpuStepParams};
 /// and a heightfield the step collides against. The CPU only appends new particles (on fracture)
 /// and updates the per-frame params; the physics runs entirely on the GPU.
 pub(crate) struct GpuParticles {
-    buf: wgpu::Buffer,         // STORAGE — the PHYSICS grains (1 per voxel), stepped
+    /// THE shared container (`docs/50`): the physics grains, capacity/count, and the two-phase async
+    /// read-back — the same `ParticleStore` the SPH pipeline uses. Everything below is the granular
+    /// SOLVER, which stays specialized (docs/46 §1).
+    store: crate::gpu_store::ParticleStore<GpuParticle>,
     pub(crate) render_buf: wgpu::Buffer, // STORAGE | VERTEX — 8× render sub-cubes (cs_expand fills it), drawn
     params: wgpu::Buffer,     // UNIFORM | COPY_DST
     heightfield: wgpu::Buffer, // STORAGE | COPY_DST
@@ -58,37 +61,13 @@ pub(crate) struct GpuParticles {
     integrate: wgpu::ComputePipeline,
     expand: wgpu::ComputePipeline, // 1 grain → 8 render sub-cubes
     bind: wgpu::BindGroup,
-    capacity: u32,
-    pub(crate) count: u32,
-    // Non-blocking readback (docs/22 de-resolution). On WebGPU buffer mapping is genuinely async —
-    // we cannot block (`Maintain::Wait` is a no-op in the browser), so the readback is two-phase:
-    // `begin_readback` copies the grains into `readback_staging` and calls `map_async`, whose
-    // callback flips `readback_ready`; a later frame `take_readback` reads the mapped bytes.
-    // `readback_count` snapshots `count` at copy time so `take_readback` can detect an intervening
-    // append (a fresh meteor) and discard the now-misaligned snapshot rather than deposit stale data.
-    readback_staging: Option<wgpu::Buffer>,
-    pub(crate) readback_count: u32,
-    /// See `gpu_sph::GpuSph::readback_ready`: wgpu bounds the `map_async` callback by `WasmNotSend`,
-    /// which is a no-op on wasm but plain `Send` everywhere else — so the `Rc<Cell<bool>>` this used to
-    /// be compiled ONLY for wasm, and was the single line pinning this container inside `mod app`.
-    /// Release/Acquire, because the callback publishes a completed mapping that `take_readback` then
-    /// reads through `get_mapped_range`.
-    readback_ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl GpuParticles {
     pub(crate) fn new(device: &wgpu::Device, capacity: u32, world_cells: u32) -> Self {
-        let buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("gpu-particles-physics"),
-            size: (capacity as usize * std::mem::size_of::<GpuParticle>()) as u64,
-            // COPY_SRC so the de-resolution readback (docs/22) can copy the live grains to a MAP_READ
-            // staging buffer — without it copy_buffer_to_buffer is a (silent, async) WebGPU validation
-            // error and the readback reads all zeros.
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
+        // COPY_SRC (for the de-resolution read-back) and STORAGE|COPY_DST are supplied by the store.
+        let store = crate::gpu_store::ParticleStore::<GpuParticle>::new(
+            device, capacity, wgpu::BufferUsages::empty(), "gpu-particles-physics");
         // 8× render sub-cubes, filled each frame by cs_expand and drawn as instances.
         let render_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("gpu-particles-render"),
@@ -202,7 +181,7 @@ impl GpuParticles {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: buf.as_entire_binding(),
+                    resource: store.buffer().as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -228,7 +207,7 @@ impl GpuParticles {
         });
 
         GpuParticles {
-            buf,
+            store,
             render_buf,
             params,
             heightfield,
@@ -242,11 +221,6 @@ impl GpuParticles {
             integrate,
             expand,
             bind,
-            capacity,
-            count: 0,
-            readback_staging: None,
-            readback_count: 0,
-            readback_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -257,15 +231,21 @@ impl GpuParticles {
 
     /// Append newly-spawned particles (from a fracture) to the GPU buffer. Silently caps at
     /// capacity for now (no recycling yet — docs/22).
+    /// Live particle count.
+    pub(crate) fn count(&self) -> u32 {
+        self.store.count()
+    }
+
+    /// `count` at the moment the in-flight read-back copy was recorded. A caller compares it against
+    /// the live count to spot an append that landed mid-flight (a fresh meteor) and discard the
+    /// now-misaligned snapshot rather than deposit stale data.
+    pub(crate) fn readback_count(&self) -> u32 {
+        self.store.readback_count()
+    }
+
+    /// Append newly-fractured grains, clamped to remaining room (`docs/50`).
     pub(crate) fn append(&mut self, queue: &wgpu::Queue, new: &[GpuParticle]) {
-        let room = (self.capacity - self.count) as usize;
-        let take = new.len().min(room);
-        if take == 0 {
-            return;
-        }
-        let offset = self.count as u64 * std::mem::size_of::<GpuParticle>() as u64;
-        queue.write_buffer(&self.buf, offset, bytemuck::cast_slice(&new[..take]));
-        self.count += take as u32;
+        self.store.append(queue, new);
     }
 
     /// Record one substep into `encoder`: rebuild the spatial hash, accumulate granular contact
@@ -273,7 +253,7 @@ impl GpuParticles {
     /// (gravity + contact + terrain). Five passes so force-accumulation (positions read-only) never
     /// races integration (docs/23). Params already written this frame.
     pub(crate) fn dispatch(&self, encoder: &mut wgpu::CommandEncoder) {
-        if self.count == 0 {
+        if self.store.count() == 0 {
             return;
         }
         // Each stage is its OWN compute pass. The stages have strict data dependencies (insert
@@ -284,7 +264,7 @@ impl GpuParticles {
         // energy (a "matter fountain"). Separate passes force the barrier on every backend (docs/23).
         let stages: [(&wgpu::ComputePipeline, u32); 5] = [
             (&self.clear, GRID_TABLE_SIZE),
-            (&self.insert, self.count),
+            (&self.insert, self.store.count()),
             // DETERMINISM (docs/47): `insert` takes its slot from `atomicAdd`, so bucket ORDER is
             // whichever thread won the race. `force_pass` then sums contacts in that order and float
             // addition is not associative, so identical input gave different output run to run —
@@ -292,8 +272,8 @@ impl GpuParticles {
             // than its own reproducibility. Sorting the buckets makes the reduction a function of the
             // data alone. It is also its own pass for the same barrier reason as the rest.
             (&self.sort, GRID_TABLE_SIZE),
-            (&self.force_pass, self.count),
-            (&self.integrate, self.count),
+            (&self.force_pass, self.store.count()),
+            (&self.integrate, self.store.count()),
         ];
         for (pipeline, threads) in stages {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -309,7 +289,7 @@ impl GpuParticles {
     /// Fill `render_buf` with 8 sub-cubes per physics grain. Run ONCE per frame after the substeps
     /// (the sub-cubes only need the settled positions) — a render-only subdivision.
     pub(crate) fn expand(&self, encoder: &mut wgpu::CommandEncoder) {
-        if self.count == 0 {
+        if self.store.count() == 0 {
             return;
         }
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -318,7 +298,7 @@ impl GpuParticles {
         });
         pass.set_pipeline(&self.expand);
         pass.set_bind_group(0, &self.bind, &[]);
-        pass.dispatch_workgroups(self.count.div_ceil(WORKGROUP), 1, 1);
+        pass.dispatch_workgroups(self.store.count().div_ceil(WORKGROUP), 1, 1);
     }
 
     pub(crate) fn set_params(&self, queue: &wgpu::Queue, params: &GpuStepParams) {
@@ -330,62 +310,20 @@ impl GpuParticles {
     /// shared `readback_ready` flag when the GPU has finished (on WebGPU that lands during the JS
     /// event loop between frames — we can NOT block for it, unlike native `tools/gpu-verify`). A
     /// no-op if the buffer is empty or a readback is already in flight.
+    /// Phase 1 of the non-blocking de-resolution read-back (`docs/22`) — the shared container's.
     pub(crate) fn begin_readback(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
-        if self.count == 0 || self.readback_staging.is_some() {
-            return;
-        }
-        let size = self.count as u64 * std::mem::size_of::<GpuParticle>() as u64;
-        let staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("gpu-particles-readback"),
-            size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut enc =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        enc.copy_buffer_to_buffer(&self.buf, 0, &staging, 0, size);
-        queue.submit(std::iter::once(enc.finish()));
-        self.readback_ready.store(false, std::sync::atomic::Ordering::Release);
-        let flag = self.readback_ready.clone();
-        staging.slice(..).map_async(wgpu::MapMode::Read, move |res| {
-            if res.is_ok() {
-                flag.store(true, std::sync::atomic::Ordering::Release);
-            }
-        });
-        self.readback_count = self.count;
-        self.readback_staging = Some(staging);
+        self.store.begin_readback(device, queue);
     }
 
-    /// Phase 2: if the in-flight readback has completed, return the snapshotted grains (a `Vec` of the
-    /// `readback_count` grains as they were at copy time) and clear the in-flight state. Returns
-    /// `None` while still pending or when nothing is in flight. If the live buffer was appended to
-    /// since the copy (a new meteor), the snapshot no longer aligns with the buffer, so the caller
-    /// must NOT compact against it — `take_readback` reports the snapshot count via `readback_count`
-    /// so the caller can detect the mismatch.
+    /// Phase 2: the snapshot, or `None` while pending. The caller compares `readback_count()` against
+    /// the live count to spot an append that landed mid-flight and discard a misaligned snapshot.
     pub(crate) fn take_readback(&mut self) -> Option<Vec<GpuParticle>> {
-        if !self.readback_ready.load(std::sync::atomic::Ordering::Acquire) {
-            return None;
-        }
-        let staging = self.readback_staging.take()?;
-        let data = staging.slice(..).get_mapped_range();
-        let out = bytemuck::cast_slice::<u8, GpuParticle>(&data).to_vec();
-        drop(data);
-        staging.unmap();
-        self.readback_ready.store(false, std::sync::atomic::Ordering::Release);
-        Some(out)
+        self.store.take_readback()
     }
 
-    /// Replace the buffer contents with `survivors` and set `count` to their number — the compaction
-    /// half of de-resolution. Grains that settled back into voxels (CPU-side) are simply not in
-    /// `survivors`, so `count` drops; the tail past the new count is left as-is (never stepped/drawn
-    /// because every pass bounds itself by `count`). Matter is NOT destroyed here — the caller has
-    /// already turned each removed grain into a voxel; this only shrinks the live GPU set.
+    /// Replace the live set with the survivors of a de-resolution pass.
     pub(crate) fn replace(&mut self, queue: &wgpu::Queue, survivors: &[GpuParticle]) {
-        let take = survivors.len().min(self.capacity as usize);
-        if take > 0 {
-            queue.write_buffer(&self.buf, 0, bytemuck::cast_slice(&survivors[..take]));
-        }
-        self.count = take as u32;
+        self.store.replace(queue, survivors);
     }
 }
 

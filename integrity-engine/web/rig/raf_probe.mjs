@@ -4,7 +4,7 @@
 import { launch } from './_launch.mjs';
 const PORT = process.env.PORT || '5173';
 const b = await launch();
-for (const scene of ['terra.html', 'terrain.html', 'birth.html']) {
+for (const scene of ['terra.html', 'birth.html']) {
   const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
   await p.goto(`http://127.0.0.1:${PORT}/${scene}`, { waitUntil: 'load' });
   await p.waitForTimeout(6000);

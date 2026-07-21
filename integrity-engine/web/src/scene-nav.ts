@@ -10,12 +10,11 @@ const SCENES: Scene[] = [
   { path: "/orbit.html", label: "Space" },
   { path: "/birth.html", label: "Birth of the Moon" },
   { path: "/terra.html", label: "Earth" },
-  { path: "/terrain.html", label: "Terrain" },
   { path: "/twomoons.html", label: "Two Moons" },
 ];
 
 function install(): void {
-  // Normalise "/index.html" → "/" so the terrain scene highlights correctly.
+  // Normalise "/index.html" → "/" so the landing page highlights correctly.
   const here = window.location.pathname.replace(/\/index\.html$/, "/");
 
   const nav = document.createElement("nav");

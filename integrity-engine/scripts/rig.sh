@@ -19,12 +19,22 @@ web="$root/web"
 PORT="${PORT:-5173}"
 VIDEO=0
 FORCE_BUILD=0
+RESTART=0
+
+# The dev server's kill lives HERE and nowhere else, on purpose. Typing
+# `pkill -f "vite --port 5173"` at a prompt matches the very shell running it — the pattern is on that
+# shell's own command line — so it kills the caller. That cost several confusing exit-144s. Keeping it
+# behind `--restart`/`--stop` means the pattern is never hand-typed, and the bracket makes it unable to
+# match its own literal text even here.
+kill_server() { pkill -f "[v]ite .*--port $PORT" 2>/dev/null || true; sleep 1; }
 
 while [[ "${1:-}" == --* ]]; do
   case "$1" in
     --video) VIDEO=1; shift;;
     --build) FORCE_BUILD=1; shift;;
     --list)  ls "$web/rig"/*.mjs | xargs -n1 basename | grep -v '^_' | column; exit 0;;
+    --restart) RESTART=1; shift;;
+    --stop)  kill_server; echo "rig: dev server stopped"; exit 0;;
     *) echo "unknown flag: $1" >&2; exit 2;;
   esac
 done
@@ -49,13 +59,24 @@ else
 fi
 
 # 3. Vite. A rebuild MUST restart it (the build-stamp trap above); otherwise reuse a live server.
-serving() { [[ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/terrain.html" || true)" == "200" ]]; }
-if (( need_build )) || ! serving; then
-  pkill -f "vite --port $PORT" 2>/dev/null || true
-  sleep 1
-  (cd "$web" && setsid nohup npx vite --port "$PORT" >/tmp/rig-vite.log 2>&1 &)
-  for _ in $(seq 1 40); do serving && break; sleep 0.5; done
-  serving || { echo "vite did not come up; see /tmp/rig-vite.log" >&2; exit 1; }
+serving() { [[ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/birth.html" || true)" == "200" ]]; }
+if (( need_build )) || (( RESTART )) || ! serving; then
+  # NOTE the bracket in "[v]ite": `pkill -f "vite --port $PORT"` matches ANY process whose command line
+  # contains that string — including the very shell running this script when it was invoked with the
+  # pattern on its own command line. That self-match killed the caller (exit 144) repeatedly before it
+  # was spotted. The bracket makes the pattern not match its own literal text.
+  kill_server
+  # Start FULLY detached: own session, all three descriptors redirected. Inheriting the script's stdout
+  # is not merely untidy — if the caller pipes this script (`rig.sh foo | tail`), the long-lived server
+  # holds the pipe's write end open and `tail` never sees EOF, so the whole command hangs long after the
+  # rig finished. That is what made this script look broken.
+  # The local binary with the root passed POSITIONALLY (vite 6 rejects `--root`). `npx --prefix`
+  # resolves the package but leaves the working directory, so vite answered 404 for every page while
+  # cheerfully logging "ready" — an explicit root removes the dependence on the caller's cwd.
+  setsid "$web/node_modules/.bin/vite" "$web" --port "$PORT" >/tmp/rig-vite.log 2>&1 </dev/null &
+  disown || true
+  for _ in $(seq 1 60); do serving && break; sleep 0.5; done
+  serving || { echo "vite did not come up; see /tmp/rig-vite.log" >&2; tail -5 /tmp/rig-vite.log >&2; exit 1; }
   echo "rig: vite (re)started on :$PORT"
 else
   echo "rig: reusing vite on :$PORT"

@@ -52,10 +52,15 @@ is being refactored toward is [`docs/33-architecture-realignment.md`](docs/33-ar
 
 - **One crate** `crates/engine` (Rust core) → WASM (`wasm-pack`) sharing one `wgpu` device with the
   renderer. `web/` is a thin TS+Vite host. Public: **integrity.bothead.net** (docs/29).
-- **Three scene structs** in `lib.rs`: `Engine` (`:244`, terrain band, GPU-compute debris), `OrbitDemo`
-  (`:2730`, space band, the giant impact / birth-of-the-Moon — now GPU too, it owns a `gpu_sph::GpuSph`
-  running `sph_step.wgsl`), and `Terra` (`:5140`, the docs/43 worlds-as-data planet scene, backed by
-  `crates/engine/src/terra/`).
+- **Two scene structs** in `lib.rs`: `OrbitDemo` (space band, the giant impact / birth-of-the-Moon; owns
+  a `gpu_sph::GpuSph` running `sph_step.wgsl`) and `Terra` (the docs/43 worlds-as-data planet scene,
+  backed by `crates/engine/src/terra/`). The terrain `Engine` — the first scene designed — was DELETED
+  2026-07-21 at Robin's request (docs/50).
+- **A scene should be DATA, and is not** (docs/46 ledger row 14). Robin's standing requirement: scenes
+  carry object/assembly definitions, coordinates and materials and must *"not require special mods of the
+  engine itself"*. Both remaining scenes are `#[wasm_bindgen]` structs INSIDE the engine crate with their
+  own pipelines and render loops, so adding or removing one means editing the engine — deleting terrain
+  cost 1,516 lines of `lib.rs` plus a public-API change. Do not add a third scene this way.
 - **The key fact:** the physics *laws* are already unified and scale-invariant (`granular::Contact`,
   the SPH kernel, `Furrow` excavation, `plough_loft`, `Body`, `LayeredBody`); the *solvers and containers*
   are FORKED (CPU `Aggregate` f64 vs voxel-`World`/GPU f32; four integrators; Earth-as-rigid-boundary vs
