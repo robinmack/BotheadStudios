@@ -1,3 +1,28 @@
+# THE LAWS OF INTEGRITY — read first, every session
+
+The moral compass of this engine. When a decision is unclear or a long session has lost its way, these
+decide it. Full text + rationale: [`docs/00-laws-of-integrity.md`](docs/00-laws-of-integrity.md).
+
+1. **Physics is the product.** Real physics, not graphics that resemble it. The picture reports the sim.
+2. **One law, every scale, every scene.** Raindrop, tyre, and giant impact are the same physics at
+   different scale/material/energy. One question must not get two answers. Grep for the primitive first.
+3. **Simulate what you can; compute what you can't; fake nothing.** Math sizes the interaction, the
+   minimal necessary matter becomes real particles, those are simulated thoroughly, the rest is real math.
+4. **The camera changes representation, never existence.** Off-camera physics still happens (cheap math);
+   its effects propagate and are rendered as they come into view. Looking away never changes what is true.
+5. **NO FUDGE, ever.** No dial or constant to make something "look real." Every number traces to physics
+   or is an openly-flagged IOU that names the real computation it defers. If physics disagrees, record it.
+6. **Physics drives the render, never the reverse.** Never move matter for a picture; never let a visual
+   criterion decide what is simulated. Interest decides what is drawn; necessity decides what is computed.
+7. **Measure and derive; never assume.** A number you did not measure or derive is a guess — wrong until
+   checked. Test, then conclude. Pin acceleration to brute force. A negative result, honestly measured, ships.
+
+*In one breath: real physics, one law at every scale, faked nowhere — simulated where seen, computed where
+not, and never assumed where it can be measured.* If any doc, comment, or past decision contradicts a Law,
+the Law wins and the other is the bug.
+
+---
+
 # Integrity engine — start here
 
 A Rust→WASM→WebGPU real-time **physics** engine. Charter: *everything is matter; one contact law + one
