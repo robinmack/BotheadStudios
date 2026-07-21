@@ -9,6 +9,15 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The central resolution system — the Analytic → Resolved hand-off, inherent (docs/49).**
+  `resolution::ResolutionField` holds active physics as analytic `Effect`s, propagates them by cheap math
+  while off-camera, and materialises each one the frame it enters view — through the SHARED matter path
+  (`MatterSim::spawn_region` for carried matter, e.g. a far-side impact's ejecta arriving), never a
+  per-backend adapter. One `update()` call per frame is the entire wiring, identical for every scene. New
+  `MatterSim::spawn_region` (deposit carried matter as grains, vs `materialize_region`'s excavation).
+  Wired into the terrain `Engine` (`register_effect` feeds it; no sources registered yet, so live behaviour
+  is unchanged). 3 field tests incl. the Moon lifecycle end to end.
+
 - **The core resolution controller (docs/49) — `resolution::ResolutionController`, THREE modes.**
   Existence is the physics' (necessity/admission — an unwatched wheel still sinks); the camera chooses the
   REPRESENTATION. `ACTIVE-PHYSICS × IN-VIEW → {Bulk, Analytic, Resolved}`: no active physics ⇒ `Bulk`

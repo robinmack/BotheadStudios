@@ -495,6 +495,49 @@ impl MatterSim {
         self.particles.len() - start
     }
 
+    /// **Spawn CARRIED matter as grains** — a ball of `material` grains at `center` (centred coords),
+    /// radius `radius`, all moving at `velocity`. Unlike [`Self::materialize_region`], which EXCAVATES
+    /// existing world voxels, this DEPOSITS matter the model already tracks but the voxel grid does not —
+    /// the ejecta a far-side impact launched, arriving in view (`docs/49` Analytic → Resolved). One grain
+    /// per ~1 m cell (voxel-scale; per-particle granularity is a `docs/33` unification). Returns the count.
+    pub fn spawn_region(
+        &mut self,
+        materials: &[Material],
+        center: Vec3,
+        radius: f32,
+        material: usize,
+        velocity: Vec3,
+    ) -> usize {
+        let ri = radius.ceil() as i32;
+        let start = self.particles.len();
+        let mass = materials.get(material).map(|m| m.density).unwrap_or(1.0);
+        for dz in -ri..=ri {
+            for dy in -ri..=ri {
+                for dx in -ri..=ri {
+                    if self.particles.len() >= self.max_particles {
+                        break;
+                    }
+                    let off = Vec3::new(dx as f32, dy as f32, dz as f32);
+                    if off.length() > radius {
+                        continue;
+                    }
+                    self.particles.push(Particle {
+                        pos: center + off,
+                        vel: velocity,
+                        material,
+                        mass,
+                        temp_k: REF_TEMP_K,
+                        resting_frames: 0,
+                    });
+                }
+            }
+        }
+        if self.particles.len() > start {
+            self.dirty = true;
+        }
+        self.particles.len() - start
+    }
+
     /// **Materialize UNSTABLE terrain into grains** (`docs/24` Path B + `docs/45`). Two jobs, one law.
     ///
     /// A heightfield represents gentle slopes conservatively (a smooth bilinear surface → an exact −∇U

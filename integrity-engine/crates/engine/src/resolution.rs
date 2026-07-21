@@ -18,6 +18,9 @@
 //! silently loses physics, over-resolving only costs frame time, so every threshold biases toward
 //! resolving.
 
+use glam::Vec3;
+use crate::materials::Material;
+
 /// **Boussinesq axial stress** under the centre of a circular contact patch (`docs/44` §4b).
 ///
 /// For a uniform pressure `p` over a patch of radius `a`, the vertical stress on the centreline at depth
@@ -199,6 +202,113 @@ impl ResolutionController {
     }
 }
 
+// -----------------------------------------------------------------------------------------------------
+// THE CENTRAL RESOLUTION FIELD (docs/49) — the ONE system, for every scene and every scale, that makes the
+// Analytic -> Resolved hand-off an inherent property of the engine.
+//
+// A scene registers the active physics it knows about as ANALYTIC EFFECTS — a region carrying a material
+// and a granularity, propagated by cheap math while off-camera (the Moon's ejecta arcing over the far
+// horizon, a shock front, a distant landslide). Once per step the scene calls `update()`; the field
+// advances every effect analytically, asks the ONE `ResolutionController` per effect, and — the frame an
+// effect enters view — materialises it through the ONE shared materialisation, `MatterSim::
+// materialize_region`, the exact call the meteor already uses.
+//
+// THERE IS NO PER-BACKEND ADAPTER, deliberately. The engine's promise is one particle system, one contact
+// law, one materialisation, differing only in scale (docs/23, docs/46) — the forked particle containers
+// (docs/32 §4) are the violation to be unified onto this path, NOT a fact to design around. So the field
+// resolves straight into `MatterSim`; a scene on a different container is a scene that has not yet
+// converged (docs/33), not a reason to add a second resolution path here.
+// -----------------------------------------------------------------------------------------------------
+
+/// A physical process tracked ANALYTICALLY until it must be resolved — the cheap representation of active
+/// physics that is real but not (yet) visible (docs/49). Scale-free: `radius`/`grain_radius` are whatever
+/// the interaction is, from ejecta metres to a tyre patch's centimetres.
+#[derive(Clone, Copy, Debug)]
+pub struct Effect {
+    /// Region centre (centred world coords).
+    pub center: Vec3,
+    /// Analytic propagation velocity (e.g. ballistic). Advanced by the per-step acceleration.
+    pub velocity: Vec3,
+    /// Region radius (m) — how much matter this effect will materialise.
+    pub radius: f32,
+    /// Granularity to resolve at when it enters view (m) — the interaction's own scale. The controller
+    /// refines it finer if the camera is closer. (Carried through to the particle store as that store
+    /// gains per-particle radius — a docs/33 unification step; `materialize_region` is voxel-scale today.)
+    pub grain_radius: f32,
+    /// What matter this is (index into the material DB). The field materialises the WORLD matter in the
+    /// region, so this is used only when the region is off the voxel footprint / for record.
+    pub material: usize,
+}
+
+/// The one central system a scene holds. Owns the single [`ResolutionController`] and the live analytic
+/// effects; turns "active physics off-camera" into "particles the instant it is seen", through the one
+/// shared materialisation.
+#[derive(Clone, Debug, Default)]
+pub struct ResolutionField {
+    pub controller: ResolutionController,
+    effects: Vec<Effect>,
+}
+
+impl ResolutionField {
+    pub fn new(controller: ResolutionController) -> Self {
+        ResolutionField { controller, effects: Vec::new() }
+    }
+
+    /// Register an analytic effect (e.g. the off-camera ejecta a far-side impact just launched).
+    pub fn add(&mut self, effect: Effect) {
+        self.effects.push(effect);
+    }
+
+    /// Effects still tracked analytically (not yet resolved). For tests/instrumentation.
+    pub fn analytic_count(&self) -> usize {
+        self.effects.len()
+    }
+
+    /// **The one call every scene makes.** Advance every analytic effect by `dt` under `accel` (cheap
+    /// math, no particles), then ask the controller whether each is now visible; for each effect that has
+    /// entered view, materialise it through the shared `MatterSim::materialize_region` and drop it from
+    /// analytic tracking (the particle sim owns it thereafter). Returns the number of effects resolved
+    /// this step. `in_view(center, radius)` is the scene's frustum test — the single scene-specific input,
+    /// and it decides only math-vs-simulation, never existence.
+    pub fn update(
+        &mut self,
+        matter: &mut crate::matter::MatterSim,
+        materials: &[Material],
+        camera: Vec3,
+        accel: Vec3,
+        dt: f32,
+        in_view: impl Fn(Vec3, f32) -> bool,
+    ) -> usize {
+        let ctrl = self.controller;
+        let mut resolved = 0usize;
+        // Two-phase (borrow the field immutably to decide, then mutate matter) — `retain` cannot hold a
+        // mutable `matter` borrow across iterations cleanly, so collect the survivors.
+        let mut survivors = Vec::with_capacity(self.effects.len());
+        for mut e in self.effects.drain(..) {
+            e.velocity += accel * dt;
+            e.center += e.velocity * dt;
+            let mode = ctrl.decide(RegionQuery {
+                distance_to_camera: (camera - e.center).length() as f64,
+                in_view: in_view(e.center, e.radius),
+                necessity_depth: 1.0, // an effect IS active physics by definition (existence, camera-free)
+                interaction_grain: Some(e.grain_radius as f64),
+            });
+            match mode {
+                ResolutionMode::Resolved { .. } => {
+                    // The ONE shared deposit of carried matter — grains created at the effect's kinematic
+                    // state (position + the velocity its analytic flight reached). Voxel-scale grains
+                    // until the CPU particle store carries per-particle radius (docs/33).
+                    matter.spawn_region(materials, e.center, e.radius, e.material, e.velocity);
+                    resolved += 1;
+                }
+                _ => survivors.push(e), // Analytic (off-camera) or Bulk: keep propagating cheaply
+            }
+        }
+        self.effects = survivors;
+        resolved
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,5 +455,111 @@ mod tests {
             ResolutionMode::Resolved { grain_radius } => assert!(grain_radius >= c.min_grain_radius - 1e-15),
             other => panic!("{other:?}"),
         }
+    }
+
+    // ---- the central resolution field: the Analytic -> Resolved hand-off ----
+
+    use crate::materials::{self, Material};
+    use crate::world::World;
+
+    fn earth_world() -> (World, Vec<Material>) {
+        let mats = materials::load();
+        let w = crate::world::generate(&mats);
+        (w, mats)
+    }
+
+    /// **The Moon example, end to end, through the ONE shared materialisation (docs/49).** An analytic
+    /// effect (ejecta) starts off-camera, propagates by cheap math with NO particles created, and the
+    /// instant it enters the camera's view it is materialised into grains via `MatterSim::
+    /// materialize_region` — the same call the meteor uses. No per-backend adapter; one path.
+    #[test]
+    fn an_off_camera_effect_materialises_the_frame_it_enters_view() {
+        let (_w, mats) = earth_world();
+        let mut matter = crate::matter::MatterSim::new(50_000);
+        let mut field = ResolutionField::new(ResolutionController::default());
+
+        // Camera at the origin looking at a small view box around it. The effect starts 50 m away moving
+        // toward the view, in the air (no terrain contact needed for this test).
+        let cam = Vec3::new(0.0, 40.0, 0.0);
+        let view_half = 6.0f32;
+        let in_view = |c: Vec3, _r: f32| (c - cam).length() < view_half;
+        field.add(Effect {
+            center: Vec3::new(0.0, 40.0, 50.0),
+            velocity: Vec3::new(0.0, 0.0, -12.0), // heading toward the camera
+            radius: 3.0,
+            grain_radius: 0.5,
+            material: materials::index_of(&mats, "basalt"),
+        });
+
+        let mut materialised_at = None;
+        for step in 0..400 {
+            let before = matter.particle_count();
+            let n = field.update(&mut matter, &mats, cam, Vec3::ZERO, 1.0 / 60.0, in_view);
+            if n > 0 {
+                materialised_at = Some(step);
+                assert!(matter.particle_count() > before, "resolve must create grains via the shared path");
+                break;
+            }
+            assert_eq!(matter.particle_count(), before, "OFF-camera: cheap math only, ZERO particles");
+        }
+        let step = materialised_at.expect("the effect should have entered view and resolved");
+        assert!(step > 0, "it must have propagated analytically for a while before entering view");
+        assert_eq!(field.analytic_count(), 0, "resolved ⇒ handed to the sim, no longer tracked analytically");
+    }
+
+    /// An effect that never enters view is NEVER materialised — it stays analytic, costing only math. The
+    /// camera does not gate existence (it is still tracked and propagated), but it is not simulated.
+    #[test]
+    fn an_effect_that_stays_off_camera_is_never_materialised() {
+        let (_w, mats) = earth_world();
+        let mut matter = crate::matter::MatterSim::new(50_000);
+        let mut field = ResolutionField::new(ResolutionController::default());
+        let cam = Vec3::new(0.0, 40.0, 0.0);
+        let in_view = |_c: Vec3, _r: f32| false; // nothing is ever in view
+        field.add(Effect {
+            center: Vec3::new(0.0, 40.0, 50.0),
+            velocity: Vec3::new(0.0, 0.0, 5.0), // moving AWAY
+            radius: 3.0,
+            grain_radius: 0.5,
+            material: materials::index_of(&mats, "basalt"),
+        });
+        for _ in 0..300 {
+            let n = field.update(&mut matter, &mats, cam, Vec3::ZERO, 1.0 / 60.0, in_view);
+            assert_eq!(n, 0);
+        }
+        assert_eq!(matter.particle_count(), 0, "never seen ⇒ never simulated (only cheap math ran)");
+        assert_eq!(field.analytic_count(), 1, "but it is still TRACKED — existence is not gated by the camera");
+    }
+
+    /// Analytic propagation is real (ballistic under gravity), so an effect's arrival is physically timed,
+    /// not scripted. Under downward gravity a horizontally-drifting effect falls, and where it falls
+    /// decides when it crosses the view — the hand-off timing is emergent.
+    #[test]
+    fn analytic_propagation_is_ballistic() {
+        let (_w, mats) = earth_world();
+        let mut matter = crate::matter::MatterSim::new(1000);
+        let mut field = ResolutionField::new(ResolutionController::default());
+        field.add(Effect {
+            center: Vec3::new(0.0, 100.0, 0.0),
+            velocity: Vec3::ZERO,
+            radius: 1.0,
+            grain_radius: 0.5,
+            material: materials::index_of(&mats, "basalt"),
+        });
+        let cam = Vec3::new(1000.0, 0.0, 0.0); // far away, nothing in view
+        let dt = 1.0 / 60.0;
+        // One second of free fall ⇒ ~½·g·t² = ~4.9 m drop, v ≈ 9.8 m/s down.
+        for _ in 0..60 {
+            field.update(&mut matter, &mats, cam, Vec3::new(0.0, -9.81, 0.0), dt, |_, _| false);
+        }
+        // The effect is private; assert via re-adding logic is impossible, so check the observable: it
+        // fell (materialise it now by forcing view and confirming it's below its start).
+        let n = field.update(&mut matter, &mats, cam, Vec3::ZERO, dt, |_, _| true);
+        assert_eq!(n, 1, "forcing view resolves it");
+        // It materialised near y ≈ 100 − 4.9 ≈ 95 (grains created around there). Confirm grains are below start.
+        let ys: Vec<f32> = matter.particles.iter().map(|p| p.pos.y).collect();
+        assert!(!ys.is_empty(), "grains were created");
+        let max_y = ys.iter().cloned().fold(f32::MIN, f32::max);
+        assert!(max_y < 100.0, "the effect fell under gravity before resolving (max grain y {max_y:.1} < 100)");
     }
 }

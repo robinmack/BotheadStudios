@@ -79,7 +79,29 @@ ResolutionMode`, `Default`. 6 tests, all the properties above, including:
 - no active physics is always `Bulk` (static ground is not simulated just because the camera is near);
 - Resolved granularity = the finer of camera and physics need, clamped [floor, bulk].
 
-## 5. NOT done — wiring into scenes
+## 5. The central system — BUILT and WIRED (2026-07-20)
+
+`crate::resolution::ResolutionField` is the ONE system that makes the Analytic → Resolved hand-off inherent:
+a scene registers active physics as analytic `Effect`s (region + material + velocity + grain), and one
+`update()` call per frame propagates them by cheap math off-camera and materialises the ones that enter
+view — through the SHARED `MatterSim::spawn_region` (carried matter) / `materialize_region` (excavation),
+never a per-backend adapter. There is deliberately no adapter: the forked particle containers (docs/32 §4)
+are the violation to unify onto this path, not a fact to design around. Native-tested end to end (the Moon
+lifecycle: propagate off-camera → spawn the frame it enters view). Wired into the terrain `Engine` (one
+`update()` call in `render`, `register_effect` to feed it); the identical one call serves any scene once it
+holds the shared matter substrate (docs/33 convergence). 3 field tests.
+
+### Still ahead
+
+- **Effect SOURCES.** Nothing feeds `register_effect` by default yet, so the live scene is unchanged. The
+  natural first source is a meteor's far-flung / beyond-cap ejecta registered as effects instead of
+  materialised immediately — a behaviour change that needs rig/browser verification.
+- **The other scenes** (`OrbitDemo`, `Terra`) get the identical `update()` call once they converge on the
+  shared `MatterSim` substrate — the docs/33 realignment, not a second resolution path.
+- **Granularity to the CPU store.** `spawn_region`/`materialize_region` are voxel-scale; carrying the
+  controller's `grain_radius` through needs the CPU `Particle` to hold a radius (the GPU already does).
+
+## (historical) 5b. original "not done" plan — superseded by §5 above
 
 This is the decision policy. Nothing calls `decide()` to actually materialize or demote grains yet.
 Wiring it as the promised default touches, per scene:
