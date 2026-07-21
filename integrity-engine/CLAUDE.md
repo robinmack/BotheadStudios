@@ -76,6 +76,12 @@ is being refactored toward is [`docs/33-architecture-realignment.md`](docs/33-ar
    `node_modules` per tree, a shared stash stack that different sessions can pop out from under each
    other, and branches that quietly diverge in directories nobody is looking at.) Branch, commit, push,
    PR — never commit to `main` directly.
+   **Keep the branch list at `main` alone** (Robin, 2026-07-20, stated twice). One feature branch at a
+   time; merge it, delete it (`gh pr merge N --squash --admin --delete-branch`), and `git fetch --prune`.
+   Do NOT leave branches parked: this is a single-developer repo and there is nobody else's in-flight
+   work to preserve. Work worth keeping but not merging (measurements, evidence, a salvaged tool) becomes
+   an **annotated tag** `archive/<name>` whose message records WHY — same commits, `git show
+   archive/<name>`, zero branch clutter. Five such branches were retired this way on 2026-07-20.
 2. **NEVER run `cargo fmt`** — the crate isn't rustfmt-conformant; it reformats the whole tree. Edit by
    hand. (`CONTRIBUTING.md` says otherwise for outside contributors; the working rule is do-not-run.)
 3. **Test:** `bash scripts/test.sh --fast [filter]` (inner loop) · full `bash scripts/test.sh` before any
@@ -105,5 +111,8 @@ is being refactored toward is [`docs/33-architecture-realignment.md`](docs/33-ar
 6. **Record changes:** design → `docs/NN` · what-happened+proof → `JOURNAL.md` (newest-first, What/Why/
    **Verified**) · consumer delta → `CHANGELOG.md [Unreleased]` · standing context → memory. A substantive
    change usually touches docs+JOURNAL+CHANGELOG together.
-7. **Commit** `area: imperative subject (docs/NN)` (lowercase area). **Deploy only when asked:**
+7. **Merging is yours to do:** `main` carries an active ruleset (1 approving code-owner review +
+   `code_quality` + 90% `code_coverage`). Robin: *"I set these rules up for outside contributors when/if
+   we have them. Since we don't yet we have impunity."* → merge with `--admin`. Do not ask each time.
+8. **Commit** `area: imperative subject (docs/NN)` (lowercase area). **Deploy only when asked:**
    `./scripts/deploy.sh` (full suite green first) → integrity.bothead.net (PUBLIC).

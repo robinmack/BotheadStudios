@@ -298,7 +298,7 @@ that part was right, and the scales worked (scene I energy monotonicity held). T
 model, not the numerics.
 
 **Left open:** the 21× multi-level gather cost is NOT fixed. Single-scale-per-frame (the camera-descent
-common case) is cheap and unaffected. The code is preserved on the pushed `deterministic-scatter` branch
+common case) is cheap and unaffected. The code is preserved on the pushed `archive/deterministic-scatter` tag
 as an evidence dead-end (do not merge); docs/47 records the remaining options (accept it / coarse summary /
 measured hybrid).
 
