@@ -1,9 +1,9 @@
 // Check (a) the normal Space scene still has Sun–Earth–Moon orbital motion, and (b) the GPU impact debris
 // (escaped vs bound disk) over time. Prints Moon distance/speed for the orbit scene.
-import { chromium } from 'playwright';
+import { launch } from './_launch.mjs';
 const out = process.env.OUT || '/tmp';
 const PORT = process.env.PORT || '5173';
-const b = await chromium.launch({ headless: false, args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=vulkan', '--no-sandbox'] });
+const b = await launch();
 const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
 p.on('pageerror', (e) => console.log('PAGEERR:', e.message));
 // --- (a) Space scene: orbits ---

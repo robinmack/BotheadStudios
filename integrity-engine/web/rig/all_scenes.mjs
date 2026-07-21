@@ -4,7 +4,7 @@
 // `UniformSlot`/`Camera`/uniform PODs via completely different pipelines.
 //
 //   bash scripts/rigshot.sh all_scenes.mjs
-import { chromium } from 'playwright';
+import { launch } from './_launch.mjs';
 const PORT = process.env.PORT || '5173';
 const OUT = process.env.OUT || '/tmp';
 const SCENES = [
@@ -12,8 +12,7 @@ const SCENES = [
   ['birth',   'birth.html',   9000],
   ['terra',   'terra.html',  10000],
 ];
-const b = await chromium.launch({ headless: false,
-  args: ['--enable-unsafe-webgpu','--enable-features=Vulkan','--use-angle=vulkan','--no-sandbox'] });
+const b = await launch();
 // Floor calibrated from measurement, not guessed: each run prints a blank-page control cropped to the
 // same rectangle, so the margin between "composited" and "did not" is visible every time rather than
 // asserted once. Real renders measured 64-137 kB; see JOURNAL.md.

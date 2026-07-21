@@ -1,7 +1,7 @@
-import { chromium } from 'playwright';
+import { launch } from './_launch.mjs';
 const PORT = process.env.PORT || '5173';
 const out = process.env.OUT || '/tmp';
-const b = await chromium.launch({ headless: false, args: ['--enable-unsafe-webgpu','--enable-features=Vulkan','--use-angle=vulkan','--no-sandbox'] });
+const b = await launch();
 const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
 const c = () => p.locator('#gpu-canvas');
 async function drag(dx,dy){ const bx=await c().boundingBox(); await p.mouse.move(bx.x+bx.width/2,bx.y+bx.height/2); await p.mouse.down(); await p.mouse.move(bx.x+bx.width/2+dx,bx.y+bx.height/2+dy,{steps:20}); await p.mouse.up(); }

@@ -1,10 +1,10 @@
 // docs/28 crater-scaled ejecta: fire ONE terrain meteor and MEASURE whether the ejecta lands in a
 // LOCAL blanket (a few crater radii, tens of m) or the old footprint-spanning storm (~96 m patch / sky).
 // Reads the engine's live terrain_debris_spread_m / _height_m via the scene's exposed sim handle.
-import { chromium } from 'playwright';
+import { launch } from './_launch.mjs';
 const out = process.env.OUT || '/tmp';
 const PORT = process.env.PORT || '5173';
-const b = await chromium.launch({ headless: false, args: ['--enable-unsafe-webgpu','--enable-features=Vulkan','--use-angle=vulkan','--no-sandbox'] });
+const b = await launch();
 const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
 p.on('console', m => { const t = m.text(); if (/spread|debris|blanket|EJECTA/.test(t)) console.log('  [page]', t); });
 const stat = async () => (await p.locator('#stats').innerText().catch(()=> '')).replace(/\s+/g,' ').trim();

@@ -15,13 +15,10 @@
 //
 //   PORT=5173 node web/rig/probe_traction.mjs      (dev server must be running)
 //   xvfb-run -a node web/rig/probe_traction.mjs    (headed Chromium is required — rig/README.md)
-import { chromium } from 'playwright';
+import { launch } from './_launch.mjs';
 
 const PORT = process.env.PORT || '5173';
-const b = await chromium.launch({
-  headless: false,
-  args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=vulkan', '--no-sandbox'],
-});
+const b = await launch();
 const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
 p.on('pageerror', (e) => console.log('PAGEERR:', e.message));
 await p.goto(`http://127.0.0.1:${PORT}/terrain.html`, { waitUntil: 'load' });

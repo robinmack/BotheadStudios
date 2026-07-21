@@ -1,9 +1,8 @@
-import { chromium } from 'playwright';
+import { launch } from './_launch.mjs';
 import { writeFileSync } from 'node:fs';
 const PORT = process.env.PORT || '5173';
 const out = process.env.OUT || '/tmp';
-const browser = await chromium.launch({ headless: false,
-  args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=vulkan', '--no-sandbox'] });
+const browser = await launch();
 const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
 const grab = async (name) => {
   await page.screenshot({ path: `${out}/${name}.png` });

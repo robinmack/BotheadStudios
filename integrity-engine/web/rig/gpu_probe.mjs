@@ -12,15 +12,12 @@
 //
 // Headless cannot composite WebGPU swapchains; this page never draws, but the flags/headed mode are
 // kept identical to the other rigs so behaviour matches what the scenes see.
-import { chromium } from 'playwright';
+import { launch } from './_launch.mjs';
 
 const PORT = process.env.PORT || '5173';
 const URL = `http://127.0.0.1:${PORT}/gpu-probe.html`;
 
-const b = await chromium.launch({
-  headless: false,
-  args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=vulkan', '--no-sandbox'],
-});
+const b = await launch();
 const p = await b.newPage({ viewport: { width: 1000, height: 900 } });
 p.on('pageerror', (e) => console.log('PAGEERR:', e.message));
 p.on('console', (m) => { if (m.type() === 'error') console.log('CONSOLE-ERR:', m.text()); });

@@ -4,11 +4,10 @@
 // — a static terrain shot barely touches the container, so it could not have caught a broken lift.
 //
 //   bash scripts/rigshot.sh debris_container.mjs
-import { chromium } from 'playwright';
+import { launch } from './_launch.mjs';
 const PORT = process.env.PORT || '5173';
 const OUT = process.env.OUT || '/tmp';
-const b = await chromium.launch({ headless: false,
-  args: ['--enable-unsafe-webgpu','--enable-features=Vulkan','--use-angle=vulkan','--no-sandbox'] });
+const b = await launch();
 const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
 p.on('pageerror', (e) => console.log('[pageerror]', e.message));
 p.on('console', (m) => { const t = m.text(); if (/error|panic|unreachable/i.test(t)) console.log('[page]', t); });

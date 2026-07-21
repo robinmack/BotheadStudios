@@ -1,9 +1,9 @@
 // Measure GPU-impact energy conservation + disk/escape over time (docs/35 diagnosis). Triggers the GPU impact
 // on orbit.html and logs total energy drift, remnant radius, bound-disk mass, escaped mass, moon candidate.
-import { chromium } from 'playwright';
+import { launch } from './_launch.mjs';
 const PORT = process.env.PORT || '5173';
 const OUT = process.env.OUT || '/tmp';
-const b = await chromium.launch({ headless: false, args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=vulkan', '--no-sandbox'] });
+const b = await launch();
 const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
 p.on('pageerror', (e) => console.log('PAGEERR:', e.message));
 await p.goto(`http://127.0.0.1:${PORT}/orbit.html`, { waitUntil: 'load' });

@@ -1,7 +1,7 @@
 // docs/43 — verify the Space + Two Moons scenes now load from DATA worlds and the deorbit physics still works.
-import { chromium } from 'playwright';
+import { launch } from './_launch.mjs';
 const out = process.env.OUT || '/tmp'; const PORT = process.env.PORT || '5173';
-const b = await chromium.launch({ headless: false, args: ['--enable-unsafe-webgpu','--enable-features=Vulkan','--use-angle=vulkan','--no-sandbox'] });
+const b = await launch();
 const p = await b.newPage({ viewport: { width: 1000, height: 800 } });
 p.on('pageerror', e => console.log('PAGEERR:', e.message));
 p.on('console', m => { const t = m.text(); if (t.includes('system world') || t.includes('error') || t.includes('Error')) console.log('PAGE:', t); });

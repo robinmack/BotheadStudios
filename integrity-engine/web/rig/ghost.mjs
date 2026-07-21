@@ -1,8 +1,7 @@
-import { chromium } from 'playwright';
+import { launch } from './_launch.mjs';
 const PORT = process.env.PORT || '5173';
 const out = process.env.OUT || '/tmp';
-const browser = await chromium.launch({ headless: false,
-  args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=vulkan', '--no-sandbox'] });
+const browser = await launch();
 const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
 // The sim readout lives in #stats (bottom bar), not #hud (top banner).
 const readout = async () => {

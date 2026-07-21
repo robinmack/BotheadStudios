@@ -91,6 +91,20 @@ pub struct World {
     /// Set only by demotion, cleared by any [`Self::set_voxel`] that puts matter back in the column
     /// (re-resolving hands authority back to the voxels). Untouched worlds are all-`false`.
     pub demoted: Vec<bool>,
+    /// **Cached surface top per column** (`w × d`), `-1` where [`Self::surface_top_voxel`] would say
+    /// `None`. Pure acceleration — it holds exactly what the old top-down scan returned.
+    ///
+    /// That scan was O(height) and walked every air voxel above the surface on EVERY call. Measured on
+    /// the terrain scene (CDP profile, 2026-07-21): `surface_top_voxel` was **16.7% of frame time**, the
+    /// single largest cost, because the probe's terrain contact queries it per particle per frame and
+    /// `surface_bilinear_grad` asks for FOUR columns per query.
+    ///
+    /// **Invalidation is by recompute, not by reasoning.** Every [`Self::set_voxel`] rescans that one
+    /// column. Writes are rare (a dig, a deposit); reads are per-particle per-frame. This is deliberately
+    /// the dumb version: incremental "the top only moves if you wrote above/at it" logic has to get water
+    /// (excluded from `is_solid`), demotion and mid-column removal all right, and a wrong cached top is a
+    /// silent physics error — bodies resting at the wrong height. `tops_match_a_fresh_scan` pins it.
+    tops: Vec<i32>,
 }
 
 impl World {
@@ -105,7 +119,10 @@ impl World {
         max_top: usize,
         water_mat: Option<usize>,
     ) -> Self {
-        World { w, h, d, voxels, max_top, water_mat, displacement: vec![0.0; w * d], demoted: vec![false; w * d] }
+        let mut world = World { w, h, d, voxels, max_top, water_mat,
+            displacement: vec![0.0; w * d], demoted: vec![false; w * d], tops: vec![-1; w * d] };
+        world.rebuild_tops();
+        world
     }
 
     #[inline]
@@ -163,16 +180,45 @@ impl World {
 
     /// The Y (in voxel units) where air begins above column `(x, z)` — i.e. the surface top.
     /// `None` if the column is empty or out of bounds.
+    ///
+    /// O(1): reads the [`Self::tops`] cache, which every write keeps equal to [`Self::scan_top`].
     pub fn surface_top_voxel(&self, x: i32, z: i32) -> Option<i32> {
         if x < 0 || z < 0 || x as usize >= self.w || z as usize >= self.d {
             return None;
         }
+        match self.tops[z as usize * self.w + x as usize] {
+            t if t >= 0 => Some(t),
+            _ => None,
+        }
+    }
+
+    /// The authoritative top-down scan — the ONE definition of "where does this column's surface sit".
+    /// The cache stores its result; nothing else may compute a column top independently.
+    fn scan_top(&self, x: i32, z: i32) -> i32 {
         for y in (0..self.h as i32).rev() {
             if self.is_solid(x, y, z) {
-                return Some(y + 1);
+                return y + 1;
             }
         }
-        None
+        -1
+    }
+
+    /// Recompute ONE column's cached top. Called by every write that can move a surface.
+    fn recompute_top(&mut self, x: i32, z: i32) {
+        if x < 0 || z < 0 || x as usize >= self.w || z as usize >= self.d {
+            return;
+        }
+        self.tops[z as usize * self.w + x as usize] = self.scan_top(x, z);
+    }
+
+    /// Fill the whole cache. Constructors only — O(w·d·h).
+    fn rebuild_tops(&mut self) {
+        for z in 0..self.d as i32 {
+            for x in 0..self.w as i32 {
+                let t = self.scan_top(x, z);
+                self.tops[z as usize * self.w + x as usize] = t;
+            }
+        }
     }
 
     /// The smooth (bilinear) terrain surface height at a world position, returned in CENTERED coords —
@@ -496,6 +542,9 @@ impl World {
         }
         let i = self.idx(x as usize, y as usize, z as usize);
         self.voxels[i] = material.map(|m| m as u16 + 1).unwrap_or(0);
+        // Keep the column-top cache exact by RECOMPUTING this column, not by reasoning about which way
+        // the surface moved. Writes are rare; reads are per-particle per-frame.
+        self.recompute_top(x, z);
         // Putting matter back into a demoted column hands authority back to the voxels. Without this the
         // column keeps answering `ground_top_voxel` from its stale baked height and the new matter is
         // invisible to everything that asks where the ground is. (Demotion re-sets the flag itself, and
@@ -860,7 +909,7 @@ pub fn generate(materials: &[Material]) -> World {
         }
     }
 
-    World {
+    let mut world = World {
         w: W,
         h: H,
         d: D,
@@ -871,7 +920,10 @@ pub fn generate(materials: &[Material]) -> World {
         // hereafter is a real, persisted deformation baked back from voxels.
         displacement: vec![0.0; W * D],
         demoted: vec![false; W * D],
-    }
+        tops: vec![-1; W * D],
+    };
+    world.rebuild_tops();
+    world
 }
 
 // --- deterministic value noise (no RNG; stable across runs/clients) ---
@@ -918,6 +970,77 @@ fn fbm(x: f32, z: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    /// The column-top CACHE must always equal what the authoritative top-down scan would return.
+    ///
+    /// `surface_top_voxel` went from an O(height) scan to an O(1) lookup because it was 16.7% of the
+    /// terrain frame (CDP profile, 2026-07-21). That is only sound while the cache is exact, and a stale
+    /// top is a SILENT physics error — bodies rest at the wrong height, grains de-resolve against the
+    /// wrong ground — not a crash. So compare the whole grid against a fresh scan after every kind of
+    /// mutation the world supports.
+    #[test]
+    fn tops_match_a_fresh_scan_after_every_kind_of_mutation() {
+        let mats = crate::materials::load();
+        let mut w = super::generate(&mats);
+        let check = |w: &super::World, when: &str| {
+            for z in 0..w.d as i32 {
+                for x in 0..w.w as i32 {
+                    let cached = w.surface_top_voxel(x, z).unwrap_or(-1);
+                    let fresh = w.scan_top(x, z);
+                    assert_eq!(cached, fresh, "column ({x},{z}) stale {when}: cached {cached}, real {fresh}");
+                }
+            }
+        };
+        check(&w, "on a fresh world");
+
+        let (cx, cz) = (w.w as i32 / 2, w.d as i32 / 2);
+        let top = w.surface_top_voxel(cx, cz).expect("solid column at centre");
+
+        // Dig down through the surface: the top must fall.
+        for y in (top - 5).max(0)..top {
+            w.set_voxel(cx, y, cz, None);
+        }
+        check(&w, "after digging the surface away");
+        assert!(w.surface_top_voxel(cx, cz).unwrap_or(-1) < top, "digging must lower the top");
+
+        // Put matter back ABOVE the old surface: the top must rise.
+        let rock = 0usize;
+        w.set_voxel(cx, top + 3, cz, Some(rock));
+        check(&w, "after depositing above the surface");
+        assert_eq!(w.surface_top_voxel(cx, cz), Some(top + 4), "deposit must raise the top");
+
+        // Remove a voxel in the MIDDLE of a column (top unchanged) — the case incremental logic gets wrong.
+        w.set_voxel(cx, (top / 2).max(1), cz, None);
+        check(&w, "after removing a mid-column voxel");
+
+        // Demotion clears a whole column through set_voxel.
+        w.demote_column_to_field(cx + 1, cz);
+        check(&w, "after demoting a column to the field");
+
+        // Excavate a column to nothing: cached must become None, not a stale height.
+        for y in 0..w.h as i32 {
+            w.set_voxel(cx + 2, y, cz, None);
+        }
+        check(&w, "after excavating a column to nothing");
+        assert_eq!(w.surface_top_voxel(cx + 2, cz), None, "an empty column has no top");
+    }
+
+    /// The guard must be ABLE to fail: a comparison that cannot detect a stale cache is worse than none,
+    /// because it converts an unchecked risk into a believed-checked one.
+    #[test]
+    fn the_top_cache_guard_detects_staleness() {
+        let mats = crate::materials::load();
+        let mut w = super::generate(&mats);
+        let (cx, cz) = (w.w as i32 / 2, w.d as i32 / 2);
+        let before = w.surface_top_voxel(cx, cz).unwrap_or(-1);
+        // Write voxels DIRECTLY, bypassing set_voxel — exactly how a future edit would break the cache.
+        for y in 0..w.h {
+            let i = w.idx(cx as usize, y, cz as usize);
+            w.voxels[i] = 0;
+        }
+        assert_eq!(w.surface_top_voxel(cx, cz).unwrap_or(-1), before, "cache is stale by construction here");
+        assert_ne!(w.scan_top(cx, cz), before, "a fresh scan must disagree — otherwise the guard is blind");
+    }
+
     use super::*;
     use crate::materials;
 

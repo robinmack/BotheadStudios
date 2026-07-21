@@ -1,6 +1,6 @@
-import { chromium } from 'playwright';
+import { launch } from './_launch.mjs';
 const out = process.env.OUT || '/tmp'; const PORT = process.env.PORT || '5173';
-const b = await chromium.launch({ headless: false, args: ['--enable-unsafe-webgpu','--enable-features=Vulkan','--use-angle=vulkan','--no-sandbox'] });
+const b = await launch();
 const p = await b.newPage({ viewport: { width: 1000, height: 800 } });
 p.on('console', m => { const t=m.text(); if(!t.includes('[vite]')) console.log('PAGE:', t); });
 p.on('pageerror', e => console.log('PAGEERR:', e.message));

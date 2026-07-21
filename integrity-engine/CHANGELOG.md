@@ -9,11 +9,21 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **`World::surface_top_voxel` is O(1)** — a cached per-column `tops` raster replaces an O(height)
+  top-down scan that was **16.7% of the terrain frame**. Every `set_voxel` recomputes its own column, so
+  the cache is exact by construction. **Output-neutral.** Measured: terrain 55.6 → 41.8 ms/frame
+  (17.9 → 23.4 fps, 1.31×).
+- **Rig harness: one launcher, one command.** `web/rig/_launch.mjs` holds the Chromium flags for all 67
+  rigs — critically `--disable-frame-rate-limit`, without which this headless setup paces every page at
+  exactly 1 Hz and every fps measurement is meaningless. `scripts/rig.sh` starts Xorg, rebuilds wasm only
+  when Rust/WGSL changed, and forces a vite restart after any rebuild (the stale-wasm trap).
+
 - **Video rig — smoothness and continuity.** `scripts/rigvideo.sh <rig>.mjs` records the composited
   screen losslessly while a rig runs; `scripts/analyze_motion.py` reports freeze %, delivered fps, worst
   hitch, discontinuity jumps and steadiness, with `--selftest` controls (known smooth / stuttery /
-  frozen) to read them against. First finding: terrain and birth deliver **~1 fps** (their own HUDs
-  agree; terra runs 46–62 fps in the same session, so it is workload, not capture overhead).
+  frozen) to read them against. **Correction (2026-07-21):** its first reported finding — "terrain and
+  birth deliver ~1 fps" — was a HARNESS ARTIFACT, not the engine. Chromium paces this headless setup at
+  exactly 1 Hz without `--disable-frame-rate-limit`. True rates: terra ~354, birth ~52, terrain ~23 fps.
 
 - **`crate::render`** — the scene-agnostic render scaffolding (`GpuMesh`, `UniformSlot`, `Camera`, the
   uniform PODs, `DEPTH_FORMAT`, and the generic buffer/mesh/depth helpers) lifted out of

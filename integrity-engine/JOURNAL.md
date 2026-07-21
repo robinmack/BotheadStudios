@@ -3,6 +3,60 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-21 — CORRECTION: the "~1 fps" was the harness, not the engine (and one real fix)
+
+**Retraction first.** Yesterday's entry below reported terrain and birth delivering **~1 fps** as an
+engine finding, cross-checked against "terra runs 46–62 fps in the same session, so it is workload, not
+capture overhead". **Both halves were wrong.**
+
+- **Chromium paces this headless-Xorg setup at exactly 1 Hz** — 1003.1 ms median, p95 1003.2, max
+  1003.3. A spread of 0.2 ms over a full run is a timer, not a workload. `--disable-frame-rate-limit`
+  removes it. Everything measured without that flag was capped at 1 fps regardless of the engine.
+- **The cross-check was invalid.** Terra's HUD computes fps as an EMA seeded from the first frame's
+  `dt`; at 1 fps it decays ~10% per frame, so it reads ~50 while the truth is 1. Held for 90 s it goes
+  **97 → 21 → 2 → 1 → 1**. Terra was at 1 fps too — the number that "ruled out" throttling was the
+  throttle, still converging.
+
+**What actually caught it:** an INDEPENDENT empty `requestAnimationFrame` loop injected alongside the
+app. It measured 1.0 fps on ALL THREE scenes *including* the one whose HUD simultaneously claimed 49.
+An empty loop cannot be workload-bound, so the browser had to be the pacer. Two app-level metrics
+agreeing (HUD + video) had felt like confirmation; they shared the same hidden cause.
+
+**True rates, 5060 Ti, flag on:** terra **354 fps** (2.0 ms), birth **52 fps** (5.3 ms), terrain
+**17.9 fps** (55.6 ms). So there IS a real cost in terrain — 30× the others — just not 1 fps.
+
+**The real fix that came out of it (core, not scene).** A CDP profile of terrain with frames uncapped:
+**98% CPU-bound**, top cost `World::surface_top_voxel` at **16.7%**. It scanned a column top-down —
+O(height), walking every air voxel above the surface — on every call, and `surface_bilinear_grad` asks
+for FOUR columns per query, per probe particle, per substep. It is now an O(1) read from a cached
+`tops` raster. **Invalidation is by recompute, not by reasoning:** every `set_voxel` rescans that one
+column. Writes are rare, reads are per-particle-per-substep, and the dumb version cannot get water
+(excluded from `is_solid`), demotion, or mid-column removal subtly wrong — a stale top is a SILENT
+physics error, bodies resting at the wrong height, not a crash.
+
+**Measured: terrain 55.6 ms → 41.8 ms/frame, 17.9 → 23.4 fps (1.31×).** `surface_top_voxel` left the
+top-14 profile entirely. 244/244 native, wasm clean, output-neutral.
+
+**Verified, including that the guard can fail:** `tops_match_a_fresh_scan_after_every_kind_of_mutation`
+compares the whole raster against a fresh scan after digging, depositing above the surface, removing a
+MID-column voxel (the case incremental logic gets wrong), demotion, and excavating a column to nothing;
+`the_top_cache_guard_detects_staleness` writes voxels directly to prove the comparison sees it. That
+second test immediately caught a real bypass — a mesher test wrote `voxels[i] = 0` directly and went RED
+until it was moved onto `set_voxel`.
+
+**Stopped short, deliberately.** The next costs are all the terrain scene's probe substep loop
+(`value_noise` 22.3%, `Aggregate::accelerations_masked` 11.7%, `break_overstrained_bonds` 10.3%) —
+`collide_probe_with_terrain` runs per substep with `stable_substeps` up to 256. Robin: that scene is
+slated for DELETION (docs/33 "converge → THEN delete terrain") and "has a lot of craziness". Optimising
+it would be work thrown away. The column-top cache was kept because it lives in `world.rs` — the core —
+not in the scene.
+
+**Harness hardening so this cannot recur:** `web/rig/_launch.mjs` is now the ONE place Chromium flags
+live and all 67 rigs launch through it; `scripts/rig.sh` is one command that starts Xorg, rebuilds wasm
+only when Rust/WGSL changed, and — the load-bearing part — **forces a vite restart whenever wasm was
+rebuilt**, because vite computes the wasm cache-busting stamp at startup and a stale server serves old
+bytes while looking green. Both traps are now structural, not README warnings.
+
 ## 2026-07-20 — video rig: measuring smoothness and continuity, not just "does it draw"
 
 **What.** `scripts/rigvideo.sh` records the composited X framebuffer losslessly while a rig drives a

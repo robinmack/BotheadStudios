@@ -986,8 +986,9 @@ mod tests {
                 for dx in -3..=3 {
                     let (x, z) = (cx + dx, cz + dz);
                     if x >= 0 && x < W as i32 && z >= 0 && z < D as i32 && y >= 0 {
-                        let i = w.idx(x as usize, y as usize, z as usize);
-                        w.voxels[i] = 0; // dig to air
+                        // Via `set_voxel`, not a raw `voxels[i] = 0`: the column-top cache is maintained
+                        // there, and a direct write leaves it stale (this test caught exactly that).
+                        w.set_voxel(x, y, z, None);
                     }
                 }
             }

@@ -1,8 +1,7 @@
-import { chromium } from 'playwright';
+import { launch } from './_launch.mjs';
 const PORT = process.env.PORT || '5173';
 const out = process.env.OUT || '/tmp';
-const browser = await chromium.launch({ headless: false,
-  args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=vulkan', '--no-sandbox'] });
+const browser = await launch();
 const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
 const readout = async () => (await page.locator('#stats').innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
 const grab = async (n) => { await page.screenshot({ path: `${out}/${n}.png` }); console.log('---', n, '\n', await readout()); };

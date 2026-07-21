@@ -95,9 +95,14 @@ is being refactored toward is [`docs/33-architecture-realignment.md`](docs/33-ar
    freeze, popping or a teleport. `scripts/rigvideo.sh <rig>.mjs` records the composited screen
    losslessly while the rig drives the scene and reports freeze %, delivered fps, worst hitch, and
    discontinuity jumps. Read it against `scripts/analyze_motion.py --selftest`, which prints the same
-   metrics for a known-smooth, a known-stuttery and a known-frozen clip. Measured 2026-07-20: terrain
-   and birth deliver **~1 fps** (their own HUD agrees) while terra runs 46–62 fps in the same session,
-   so that is workload, not capture overhead.
+   metrics for a known-smooth, a known-stuttery and a known-frozen clip.
+   **Launch rigs only via `scripts/rig.sh` (or `rigshot.sh`/`rigvideo.sh`), never a bare
+   `chromium.launch`.** Without `--disable-frame-rate-limit` this headless setup paces EVERY page at
+   exactly 1 Hz (1003 ms, ±0.2 ms) and every frame-rate measurement is capped at 1 fps no matter what the
+   engine does. That artifact was briefly written up here as a real ~1 fps engine collapse; an
+   INDEPENDENT empty rAF loop reading 1.0 fps on all three scenes is what exposed it. `web/rig/_launch.mjs`
+   is the one place the flags live. True rates on the 5060 Ti (2026-07-21): **terra ~354, birth ~52,
+   terrain ~23 fps.**
 4. **Rig-watch every visual claim** (Law: physics drives the render — verify the render). `npm run wasm`
    + serve (`npx vite` in `web/`), start the GPU-backed X server ONCE with
    `scripts/start-render-xorg.sh`, then `scripts/rigshot.sh <scene>.mjs`. That wrapper composites a real
