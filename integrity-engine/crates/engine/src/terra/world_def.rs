@@ -27,6 +27,94 @@ pub struct World {
     pub camera: Option<CameraDef>,
     #[serde(default)]
     pub time: Option<TimeDef>,
+    /// An `"impact"` world (docs/51): the giant-impact initial conditions. Absent for other kinds.
+    #[serde(default)]
+    pub impact: Option<ImpactDef>,
+}
+
+/// **The giant impact as DECLARED initial conditions** (`docs/51`).
+///
+/// These were Rust constants inside `gpu_sph`, which made "Birth of the Moon" the last scene on a code
+/// path: every other page is the same engine driven by a different `world.json`, but birth was selected
+/// by `data-scene="birth"` and its setup was compiled in. They are initial conditions and a few dials —
+/// exactly what docs/43 says belongs in data — not laws. The LAWS (Tillotson EOS, SPH, self-gravity)
+/// stay in the engine and are not selectable from a file.
+///
+/// **Every field defaults to the constant it replaced**, so a world that omits it is bit-identical to
+/// the old hardcoded path; `impact_defaults_reproduce_the_hardcoded_constants` pins that.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ImpactDef {
+    /// The target (proto-Earth).
+    #[serde(default = "ImpactDef::default_target")]
+    pub target: ImpactBody,
+    /// The impactor (Theia).
+    #[serde(default = "ImpactDef::default_impactor")]
+    pub impactor: ImpactBody,
+    /// Approach speed as a MULTIPLE of the mutual escape speed at contact. 1.15 is the canonical
+    /// giant-impact value; it is a declared initial condition, not a tuned dial.
+    #[serde(default = "ImpactDef::default_v_esc_multiple")]
+    pub v_esc_multiple: f64,
+    /// Initial separation as a multiple of the contact radius (r_target + r_impactor).
+    #[serde(default = "ImpactDef::default_start_separation")]
+    pub start_separation: f64,
+    /// Impact parameter as a multiple of the TARGET's radius. 1.0 ⇒ b ≈ R_e, the canonical oblique hit.
+    #[serde(default = "ImpactDef::default_impact_parameter")]
+    pub impact_parameter: f64,
+    /// Proto-target spin about +z (rad/s) applied at assembly. A spinning target flings its own mantle
+    /// into the disk (docs/41 spin IOU). 4e-4 ≈ a 4.4 h day and keeps the accreted Moon bound.
+    #[serde(default = "ImpactDef::default_spin")]
+    pub target_spin_rad_s: f64,
+    /// Separation during the GPU relax, as a multiple of the contact radius — far enough that mutual
+    /// gravity is negligible (~1/FAR²) while each body settles under its own.
+    #[serde(default = "ImpactDef::default_relax_separation")]
+    pub relax_separation: f64,
+}
+
+/// One body in an `"impact"` world: a differentiated sphere given by its core/surface radii.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ImpactBody {
+    /// Core radius (m) — the iron core boundary.
+    pub core_radius_m: f64,
+    /// Surface radius (m).
+    pub radius_m: f64,
+    /// SPH softening length (m).
+    #[serde(default = "ImpactDef::default_softening")]
+    pub softening_m: f64,
+    /// Coarse-core factor: the core is seeded at this multiple of the mantle's particle mass, so the
+    /// MANTLE (which sheds the disk) is finely resolved without spending the budget on the core
+    /// (docs/41/42 variable resolution). 1.0 = uniform.
+    #[serde(default = "ImpactDef::default_core_lod")]
+    pub core_lod_factor: f64,
+}
+
+impl ImpactDef {
+    fn default_v_esc_multiple() -> f64 { 1.15 }
+    fn default_start_separation() -> f64 { 1.6 }
+    fn default_impact_parameter() -> f64 { 1.0 }
+    fn default_spin() -> f64 { 4.0e-4 }
+    fn default_relax_separation() -> f64 { 40.0 }
+    fn default_softening() -> f64 { 1.0e6 }
+    fn default_core_lod() -> f64 { 1.0 }
+    fn default_target() -> ImpactBody {
+        ImpactBody { core_radius_m: 0.5 * 5.0e6, radius_m: 5.0e6, softening_m: 1.0e6, core_lod_factor: 8.0 }
+    }
+    fn default_impactor() -> ImpactBody {
+        ImpactBody { core_radius_m: 0.5 * 2.7e6, radius_m: 2.7e6, softening_m: 1.0e6, core_lod_factor: 1.0 }
+    }
+}
+
+impl Default for ImpactDef {
+    fn default() -> Self {
+        ImpactDef {
+            target: Self::default_target(),
+            impactor: Self::default_impactor(),
+            v_esc_multiple: Self::default_v_esc_multiple(),
+            start_separation: Self::default_start_separation(),
+            impact_parameter: Self::default_impact_parameter(),
+            target_spin_rad_s: Self::default_spin(),
+            relax_separation: Self::default_relax_separation(),
+        }
+    }
 }
 
 /// One body in a `"system"` world — the declared initial conditions the N-body integrator (`orbit`) evolves.
@@ -266,6 +354,60 @@ mod atmosphere_source_tests {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// **The whole safety of moving the giant impact into data.** Every `ImpactDef` field replaced a Rust
+    /// constant; if a default drifts from the constant it replaced, "Birth of the Moon" quietly becomes a
+    /// DIFFERENT experiment — a different impact angle or speed changes whether a Moon forms at all, and
+    /// nothing would error. These literals are the values as they stood in `gpu_sph` before the move.
+    #[test]
+    fn impact_defaults_reproduce_the_hardcoded_constants() {
+        let d = ImpactDef::default();
+        assert_eq!(d.v_esc_multiple, 1.15, "canonical giant-impact approach speed");
+        assert_eq!(d.start_separation, 1.6, "d0 = 1.6 x contact radius");
+        assert_eq!(d.impact_parameter, 1.0, "b = r_e, the oblique hit");
+        assert_eq!(d.target_spin_rad_s, 4.0e-4, "PROTO_EARTH_SPIN");
+        assert_eq!(d.relax_separation, 40.0, "RELAX_SEPARATION");
+        assert_eq!(d.target.radius_m, 5.0e6);
+        assert_eq!(d.target.core_radius_m, 0.5 * 5.0e6);
+        assert_eq!(d.target.core_lod_factor, 8.0, "CF, the coarse-core factor");
+        assert_eq!(d.target.softening_m, 1.0e6);
+        assert_eq!(d.impactor.radius_m, 2.7e6);
+        assert_eq!(d.impactor.core_radius_m, 0.5 * 2.7e6);
+        assert_eq!(d.impactor.core_lod_factor, 1.0, "the impactor is uniform-resolution");
+    }
+
+    /// A world file that omits `impact` entirely, or gives it partially, must still be the declared
+    /// default — otherwise adding the schema silently changes every existing world.
+    #[test]
+    fn a_partial_impact_block_falls_back_to_the_declared_defaults() {
+        let w = World::parse(r#"{"name":"birth","type":"impact","impact":{}}"#).expect("parses");
+        assert_eq!(w.impact.expect("impact present"), ImpactDef::default());
+
+        // Overriding ONE dial must leave the rest alone.
+        let w = World::parse(
+            r#"{"name":"b","type":"impact","impact":{"v_esc_multiple":1.4}}"#).expect("parses");
+        let i = w.impact.expect("impact present");
+        assert_eq!(i.v_esc_multiple, 1.4, "the override takes");
+        assert_eq!(i.impact_parameter, ImpactDef::default().impact_parameter, "others stay declared");
+        assert_eq!(i.target, ImpactDef::default().target);
+    }
+
+    /// The bodies the engine builds must actually FOLLOW the data, or the file is decoration.
+    #[test]
+    fn changing_the_declared_radius_changes_the_body_the_engine_builds() {
+        let mut small = ImpactDef::default();
+        small.impactor.radius_m = 1.0e6; // a much smaller Theia
+        let (_, t_default) = crate::gpu_sph::build_impact_bodies_from(&ImpactDef::default(), 2000);
+        let (_, t_small) = crate::gpu_sph::build_impact_bodies_from(&small, 2000);
+        assert!(
+            t_small.pos.len() < t_default.pos.len(),
+            "a smaller declared impactor must build fewer particles ({} vs {}) — otherwise the world \
+             file is not driving anything",
+            t_small.pos.len(), t_default.pos.len()
+        );
+    }
+
     use super::*;
 
     #[test]

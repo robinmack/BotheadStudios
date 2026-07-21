@@ -1,0 +1,10 @@
+import { launch, PORT, OUT } from './_launch.mjs';
+const b = await launch();
+const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
+p.on('pageerror', e => console.log('[PAGEERROR]', e.message));
+p.on('console', m => console.log('[' + m.type() + ']', m.text().slice(0, 200)));
+p.on('requestfailed', r => console.log('[REQFAIL]', r.url(), r.failure()?.errorText));
+await p.goto(`http://127.0.0.1:${PORT}/birth.html`, { waitUntil: 'load' });
+await p.waitForTimeout(16000);
+await p.screenshot({ path: `${OUT}/birth-debug.png` });
+await b.close();

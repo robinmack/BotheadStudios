@@ -64,7 +64,10 @@ async function main(): Promise<void> {
   report("info", `secureContext=${window.isSecureContext} · gpu in navigator=${"gpu" in navigator}`);
   // The scene identity comes from the page. The DEORBIT scenes (Space, Two Moons) are now DATA worlds
   // (docs/43, worlds-as-data): `<body data-world="…/world.json">` names an N-body "system" world that the
-  // engine loads. Birth of the Moon stays on the code path (`data-scene="birth"` → GPU SPH impact). Resolve
+  // engine loads. Birth of the Moon is ALSO a world now (docs/51): `data-scene="birth"` still selects the
+  // GPU SPH impact PATH, but its initial conditions — body radii, materials, proto-Earth spin, and the
+  // impact geometry (1.15·v_esc, b≈R_e, d₀=1.6·contact) — come from `/worlds/birth/world.json` instead of
+  // Rust constants. It was the last scene whose setup was compiled in. Resolve
   // the identity now so the banner stamps before WASM loads (a stale Safari cache is obvious at a glance).
   const worldUrl = document.body.getAttribute("data-world");
   const birthScene = document.body.getAttribute("data-scene") === "birth";
@@ -81,7 +84,9 @@ async function main(): Promise<void> {
       report("error", `world load failed, falling back to defaults: ${String(e)}`);
     }
   }
-  const numMoons = world
+  // An "impact" world declares no `bodies`, so it keeps the attribute fallback: the moon count sizes the
+  // per-moon GPU uniforms and is not something the giant impact declares.
+  const numMoons = world && !birthScene
     ? (world.bodies ?? []).filter((b) => b.role === "moon").length || 1
     : Number(document.body.getAttribute("data-moons")) || 1;
   const sceneName =
@@ -123,7 +128,11 @@ async function main(): Promise<void> {
     // docs/43: for a DATA world (the deorbit scenes), hand the engine the JSON — it replaces the built-in
     // Sun/Earth/Moon constants with the world's declared initial conditions, spin, tints, time scale, and
     // orbit-camera framing. `create` above was given the world's moon count so the GPU per-moon buffers match.
-    if (world && worldJson) {
+    // Route by the world's TYPE. A "system" world declares `bodies[]` for the N-body integrator; an
+    // "impact" world (Birth of the Moon, docs/51) declares giant-impact initial conditions and has no
+    // `bodies` at all, so handing it to `load_world` fails with "missing a `bodies` array" and the scene
+    // never starts. The rig caught exactly that.
+    if (world && worldJson && !birthScene) {
       demo.load_world(worldJson);
       report("info", `loaded system world: ${world.name ?? "?"}`);
     }
@@ -131,7 +140,19 @@ async function main(): Promise<void> {
     // — two differentiated bodies, stepped by sph_step.wgsl in-browser, forming a rotationally-SUSTAINED disk
     // (the docs/41 spin fix) that accretes a Moon. The relax runs non-blocking in chunks (the phase machine),
     // so it auto-starts on load. The old CPU-Aggregate impact (`start_birth`) is retired.
-    if (birthScene) demo.start_gpu_impact();
+    if (birthScene) {
+      // Declare the ICs BEFORE starting: without this the engine falls back to ImpactDef::default(),
+      // which reproduces the old constants exactly, so a failed fetch degrades to the previous scene
+      // rather than to nothing.
+      if (worldJson) {
+        try {
+          demo.load_impact_world(worldJson);
+        } catch (e) {
+          report("error", `impact world rejected, using declared defaults: ${String(e)}`);
+        }
+      }
+      demo.start_gpu_impact();
+    }
     hideStatus();
     const stats = document.getElementById("stats");
     if (stats) stats.hidden = false;

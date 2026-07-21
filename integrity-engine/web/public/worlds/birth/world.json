@@ -1,0 +1,13 @@
+{
+  "name": "Birth of the Moon",
+  "type": "impact",
+  "impact": {
+    "target":   { "core_radius_m": 2.5e6, "radius_m": 5.0e6, "softening_m": 1.0e6, "core_lod_factor": 8.0 },
+    "impactor": { "core_radius_m": 1.35e6, "radius_m": 2.7e6, "softening_m": 1.0e6, "core_lod_factor": 1.0 },
+    "v_esc_multiple": 1.15,
+    "start_separation": 1.6,
+    "impact_parameter": 1.0,
+    "target_spin_rad_s": 4.0e-4,
+    "relax_separation": 40.0
+  }
+}
