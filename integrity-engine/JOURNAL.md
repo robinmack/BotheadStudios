@@ -3,6 +3,49 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-20 — video rig: measuring smoothness and continuity, not just "does it draw"
+
+**What.** `scripts/rigvideo.sh` records the composited X framebuffer losslessly while a rig drives a
+scene; `scripts/analyze_motion.py` reports FREEZE (% of frame-pairs where nothing moved, worst
+continuous hitch, and the **delivered fps** that implies), JUMPS (deltas far above the run's own median
+— a pop, teleport or flash) and STEADINESS. `--selftest` builds a known-smooth, a known-stuttery
+(1-in-3) and a known-frozen clip and prints the same metrics for each, so a real number is read against
+controls rather than against intuition.
+
+**Why.** Every check the engine had was a single frame. Stutter, a freeze, popping and a teleport are
+properties of the SEQUENCE — structurally invisible to a screenshot. Robin asked for it as the next
+harness step, and it is the first tool here that can fail a scene that screenshots perfectly.
+
+**The first real measurement, and it is not flattering.** Terrain (with a meteor) and birth both deliver
+**~1.0 fps** — 96.6% of captured frame-pairs are identical, with a worst continuous hitch of **7.5 s**
+on terrain. Each scene's own HUD counter independently agrees (~1 fps), and Terra rendered 46–62 fps in
+the SAME session on the same display, so this is workload cost, not capture overhead or window
+throttling. The meteor impact shows up exactly as it should: 4 jump frames, max/median **637×**.
+
+**Three calibration errors, all caught by measurement, all the same shape.**
+1. The freeze threshold was guessed at 0.35 and called **44.5% of a known-smooth clip frozen**. Swept
+   against the controls instead: a flat plateau over [0.02, 0.2] scores smooth 0.0% and 1-in-3 67.2%.
+2. Worse, the STATISTIC was wrong. A frame-wide mean at 160×100 is dominated by static UI, so a small
+   moving object (Theia is a few pixels) reads as frozen — it scored the birth capture 99.7% frozen
+   against a true 96.5%. Switched to "did ANY pixel change by more than `pix_eps`", cross-checked at
+   640×400 where max-delta, %-pixels-changed and mean-delta agree (96.5/96.5/96.2%).
+3. Then the controls themselves were contaminated: under H.264 a *duplicated* frame comes back altered
+   by up to ~8 grey levels, so a peak statistic cannot see it as a duplicate, and no threshold satisfied
+   both controls at once (at `pix_eps` 1 the 1-in-3 clip read 1.7% frozen; at 8 the smooth clip read
+   21.8%). Recording **losslessly** removed the confound and the plateau appeared instantly: [1,4] gives
+   0.0% and 67.2%, exactly right. `pix_eps=3`.
+
+That is the pattern of the whole day: the number you did not derive is a guess, and here it was wrong
+three times in a row while looking perfectly plausible each time.
+
+**Also fixed:** `rigvideo.sh` died with exit 141 and no output, because `awk '{print; exit}'` closes the
+pipe early, `xdpyinfo` takes SIGPIPE and `set -o pipefail` kills the script. It is a race, so it worked
+the first time it was run.
+
+**Verified.** Controls read 0.0% / 67.2% / 100.0% frozen and 30.0 / 9.8 / 0.0 delivered fps, with zero
+false-positive jumps. Real captures produce the numbers above, cross-validated against both the in-app
+HUD and a fast scene in the same session.
+
 ## 2026-07-20 — the render scaffolding lifted out of `mod app` (docs/33)
 
 **What.** `crate::render` — `GpuMesh`, `UniformSlot`, `Camera`, `Uniforms`/`SkyUniforms`/`InstanceRaw`,

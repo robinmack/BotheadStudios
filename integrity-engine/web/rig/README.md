@@ -44,3 +44,23 @@ stale code while looking perfectly green. Check the `build` stamp in the HUD mat
 Ports and output paths used to be hardcoded per rig — 13 different dead ports, and 30 rigs writing into
 a long-gone session's scratchpad directory. That is now one default in `rigshot.sh`. It removed friction
 in reusing a rig; it did not make any of them a test.
+
+## Video: smoothness and continuity
+
+A screenshot cannot see stutter, a freeze, popping or a teleport — those are properties of the
+*sequence*. `scripts/rigvideo.sh <rig>.mjs [fps]` records the composited X framebuffer (the same thing
+`rigshot.sh` screenshots) while the rig runs, then reports:
+
+- **FREEZE** — % of captured frame-pairs where nothing moved, the worst continuous hitch in ms, and the
+  **delivered fps** that implies. This is real presented frame rate, not claimed fps.
+- **JUMPS** — frames whose delta is far above the run's own median: a pop, teleport or flash.
+- **STEADINESS** — how even the motion is.
+
+**Read it against the controls.** `scripts/analyze_motion.py --selftest` builds a known-smooth, a
+known-stuttery (1-in-3) and a known-frozen clip and prints the same metrics for each. A number here
+means nothing without them.
+
+Recording is **lossless** on purpose. With lossy encoding a duplicated frame comes back altered by up to
+~8 grey levels, so "did anything move?" cannot separate a real update from encoder noise — with H.264
+the two controls could not both be satisfied at any threshold. That confound cost a wrong conclusion
+before it was found.
