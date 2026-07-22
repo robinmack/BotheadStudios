@@ -2582,7 +2582,19 @@ mod app {
             // because it is drawn at its position, not painted on a skybox.
             {
                 let spos = ((r_bodies[0] - focus) * DISPLAY_SCALE).as_vec3();
-                let sun_r_disp = (6.96e8 * DISPLAY_SCALE) as f32;
+                // Radius and photosphere temperature from the SUN'S OWN DEFINITION (assets/bodies/sun.json),
+                // not repeated here. The ~0.53° disk seen from Earth is then emergent — it is a real sphere
+                // of a real size at a real distance, so it grows on approach and shrinks from Mars without
+                // anyone writing an angle down.
+                let sun = crate::planet::body("sun");
+                let sun_r_disp = (sun.radius() * DISPLAY_SCALE) as f32;
+                // Colour from the declared photosphere temperature through the SAME incandescence law that
+                // makes hot rock glow — a star is not a special case, it is matter at a temperature. At the
+                // Sun's 5,772 K that lands on white, which is what the Sun actually looks like from space
+                // (its blackbody peak is green; the integral is white — the yellow sun is an atmospheric
+                // effect, seen from under the air). A cooler star now renders red WITHOUT new code.
+                let photosphere = sun.layers.last().map(|l| l.t_outer).unwrap_or(5772.0);
+                let glow = incandescence(photosphere as f32);
                 write_space_uniform(
                     &self.queue,
                     &self.sun_uni,
@@ -2592,9 +2604,9 @@ mod app {
                     [0.0, 0.0, 0.0, 1.0], // no reflectance — it is the illuminant
                     // The photosphere's radiance is ~4.6e4× a sunlit white surface at 1 AU
                     // (~2e7 vs ~430 W/m²/sr): ANY exposure set for the scene saturates on the Sun.
-                    // incandescence()'s rock-glow intensity (~2) tone-mapped to dull grey — honest
-                    // brightness is the measured ratio, which pins the Reinhard output at white.
-                    [1.0, 1.0, 1.0, 4.6e4],
+                    // incandescence()'s rock-glow INTENSITY (~2) tone-maps to dull grey, so the colour
+                    // comes from the law and the brightness from that measured ratio.
+                    [glow[0], glow[1], glow[2], 4.6e4],
                     AIRLESS,
                 );
             }

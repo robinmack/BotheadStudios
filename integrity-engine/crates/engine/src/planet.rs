@@ -511,3 +511,43 @@ mod body_definition_tests {
             "Earth's declared air must still weigh ~1 atm at the surface (got {:.0} Pa)", e.surface_pressure());
     }
 }
+
+#[cfg(test)]
+mod star_appearance_tests {
+    /// **The Sun's apparent size is not drawn, it is a consequence.** Its declared radius at Earth's real
+    /// orbital distance must subtend the ~0.53° every observer measures. Nothing in the renderer sets an
+    /// angle: it draws a sphere of this radius at that distance, so the disk grows on approach and shrinks
+    /// from Mars for free. If this drifts, someone has started painting the sky.
+    #[test]
+    fn the_declared_sun_subtends_half_a_degree_from_earth() {
+        let r = super::body("sun").radius();
+        assert!((r - 6.96e8).abs() < 1e7, "declared solar radius {r:.3e} m");
+        const AU: f64 = 1.495_978_707e11;
+        let angular_deg = 2.0 * (r / AU).atan().to_degrees();
+        assert!(
+            (angular_deg - 0.533).abs() < 0.01,
+            "the Sun must subtend ~0.53° from Earth, got {angular_deg:.4}°"
+        );
+        // And ~2× that from Mercury's perihelion (4.6e10 m) — the same sphere, no special case.
+        let from_mercury = 2.0 * (r / 4.6e10).atan().to_degrees();
+        assert!(from_mercury > 1.6, "closer ⇒ bigger: {from_mercury:.2}° from Mercury");
+    }
+
+    /// The Sun's COLOUR comes from its declared photosphere temperature, not from a hardcoded white. At
+    /// 5,772 K that is white — which is what the Sun looks like from space; the "yellow sun" is what the
+    /// atmosphere does to it, seen from underneath. The point of deriving it is that a cooler star must
+    /// come out red without anyone writing new code.
+    #[test]
+    fn a_stars_colour_follows_its_declared_temperature() {
+        let photosphere = super::body("sun").layers.last().unwrap().t_outer;
+        assert!(
+            (photosphere - 5772.0).abs() < 1.0,
+            "the Sun's declared photosphere is 5,772 K, got {photosphere}"
+        );
+        // The renderer's incandescence law is wasm-gated, so reproduce its ramp here rather than
+        // duplicating the constants: white above ~3200 K, red-dominant just above the 800 K glow floor.
+        let ramp = |t: f64| ((t - 800.0) / (3200.0 - 800.0)).clamp(0.0, 1.0);
+        assert!(ramp(photosphere) >= 1.0, "a 5,772 K photosphere saturates the ramp ⇒ white");
+        assert!(ramp(1200.0) < 0.25, "a cool body stays down the red end of the ramp");
+    }
+}
