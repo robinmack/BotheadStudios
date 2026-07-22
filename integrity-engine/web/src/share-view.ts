@@ -23,6 +23,28 @@ export type ShareView = {
   afterPresent(): void;
 };
 
+/// Is this page served from somewhere the `/__shot` receiver actually exists?
+///
+/// The receiver is a **vite dev-server middleware**, so it exists on localhost and over the LAN
+/// (`scripts/dev-lan.sh`) and NOT in production — integrity.bothead.net answers `405`. A button that
+/// silently fails is worse than no button, so the honest signal is where the page came FROM: a private
+/// or loopback host means the dev server is serving it.
+///
+/// Deliberately host-based rather than probing `/__shot`: a probe costs a request on every page load and
+/// races the first paint, and the answer is already knowable from the URL.
+export function hasShotReceiver(hostname: string = location.hostname): boolean {
+  const h = hostname.toLowerCase();
+  if (h === "localhost" || h === "" || h.endsWith(".local")) return true;
+  if (h === "::1" || h === "[::1]") return true;
+  // 127.0.0.0/8
+  if (/^127\./.test(h)) return true;
+  // RFC1918: 10/8, 192.168/16, 172.16/12
+  if (/^10\./.test(h)) return true;
+  if (/^192\.168\./.test(h)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true;
+  return false;
+}
+
 export function createShareView(
   canvas: HTMLCanvasElement,
   opts: { label?: string; onStatus?: (msg: string, bad?: boolean) => void } = {},
@@ -48,6 +70,9 @@ export function createShareView(
     want = true;
     onStatus?.("capturing view…");
   });
+  // Hidden where the receiver does not exist (the public site). Hidden HERE, once, rather than left to
+  // each scene to remember — a scene that forgot would ship a button that always fails.
+  button.hidden = !hasShotReceiver();
 
   return {
     button,
@@ -56,6 +81,7 @@ export function createShareView(
     },
     afterPresent() {
       if (!want) return;
+      if (button.hidden) { want = false; return; } // no receiver here; never post into the void
       want = false;
       try {
         const url = canvas.toDataURL("image/png");

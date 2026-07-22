@@ -5,6 +5,7 @@
 import init, { Terra } from "./wasm/engine.js";
 import "./scene-nav";
 import { createShareView } from "./share-view";
+import { createSimHud } from "./sim-hud";
 
 // --- Log relay: mirror console + errors to the dev server (parity with the other scenes) ---
 function report(level: string, msg: string): void {
@@ -191,6 +192,7 @@ async function main(): Promise<void> {
     shareSlot.appendChild(share.button);
     document.body.appendChild(shareSlot);
 
+    const hud = createSimHud("earth");
     const frame = () => {
       // Held keys → move/altitude intents (the engine scales the step by altitude). Fully data-driven.
       const fwd = (active("forward") ? 1 : 0) - (active("back") ? 1 : 0);
@@ -210,10 +212,21 @@ async function main(): Promise<void> {
       lastT = now;
       if (dt > 0) fps = fps === 0 ? 1000 / dt : fps * 0.9 + (1000 / dt) * 0.1;
       if (stats) {
-        stats.innerHTML =
-          `<b>${terra.world_name()}</b> · alt ${fmtAlt(terra.altitude_m())} · ` +
-          `lat ${terra.latitude().toFixed(2)}° lon ${terra.longitude().toFixed(2)}° · ` +
-          `${terra.ground_biome()} · ${fps.toFixed(0)} fps<br>${controlsHint}`;
+        // The SHARED HUD, like every other scene. Terra was the only one writing `stats.innerHTML`
+        // itself, which is why it showed no BUILD STAMP — and without that you cannot tell whether what
+        // you are looking at is the build you just deployed.
+        hud.update({
+          title: `<b>${terra.world_name()}</b>`,
+          physics: [
+            `alt <b>${fmtAlt(terra.altitude_m())}</b> · lat <b>${terra.latitude().toFixed(2)}°</b> ` +
+              `lon <b>${terra.longitude().toFixed(2)}°</b>`,
+            `standing on <b>${terra.ground_biome()}</b>`,
+          ],
+          timeScale: 1,
+          fps: Math.round(fps),
+          metersPerPixel: 0,
+          controls: controlsHint,
+        });
       }
       if (firstFrame) {
         report("info", "first terra frame rendered OK");
