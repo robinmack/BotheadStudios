@@ -63,8 +63,8 @@ async function main() {
   // --- Drop meteor. Energy is a real number in joules, not a "power" dial.
   const drop = document.getElementById("drop-meteor");
   const fire = () => {
-    const n = g.drop_meteor(2.0e6);
-    setStatus(n > 0 ? `meteor: ${n} grains resolved` : "meteor: the ground held", false);
+    g.throw_meteor(1200, 900);
+    setStatus("meteor away — 1,200 kg of iron at 900 m/s", false);
     setTimeout(() => setStatus(""), 2500);
   };
   drop?.addEventListener("click", fire);
@@ -87,7 +87,7 @@ async function main() {
         title: `<b>${g.world_name()}</b>`,
         physics: [
           `standing on <b>${g.surface_material()}</b> · eye <b>${g.eye_altitude_m().toFixed(0)}</b> m above ground`,
-          `grains resolved now <b>${g.particle_count()}</b> · total ever <b>${g.created_total()}</b>`,
+          `grains <b>${g.particle_count()}</b> · meteors in flight <b>${g.meteors_in_flight()}</b> · total ever <b>${g.created_total()}</b>`,
         ],
         timeScale: 1,
         fps,

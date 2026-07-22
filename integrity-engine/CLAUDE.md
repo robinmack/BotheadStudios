@@ -73,6 +73,31 @@ is being refactored toward is [`docs/33-architecture-realignment.md`](docs/33-ar
   already there. It is one instance of the pattern docs/48 names — physics built and verified, then wired
   into one place or none. **Grep for the primitive before writing one.**
 
+## Before you create a scene or a behaviour — the Law pre-flight
+
+**Run this BEFORE writing it, not after.** On 2026-07-21 a scene shipped that broke four Laws while the
+Laws sat in a file edited that same day; availability is demonstrably not enough. Each question below is
+a mistake actually made in this repo, not a hypothetical.
+
+1. **Does any number in it fail to trace to physics?** (Law V) A declared `gravity`, a surface pressure,
+   an escape velocity, a clamp, a "power" dial. → Name the matter instead and let the quantity emerge.
+   `crate::laws` FAILS THE BUILD on the ones a machine can see; the rest are yours to catch.
+2. **Does it answer a question the engine already answers?** (Law II) Grep for the primitive before
+   writing one, and enumerate the existing consumers. Two grain-interaction paths, two ways to get
+   ground height, two incandescence curves — each of those shipped here.
+3. **Does it resolve more than necessity requires?** (Law III) Resolving a whole patch because it is
+   simpler is "by whim". The un-resolved world is still computed, just cheaply.
+4. **Does the camera decide anything but representation?** (Law IV/VI) If looking away changes what is
+   true, or a visual criterion decides what is simulated, stop.
+5. **Is the camera itself matter?** (Law I) It obeys the same contact law as a grain — never a clamp.
+6. **Are you reaching for it because it will LOOK right?** (Law I) *"That instinct is the enemy of this
+   engine."* This is the one that produced every other failure in the list.
+7. **Has this already been decided?** Search `docs/` and `JOURNAL.md` first. Adding a new doc that
+   restates a settled principle is its own failure — the answer is usually already in `docs/00`.
+
+If a step cannot be satisfied honestly, the right output is a **flagged IOU that names the real
+computation it defers** (Law V) — recorded in `docs/46`'s ledger, not a quiet approximation.
+
 ## Hard rules (do not violate)
 
 1. **Work directly in the main checkout on a feature branch** — `~/workspace/BotheadStudios`. Do NOT

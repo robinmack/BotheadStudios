@@ -54,9 +54,13 @@ pub struct GroundDef {
     /// to a declared number.
     #[serde(default = "GroundDef::default_view_radius")]
     pub view_radius_m: f32,
-    /// Surface gravity (m/s²) the analytic effects fall under.
-    #[serde(default = "GroundDef::default_gravity")]
-    pub gravity_ms2: f32,
+    /// The planet this ground is a surface patch OF. Gravity is NOT declared here: it EMERGES as
+    /// `g = GM/R²` from that body's real mass and radius (`planet::earth()`), exactly as
+    /// `LayeredBody::atmosphere_mass` refuses to let a world declare its surface pressure. A ground
+    /// patch with a hand-written `9.81` is a cube of blocks suspended in space wearing Earth's number —
+    /// an abstraction, not a world. Name the planet and the physics follows.
+    #[serde(default = "GroundDef::default_planet")]
+    pub planet: String,
     /// Camera altitude above the surface beneath it (m) — the scene's framing, declared not compiled.
     #[serde(default = "GroundDef::default_eye_height")]
     pub eye_height_m: f32,
@@ -174,7 +178,7 @@ impl GroundDef {
     fn default_view_radius() -> f32 { 2_000.0 }
     fn default_eye_height() -> f32 { 20.0 }
     fn default_grain() -> f32 { 1.0 }
-    fn default_gravity() -> f32 { 9.81 }
+    fn default_planet() -> String { "earth".into() }
 }
 
 /// One declared matter event.

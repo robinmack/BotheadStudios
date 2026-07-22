@@ -68,6 +68,9 @@ pub mod simulation;
 #[cfg(target_arch = "wasm32")]
 pub mod ground_scene;
 #[cfg(test)]
+/// docs/00 — the Laws, made checkable: fails the build when a world file declares a quantity that must
+/// emerge from matter. Availability of the Laws proved insufficient on its own (2026-07-21).
+mod laws;
 mod isotropy;
 pub mod materials;
 pub mod matter;
