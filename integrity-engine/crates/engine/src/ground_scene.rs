@@ -304,6 +304,7 @@ const NEAR_CLIP: f32 = 0.2;
 /// The ground scene: a world defined by data, rendered and made destructible.
 #[wasm_bindgen]
 pub struct Ground {
+    step_clock: crate::clock::StepClock,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -595,6 +596,7 @@ impl Ground {
             crate::atmosphere::twilight_half_angle(h, e.radius())
         };
         Ok(Ground {
+            step_clock: crate::clock::StepClock::new(),
             surface, device, queue, config, depth_view,
             world_pipeline, world_uni, sky_pipeline, sky_uni,
             particle_pipeline, particle_bind, particle_instances, cube_gpu,
@@ -665,7 +667,18 @@ impl Ground {
     /// One frame: step the physics, re-mesh if matter changed the ground, then draw sky → world → grains.
     pub fn render(&mut self) -> Result<(), JsValue> {
         self.frame = self.frame.wrapping_add(1);
-        self.sim.step(1.0 / 60.0);
+        // **Wall-clock physics.** This used to be `step(1.0/60.0)` once per frame, which makes simulated
+        // time = frames ÷ 60: a 30 fps machine ran the world at half speed and a 300 fps one at five
+        // times. Rig-measured rates on one box span 23–354 fps, so it was not hypothetical — and it
+        // inverts Law VI, letting the render decide how fast physics happens.
+        //
+        // Now: measure the real elapsed time, and consume it in FIXED inner steps so the integrator sees
+        // a constant dt (which its stability depends on) while the world advances at wall-clock rate. The
+        // remainder is carried, so no time is lost or invented.
+        let dt = self.step_clock.tick();
+        for _ in 0..dt.steps {
+            self.sim.step(crate::clock::PHYSICS_DT);
+        }
 
         // Grains that came to rest de-resolved back into voxels, so the surface changed: re-mesh. The
         // crater persists as GEOMETRY — the matter became ground again rather than being deleted.
@@ -926,3 +939,4 @@ fn write_sky(queue: &wgpu::Queue, slot: &UniformSlot, vp: Mat4, eye: Vec3, light
     };
     queue.write_buffer(&slot.buf, 0, bytemuck::bytes_of(&u));
 }
+

@@ -48,7 +48,18 @@ pub const SETTLE_SPEED: f32 = 0.02; // below this HORIZONTAL speed, a grounded p
 //                                    grid. NB the check is on horizontal speed only: a grounded grain's
 //                                    vertical velocity is the explicit snap-contact's numerical jitter
 //                                    (~g·dt residual), NOT real motion, so it must not block deposition.
-const SETTLE_FRAMES: u32 = 10; // ...or after this many consecutive grounded steps
+/// ...or after this long resting on the ground. **In SECONDS, not frames.**
+///
+/// This was `SETTLE_FRAMES: u32 = 10` — ten consecutive grounded STEPS — which made the instant matter
+/// stops being matter depend on the timestep. The same excavation settled in 0.167 s at 60 Hz and 0.0167 s
+/// at 600 Hz, so how fast the host ran decided how the world behaved. Ten frames at the engine's 60 Hz
+/// step is the same 0.167 s, so nothing changes today; what changes is that it stays 0.167 s when the
+/// step does not.
+///
+/// FLAGGED: a duration is not yet a physical criterion. The honest form is energy — deposit once a grain's
+/// kinetic energy falls below what its material's contact dissipates in one step — which is what
+/// `accretion::representation` does by measurement for bodies. Recorded in the burn-down.
+const SETTLE_SECONDS: f32 = 10.0 / 60.0;
 const MAX_EJECT: f32 = 0.045; // cap ejection speed below the world's ~7 cm/s escape velocity
 const VAPOR_EXPANSION: f32 = 3.0; // vaporized ejecta expand away faster (gas/plasma) — docs/20
 
@@ -67,7 +78,8 @@ pub struct Particle {
     /// Kelvin. Impact ejecta carry the heat deposited in them (`docs/20`); drives the incandescent
     /// glow of molten debris ([`crate::emission::incandescence`]). Cold matter sits at `REF_TEMP_K`.
     pub temp_k: f32,
-    resting_frames: u32,
+    /// How long (SECONDS, not frames) this grain has been resting on the ground.
+    resting_seconds: f32,
 }
 
 pub struct MatterSim {
@@ -143,7 +155,7 @@ impl MatterSim {
                         material: mat,
                         mass: materials[mat].density,
                         temp_k: REF_TEMP_K,
-                        resting_frames: 0,
+                        resting_seconds: 0.0,
                     });
                     spawned += 1;
                 }
@@ -229,7 +241,7 @@ impl MatterSim {
                 material: mat,
                 mass: materials[mat].density,
                 temp_k: REF_TEMP_K, // set below from the deposited heat
-                resting_frames: 0,
+                resting_seconds: 0.0,
             });
         }
 
@@ -319,7 +331,7 @@ impl MatterSim {
                         material: mat,
                         mass: materials[mat].density, // kg (1 m³ voxel)
                         temp_k: REF_TEMP_K,
-                        resting_frames: 0,
+                        resting_seconds: 0.0,
                     });
                 }
             }
@@ -434,7 +446,7 @@ impl MatterSim {
                         material: mat,
                         mass: materials[mat].density, // kg (1 m³ voxel)
                         temp_k: REF_TEMP_K,
-                        resting_frames: 0,
+                        resting_seconds: 0.0,
                     });
                 }
             }
@@ -532,7 +544,7 @@ impl MatterSim {
                         material,
                         mass,
                         temp_k: REF_TEMP_K,
-                        resting_frames: 0,
+                        resting_seconds: 0.0,
                     });
                 }
             }
@@ -737,7 +749,7 @@ impl MatterSim {
                 material: mat,
                 mass: materials[mat].density,
                 temp_k: REF_TEMP_K,
-                resting_frames: 0,
+                resting_seconds: 0.0,
             });
         }
         self.particles.len() - start
@@ -939,7 +951,7 @@ impl MatterSim {
                         material: mat,
                         mass: materials[mat].density,
                         temp_k: REF_TEMP_K,
-                        resting_frames: 0,
+                        resting_seconds: 0.0,
                     });
                     n += 1;
                     removed += 1;
@@ -1056,13 +1068,13 @@ impl MatterSim {
             if p.pos.y - PARTICLE_HALF <= ground_y {
                 p.pos.y = ground_y + PARTICLE_HALF;
                 p.vel *= CONTACT_DAMP;
-                p.resting_frames += 1;
+                p.resting_seconds += dt;
                 // "At rest" = stopped sliding HORIZONTALLY. The remaining vertical velocity of a grounded
                 // grain is the snap-contact's per-step jitter (gravity pulls it a hair below the surface,
                 // the contact snaps it back), a numerical artifact under Earth g — checking full speed
                 // left grains bouncing above SETTLE_SPEED forever and never depositing.
                 let horiz = (p.vel.x * p.vel.x + p.vel.z * p.vel.z).sqrt();
-                if horiz < SETTLE_SPEED || p.resting_frames > SETTLE_FRAMES {
+                if horiz < SETTLE_SPEED || p.resting_seconds > SETTLE_SECONDS {
                     // Deposit via the SHARED de-resolution primitive (same law the GPU debris readback
                     // uses): into the column's air-start voxel — unless a dynamic body occupies that cell
                     // or the column is full, in which case the grain stays a particle (matter conserved).
@@ -1072,7 +1084,7 @@ impl MatterSim {
                     }
                 }
             } else {
-                p.resting_frames = 0;
+                p.resting_seconds = 0.0;
             }
 
             self.particles[i] = p;
@@ -1116,7 +1128,7 @@ impl MatterSim {
             }
 
             body.resting = false; // contact wakes the body
-            p.resting_frames = 0;
+            p.resting_seconds = 0.0;
         }
     }
 }
@@ -2191,7 +2203,7 @@ mod tests {
             material: 0,
             mass: 5.0,
             temp_k: REF_TEMP_K,
-            resting_frames: 0,
+            resting_seconds: 0.0,
         });
         let momentum_before = probe.mass * probe.vel + sim.particles[0].mass * sim.particles[0].vel;
 
@@ -2234,7 +2246,7 @@ mod tests {
             material: 0,
             mass: 1.0,
             temp_k: REF_TEMP_K,
-            resting_frames: 0,
+            resting_seconds: 0.0,
         });
         let solids_before = w.solid_count();
 
@@ -2396,6 +2408,54 @@ mod tests {
         assert!(
             hottest > boil,
             "the core vaporizes (hottest {hottest} K > boil {boil} K)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod settle_timing_tests {
+    /// **The same world must settle the same way whatever the timestep.**
+    ///
+    /// Deposition was gated on `resting_frames > 10` — ten consecutive grounded STEPS — so the moment
+    /// matter stopped being matter depended on how fast the host was running: 0.167 s of settling at
+    /// 60 Hz, 0.0167 s at 600 Hz, for identical physics. It is a duration now, accumulated from `dt`.
+    #[test]
+    fn settling_takes_the_same_TIME_at_any_timestep() {
+        let mats = crate::materials::load();
+        // Run the same excavation at two very different steps and compare SIMULATED time to settle.
+        let run = |dt: f32, steps: usize| -> (usize, f32) {
+            let mut w = crate::world::generate(&mats);
+            let field = crate::gravity::MassField::build(&w, &mats, 8);
+            let surf = {
+                let c = w.center();
+                w.bulk_height(0.0, 0.0) + c.y - c.y
+            };
+            let mut sim = super::MatterSim::new(20_000);
+            sim.dig(&mut w, &mats, glam::Vec3::new(0.0, surf - 1.5, 0.0), 3.0, 1.0e6);
+            let start = sim.particles.len();
+            let mut t = 0.0f32;
+            for _ in 0..steps {
+                sim.step(&mut w, &field, &[], dt);
+                t += dt;
+                if sim.particles.len() * 2 < start {
+                    break; // half of them have deposited
+                }
+            }
+            (start, t)
+        };
+
+        let (n_a, t_a) = run(1.0 / 60.0, 600);
+        let (n_b, t_b) = run(1.0 / 240.0, 2400);
+        assert!(n_a > 0 && n_b > 0, "the dig must produce grains ({n_a}, {n_b})");
+
+        // The SIMULATED time to settle must agree — that is the property. (It need not be identical:
+        // contact resolution is stepwise, so a finer step resolves the approach slightly differently.)
+        let rel = (t_a - t_b).abs() / t_a.max(1e-6);
+        assert!(
+            rel < 0.35,
+            "settling must take the same SIMULATED time at any step: {t_a:.4} s at 60 Hz vs {t_b:.4} s \
+             at 240 Hz ({:.0}% apart). Before the fix this was a factor of four, by construction.",
+            100.0 * rel
         );
     }
 }

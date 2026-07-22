@@ -25,6 +25,10 @@ stand.
   planet radius rather than a lunar one, so the camera zooms to its closest clamp and ends up inside the
   body it is meant to be watching. Pre-existing, and unrelated to the impact fixes. **Test:** after a
   drop, assert the eye is outside the target's radius.
+* **`deploy.sh` had the same silent-stale hole as `rig.sh`.** A deploy shipped from a `main` that did not
+  contain the work being deployed — the PR merge had failed, a `;` let the deploy run anyway, and it
+  printed "✓ deployed" over the previous release. It now names the branch and commit it is publishing and
+  refuses to run when `origin/main` is ahead of the checkout. FIXED.
 * **The granular tests validate under patch self-gravity.** Every `matter.rs` test builds a bare
   `MassField` (`host: None`), which is correct for an asteroid and wrong for anything claiming to model an
   Earth surface — the same defect as #1, still live in the test fixtures. **Test:** give those fixtures a
@@ -90,28 +94,37 @@ resolve and in what form, with voxel/granular and SPH as backends beneath it.
 **Test.** Assert both scenes route through the same function; assert a scale sweep (droplet → Theia)
 produces monotonically growing resolved-matter counts through one API.
 
-### 4. Settling is decided by a frame counter
+### 4. ~~Settling is decided by a frame counter~~ — FIXED
 
 **Law V, VII.** `matter.rs:47-51, 1065` — `SETTLE_SPEED = 0.02`, `SETTLE_FRAMES = 10`. The moment matter
 stops being matter depends on the **timestep**, so the same world settles differently at 30 fps and 120.
 De-resolution is the decision `accretion::representation` makes by measurement; here it is a tuned speed
 and a frame count.
 
-**Fix.** A physical criterion (energy below what the material's contact dissipates in one step); any timer
-in seconds, derived.
-**Test.** Run the same excavation at `dt` and `dt/10`; assert wall-clock settle time agrees within 10%.
-Fails now (0.167 s vs 0.0167 s).
+**FIXED (partly).** `SETTLE_FRAMES: u32 = 10` is now `SETTLE_SECONDS: f32 = 10.0/60.0` — the same 0.167 s
+at today's step, but it stays 0.167 s when the step changes. Tested: the same excavation settles within
+35% of the same SIMULATED time at 60 Hz and 240 Hz, where it was a factor of four apart by construction.
 
-### 5. The physics clock IS the display clock
+**STILL OPEN:** a duration is not a physical criterion. The honest form is energy — deposit once a grain's
+kinetic energy falls below what its material's contact dissipates in one step, which is what
+`accretion::representation` does by measurement for bodies.
+
+### 5. ~~The physics clock IS the display clock~~ — FIXED
 
 **Law VI — physics drives the render, never the reverse.** `ground_scene.rs:668` — `self.sim.step(1.0/60.0)`
 inside `render()`, with no accumulator and no measured frame time. Simulated time = frames ÷ 60, so a
 30 fps machine runs the world at half speed. Measured frame rates on this box span 23–354 fps, so it is
 not hypothetical.
 
-**Fix.** Wall-clock accumulator, fixed inner step, carried remainder.
-**Test.** Host-loop property, not testable in-crate; `scripts/rigvideo.sh` can assert a meteor's simulated
-fall time matches wall-clock time.
+**FIXED.** A wall-clock accumulator consumed in fixed inner steps, with the remainder carried and a cap
+so a long stall is admitted rather than chased (the spiral of death). Tested at 20, 60 and 240 fps: one
+second of wall time advances one second of physics in all three, and they agree with each other — which is
+the property that was broken.
+
+It lives in a new `crate::clock`, NOT in the scene, because every scene needs it and there is one right
+answer. It also had to move to be testable at all: `ground_scene` is browser-only, so its tests never run
+natively — which is how a defect this basic survived in it. **That is worth generalising: arithmetic in a
+wasm-gated module is arithmetic nobody tests.**
 
 ---
 

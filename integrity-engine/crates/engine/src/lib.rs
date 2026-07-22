@@ -25,6 +25,9 @@ mod aggregate;
 mod atmosphere;
 mod axle; // docs/47 §3 — the revolute joint: holds a wheel's hub, frees ONE spin axis
 mod bhtree;
+/// The physics clock: real elapsed time into whole fixed steps, so a slow machine simulates the same
+/// world as a fast one. Not scene code — every scene needs it, and there is one right answer.
+pub mod clock;
 mod blackbody; // Planck + the CIE observer: colour from temperature, for stars and (a follow-up) hot ejecta
 mod body;
 mod damage;
