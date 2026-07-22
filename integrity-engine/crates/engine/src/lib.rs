@@ -695,6 +695,7 @@ mod app {
         interior_uni: UniformSlot,
         sun_uni: UniformSlot,
         atm_tau: [f64; 3],
+        atm_twilight: f64,
         interior_tint: [f32; 4],
         interior_glow: [f32; 4],
         wall_unis: Vec<UniformSlot>,
@@ -874,6 +875,15 @@ mod app {
             let atm_tau = crate::atmosphere::rayleigh_tau(
                 crate::planet::earth().surface_pressure() / 101_325.0,
             );
+            let atm_twilight = {
+                let e = crate::planet::earth();
+                let h = mats
+                    .iter()
+                    .find(|m| m.id == "air")
+                    .map(|air| crate::atmosphere::scale_height(air, 288.0, e.gravity_at(e.radius())))
+                    .unwrap_or(0.0);
+                crate::atmosphere::twilight_half_angle(h, e.radius())
+            };
             let wall_unis: Vec<UniformSlot> = (0..WALL_N)
                 .map(|_| make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler))
                 .collect();
@@ -1026,6 +1036,7 @@ mod app {
                 interior_uni,
                 sun_uni,
                 atm_tau,
+                atm_twilight,
                 interior_tint,
                 interior_glow,
                 wall_unis,
@@ -2417,7 +2428,7 @@ mod app {
                 let mu_v = dir.dot(v_dir);
                 let mu_s = dir.dot(sun_dir_earth);
                 let cos_th = v_dir.dot(sun_dir_earth);
-                let veil = crate::atmosphere::rayleigh_veil(mu_v, mu_s, cos_th, atm_tau_eff, 22.0);
+                let veil = crate::atmosphere::rayleigh_veil(mu_v, mu_s, cos_th, atm_tau_eff, crate::atmosphere::SUN_GAIN as f64, self.atm_twilight);
                 let tr = crate::atmosphere::rayleigh_transmit(mu_v, mu_s, atm_tau_eff);
                 let tint = [m.albedo[0] * tr[0], m.albedo[1] * tr[1], m.albedo[2] * tr[2], 1.0];
                 write_space_uniform(
@@ -2509,7 +2520,7 @@ mod app {
                         if r < EARTH_RADIUS_M * 0.985 {
                             // On the buried part of the bowl: real layer material + temperature here.
                             let m = &self.mats
-                                [materials::index_of(&self.mats, profile.layer_at(r).material)];
+                                [materials::index_of(&self.mats, &profile.layer_at(r).material)];
                             tint = [m.albedo[0], m.albedo[1], m.albedo[2], 1.0];
                             glow = incandescence(profile.temperature_at(r) as f32);
                             scale = wall_grain_r;
@@ -2879,23 +2890,44 @@ mod app {
         UniformSlot { buf, bind }
     }
 
-    /// A body with NO declared atmosphere: zero optical depth. The shared Rayleigh model then returns
-    /// exactly black — the airless Moon needs no special case, it just has no air.
-    const AIRLESS: [f32; 4] = [0.0, 0.0, 0.0, crate::atmosphere::SUN_GAIN];
+    /// A body's AIR, as the shaders want it: `[tau_r, tau_g, tau_b, exposure, twilight_half_angle]`.
+    /// One value carries the whole atmosphere so that adding a property does not mean a new argument at
+    /// every draw call — `write_space_uniform` unpacks it into the two uniform slots that hold it.
+    type Air = [f32; 5];
+
+    /// A body with NO declared atmosphere: zero optical depth and zero twilight. The shared Rayleigh
+    /// model then returns exactly black with a knife-edge terminator — the airless Moon needs no special
+    /// case, it just has no air.
+    const AIRLESS: Air = [0.0, 0.0, 0.0, crate::atmosphere::SUN_GAIN, 0.0];
 
     impl Terra {
         /// This world's air, as the shared Rayleigh model wants it: the optical depth derived from the
         /// DECLARED atmosphere's mass (a world never declares τ, and never declares surface pressure —
         /// both fall out of the air's own weight), at the one canonical exposure. A world with no
         /// atmosphere yields zeros here and renders with a hard terminator, correctly.
-        fn air(&self) -> [f32; 4] {
+        fn air(&self) -> Air {
             [
                 self.atm_tau[0] as f32,
                 self.atm_tau[1] as f32,
                 self.atm_tau[2] as f32,
                 crate::atmosphere::SUN_GAIN,
+                self.atm_twilight as f32,
             ]
         }
+    }
+
+    /// The twilight half-angle for a body: sqrt(2H/R), with H the scale height of the DECLARED air at
+    /// this body's own surface gravity. No air ⇒ no twilight ⇒ a knife-edge terminator.
+    fn twilight_of(radius_m: f64, g: f64, mats: &[materials::Material], tau: [f64; 3]) -> f64 {
+        if tau[2] <= 0.0 {
+            return 0.0;
+        }
+        let h = mats
+            .iter()
+            .find(|m| m.id == "air")
+            .map(|air| crate::atmosphere::scale_height(air, 288.0, g))
+            .unwrap_or(0.0);
+        crate::atmosphere::twilight_half_angle(h, radius_m)
     }
 
     fn write_space_uniform(
@@ -2906,15 +2938,16 @@ mod app {
         light: Vec3,
         tint: [f32; 4],
         emissive: [f32; 4],
-        atm: [f32; 4],
+        air: Air,
     ) {
         let u = SpaceUniforms {
             view_proj: view_proj.to_cols_array_2d(),
             model: model.to_cols_array_2d(),
-            light_dir: [light.x, light.y, light.z, 0.0],
+            // .w = the twilight half-angle: how far past the geometric terminator the air is still lit.
+            light_dir: [light.x, light.y, light.z, air[4]],
             tint,
             emissive,
-            atm,
+            atm: [air[0], air[1], air[2], air[3]],
         };
         queue.write_buffer(&slot.buf, 0, bytemuck::bytes_of(&u));
     }
@@ -3191,6 +3224,7 @@ mod app {
         fly: crate::terra::fly_camera::FlyCamera,
         planet_radius: f64,
         atm_tau: [f64; 3],
+        atm_twilight: f64,
         world_name: String,
         // docs/43 Phase 2 — the baked surface rasters (land mask, elevation+bathymetry, land-cover biome) and
         // the biome-index → material-index map. `None` until a world with surface rasters is loaded.
@@ -3305,7 +3339,9 @@ mod app {
             let shell_count = 4096; // ~2.8° grain spacing — resolves continents/biomes (Phase 2, grain shell)
             let shell_unis: Vec<UniformSlot> =
                 (0..shell_count).map(|_| make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler)).collect();
-            let atm_tau = crate::atmosphere::rayleigh_tau(crate::planet::earth().surface_pressure() / 101_325.0);
+            let earth = crate::planet::earth();
+            let atm_tau = crate::atmosphere::rayleigh_tau(earth.surface_pressure() / 101_325.0);
+            let atm_twilight = twilight_of(earth.radius(), earth.gravity_at(earth.radius()), &mats, atm_tau);
             // Default fly camera: orbital over the equator (a world file overrides this in `load_world`).
             let fly = crate::terra::fly_camera::FlyCamera::new(
                 20.0, 0.0, 12_000_000.0, 0.0, -1.2, 2.0, 40_000_000.0,
@@ -3332,6 +3368,7 @@ mod app {
                 mats,
                 fly,
                 planet_radius: EARTH_RADIUS_M,
+                atm_twilight,
                 atm_tau,
                 world_name: String::new(),
                 landmask: None,
@@ -3377,6 +3414,7 @@ mod app {
                 .unwrap_or_else(|| crate::planet::earth().surface_pressure())
                 / 101_325.0;
             self.atm_tau = crate::atmosphere::rayleigh_tau(p_ratio);
+            self.atm_twilight = twilight_of(planet.radius_m, g_surface, &self.mats, self.atm_tau);
             self.world_name = w.name.clone();
 
             // docs/43 Phase 4 — seed the fly camera from the world's declared camera (default: orbital over 20°N).
@@ -3520,8 +3558,13 @@ mod app {
             let view = self.fly.view(r_disp, DISPLAY_SCALE, aspect, ground_disp);
             let view_proj = view.vp_abs;
             let eye = view.eye;
-            // Fixed direction TO the sun → a pleasant ¾ lighting; the day/night terminator is emergent.
-            let sun_dir = glam::DVec3::new(1.0, 0.45, 0.6).normalize();
+            // The REAL direction to the Sun for right now (orbit::solar_direction_earth_fixed). What stood
+            // here was `DVec3::new(1.0, 0.45, 0.6)` — a fixed vector whose comment called it "a pleasant ¾
+            // lighting" while claiming the terminator was emergent. It was not: the globe was already
+            // oriented to real time, so a decorative sun put noon in the wrong ocean and the day/night line
+            // wherever it happened to land. Now the terminator is where the Sun actually puts it, and the
+            // seasons come from the same declination that makes them real.
+            let sun_dir = crate::orbit::solar_direction_earth_fixed(crate::orbit::unix_now_seconds());
             let sun_light = Vec3::new(sun_dir.x as f32, sun_dir.y as f32, sun_dir.z as f32);
 
             // docs/43 Phase 5 — build the fine ground cap under the camera and cross-fade it in as we descend.
@@ -3591,7 +3634,7 @@ mod app {
                     let mu_v = dir.dot(v_dir);
                     let mu_s = dir.dot(sun_dir);
                     let cos_th = v_dir.dot(sun_dir);
-                    let veil = crate::atmosphere::rayleigh_veil(mu_v, mu_s, cos_th, self.atm_tau, 22.0);
+                    let veil = crate::atmosphere::rayleigh_veil(mu_v, mu_s, cos_th, self.atm_tau, crate::atmosphere::SUN_GAIN as f64, self.atm_twilight);
                     let tr = crate::atmosphere::rayleigh_transmit(mu_v, mu_s, self.atm_tau);
                     let tint = [m.albedo[0] * tr[0], m.albedo[1] * tr[1], m.albedo[2] * tr[2], 1.0];
                     write_space_uniform(

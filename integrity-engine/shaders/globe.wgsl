@@ -7,7 +7,7 @@
 struct U {
     view_proj : mat4x4<f32>,
     model     : mat4x4<f32>,
-    light_dir : vec4<f32>,  // xyz = direction TO the sun
+    light_dir : vec4<f32>,  // xyz = direction TO the sun, w = twilight half-angle (rad)
     tint      : vec4<f32>,  // multiplies the vertex colour
     emissive  : vec4<f32>,  // xyz = camera eye (display units)
     atm       : vec4<f32>,  // xyz = Rayleigh optical depth per band (docs/26), w = sun gain
@@ -67,7 +67,7 @@ fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     // optical depth scatters at the shared exposure. A body with no declared atmosphere carries tau = 0
     // and gets exactly nothing — the airless case needs no branch.
     let view = normalize(u.emissive.xyz - i.wpos);
-    radiance += rayleigh_veil(dot(n, view), dot(n, l), dot(view, l), u.atm.xyz, u.atm.w);
+    radiance += rayleigh_veil(dot(n, view), dot(n, l), dot(view, l), u.atm.xyz, u.atm.w, u.light_dir.w);
     let mapped = radiance / (vec3<f32>(1.0) + radiance); // Reinhard tone-map
     // Alpha = tint.a: 1.0 for the opaque globe, the cross-fade factor for the ground cap. `emissive.xyz`
     // is the eye for the globe (world space) and the ORIGIN for the camera-relative cap, so `view` holds
