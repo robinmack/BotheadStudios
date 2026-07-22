@@ -86,12 +86,19 @@ pub fn perigee(rel_pos: DVec3, rel_vel: DVec3, mu: f64) -> Option<f64> {
         return Some(0.0);
     }
     let energy = 0.5 * rel_vel.length_squared() - mu / r;
-    if energy >= 0.0 {
-        return None; // unbound (parabolic/hyperbolic) — no perigee it returns to
-    }
-    let a = -mu / (2.0 * energy);
     let h = rel_pos.cross(rel_vel).length();
     let e = (1.0 + 2.0 * energy * h * h / (mu * mu)).max(0.0).sqrt();
+    if energy >= 0.0 {
+        // UNBOUND, but not featureless: a hyperbolic pass still has a closest approach, and on a giant
+        // impact that distance is the whole story. Returning `None` here made the HUD announce "perigee
+        // unbound (would escape)" about Theia while it was 7,722 km out and closing at 11 km/s — a body
+        // that was seconds from hitting. q = h²/μ · 1/(1+e) is the periapsis of any conic.
+        if e <= 1.0 || h == 0.0 {
+            return None; // radial fall: no periapsis, it goes straight in
+        }
+        return Some(h * h / mu / (1.0 + e));
+    }
+    let a = -mu / (2.0 * energy);
     Some(a * (1.0 - e))
 }
 
@@ -751,5 +758,37 @@ mod solar_position_tests {
         let later = lon_at(noon + 6.0 * 3600.0);
         let moved = (at_noon - later).rem_euclid(360.0);
         assert!((moved - 90.0).abs() < 2.0, "6 h ⇒ ~90° west, got {moved:.2}°");
+    }
+}
+
+#[cfg(test)]
+mod periapsis_tests {
+    use super::*;
+
+    /// A hyperbolic approach has a CLOSEST APPROACH, and on an impact trajectory that number is the
+    /// interesting one. This is the check that stops the HUD saying "would escape" about a body that is
+    /// about to hit.
+    #[test]
+    fn an_unbound_approach_still_has_a_closest_approach() {
+        const MU: f64 = G * 5.972e24;
+        // Circular orbit: periapsis = radius (the bound case must not regress).
+        let r = 7.0e6;
+        let v_circ = (MU / r).sqrt();
+        let q = perigee(DVec3::new(r, 0.0, 0.0), DVec3::new(0.0, v_circ, 0.0), MU).unwrap();
+        assert!((q - r).abs() < 1.0, "a circular orbit's periapsis is its radius (got {q:.0})");
+
+        // Hyperbolic flyby, well above escape speed, with a real impact parameter.
+        let d = 1.0e8;
+        let v = 11_000.0; // escape from this range is ~3.3 km/s, so this is firmly unbound
+        let b = 2.0e7; // offset ⇒ angular momentum ⇒ a genuine periapsis
+        let q = perigee(DVec3::new(d, b, 0.0), DVec3::new(-v, 0.0, 0.0), MU)
+            .expect("a hyperbolic pass has a periapsis");
+        assert!(q > 0.0 && q < b, "periapsis is inside the impact parameter (got {q:.3e}, b {b:.0e})");
+        // Gravity focuses it: closest approach is nearer than the straight-line miss distance.
+        assert!(q < b * 0.995, "gravitational focusing pulls the pass in (q {q:.4e} vs b {b:.1e})");
+
+        // Aimed straight at the centre there is no periapsis to speak of — it goes in.
+        assert!(perigee(DVec3::new(d, 0.0, 0.0), DVec3::new(-v, 0.0, 0.0), MU).is_none(),
+            "a radial fall has no closest approach; it is a hit");
     }
 }

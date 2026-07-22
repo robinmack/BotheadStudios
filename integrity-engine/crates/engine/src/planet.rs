@@ -218,6 +218,7 @@ pub fn surface_phase(mat: &Material, t: f64, p: f64) -> Phase {
 pub fn body(id: &str) -> LayeredBody {
     let src = match id {
         "earth" => include_str!("../../../assets/bodies/earth.json"),
+        "proto-earth" => include_str!("../../../assets/bodies/proto-earth.json"),
         "moon" => include_str!("../../../assets/bodies/moon.json"),
         "sun" => include_str!("../../../assets/bodies/sun.json"),
         "theia" => include_str!("../../../assets/bodies/theia.json"),
@@ -548,5 +549,53 @@ mod star_appearance_tests {
         let ramp = |t: f64| ((t - 800.0) / (3200.0 - 800.0)).clamp(0.0, 1.0);
         assert!(ramp(photosphere) >= 1.0, "a 5,772 K photosphere saturates the ramp ⇒ white");
         assert!(ramp(1200.0) < 0.25, "a cool body stays down the red end of the ramp");
+    }
+}
+
+#[cfg(test)]
+mod giant_impact_budget_tests {
+    /// **Mass has to add up.** The giant-impact hypothesis is a claim about a mass budget: proto-Earth
+    /// plus Theia becomes modern Earth, plus the Moon, plus whatever escaped. So the bodies the scene
+    /// places must satisfy it — otherwise the simulation is running an impact that could not have made
+    /// the world we live on.
+    ///
+    /// This test exists because the scene was pointed at `earth.json`: adding a Mars-sized body to a
+    /// planet that ALREADY contains it gave a post-impact Earth of 1.115 M⊕ — 11% too heavy, an entire
+    /// Mars of surplus. Modern Earth is the RESULT of this collision, never its input.
+    #[test]
+    fn proto_earth_plus_theia_makes_the_earth_and_moon_we_have() {
+        const M_EARTH: f64 = 5.972e24;
+        const M_MOON: f64 = 7.342e22;
+        let m = |id: &str| super::body(id).total_mass();
+        let (proto, theia, earth) = (m("proto-earth"), m("theia"), m("earth"));
+
+        // Theia is Mars-class: the impactor of the hypothesis, ~0.1 M⊕.
+        let theia_frac = theia / M_EARTH;
+        assert!((0.08..0.15).contains(&theia_frac), "Theia is Mars-class, got {theia_frac:.3} M⊕");
+
+        // Proto-Earth is ~0.9 M⊕ — the canonical value, and independently what the budget demands.
+        let proto_frac = proto / M_EARTH;
+        assert!((0.85..0.95).contains(&proto_frac), "proto-Earth is ~0.9 M⊕, got {proto_frac:.3}");
+
+        // THE BUDGET: what goes in must account for what comes out, within the mass that escapes (a few
+        // percent in the published simulations) and our own layer-density approximation.
+        let before = proto + theia;
+        let after = earth + M_MOON;
+        let err = (before - after).abs() / after;
+        assert!(
+            err < 0.03,
+            "proto-Earth + Theia ({before:.4e}) must account for Earth + Moon ({after:.4e}); off by {:.1}%",
+            100.0 * err
+        );
+
+        // And the error must be in the physical direction: at least as much goes in as comes out, since
+        // some fraction escapes the system entirely.
+        assert!(before >= after * 0.99, "the impact cannot create mass");
+
+        // The target must actually be the smaller, pre-impact planet — not modern Earth wearing its name.
+        assert!(proto < earth, "proto-Earth is lighter than the Earth it becomes");
+        assert!(super::body("proto-earth").radius() < super::body("earth").radius(), "and smaller");
+        // It has no atmosphere: modern air is later outgassing, and this impact would strip it regardless.
+        assert_eq!(super::body("proto-earth").atmosphere_mass, 0.0, "proto-Earth carries no declared air");
     }
 }

@@ -256,22 +256,38 @@ pub struct ImpactDef {
     pub relax_separation: f64,
 }
 
-/// One body in an `"impact"` world: a differentiated sphere given by its core/surface radii.
+impl ImpactBody {
+    /// This body's definition — the single source for what it is made of and how big it is.
+    pub fn definition(&self) -> crate::planet::LayeredBody {
+        crate::planet::body(&self.body)
+    }
+    /// Surface radius (m), from the definition.
+    pub fn radius_m(&self) -> f64 {
+        self.definition().radius()
+    }
+    /// The core boundary (m): the outermost IRON layer in the definition. Differentiation is a property
+    /// of the body — a scene does not get to say where Theia's core ends.
+    pub fn core_radius_m(&self) -> f64 {
+        let b = self.definition();
+        b.layers
+            .iter()
+            .filter(|l| l.material == "iron")
+            .map(|l| l.outer_r)
+            .fold(0.0, f64::max)
+    }
+}
+
+/// One body in an `"impact"` world — and all a scene may say about it is WHICH body it is.
+///
+/// Everything physical (radius, core boundary, densities, materials) comes from the definition. Every
+/// RESOLUTION choice (particle count, softening length, where to spend detail) belongs to the engine: it
+/// is a statement about available compute, not about the world. A scene that could set them would be
+/// deciding how carefully physics gets done, which is not a scene's business.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ImpactBody {
-    /// Core radius (m) — the iron core boundary.
-    pub core_radius_m: f64,
-    /// Surface radius (m).
-    pub radius_m: f64,
-    /// SPH softening length (m).
-    #[serde(default = "ImpactDef::default_softening")]
-    pub softening_m: f64,
-    /// Coarse-core factor: the core is seeded at this multiple of the mantle's particle mass, so the
-    /// MANTLE (which sheds the disk) is finely resolved without spending the budget on the core
-    /// (docs/41/42 variable resolution). 1.0 = uniform.
-    #[serde(default = "ImpactDef::default_core_lod")]
-    pub core_lod_factor: f64,
+    /// The defined body (`assets/bodies/<id>.json`).
+    pub body: String,
 }
 
 impl ImpactDef {
@@ -283,10 +299,10 @@ impl ImpactDef {
     fn default_softening() -> f64 { 1.0e6 }
     fn default_core_lod() -> f64 { 1.0 }
     fn default_target() -> ImpactBody {
-        ImpactBody { core_radius_m: 0.5 * 5.0e6, radius_m: 5.0e6, softening_m: 1.0e6, core_lod_factor: 8.0 }
+        ImpactBody { body: "proto-earth".into() }
     }
     fn default_impactor() -> ImpactBody {
-        ImpactBody { core_radius_m: 0.5 * 2.7e6, radius_m: 2.7e6, softening_m: 1.0e6, core_lod_factor: 1.0 }
+        ImpactBody { body: "theia".into() }
     }
 }
 
@@ -555,13 +571,37 @@ mod tests {
         assert_eq!(d.impact_parameter, 1.0, "b = r_e, the oblique hit");
         assert_eq!(d.target_spin_rad_s, 4.0e-4, "PROTO_EARTH_SPIN");
         assert_eq!(d.relax_separation, 40.0, "RELAX_SEPARATION");
-        assert_eq!(d.target.radius_m, 5.0e6);
-        assert_eq!(d.target.core_radius_m, 0.5 * 5.0e6);
-        assert_eq!(d.target.core_lod_factor, 8.0, "CF, the coarse-core factor");
-        assert_eq!(d.target.softening_m, 1.0e6);
-        assert_eq!(d.impactor.radius_m, 2.7e6);
-        assert_eq!(d.impactor.core_radius_m, 0.5 * 2.7e6);
-        assert_eq!(d.impactor.core_lod_factor, 1.0, "the impactor is uniform-resolution");
+        // The bodies are NAMED, and everything physical about them comes from their definitions. What
+        // this test used to assert — a 5,000 km target and a 2,700 km impactor — was the bug: a 5,000 km
+        // Earth masses 0.48 Earth, and Theia is 3,390 km, so the scene was running two shrunken bodies
+        // under real names and every mass, speed and timescale in it was wrong. The test pinned that in
+        // place, which is how it survived.
+        assert_eq!(d.target.body, "proto-earth");
+        assert_eq!(d.impactor.body, "theia");
+        assert!((d.target.radius_m() - 6.161e6).abs() < 5e3, "the target is PROTO-Earth: {}", d.target.radius_m());
+        assert!((d.impactor.radius_m() - 3.39e6).abs() < 1e3, "the impactor IS Theia: {}", d.impactor.radius_m());
+        // Core boundaries come from the definitions' own iron layers, not from a declared fraction.
+        assert!((d.target.core_radius_m() - 3.365e6).abs() < 1e4, "proto-Earth's core: {}", d.target.core_radius_m());
+        assert!((d.impactor.core_radius_m() - 1.8e6).abs() < 1e4, "Theia's core: {}", d.impactor.core_radius_m());
+        // Theia must be the SMALLER body, or it is not an impactor.
+        assert!(d.impactor.radius_m() < d.target.radius_m(), "the impactor is smaller than the target");
+    }
+
+    /// A scene may say WHICH body, and nothing else about it. Resolution (particle count, softening,
+    /// where to spend detail) is the engine's business — a scene that could set it would be deciding how
+    /// carefully physics gets done.
+    #[test]
+    fn a_scene_may_not_redefine_a_body_or_set_its_resolution() {
+        for bad in [
+            r#"{"name":"w","type":"impact","impact":{"impactor":{"body":"theia","radius_m":2.7e6}}}"#,
+            r#"{"name":"w","type":"impact","impact":{"impactor":{"body":"theia","core_radius_m":1.0e6}}}"#,
+            r#"{"name":"w","type":"impact","impact":{"impactor":{"body":"theia","softening_m":1.0e6}}}"#,
+            r#"{"name":"w","type":"impact","impact":{"impactor":{"body":"theia","core_lod_factor":4.0}}}"#,
+        ] {
+            assert!(World::parse(bad).is_err(), "a scene must not be able to say this: {bad}");
+        }
+        // Naming a body is all it takes.
+        assert!(World::parse(r#"{"name":"w","type":"impact","impact":{"impactor":{"body":"theia"}}}"#).is_ok());
     }
 
     /// A MISTYPED key must be an error, not a silent fallback. serde ignores unknown fields by default,
@@ -595,19 +635,26 @@ mod tests {
         assert_eq!(i.target, ImpactDef::default().target);
     }
 
-    /// The bodies the engine builds must actually FOLLOW the data, or the file is decoration.
+    /// The bodies the engine builds must actually FOLLOW the definitions, or naming one is decoration.
+    /// (This test used to prove the world file's declared RADIUS drove the build — which was true, and
+    /// was the bug: the scene could say Theia was any size it liked. Now it proves the DEFINITION drives
+    /// it, which is the property worth having.)
     #[test]
-    fn changing_the_declared_radius_changes_the_body_the_engine_builds() {
-        let mut small = ImpactDef::default();
-        small.impactor.radius_m = 1.0e6; // a much smaller Theia
-        let (_, t_default) = crate::gpu_sph::build_impact_bodies_from(&ImpactDef::default(), 2000);
-        let (_, t_small) = crate::gpu_sph::build_impact_bodies_from(&small, 2000);
+    fn naming_a_different_body_builds_a_different_body() {
+        let theia = ImpactDef::default();
+        let mut lunar = ImpactDef::default();
+        lunar.impactor = ImpactBody { body: "moon".into() }; // 1,737 km, half Theia's radius
+        let (_, t_theia) = crate::gpu_sph::build_impact_bodies_from(&theia, 2000);
+        let (_, t_lunar) = crate::gpu_sph::build_impact_bodies_from(&lunar, 2000);
         assert!(
-            t_small.pos.len() < t_default.pos.len(),
-            "a smaller declared impactor must build fewer particles ({} vs {}) — otherwise the world \
-             file is not driving anything",
-            t_small.pos.len(), t_default.pos.len()
+            t_lunar.pos.len() < t_theia.pos.len(),
+            "a smaller NAMED body must build fewer particles ({} vs {}) — otherwise the definition is \
+             not driving anything",
+            t_lunar.pos.len(), t_theia.pos.len()
         );
+        // And the built radius must match the definition, not anything the scene said.
+        let r = t_theia.pos.iter().map(|p| p.length()).fold(0.0, f64::max);
+        assert!((r - 3.39e6).abs() < 3.0e5, "the built Theia is Theia-sized: {r:.3e} m");
     }
 
     use super::*;

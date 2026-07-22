@@ -1,5 +1,51 @@
 {
   "worktree": {
     "bgIsolation": "none"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(cargo:*)",
+      "Bash(npm:*)",
+      "Bash(npx:*)",
+      "Bash(node:*)",
+      "Bash(python3:*)",
+      "Bash(git:*)",
+      "Bash(gh:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(find:*)",
+      "Bash(sed:*)",
+      "Bash(awk:*)",
+      "Bash(wc:*)",
+      "Bash(sort:*)",
+      "Bash(uniq:*)",
+      "Bash(diff:*)",
+      "Bash(cut:*)",
+      "Bash(cp:*)",
+      "Bash(mv:*)",
+      "Bash(mkdir:*)",
+      "Bash(touch:*)",
+      "Bash(chmod:*)",
+      "Bash(echo:*)",
+      "Bash(printf:*)",
+      "Bash(rm:*)",
+      "Bash(curl:*)",
+      "Bash(sha256sum:*)",
+      "Bash(gunzip:*)",
+      "Bash(gzip:*)",
+      "Bash(tar:*)",
+      "Bash(pgrep:*)",
+      "Bash(pkill:*)",
+      "Bash(kill:*)",
+      "Bash(sleep:*)",
+      "Bash(timeout:*)",
+      "Bash(date:*)",
+      "Bash(nvidia-smi:*)",
+      "Bash(bash:*)"
+    ]
   }
 }

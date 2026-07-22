@@ -130,17 +130,32 @@ pub fn build_impact_bodies_from(
     const FTP: f64 = 4.0 / 3.0 * std::f64::consts::PI;
     let (core, mantle) = (crate::eos::Tillotson::iron(), crate::eos::Tillotson::basalt());
     let (t, im) = (&def.target, &def.impactor);
+    // Radii and core boundaries come from the BODY DEFINITIONS, never from the scene. Resolution (the
+    // particle count) is the only compute knob left — a coarse simulation of the real Earth is honest;
+    // a fine simulation of a half-sized one is not.
+    let (t_r, t_core) = (t.radius_m(), t.core_radius_m());
+    let (im_r, im_core) = (im.radius_m(), im.core_radius_m());
     // docs/42 browser-parity: the target is variable-resolution (coarse iron core + FINE basalt mantle) —
     // the fine mantle sheds a real disk (uniform seeding did not). Solve m_fine so the count ≈ n_earth.
-    let m_mantle = mantle.rho0 * FTP * (t.radius_m.powi(3) - t.core_radius_m.powi(3));
-    let m_core = core.rho0 * FTP * t.core_radius_m.powi(3);
-    let m_fine = (m_mantle + m_core / t.core_lod_factor) / n_earth as f64;
-    let earth = HydroBody::new_lod(core, mantle, t.core_radius_m, t.radius_m, t.softening_m as f64, m_fine, t.core_lod_factor);
+    let m_mantle = mantle.rho0 * FTP * (t_r.powi(3) - t_core.powi(3));
+    let m_core = core.rho0 * FTP * t_core.powi(3);
+    // **Resolution is the ENGINE's call, not the scene's.** Detail is spent where the physics needs it:
+    // the TARGET's mantle is what shears off and forms the disk, so it is finely seeded, while its core
+    // (which mostly just sits there being massive) is seeded coarse. That allocation is a statement about
+    // compute, not about the world, so it lives here.
+    const TARGET_CORE_LOD: f64 = 8.0; // core particles this much heavier than mantle ones
+    let m_fine = (m_mantle + m_core / TARGET_CORE_LOD) / n_earth as f64;
+    // Softening EMERGES from the resolution: half the fine-particle spacing, (m/ρ)^⅓. Declaring it (the
+    // world file said 1.0e6 m) let a number that must track particle size sit still while the size moved.
+    let softening = 0.5 * (m_fine / mantle.rho0).cbrt();
+    let earth = HydroBody::new_lod(core, mantle, t_core, t_r, softening, m_fine, TARGET_CORE_LOD);
     // The impactor: uniform-differentiated at the SAME fine particle mass (equal-mass across the system).
-    let m_theia = core.rho0 * FTP * im.core_radius_m.powi(3)
-        + mantle.rho0 * FTP * (im.radius_m.powi(3) - im.core_radius_m.powi(3));
+    let m_theia = core.rho0 * FTP * im_core.powi(3)
+        + mantle.rho0 * FTP * (im_r.powi(3) - im_core.powi(3));
     let theia_n = (m_theia / m_fine).round().max(50.0) as usize;
-    let theia = HydroBody::new_differentiated(core, mantle, im.core_radius_m, im.radius_m, im.softening_m as f64, theia_n);
+    // The impactor is seeded uniformly at the SAME fine particle mass — equal-mass particles across
+    // the system, so neither body's resolution biases the shared dynamics.
+    let theia = HydroBody::new_differentiated(core, mantle, im_core, im_r, softening, theia_n);
     (earth, theia)
 }
 
@@ -156,7 +171,7 @@ pub fn build_impact_bodies(n_earth: usize, _n_theia: usize) -> (crate::hydrostat
 /// Returns (particles, softening, relax_dt).
 pub fn build_far_apart_from(def: &crate::terra::world_def::ImpactDef, n_earth: usize, n_theia: usize) -> (Vec<SphParticle>, f32, f32) {
     let (earth, theia) = build_impact_bodies_from(def, n_earth);
-    let far = def.relax_separation * (def.target.radius_m + def.impactor.radius_m);
+    let far = def.relax_separation * (def.target.radius_m() + def.impactor.radius_m());
     let ec = com(&earth);
     let tc = com(&theia);
     let mut out = Vec::with_capacity(earth.pos.len() + theia.pos.len());

@@ -476,13 +476,23 @@ async function main(): Promise<void> {
           `${earthPct.toFixed(1)}% of Earth's (survives → planet-scale crater) ` +
           `<span style="opacity:.7">· fragmentation/crater not yet materialised</span>`;
       } else if (peri < 0) {
-        line2 = `perigee <b>unbound</b> (would escape)`;
+        line2 = `<b>radial fall</b> — aimed at the centre, no closest approach`;
       } else {
-        const crash = peri < 8108; // Earth radius + Moon radius, km → surfaces meet
-        line2 =
-          `perigee <b style="color:${crash ? "#ff8a8a" : "#dfe6ff"}">` +
-          `${Math.round(peri).toLocaleString()}</b> km ` +
-          `<span style="opacity:.7">(Earth R ≈ 6,371 — brake below this to crash)</span>`;
+        // Surfaces meet at the sum of the two bodies' real radii, from their definitions — this was
+        // hardcoded to Earth + Moon (8,108 km) and so was simply wrong in the birth scene, where the
+        // impactor is Theia and contact is 9,761 km.
+        const contact = demo.contact_distance_km();
+        const crash = peri < contact;
+        // Say what the number MEANS. A closest approach inside the contact distance is not an orbit with
+        // a low perigee, it is a collision — and the scene used to report exactly that case as "perigee
+        // unbound (would escape)" while Theia was seconds from impact.
+        line2 = crash
+          ? `<b style="color:#ff8a8a">impact trajectory</b> · closest approach ` +
+            `<b>${Math.round(peri).toLocaleString()}</b> km ` +
+            `<span style="opacity:.7">(inside contact at ${Math.round(contact).toLocaleString()} km)</span>`
+          : `closest approach <b>${Math.round(peri).toLocaleString()}</b> km ` +
+            `<span style="opacity:.7">(surfaces meet at ${Math.round(contact).toLocaleString()} km — ` +
+            `brake below this to crash)</span>`;
       }
       // The aftermath clock (Robin): SIM time since the impact, at the unit the scale deserves —
       // the honest answer to "what timeframe are we watching this over?" (time-LOD ≠ wall time).

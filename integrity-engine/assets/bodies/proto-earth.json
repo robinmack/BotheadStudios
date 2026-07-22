@@ -1,0 +1,42 @@
+{
+  "$comment": "PROTO-EARTH - the target of the giant impact, and a DIFFERENT BODY from modern Earth. Modern Earth is the RESULT: proto-Earth + Theia - the Moon - what escaped. Pointing the birth scene at earth.json produced a post-impact planet of 1.115 Earth masses, 11% too heavy, because it added a Mars-sized body to a planet that already included it. Mass here is 0.910 M_earth, which is what the budget demands (modern + Moon - Theia) and independently what the giant-impact literature gives (~0.9). Layer radii are modern Earth's scaled by (0.910)^(1/3) at unchanged densities - FLAGGED: a slightly less massive planet is also slightly less compressed, so the real proto-Earth's density profile differs a little from this. No atmosphere: modern air is a product of later outgassing and would not survive this impact anyway.",
+  "name": "Proto-Earth",
+  "layers": [
+    {
+      "material": "iron",
+      "outer_r": 1181276,
+      "density": 12900.0,
+      "t_inner": 5900.0,
+      "t_outer": 5800.0
+    },
+    {
+      "material": "iron",
+      "outer_r": 2272614,
+      "density": 11900.0,
+      "t_inner": 5800.0,
+      "t_outer": 5150.0
+    },
+    {
+      "material": "iron",
+      "outer_r": 3365404,
+      "density": 10600.0,
+      "t_inner": 5150.0,
+      "t_outer": 4150.0
+    },
+    {
+      "material": "peridotite",
+      "outer_r": 6137026,
+      "density": 4500.0,
+      "t_inner": 2900.0,
+      "t_outer": 1600.0
+    },
+    {
+      "material": "basalt",
+      "outer_r": 6161203,
+      "density": 2900.0,
+      "t_inner": 900.0,
+      "t_outer": 288.0
+    }
+  ],
+  "atmosphere_mass_kg": 0.0
+}

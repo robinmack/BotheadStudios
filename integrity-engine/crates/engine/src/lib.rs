@@ -579,7 +579,12 @@ mod app {
     /// are much smaller than the Earth–Moon frame, so the particle field is drawn at an enlarged scale (Earth's
     /// ~5000 km radius → a few display units) and the camera zooms in — a scene-framing choice, the physics is
     /// unchanged (positions stay Earth-relative metres; only this render multiplier differs from DISPLAY_SCALE).
-    const SPH_VIS_SCALE: f64 = 7.0e-7;
+    /// RETIRED as a separate scale — kept as an alias of `DISPLAY_SCALE` so the impact band and every
+    /// other scene draw at ONE scale. It existed to magnify a 5,000 km stand-in body up to something that
+    /// read as a planet (7e-7 against DISPLAY_SCALE's 1.57e-7 — 4.5× larger than Earth is drawn anywhere
+    /// else). With the impact running the REAL Earth and the REAL Theia from their definitions, there is
+    /// nothing left to magnify, and a second display scale would just be a place for the two to disagree.
+    const SPH_VIS_SCALE: f64 = DISPLAY_SCALE;
     // Fast-forward so a full ~27.3-day orbit plays in ~20 s. Symplectic Verlet stays stable with many
     // substeps per frame (dt ~= 125 s at this scale => thousands of steps per orbit).
     const ORBIT_TIME_SCALE: f64 = 118_000.0; // sim-seconds per real-second
@@ -1368,10 +1373,26 @@ mod app {
         /// Predicted perigee (closest approach) of the Moon's orbit about the Earth, in km — or a
         /// negative value if the orbit is unbound. Drops below Earth's radius (~6,371 km) before a crash.
         pub fn moon_perigee_km(&self) -> f64 {
-            let rel_pos = self.bodies[2].pos - self.bodies[1].pos;
-            let rel_vel = self.bodies[2].vel - self.bodies[1].vel;
-            let mu = crate::orbit::G * (self.bodies[1].mass + self.bodies[2].mass);
+            // During the impact the orbital element belongs to the PARTICLE bodies (see `sph_body_state`);
+            // reading `bodies[2]` there quoted the default Moon's untouched 380,661 km for the whole run.
+            let (rel_pos, rel_vel, mu) = match self.sph_body_state() {
+                Some([(me, ec, ev), (mt, tc, tv)]) => {
+                    (tc - ec, tv - ev, crate::orbit::G * (me + mt))
+                }
+                None => (
+                    self.bodies[2].pos - self.bodies[1].pos,
+                    self.bodies[2].vel - self.bodies[1].vel,
+                    crate::orbit::G * (self.bodies[1].mass + self.bodies[2].mass),
+                ),
+            };
             crate::orbit::perigee(rel_pos, rel_vel, mu).map_or(-1.0, |p| p / 1000.0)
+        }
+
+        /// The separation at which the two bodies' SURFACES meet, km — from their definitions, so the
+        /// HUD's "brake below this to crash" line is right for whichever bodies the scene placed. It was
+        /// hardcoded to Earth + Moon (8,108 km); with Theia as the impactor the real figure is 9,761.
+        pub fn contact_distance_km(&self) -> f64 {
+            (self.impact_def.target.radius_m() + self.impact_def.impactor.radius_m()) / 1000.0
         }
 
         /// The Moon's speed relative to the Earth, km/s (HUD). On a true drop this *climbs* all the way
@@ -1379,8 +1400,14 @@ mod app {
         /// (a partial brake) instead slows at apogee and speeds at perigee (Kepler), which can look
         /// like "flattening" but is the opposite of drag.
         pub fn moon_speed_kms(&self) -> f64 {
+            // Same correction as `moon_distance_km`: during the impact the closing speed is a property of
+            // the particle field, not of an N-body slot that nothing is updating.
+            if let Some([(_, _, ev), (_, _, tv)]) = self.sph_body_state() {
+                return (tv - ev).length() / 1000.0;
+            }
             (self.bodies[2].vel - self.bodies[1].vel).length() / 1000.0
         }
+
 
         /// Whether the Moon has struck the planet (HUD).
         pub fn has_impacted(&self) -> bool {
@@ -1723,6 +1750,12 @@ mod app {
 
         /// Earth's day length (hours) from its live spin state — ∞ (0.0 returned as -1) if not spinning.
         pub fn earth_day_hours(&self) -> f64 {
+            // Measured from the particle field while the impact is live — the post-impact day length is
+            // the quantity this scene exists to let EMERGE, and the HUD was printing the modern 23.9 h
+            // from an N-body slot the impact never touches.
+            if let Some(t) = self.sph_target_spin_period_s() {
+                return t / 3600.0;
+            }
             let t = crate::tides::spin_period_s(self.spin_l, self.bodies[1].mass, EARTH_RADIUS_M);
             if t.is_finite() { t / 3600.0 } else { -1.0 }
         }
@@ -1781,7 +1814,63 @@ mod app {
 
         /// Live Earth–Moon separation in km (for the HUD). Should hover near 384,400 km.
         pub fn moon_distance_km(&self) -> f64 {
+            // While the impact is live, the third body is NOT in the N-body array — the SPH field is the
+            // matter. Reporting `bodies[2]` there printed the default Moon's untouched orbit: a frozen
+            // "Earth–Theia 384,400 km · v 1.02 km/s" that never moved for the whole scene, describing a
+            // body that was not on screen. Measure the real separation from the particles instead.
+            if let Some([(_, ec, _), (_, tc, _)]) = self.sph_body_state() {
+                return (tc - ec).length() / 1000.0;
+            }
             (self.bodies[2].pos - self.bodies[1].pos).length() / 1000.0
+        }
+
+        /// Mass, centre of mass and mean velocity of each impact body, straight from the live particle
+        /// field: (target, impactor). `None` when the impact is not running.
+        ///
+        /// **This exists because the HUD was reading `bodies[2]` throughout the impact** — an N-body slot
+        /// holding the default Moon, which nothing updates while the SPH field IS the matter. Distance,
+        /// speed, perigee and day length were all quoting a body that was not in the scene: a frozen
+        /// "384,400 km · 1.02 km/s" for the entire run. Anything the HUD says about the impact must be
+        /// measured from the particles.
+        fn sph_body_state(&self) -> Option<[(f64, glam::DVec3, glam::DVec3); 2]> {
+            if !self.sph_active || self.sph_snapshot.is_empty() {
+                return None;
+            }
+            let mut acc = [(0.0f64, glam::DVec3::ZERO, glam::DVec3::ZERO); 2];
+            for p in &self.sph_snapshot {
+                let i = (p.prov != 0) as usize;
+                let m = p.mass as f64;
+                acc[i].0 += m;
+                acc[i].1 += glam::DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64) * m;
+                acc[i].2 += glam::DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64) * m;
+            }
+            (acc[0].0 > 0.0 && acc[1].0 > 0.0).then(|| {
+                [0, 1].map(|i| (acc[i].0, acc[i].1 / acc[i].0, acc[i].2 / acc[i].0))
+            })
+        }
+
+        /// The TARGET's spin period (s) measured from the particle field: its own angular momentum about
+        /// its own centre, over its measured moment of inertia. This is the honest "Earth day" during and
+        /// after the impact — the quantity the scene exists to let EMERGE, rather than the modern 23.9 h
+        /// the HUD was printing from an untouched N-body slot.
+        fn sph_target_spin_period_s(&self) -> Option<f64> {
+            let [(m_t, c, v_c), _] = self.sph_body_state()?;
+            let _ = m_t;
+            let (mut l, mut inertia) = (glam::DVec3::ZERO, 0.0f64);
+            for p in self.sph_snapshot.iter().filter(|p| p.prov == 0) {
+                let m = p.mass as f64;
+                let r = glam::DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64) - c;
+                let v = glam::DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64) - v_c;
+                l += r.cross(v) * m;
+            }
+            let axis = l.try_normalize()?;
+            // Moment of inertia about the MEASURED spin axis, not an assumed sphere.
+            for p in self.sph_snapshot.iter().filter(|p| p.prov == 0) {
+                let r = glam::DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64) - c;
+                inertia += p.mass as f64 * (r - axis * r.dot(axis)).length_squared();
+            }
+            let omega = l.length() / inertia.max(1e-9);
+            (omega > 1e-12).then(|| std::f64::consts::TAU / omega)
         }
 
         /// Start the GPU deformable-Earth giant impact (docs/33 stage 4c.4): build + relax two differentiated
@@ -2438,15 +2527,15 @@ mod app {
             // the materialized impact region are hidden — the real (moving, glowing) cap particles are
             // the matter there now, and the void they leave IS the crater.
             let earth_center = r_bodies[1];
-            // docs/42 render layer: while the GPU impact is live, the PRETTY Earth-shell must overlay the SPH
-            // particle field — so it is sized to the sub-scale (5000 km) SPH body and rendered at SPH_VIS_SCALE
-            // (not the real 6371 km at DISPLAY_SCALE), and its grains fade out by `1−render_blend` (the slider
-            // cross-fades to the raw physics billboards). Otherwise (CPU scene) it's the real Earth as before.
+            // The impact now runs the REAL Earth and the REAL Theia (their own definitions), so there is no
+            // sub-scale body and no second display scale: both branches draw at DISPLAY_SCALE and differ
+            // only in which radius they ask for. The `render_blend` cross-fade between the resolved surface
+            // and the particle field remains, and is the next thing to go — see the note at its use.
             // Earth's RADIUS comes from Earth's definition — the scene does not get to say how big Earth
             // is. (During the GPU impact the body is deliberately rendered at the sub-scale radius the SPH
             // field actually occupies, which is a declared visualization scale, not a second Earth.)
             let (pretty_scale, pretty_r_surf) = if self.sph_active {
-                (SPH_VIS_SCALE, self.impact_def.target.radius_m)
+                (SPH_VIS_SCALE, self.impact_def.target.radius_m())
             } else {
                 (DISPLAY_SCALE, crate::planet::body("earth").radius())
             };

@@ -2,12 +2,17 @@
   "name": "Birth of the Moon",
   "type": "impact",
   "impact": {
-    "target":   { "core_radius_m": 2.5e6, "radius_m": 5.0e6, "softening_m": 1.0e6, "core_lod_factor": 8.0 },
-    "impactor": { "core_radius_m": 1.35e6, "radius_m": 2.7e6, "softening_m": 1.0e6, "core_lod_factor": 1.0 },
+    "target": {
+      "body": "proto-earth"
+    },
+    "impactor": {
+      "body": "theia"
+    },
     "v_esc_multiple": 1.15,
     "start_separation": 1.6,
     "impact_parameter": 1.0,
-    "target_spin_rad_s": 4.0e-4,
+    "target_spin_rad_s": 0.0004,
     "relax_separation": 40.0
-  }
+  },
+  "$comment": "A scene places bodies and sets their initial conditions; it never defines them. The target and impactor NAME defined bodies (assets/bodies/*.json) and take their radii, core boundaries, densities and materials from there. This file previously declared a 2,700 km impactor against Theia's real 3,390 km, and a 5,000 km 'Earth' massing 0.48 Earth - a compute reduction wearing a planet's name, which made every mass, speed and timescale in the scene quietly wrong. Resolution is now the only compute knob (particle count)."
 }
