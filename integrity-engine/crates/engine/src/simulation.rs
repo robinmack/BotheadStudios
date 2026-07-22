@@ -179,6 +179,13 @@ impl Simulation {
     }
     /// Surface gravity, EMERGENT from the planet this ground is a patch of: `g = GM/R²` over that
     /// body's real layered mass. Never a declared constant.
+    /// The acceleration the MASS FIELD reports at a point — what a grain actually falls under
+    /// (`matter::step` uses exactly this). Exposed so the discrepancy against the planet's own surface
+    /// gravity can be measured rather than argued about.
+    pub fn probe_field_acceleration(&self, at: glam::Vec3) -> glam::Vec3 {
+        self.field.acceleration_point_approx(at, 6.0)
+    }
+
     pub fn gravity_ms2(&self) -> f32 {
         self.surface_g
     }
@@ -498,5 +505,57 @@ mod tests {
             Ok(_) => panic!("must not build a ground sim from an impact world"),
         };
         assert!(err.contains("ground"), "the error should say what was wrong: {err}");
+    }
+}
+
+#[cfg(test)]
+mod gravity_audit_tests {
+    /// **What acceleration does a grain in the Ground scene actually feel?**
+    ///
+    /// The grains are stepped under `field.acceleration_point_approx` (matter.rs:1031) — the self-gravity
+    /// of the loaded surface PATCH. A patch is a small box of voxels; a planet is not. If the patch is all
+    /// a grain feels, it is falling in microgravity toward the middle of the box rather than toward the
+    /// planet, and every settling time, ejecta arc and crater profile in the scene is wrong by orders of
+    /// magnitude.
+    ///
+    /// This test does not assert a fix; it MEASURES the discrepancy so the burn-down has a number.
+    #[test]
+    fn measure_what_gravity_a_ground_grain_actually_feels() {
+        let mats = crate::materials::load();
+        let sim = super::Simulation::from_json(
+            r#"{"name":"probe","type":"ground","ground":{"surface":{"amplitude_m":0.0}}}"#,
+            mats,
+        )
+        .expect("the probe world parses");
+
+        let g_planet = sim.gravity_ms2();
+        // A point a couple of metres above the patch, where a grain would sit.
+        let probe = glam::Vec3::new(0.0, 30.0, 0.0);
+        let a = sim.probe_field_acceleration(probe);
+
+        println!("planet surface gravity : {g_planet:.4} m/s²");
+        println!("patch field at the surface: {:?} (|a| = {:.6} m/s²)", a, a.length());
+        println!("ratio                  : {:.3e}", a.length() as f64 / g_planet as f64);
+
+        assert!(g_planet > 9.0, "the planet's own gravity is Earth-like: {g_planet}");
+
+        // **A CHARACTERIZATION TEST: this asserts the DEFECT, not the desired behaviour.**
+        //
+        // Grains in the Ground scene fall under the self-gravity of the loaded surface PATCH — a box of
+        // voxels a few tens of metres across, which pulls at 0.0002 m/s². The planet they are supposedly
+        // standing on pulls at 9.88. They are in MICROGRAVITY, at about one forty-six-thousandth of
+        // Earth's, so every settling time, ejecta arc and crater profile in that scene is wrong by four
+        // orders of magnitude: a grain takes ~215x too long to fall.
+        //
+        // It is locked here so the fix cannot happen silently and so the burn-down has a number. WHEN IT
+        // IS FIXED THIS TEST WILL FAIL — that is the point. Invert it then: assert the field agrees with
+        // the planet's own surface gravity, which is what `MassField` should be reporting once the patch
+        // is a patch OF something rather than a lump alone in space.
+        let ratio = a.length() as f64 / g_planet as f64;
+        assert!(
+            ratio < 1.0e-3,
+            "EXPECTED FAILURE — the patch-gravity defect appears to be FIXED (ratio {ratio:.3e}). \
+             Good. Now invert this test: assert |a| ≈ g_planet, and delete this message."
+        );
     }
 }
