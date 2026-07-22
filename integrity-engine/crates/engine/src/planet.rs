@@ -595,8 +595,13 @@ mod giant_impact_budget_tests {
         // The target must actually be the smaller, pre-impact planet — not modern Earth wearing its name.
         assert!(proto < earth, "proto-Earth is lighter than the Earth it becomes");
         assert!(super::body("proto-earth").radius() < super::body("earth").radius(), "and smaller");
-        // It has no atmosphere: modern air is later outgassing, and this impact would strip it regardless.
-        assert_eq!(super::body("proto-earth").atmosphere_mass, 0.0, "proto-Earth carries no declared air");
+        // It carries a great deal MORE atmosphere than modern Earth, not less — a magma ocean degasses a
+        // ~100 bar steam/CO₂ envelope. This assertion used to read "carries no declared air", which was
+        // the same mistake in miniature: "not modern air" is not "no air".
+        assert!(
+            super::body("proto-earth").atmosphere_mass > super::body("earth").atmosphere_mass,
+            "a degassing magma ocean has more air than the modern planet, not none"
+        );
     }
 }
 
