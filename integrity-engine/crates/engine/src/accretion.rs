@@ -296,3 +296,77 @@ mod tests {
         assert_eq!(out.bodies.len(), 0, "unbound hot group must not accrete");
     }
 }
+
+/// **How much of a set of particles is still one body**: the fraction of its mass lying within
+/// `coherence_radius` of its own centre of mass.
+///
+/// 1.0 is an intact body. It falls as the body is torn apart and climbs again as debris re-accretes,
+/// which makes it the measurement that decides HOW MATTER IS DRAWN: a coherent body has a surface, a
+/// disrupted one does not. That replaced a "Pretty ⇄ Physics" slider which cross-faded a resolved surface
+/// against the particle field — two representations of the same matter, mixed by hand, which is why the
+/// surface was seen racing the particles and being swallowed by the disk.
+///
+/// It lives here rather than on a scene because "is this still a body" is a question about matter, not
+/// about a camera or a scenario. Any scene with particles can ask it.
+///
+/// FLAGGED: a radius test is cruder than [`find_clumps`], which resolves genuine self-bound membership.
+/// This is the cheap per-frame answer; that is the honest one.
+pub fn coherence(positions: &[glam::DVec3], masses: &[f64], coherence_radius: f64) -> f64 {
+    let total: f64 = masses.iter().sum();
+    if total <= 0.0 || positions.is_empty() {
+        return 0.0;
+    }
+    let com: glam::DVec3 = positions
+        .iter()
+        .zip(masses)
+        .map(|(p, m)| *p * *m)
+        .sum::<glam::DVec3>()
+        / total;
+    let r2 = coherence_radius * coherence_radius;
+    let inside: f64 = positions
+        .iter()
+        .zip(masses)
+        .filter(|(p, _)| (**p - com).length_squared() <= r2)
+        .map(|(_, m)| *m)
+        .sum();
+    inside / total
+}
+
+#[cfg(test)]
+mod coherence_tests {
+    use super::coherence;
+    use glam::DVec3;
+
+    /// Coherence must read 1 for an intact body, fall as it is torn apart, and recover as debris
+    /// re-gathers — because that is the signal the renderer uses to decide whether matter has a surface.
+    #[test]
+    fn coherence_tracks_a_body_coming_apart_and_back_together() {
+        let r = 1.0e6;
+        // A filled sphere: everything within the coherence radius.
+        let intact: Vec<DVec3> = (0..64)
+            .map(|i| {
+                let t = i as f64 / 64.0 * std::f64::consts::TAU;
+                DVec3::new(t.cos(), t.sin(), 0.0) * (0.6 * r)
+            })
+            .collect();
+        let m = vec![1.0; intact.len()];
+        assert!((coherence(&intact, &m, 1.2 * r) - 1.0).abs() < 1e-12, "an intact body reads 1");
+
+        // Blow half of it far away: coherence falls to the fraction left behind.
+        let mut torn = intact.clone();
+        for p in torn.iter_mut().take(32) {
+            *p *= 50.0;
+        }
+        let c = coherence(&torn, &m, 1.2 * r);
+        assert!(c < 0.6, "a body half dispersed is no longer coherent (got {c:.2})");
+
+        // Bring it back: the measurement recovers, which is the re-accretion half of the transition.
+        let regathered: Vec<DVec3> = torn.iter().map(|p| *p * 0.02).collect();
+        let back = coherence(&regathered, &m, 1.2 * r);
+        assert!(back > c, "re-gathered debris reads more coherent again ({back:.2} vs {c:.2})");
+
+        // Degenerate inputs answer rather than panicking.
+        assert_eq!(coherence(&[], &[], r), 0.0);
+        assert_eq!(coherence(&intact, &vec![0.0; intact.len()], r), 0.0, "massless is not a body");
+    }
+}

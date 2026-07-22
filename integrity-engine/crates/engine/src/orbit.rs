@@ -80,6 +80,19 @@ pub fn angular_momentum(bodies: &[Body]) -> DVec3 {
 /// unbound (it would escape, not come back). `mu = G·(m1 + m2)`. Lets the HUD tell, live, whether a
 /// slowed Moon will merely graze, plunge deep, or crash into the planet. Standard orbital-elements
 /// relations (specific energy + angular momentum → semi-major axis + eccentricity → perigee).
+/// Is this relative orbit BOUND — will it come back? Specific orbital energy below zero.
+///
+/// Separated from [`perigee`] deliberately. `perigee` used to answer both questions at once by returning
+/// `None` for anything unbound, and callers leaned on that: the disk statistic read `None` as "escaping".
+/// When `perigee` was taught to report the closest approach of a hyperbolic pass — which it has, and which
+/// the HUD needs on an impact trajectory — every escaping particle silently became disk material, and the
+/// measured disk jumped to the impactor's entire mass. One function answering two questions is one
+/// function too few.
+pub fn is_bound(rel_pos: DVec3, rel_vel: DVec3, mu: f64) -> bool {
+    let r = rel_pos.length();
+    r > 0.0 && 0.5 * rel_vel.length_squared() - mu / r < 0.0
+}
+
 pub fn perigee(rel_pos: DVec3, rel_vel: DVec3, mu: f64) -> Option<f64> {
     let r = rel_pos.length();
     if r == 0.0 {
