@@ -595,8 +595,13 @@ mod giant_impact_budget_tests {
         // The target must actually be the smaller, pre-impact planet — not modern Earth wearing its name.
         assert!(proto < earth, "proto-Earth is lighter than the Earth it becomes");
         assert!(super::body("proto-earth").radius() < super::body("earth").radius(), "and smaller");
-        // It has no atmosphere: modern air is later outgassing, and this impact would strip it regardless.
-        assert_eq!(super::body("proto-earth").atmosphere_mass, 0.0, "proto-Earth carries no declared air");
+        // It carries a great deal MORE atmosphere than modern Earth, not less — a magma ocean degasses a
+        // ~100 bar steam/CO₂ envelope. This assertion used to read "carries no declared air", which was
+        // the same mistake in miniature: "not modern air" is not "no air".
+        assert!(
+            super::body("proto-earth").atmosphere_mass > super::body("earth").atmosphere_mass,
+            "a degassing magma ocean has more air than the modern planet, not none"
+        );
     }
 }
 
@@ -646,5 +651,44 @@ mod hadean_surface_tests {
         // Hot enough to glow visibly, which is what makes it read as a magma ocean without any art:
         // the incandescence law starts at ~800 K.
         assert!(top.t_outer > 800.0, "a magma ocean glows: {} K", top.t_outer);
+    }
+}
+
+#[cfg(test)]
+mod hadean_atmosphere_tests {
+    /// **A magma ocean is not an airless world — it is the opposite.** Proto-Earth's atmosphere was
+    /// declared as ZERO on the reasoning that modern air is later outgassing and the impact would strip
+    /// it. Half right: it is certainly not modern air. But a magma ocean DEGASSES, and the Hadean surface
+    /// carried a massive steam/CO₂ envelope — the literature puts it at the ~100 bar scale over the
+    /// ocean, and independently at >27 bar with a ~503 K surface once the ocean had solidified, which is
+    /// the cooled end state. Zero was further from the truth than modern air would have been.
+    ///
+    /// Nothing here declares a pressure: the engine weighs the declared mass, as it does for every body.
+    #[test]
+    fn proto_earth_carries_a_massive_hot_steam_atmosphere() {
+        let proto = super::body("proto-earth");
+        let modern = super::body("earth");
+
+        let p_bar = proto.surface_pressure() / 1.0e5;
+        assert!(
+            (60.0..200.0).contains(&p_bar),
+            "a magma-ocean steam envelope is ~100 bar, got {p_bar:.1} bar"
+        );
+        // Emphatically heavier than today's, not lighter.
+        assert!(
+            proto.atmosphere_mass > 50.0 * modern.atmosphere_mass,
+            "proto-Earth's air far outweighs modern air ({:.2e} vs {:.2e} kg)",
+            proto.atmosphere_mass, modern.atmosphere_mass
+        );
+        // And the modern planet still weighs in at ~1 atm — the same rule, two bodies, two answers.
+        let modern_bar = modern.surface_pressure() / 1.0e5;
+        assert!((0.9..1.1).contains(&modern_bar), "modern Earth is ~1 bar, got {modern_bar:.2}");
+
+        // The surface underneath it is molten, and hot enough to GLOW — which is what the renderer needs
+        // to know, and all it needs to know.
+        let top = proto.layers.last().unwrap();
+        assert!(top.t_outer > 1800.0, "a magma ocean surface, got {} K", top.t_outer);
+        let glow = crate::blackbody::blackbody_srgb(top.t_outer);
+        assert!(glow[0] > glow[2], "at {} K it glows red-orange, got {glow:?}", top.t_outer);
     }
 }

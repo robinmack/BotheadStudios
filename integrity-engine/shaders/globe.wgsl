@@ -11,6 +11,7 @@ struct U {
     tint      : vec4<f32>,  // multiplies the vertex colour
     emissive  : vec4<f32>,  // xyz = camera eye (display units)
     atm       : vec4<f32>,  // xyz = Rayleigh optical depth per band (docs/26), w = sun gain
+    glow      : vec4<f32>,  // rgb = Planck colour of the surface's own temperature, w = its radiance gain
 };
 @group(0) @binding(0) var<uniform> u : U;
 // The material texture arrays (docs/12): albedo for reference, NORMAL for relief lighting. Terra bakes
@@ -58,6 +59,12 @@ fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     let SUN_GAIN = u.atm.w; // atmosphere::SUN_GAIN — one exposure for every view of this world
     let albedo = i.col * u.tint.rgb;
     var radiance = albedo * (ndl * SUN_GAIN);
+    // **The body's own heat.** A surface hot enough to glow emits regardless of where the Sun is, so this
+    // is added on BOTH sides of the terminator — which is the physics: proto-Earth's 1,900 K magma ocean
+    // radiates ~547x what a sunlit white surface reflects, so it outshines its own daylight and has no
+    // day/night line at all. The colour is Planck's for that temperature and the gain is Stefan-Boltzmann's;
+    // neither is chosen, and a cold planet sends zero here and pays nothing.
+    radiance += u.glow.rgb * (u.glow.w * SUN_GAIN);
     // **The atmosphere — Earth's own air, from the ONE Rayleigh model (the shared chunk).** For a point
     // on the globe the local zenith IS its surface normal, so the sky's own angles apply unchanged:
     // mu_v = n·view, mu_s = n·sun, phase = view·sun. What this replaces was a Fresnel rim that could

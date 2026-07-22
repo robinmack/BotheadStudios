@@ -168,3 +168,48 @@ mod tests {
         }
     }
 }
+
+/// **How brightly a surface glows because of its own heat**, as a multiple of the radiance of a sunlit
+/// white surface at 1 AU (~430 W·m⁻²·sr⁻¹ — the reference the scenes' exposure is built on).
+///
+/// Stefan–Boltzmann, divided by π for radiance and by that reference: nothing chosen. It is what lets the
+/// engine render a magma ocean from the ONE thing it needs to know — the temperature — instead of being
+/// handed a picture of one. Below the visible-glow floor it returns 0, so a cold planet costs nothing.
+///
+/// The numbers are worth knowing before looking at the result: proto-Earth's declared 1,900 K surface
+/// emits ~547× a sunlit white surface, and about 4,000× what its own sunlit rock reflects. A magma ocean
+/// outshines its own daylight, so it has no day/night terminator at all — it glows all over.
+pub fn thermal_glow_gain(t_k: f64) -> f64 {
+    const SIGMA: f64 = 5.670_374_419e-8; // Stefan–Boltzmann, W·m⁻²·K⁻⁴
+    const SUNLIT_WHITE_RADIANCE: f64 = 430.0; // W·m⁻²·sr⁻¹ at 1 AU — the exposure's reference point
+    if t_k <= 800.0 {
+        return 0.0; // below visible incandescence
+    }
+    (SIGMA * t_k.powi(4) / std::f64::consts::PI) / SUNLIT_WHITE_RADIANCE
+}
+
+#[cfg(test)]
+mod glow_tests {
+    use super::*;
+
+    /// A body glows because it is hot, and how much is not a choice. These are the numbers that decide
+    /// whether a magma ocean reads as a magma ocean.
+    #[test]
+    fn thermal_glow_follows_stefan_boltzmann() {
+        assert_eq!(thermal_glow_gain(288.0), 0.0, "modern Earth's surface does not glow");
+        assert_eq!(thermal_glow_gain(800.0), 0.0, "the visible-glow floor");
+
+        // Proto-Earth's declared magma ocean, against the exposure's own reference.
+        let magma = thermal_glow_gain(1900.0);
+        assert!((500.0..600.0).contains(&magma), "1,900 K glows ~547× a sunlit white surface, got {magma:.0}");
+
+        // T⁴, exactly: double the temperature, sixteen times the glow.
+        let a = thermal_glow_gain(1500.0);
+        let b = thermal_glow_gain(3000.0);
+        assert!((b / a - 16.0).abs() < 0.01, "Stefan–Boltzmann is T⁴ (got {:.2}×)", b / a);
+
+        // And the colour comes from the same temperature, through Planck.
+        let c = blackbody_srgb(1900.0);
+        assert!(c[0] > c[1] && c[1] > c[2], "1,900 K is orange: red > green > blue, got {c:?}");
+    }
+}

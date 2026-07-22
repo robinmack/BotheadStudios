@@ -1628,6 +1628,258 @@
         "decomposes_k": 0.0,
         "decomposition_suppressed_pa": 0.0
       }
+    },
+    {
+      "id": "carbon_dioxide",
+      "display_name": "Carbon dioxide (CO2)",
+      "category": "gas",
+      "phase": "gas",
+      "parent": null,
+      "mechanical": {
+        "density": 1.977,
+        "youngs_modulus": 0,
+        "poisson_ratio": 0,
+        "compressive_strength": 0,
+        "tensile_strength": 0,
+        "cohesion": 0,
+        "friction_angle": 0,
+        "hardness_mohs": 0,
+        "ductility": 0,
+        "restitution": 0.0,
+        "friction_coefficient": 0.0,
+        "dynamic_viscosity": 1.47e-05
+      },
+      "optical": {
+        "albedo": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "roughness": 1.0,
+        "metallic": 0.0,
+        "translucency": 1.0,
+        "color_variance": 0.0,
+        "grain": "transparent medium"
+      },
+      "thermal": {
+        "specific_heat": 846,
+        "melt_point": 216.6,
+        "latent_fusion": 205000.0,
+        "boil_point": 194.7,
+        "latent_vaporization": 571000.0,
+        "simon_a": 0.0,
+        "simon_c": 0.0,
+        "molar_mass": 0.044009,
+        "decomposes_k": 0.0,
+        "decomposition_suppressed_pa": 0.0
+      },
+      "notes": "CO2 at 0 C, 1 atm. THE atmosphere of Mars (~95% by volume, ~6 mbar surface) and the dominant gas left over a solidified magma ocean (~100 bar on the Hadean Earth, Zahnle et al.). At one atmosphere CO2 has NO liquid phase: it sublimes at 194.7 K, and the 216.6 K melt point applies only above the 5.18 bar triple point - which is why Mars grows CO2 FROST rather than rain. Refractive index (n-1) = 4.49e-4 at STP, ~1.5x air's, so a CO2 atmosphere scatters more per molecule than air does.",
+      "sources": [
+        "CRC Handbook of Chemistry and Physics, 97th ed.",
+        "https://webbook.nist.gov/chemistry/",
+        "https://en.wikipedia.org/wiki/Carbon_dioxide"
+      ]
+    },
+    {
+      "id": "sulfur_dioxide",
+      "display_name": "Sulfur dioxide (SO2)",
+      "category": "gas",
+      "phase": "gas",
+      "parent": null,
+      "mechanical": {
+        "density": 2.619,
+        "youngs_modulus": 0,
+        "poisson_ratio": 0,
+        "compressive_strength": 0,
+        "tensile_strength": 0,
+        "cohesion": 0,
+        "friction_angle": 0,
+        "hardness_mohs": 0,
+        "ductility": 0,
+        "restitution": 0.0,
+        "friction_coefficient": 0.0,
+        "dynamic_viscosity": 1.28e-05
+      },
+      "optical": {
+        "albedo": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "roughness": 1.0,
+        "metallic": 0.0,
+        "translucency": 1.0,
+        "color_variance": 0.0,
+        "grain": "transparent medium"
+      },
+      "thermal": {
+        "specific_heat": 640,
+        "melt_point": 197.6,
+        "latent_fusion": 115000.0,
+        "boil_point": 263.1,
+        "latent_vaporization": 389000.0,
+        "simon_a": 0.0,
+        "simon_c": 0.0,
+        "molar_mass": 0.064066,
+        "decomposes_k": 0.0,
+        "decomposition_suppressed_pa": 0.0
+      },
+      "notes": "SO2 at 0 C, 1 atm. The form volcanic sulfur takes at HIGH temperature (H2S dominates only in cool gases), so it is the sulfur species over a magma ocean - and it is a gas there, not the sulfuric acid of Venus's cloud deck, which needs cool altitudes to condense. Also present in Io's tenuous atmosphere and as surface frost.",
+      "sources": [
+        "CRC Handbook of Chemistry and Physics, 97th ed.",
+        "https://webbook.nist.gov/chemistry/",
+        "https://en.wikipedia.org/wiki/Sulfur_dioxide"
+      ]
+    },
+    {
+      "id": "nitrogen",
+      "display_name": "Nitrogen (N2)",
+      "category": "gas",
+      "phase": "gas",
+      "parent": null,
+      "mechanical": {
+        "density": 1.2506,
+        "youngs_modulus": 0,
+        "poisson_ratio": 0,
+        "compressive_strength": 0,
+        "tensile_strength": 0,
+        "cohesion": 0,
+        "friction_angle": 0,
+        "hardness_mohs": 0,
+        "ductility": 0,
+        "restitution": 0.0,
+        "friction_coefficient": 0.0,
+        "dynamic_viscosity": 1.76e-05
+      },
+      "optical": {
+        "albedo": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "roughness": 1.0,
+        "metallic": 0.0,
+        "translucency": 1.0,
+        "color_variance": 0.0,
+        "grain": "transparent medium"
+      },
+      "thermal": {
+        "specific_heat": 1040,
+        "melt_point": 63.15,
+        "latent_fusion": 25700.0,
+        "boil_point": 77.36,
+        "latent_vaporization": 199000.0,
+        "simon_a": 0.0,
+        "simon_c": 0.0,
+        "molar_mass": 0.0280134,
+        "decomposes_k": 0.0,
+        "decomposition_suppressed_pa": 0.0
+      },
+      "notes": "N2 at 0 C, 1 atm. 78% of modern air by volume and ~2.6% of Mars's; nearly inert, so it accumulates as more reactive species are lost. The `air` entry's melt/boil points are these, since air is N2-dominated.",
+      "sources": [
+        "CRC Handbook of Chemistry and Physics, 97th ed.",
+        "https://webbook.nist.gov/chemistry/"
+      ]
+    },
+    {
+      "id": "methane",
+      "display_name": "Methane (CH4)",
+      "category": "gas",
+      "phase": "gas",
+      "parent": null,
+      "mechanical": {
+        "density": 0.6566,
+        "youngs_modulus": 0,
+        "poisson_ratio": 0,
+        "compressive_strength": 0,
+        "tensile_strength": 0,
+        "cohesion": 0,
+        "friction_angle": 0,
+        "hardness_mohs": 0,
+        "ductility": 0,
+        "restitution": 0.0,
+        "friction_coefficient": 0.0,
+        "dynamic_viscosity": 1.1e-05
+      },
+      "optical": {
+        "albedo": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "roughness": 1.0,
+        "metallic": 0.0,
+        "translucency": 1.0,
+        "color_variance": 0.0,
+        "grain": "transparent medium"
+      },
+      "thermal": {
+        "specific_heat": 2220,
+        "melt_point": 90.7,
+        "latent_fusion": 58600.0,
+        "boil_point": 111.7,
+        "latent_vaporization": 510000.0,
+        "simon_a": 0.0,
+        "simon_c": 0.0,
+        "molar_mass": 0.0160425,
+        "decomposes_k": 0.0,
+        "decomposition_suppressed_pa": 0.0
+      },
+      "notes": "CH4 at 0 C, 1 atm. A reduced-atmosphere species: prominent in the early Hadean's hydride-rich air and on the giant planets and Titan. Zahnle et al. put CO/CH4 at 1:1 near 1000 K at one bar and 1200 K at 100 bar, so which of the two dominates is a temperature and pressure question.",
+      "sources": [
+        "CRC Handbook of Chemistry and Physics, 97th ed.",
+        "https://webbook.nist.gov/chemistry/"
+      ]
+    },
+    {
+      "id": "hydrogen",
+      "display_name": "Hydrogen (H2)",
+      "category": "gas",
+      "phase": "gas",
+      "parent": null,
+      "mechanical": {
+        "density": 0.08988,
+        "youngs_modulus": 0,
+        "poisson_ratio": 0,
+        "compressive_strength": 0,
+        "tensile_strength": 0,
+        "cohesion": 0,
+        "friction_angle": 0,
+        "hardness_mohs": 0,
+        "ductility": 0,
+        "restitution": 0.0,
+        "friction_coefficient": 0.0,
+        "dynamic_viscosity": 8.76e-06
+      },
+      "optical": {
+        "albedo": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "roughness": 1.0,
+        "metallic": 0.0,
+        "translucency": 1.0,
+        "color_variance": 0.0,
+        "grain": "transparent medium"
+      },
+      "thermal": {
+        "specific_heat": 14300,
+        "melt_point": 13.99,
+        "latent_fusion": 58000.0,
+        "boil_point": 20.27,
+        "latent_vaporization": 449000.0,
+        "simon_a": 0.0,
+        "simon_c": 0.0,
+        "molar_mass": 0.00201588,
+        "decomposes_k": 0.0,
+        "decomposition_suppressed_pa": 0.0
+      },
+      "notes": "H2 at 0 C, 1 atm. The lightest gas, which is the point: at 2 g/mol its scale height is 14x air's, so it puffs a planet's atmosphere out and escapes readily - the reason Earth kept its nitrogen and lost the hydride-rich primary atmosphere it started with.",
+      "sources": [
+        "CRC Handbook of Chemistry and Physics, 97th ed.",
+        "https://webbook.nist.gov/chemistry/"
+      ]
     }
   ]
 }
