@@ -599,6 +599,10 @@ mod app {
         tint: [f32; 4],      // body color
         emissive: [f32; 4],  // rgb = incandescent glow, w = intensity (self-lit hot ejecta)
         atm: [f32; 4],       // xyz = Rayleigh optical depth per band, w = sun gain (the SAME air the ground sky uses)
+        /// rgb = the Planck colour of this body's own surface temperature, w = how brightly it glows as a
+        /// multiple of a sunlit white surface (`blackbody::thermal_glow_gain`). A cold planet sends zeros
+        /// and pays nothing; a magma ocean sends ~547 and lights itself.
+        glow: [f32; 4],
     }
 
     /// How far (wall-clock seconds) the RENDER runs behind the PHYSICS (docs/13). Humans don't
@@ -2695,6 +2699,10 @@ mod app {
                     [1.0, 1.0, 1.0, pretty_fade],
                     [eye_disp.x as f32, eye_disp.y as f32, eye_disp.z as f32, 0.0],
                     self.air(),
+                    // The TARGET body's own heat. proto-Earth is a magma ocean, so this scene's planet
+                    // glows rather than being lit — which is why the birth scene had no business
+                    // borrowing modern Earth's daylit appearance.
+                    glow_of(&self.impact_def.target.definition()),
                 );
             }
             for (i, uni) in self.shell_unis.iter().enumerate() {
@@ -2733,6 +2741,7 @@ mod app {
                     tint,
                     [veil[0], veil[1], veil[2], 1.0], // the sky, added over the ground,
                     AIRLESS,
+                    NO_GLOW,
                 );
             }
             // THE SUN: real matter (planet::sun), rendered where it actually is — a ~0.5° disk of
@@ -2761,12 +2770,14 @@ mod app {
                     Mat4::from_translation(spos) * Mat4::from_scale(Vec3::splat(sun_r_disp)),
                     earth_light,
                     [0.0, 0.0, 0.0, 1.0], // no reflectance — it is the illuminant
-                    // The photosphere's radiance is ~4.6e4× a sunlit white surface at 1 AU
-                    // (~2e7 vs ~430 W/m²/sr): ANY exposure set for the scene saturates on the Sun.
-                    // incandescence()'s rock-glow INTENSITY (~2) tone-maps to dull grey, so the colour
-                    // comes from the law and the brightness from that measured ratio.
-                    [glow[0], glow[1], glow[2], 4.6e4],
+                    // The photosphere's radiance against the same reference every other glowing surface
+                    // uses. This was the literal 4.6e4, worked out by hand from ~2e7 vs ~430 W/m²/sr —
+                    // and `thermal_glow_gain(5772)` returns 46,530, so the law reproduces the number that
+                    // was measured. One Stefan–Boltzmann for the Sun and for a magma ocean; any exposure
+                    // set for sunlit surfaces saturates on both, which is what looking at them is like.
+                    [glow[0], glow[1], glow[2], crate::blackbody::thermal_glow_gain(photosphere) as f32],
                     AIRLESS,
+                    NO_GLOW,
                 );
             }
             // The BULK INTERIOR (the un-materialized deep Earth): an opaque sphere at the depth the
@@ -2803,6 +2814,7 @@ mod app {
                     itint,
                     iglow, // outer-core iron: self-lit at its real temperature (magma while impacting),
                     AIRLESS,
+                    NO_GLOW,
                 );
             }
             // CRATER WALL: grains on the carved bowl surface (the physical boundary hole), each wearing
@@ -2842,6 +2854,7 @@ mod app {
                         tint,
                         glow,
                         AIRLESS,
+                        NO_GLOW,
                     );
                 }
             }
@@ -2863,6 +2876,7 @@ mod app {
                         [0.45, 0.34, 0.28, 1.0], // cooling rock
                         [1.0, 0.55, 0.25, 0.5],  // a faint warm glow — recently molten,
                         AIRLESS,
+                        NO_GLOW,
                     );
                 }
                 n
@@ -2883,6 +2897,7 @@ mod app {
                         &self.queue, uni, view_proj, Mat4::from_scale(Vec3::ZERO),
                         earth_light, [0.0; 4], [0.0; 4],
                         AIRLESS,
+                        NO_GLOW,
                     );
                     continue;
                 }
@@ -2900,6 +2915,7 @@ mod app {
                     self.moon_tint, // aggregate albedo of basalt (docs/17); dark, lit bright by the sun
                     [0.0; 4],       // intact moon: reflected light only (its hot core is buried),
                     AIRLESS,
+                    NO_GLOW,
                 );
             }
             // The shattered Moon: each surviving fragment is drawn as a small basalt sphere at its real
@@ -2950,6 +2966,7 @@ mod app {
                         tint,
                         glow,
                         AIRLESS,
+                        NO_GLOW,
                     );
                     debris_count += 1;
                 }
@@ -2979,6 +2996,7 @@ mod app {
                         self.moon_tint,
                         [0.0; 4], // crusted over: reflected light only (interior heat is sub-surface),
                         AIRLESS,
+                        NO_GLOW,
                     );
                     debris_count += 1;
                 }
@@ -3230,6 +3248,9 @@ mod app {
     /// A body with NO declared atmosphere: zero optical depth and zero twilight. The shared Rayleigh
     /// model then returns exactly black with a knife-edge terminator — the airless Moon needs no special
     /// case, it just has no air.
+    /// A body that does not glow — anything below visible incandescence.
+    const NO_GLOW: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+
     const AIRLESS: Air = [0.0, 0.0, 0.0, crate::atmosphere::SUN_GAIN, 0.0];
 
     impl Terra {
@@ -3258,6 +3279,19 @@ mod app {
 
     /// The twilight half-angle for a body: sqrt(2H/R), with H the scale height of the DECLARED air at
     /// this body's own surface gravity. No air ⇒ no twilight ⇒ a knife-edge terminator.
+    /// A body's own thermal glow, ready for the uniform: the Planck colour of its declared surface
+    /// temperature and the Stefan-Boltzmann radiance that goes with it. This is the whole of what the
+    /// renderer needs to draw a magma ocean — the heat, not a picture of the heat.
+    fn glow_of(body: &crate::planet::LayeredBody) -> [f32; 4] {
+        let t = body.layers.last().map_or(0.0, |l| l.t_outer);
+        let gain = crate::blackbody::thermal_glow_gain(t);
+        if gain <= 0.0 {
+            return NO_GLOW;
+        }
+        let c = crate::blackbody::blackbody_srgb(t);
+        [c[0], c[1], c[2], gain as f32]
+    }
+
     fn twilight_of(radius_m: f64, g: f64, mats: &[materials::Material], tau: [f64; 3]) -> f64 {
         if tau[2] <= 0.0 {
             return 0.0;
@@ -3290,6 +3324,7 @@ mod app {
         tint: [f32; 4],
         emissive: [f32; 4],
         air: Air,
+        glow: [f32; 4],
     ) {
         let u = SpaceUniforms {
             view_proj: view_proj.to_cols_array_2d(),
@@ -3299,6 +3334,7 @@ mod app {
             tint,
             emissive,
             atm: [air[0], air[1], air[2], air[3]],
+            glow,
         };
         queue.write_buffer(&slot.buf, 0, bytemuck::bytes_of(&u));
     }
@@ -3563,6 +3599,10 @@ mod app {
         // material) replaces the grain shell for the scene. `None` until then (falls back to the grain shell).
         globe_pipeline: wgpu::RenderPipeline,
         globe_mesh: Option<GpuMesh>,
+        /// WHICH defined body this scene placed. A scene positions a body and never defines one, but it
+        /// does have to remember which one it put there — the render asks the definition for the body's
+        /// own heat, and a magma-ocean world must not borrow modern Earth's daylit look.
+        body_id: String,
         /// The real sky. Terra's world frame is Earth-FIXED, so the catalogue is rotated by Greenwich
         /// sidereal time each frame — which is what makes the stars wheel overhead, once per sidereal day.
         stars: Option<StarField>,
@@ -3713,6 +3753,7 @@ mod app {
                 shell_count,
                 globe_pipeline,
                 globe_mesh: None,
+                body_id: "earth".into(),
                 stars: None,
                 globe_uni,
                 cap_pipeline,
@@ -3803,6 +3844,9 @@ mod app {
             self.relief_exag = TERRA_RELIEF_EXAG;
             // Earth's surface belongs to Earth, not to this world file. Prefer the body definition; a
             // world's own `surface` is only honoured for a body the engine has no definition for yet.
+            if let Some(id) = w.body.as_deref() {
+                self.body_id = id.to_string();
+            }
             let body_surface = w
                 .body
                 .as_deref()
@@ -3957,6 +4001,8 @@ mod app {
                     [1.0, 1.0, 1.0, 1.0],
                     [eye.x as f32, eye.y as f32, eye.z as f32, 1.0],
                     air,
+                    // Terra draws whichever body the world names, so the glow is that body's.
+                    glow_of(&crate::planet::body(&self.body_id)),
                 );
             } else {
                 // Fallback: the Phase-2 grain shell (used until a world's surface rasters build the globe mesh).
@@ -4007,6 +4053,7 @@ mod app {
                         tint,
                         [veil[0], veil[1], veil[2], 1.0],
                         air,
+                        NO_GLOW,
                     );
                 }
             }
@@ -4206,6 +4253,7 @@ mod app {
                 [1.0, 1.0, 1.0, cap_fade],
                 [0.0, 0.0, 0.0, 1.0],
                 self.air(),
+                NO_GLOW,
             );
         }
 
@@ -4244,7 +4292,17 @@ mod tests {
     #[test]
     fn material_database_loads() {
         let mats = materials::load();
-        assert_eq!(mats.len(), 24, "seed database should have 24 materials");
+        // A FLOOR, not a fixed count. This asserted exactly 24 and went red the moment the atmospheric
+        // gases were catalogued — pinning the size of a catalogue that is meant to grow turns standing
+        // procedure ("source and catalogue any new substance") into a chore that breaks a test each time.
+        // What matters is that the database loads and that the materials the engine names are present.
+        assert!(mats.len() >= 24, "the catalogue should not SHRINK (got {})", mats.len());
+        for id in ["granite", "basalt", "peridotite", "iron", "water", "air", "carbon_dioxide"] {
+            assert!(
+                mats.iter().any(|m| m.id == id),
+                "{id} must be catalogued — the engine names it"
+            );
+        }
         // `rubber` — the tyre compound; the go-kart's grip, damping and hysteresis live in this datum.
         // It used to carry NO thermal block at all, on the reasoning that rubber does not melt so
         // melt_point had no honest value. The reasoning was right and the encoding was not: "does not

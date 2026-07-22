@@ -485,3 +485,45 @@ mod thermal_data_tests {
         assert!(get("crude_oil").specific_heat().is_some(), "but its heat capacity is still known");
     }
 }
+
+#[cfg(test)]
+mod atmospheric_gas_tests {
+    /// **Gases are materials.** Standing procedure: when a new substance enters the engine — solid,
+    /// liquid or gas — its properties get sourced and catalogued rather than assumed at the point of use.
+    /// These five went in because a magma-ocean atmosphere is steam, CO₂ and SO₂, and because Mars is CO₂
+    /// and cannot be honest without it.
+    ///
+    /// The molar masses are the load-bearing numbers: the engine derives a specific gas constant from
+    /// them, and a scale height from that. A CO₂ atmosphere is genuinely more compact than an air one at
+    /// the same temperature and gravity, and it is this table that makes that true.
+    #[test]
+    fn the_atmospheric_gases_carry_sourced_properties() {
+        let mats = super::load();
+        let get = |id: &str| &mats[super::index_of(&mats, id)];
+
+        for id in ["carbon_dioxide", "sulfur_dioxide", "nitrogen", "methane", "hydrogen"] {
+            let m = get(id);
+            // (the catalogue records phase as data; here we only need the physical numbers)
+            assert!(m.specific_heat().is_some(), "{id} must carry sourced thermal data");
+            assert!(m.density > 0.0, "{id} must have a density");
+        }
+
+        // Molar masses, against the values everyone can check.
+        let molar = |id: &str| get(id).thermal.as_ref().unwrap().molar_mass as f64;
+        assert!((molar("carbon_dioxide") - 0.044).abs() < 0.001, "CO₂ is 44 g/mol");
+        assert!((molar("nitrogen") - 0.028).abs() < 0.001, "N₂ is 28 g/mol");
+        assert!((molar("hydrogen") - 0.002).abs() < 0.0005, "H₂ is 2 g/mol");
+
+        // The consequence that matters: scale height goes as 1/molar mass, so at one temperature and one
+        // gravity a CO₂ atmosphere hugs the ground and a hydrogen one puffs out. Same law, different gas.
+        let h = |id: &str| crate::atmosphere::scale_height(get(id), 288.0, 9.81);
+        assert!(h("carbon_dioxide") < h("air"), "CO₂ is heavier than air, so its atmosphere is shallower");
+        assert!(h("hydrogen") > 10.0 * h("air"), "hydrogen puffs out — 14× air's scale height");
+        assert!(h("nitrogen") > h("air"), "N₂ alone is slightly lighter than air (which carries O₂ and Ar)");
+
+        // CO₂ has NO liquid phase at one atmosphere — it sublimes. That is why Mars grows frost, not rain.
+        let co2 = get("carbon_dioxide");
+        assert!(co2.boil_point().unwrap() < co2.melt_point().unwrap(),
+            "CO₂ sublimes at 1 atm: its sublimation point (194.7 K) is BELOW the 216.6 K triple-point melt");
+    }
+}

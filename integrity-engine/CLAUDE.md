@@ -21,6 +21,10 @@ decide it. Full text + rationale: [`docs/00-laws-of-integrity.md`](docs/00-laws-
    as "does not melt"; both melt under confining pressure, which is exactly the impact regime. And eleven
    materials had no thermal data while three call sites invented three different specific heats to cover
    it.) If an entry is silent, source it; an unknown must stay unknown at the boundary.
+   **SOP: any new substance — solid, liquid OR GAS — gets its properties sourced and catalogued in
+   `data/materials.json` before use**, with `sources` filled in. Gases are materials: the engine derives a
+   specific gas constant from molar mass and a scale height from that, so a CO₂ atmosphere is genuinely
+   more compact than an air one — but only if CO₂ is in the table.
 
 8. **This is a NEW KIND of engine — challenge what you "know".** Traditional engines only *emulate*
    physics; Integrity *embodies* it — **to the best of our ability with the compute available**. That
