@@ -6,6 +6,7 @@ import init, { Terra } from "./wasm/engine.js";
 import "./scene-nav";
 import { createShareView } from "./share-view";
 import { createSimHud } from "./sim-hud";
+import { attachCameraInput, CAMERA_HINT } from "./camera-input";
 
 // --- Log relay: mirror console + errors to the dev server (parity with the other scenes) ---
 function report(level: string, msg: string): void {
@@ -144,26 +145,15 @@ async function main(): Promise<void> {
     const moveHint = ["forward", "left", "back", "right"].map((a) => keyFor(a as Action)).join("");
     const altHint = [keyFor("up"), keyFor("down")].filter(Boolean).join("/");
     const controlsHint =
-      `${moveHint ? `${moveHint} fly · ` : ""}${altHint ? `${altHint} alt · ` : ""}wheel zoom · drag look`;
+      `${moveHint ? `${moveHint} fly · ` : ""}${altHint ? `${altHint} alt · ` : ""}wheel zoom · ${CAMERA_HINT}`;
 
-    let dragging = false;
-    let lastX = 0;
-    let lastY = 0;
-    canvas.addEventListener("pointerdown", (e) => {
-      dragging = true;
-      lastX = e.clientX;
-      lastY = e.clientY;
-      canvas.setPointerCapture(e.pointerId);
-    });
-    canvas.addEventListener("pointerup", (e) => {
-      dragging = false;
-      canvas.releasePointerCapture(e.pointerId);
-    });
-    canvas.addEventListener("pointermove", (e) => {
-      if (!dragging) return;
-      terra.drag_look(e.clientX - lastX, e.clientY - lastY);
-      lastX = e.clientX;
-      lastY = e.clientY;
+    // THE shared camera controls (camera-input.ts): right-drag / alt-drag looks, left-or-ctrl walks
+    // forward, +shift reverses. Terra's own `drag_look` and `move_tangent` do the work; the gesture
+    // grammar is identical to every other scene.
+    const cam = attachCameraInput(canvas, (dyaw, dpitch) => {
+      // `drag_look` takes pixel deltas; the module reports radians, so convert back through its own
+      // sensitivity rather than inventing a second constant.
+      terra.drag_look(-dyaw / 0.005, -dpitch / 0.005);
     });
     canvas.addEventListener(
       "wheel",
@@ -198,7 +188,9 @@ async function main(): Promise<void> {
       const fwd = (active("forward") ? 1 : 0) - (active("back") ? 1 : 0);
       const right = (active("right") ? 1 : 0) - (active("left") ? 1 : 0);
       const climb = (active("up") ? 1 : 0) - (active("down") ? 1 : 0);
-      if (fwd !== 0 || right !== 0) terra.move_tangent(fwd, right);
+      // Keyboard intents plus the shared pointer scheme; both feed the same mover.
+      const walk = fwd + cam.forward();
+      if (walk !== 0 || right !== 0) terra.move_tangent(walk, right);
       if (climb !== 0) terra.zoom_alt(climb * 0.35); // ~4%/frame altitude change while held
       try {
         terra.render();

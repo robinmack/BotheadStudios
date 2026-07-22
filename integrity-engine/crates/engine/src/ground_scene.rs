@@ -664,6 +664,13 @@ impl Ground {
 
         let (view_proj, eye) = self.view_proj();
         self.last_eye = eye;
+        // **Inside matter you see nothing.** The camera is a matter shell and cannot normally enter the
+        // ground, but if it ever does — a fast move, a surface that rose into it, a crater wall closing
+        // over it — the honest picture is BLACK, not a view from inside the world looking out through
+        // its skin. Robin: "if the camera does penetrate it should black out (nothing to see) until it
+        // is no longer penetrating a material object." Opaque matter between your eye and everything
+        // else is the physical reason, so this is a report of the sim, not a failure mode being hidden.
+        let submerged = self.eye_is_inside_matter(eye);
         let light = Vec3::new(0.45, 0.9, 0.4).normalize();
         write_uniform(&self.queue, &self.world_uni, view_proj, Mat4::IDENTITY, eye, light);
         write_sky(&self.queue, &self.sky_uni, view_proj, eye, light, self.atm_tau);
@@ -726,7 +733,11 @@ impl Ground {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.03, b: 0.05, a: 1.0 }),
+                        load: wgpu::LoadOp::Clear(if submerged {
+                            wgpu::Color::BLACK
+                        } else {
+                            wgpu::Color { r: 0.02, g: 0.03, b: 0.05, a: 1.0 }
+                        }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -741,6 +752,9 @@ impl Ground {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            if submerged {
+                // Nothing is drawn: the cleared black IS the view. Cheaper as well as more honest.
+            } else {
             // Sky first (fullscreen, behind everything), then the textured ground, then the grains.
             pass.set_pipeline(&self.sky_pipeline);
             pass.set_bind_group(0, &self.sky_uni.bind, &[]);
@@ -757,6 +771,7 @@ impl Ground {
                 pass.set_vertex_buffer(1, self.particle_instances.slice(..));
                 pass.set_index_buffer(self.cube_gpu.index_buf.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..self.cube_gpu.index_count, 0, 0..inst.len() as u32);
+            }
             }
         }
         self.queue.submit(std::iter::once(enc.finish()));
@@ -786,7 +801,13 @@ impl Ground {
         // PHYSICS decides where it may actually be. The shell cannot enter matter, so a rig pose that
         // would put the eye inside a dune is corrected out along the surface normal — it slides, it does
         // not pop straight up, and the near plane comes with it.
-        (self.camera_shell_resolve(desired), target)
+        let eye = self.camera_shell_resolve(desired);
+        // **Mouse-look pivots from the eye.** The target is a point along the LOOK DIRECTION, not a
+        // fixed spot on the ground: an orbit camera aimed at a fixed target ignores pitch entirely,
+        // which is exactly what a rig check caught (right-drag turned the view, alt-drag did nothing).
+        let cp = self.camera.pitch.cos();
+        let dir = Vec3::new(cp * self.camera.yaw.sin(), self.camera.pitch.sin(), cp * self.camera.yaw.cos());
+        (eye, eye + dir * 100.0)
     }
 
     /// **The camera is MATTER** — a tiny transparent shell that obeys the SAME universal terrain
@@ -841,6 +862,13 @@ impl Ground {
             pos = p;
         }
         Vec3::new(pos.x as f32, pos.y as f32, pos.z as f32)
+    }
+
+    /// Is the eye inside opaque matter? The surface is a heightfield, so "below the ground under me"
+    /// is the whole test — and it uses the SAME surface the physics rests grains on, so the picture and
+    /// the physics cannot disagree about whether you are buried.
+    fn eye_is_inside_matter(&self, eye: Vec3) -> bool {
+        eye.y < self.sim.world.surface_height_bilinear(Vec3::new(eye.x, 0.0, eye.z))
     }
 
     fn ground_at(&self, x: f32, z: f32) -> f32 {

@@ -4,6 +4,7 @@ import init, { Ground } from "./wasm/engine.js";
 import "./scene-nav";
 import { createSimHud } from "./sim-hud";
 import { createShareView } from "./share-view";
+import { attachCameraInput, CAMERA_HINT } from "./camera-input";
 
 const canvas = document.getElementById("gpu-canvas") as HTMLCanvasElement;
 const stats = document.getElementById("stats");
@@ -42,16 +43,11 @@ async function main() {
     g.resize(canvas.width, canvas.height);
   });
 
-  // --- Orbit controls: drag to look, wheel to zoom. The engine keeps the eye above the ground.
+  // THE shared camera controls (camera-input.ts) — the same gesture grammar as every other scene.
   let yaw = 0.6, pitch = -0.25, zoom = 1.0;
-  let dragging = false, lastX = 0, lastY = 0;
-  canvas.addEventListener("pointerdown", (e) => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
-  window.addEventListener("pointerup", () => { dragging = false; });
-  window.addEventListener("pointermove", (e) => {
-    if (!dragging) return;
-    yaw -= (e.clientX - lastX) * 0.005;
-    pitch -= (e.clientY - lastY) * 0.005;
-    lastX = e.clientX; lastY = e.clientY;
+  const cam = attachCameraInput(canvas, (dyaw, dpitch) => {
+    yaw += dyaw;
+    pitch = Math.max(-1.4, Math.min(0.4, pitch + dpitch));
     g.set_orbit(yaw, pitch, zoom);
   });
   canvas.addEventListener("wheel", (e) => {
@@ -81,6 +77,13 @@ async function main() {
     frames++;
     const now = performance.now();
     if (now - last >= 500) { fps = Math.round((frames * 1000) / (now - last)); frames = 0; last = now; }
+    // Forward/back walks the camera in (the scene's rig holds the declared eye height, and the camera
+    // shell stops it entering the ground — the camera is matter).
+    const walk = cam.forward();
+    if (walk !== 0) {
+      zoom = Math.min(6, Math.max(0.15, zoom * (1 - walk * 0.02)));
+      g.set_orbit(yaw, pitch, zoom);
+    }
     try {
       g.render();
     } catch (err) {
@@ -99,7 +102,7 @@ async function main() {
         timeScale: 1,
         fps,
         metersPerPixel: 0,
-        controls: `drag look · wheel zoom · <b>M</b> or the button drops a meteor`,
+        controls: `${CAMERA_HINT} · wheel zoom · <b>M</b> or the button drops a meteor`,
       });
     }
     requestAnimationFrame(frame);
