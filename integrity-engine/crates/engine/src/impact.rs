@@ -367,7 +367,7 @@ pub fn furrow_target_grains(
         ejections.push(f.ejection(pos, outward, below));
         bodies.push(Body { pos, vel: ground_vel, mass: mass_i }); // ejection added (scaled) below
         masses.push(mass_i);
-        mat_ids.push(materials::index_of(mats, layer.material));
+        mat_ids.push(materials::index_of(mats, &layer.material));
         temps.push(target.temperature_at(r_sample) as f32);
         source.push(crate::aggregate::SOURCE_TARGET);
     }
@@ -471,7 +471,7 @@ pub fn build_impact_debris_scaled(
             mass: frag_mass,
         });
         let layer = moon_body.layer_at(rr);
-        mat_ids.push(materials::index_of(mats, layer.material));
+        mat_ids.push(materials::index_of(mats, &layer.material));
         temps.push(moon_body.temperature_at(rr) as f32);
         source.push(crate::aggregate::SOURCE_IMPACTOR);
     }

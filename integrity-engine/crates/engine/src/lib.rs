@@ -574,6 +574,7 @@ mod app {
         light_dir: [f32; 4], // xyz = direction to the "sun"
         tint: [f32; 4],      // body color
         emissive: [f32; 4],  // rgb = incandescent glow, w = intensity (self-lit hot ejecta)
+        atm: [f32; 4],       // xyz = Rayleigh optical depth per band, w = sun gain (the SAME air the ground sky uses)
     }
 
     /// How far (wall-clock seconds) the RENDER runs behind the PHYSICS (docs/13). Humans don't
@@ -2426,7 +2427,8 @@ mod app {
                     Mat4::from_translation(spos) * Mat4::from_scale(Vec3::splat(scale)),
                     earth_light,
                     tint,
-                    [veil[0], veil[1], veil[2], 1.0], // the sky, added over the ground
+                    [veil[0], veil[1], veil[2], 1.0], // the sky, added over the ground,
+                    AIRLESS,
                 );
             }
             // THE SUN: real matter (planet::sun), rendered where it actually is — a ~0.5° disk of
@@ -2448,6 +2450,7 @@ mod app {
                     // incandescence()'s rock-glow intensity (~2) tone-mapped to dull grey — honest
                     // brightness is the measured ratio, which pins the Reinhard output at white.
                     [1.0, 1.0, 1.0, 4.6e4],
+                    AIRLESS,
                 );
             }
             // The BULK INTERIOR (the un-materialized deep Earth): an opaque sphere at the depth the
@@ -2482,7 +2485,8 @@ mod app {
                         * Mat4::from_scale(Vec3::new(ir_eq, ir_eq, ir_pol)),
                     earth_light,
                     itint,
-                    iglow, // outer-core iron: self-lit at its real temperature (magma while impacting)
+                    iglow, // outer-core iron: self-lit at its real temperature (magma while impacting),
+                    AIRLESS,
                 );
             }
             // CRATER WALL: grains on the carved bowl surface (the physical boundary hole), each wearing
@@ -2521,6 +2525,7 @@ mod app {
                         earth_light,
                         tint,
                         glow,
+                        AIRLESS,
                     );
                 }
             }
@@ -2540,7 +2545,8 @@ mod app {
                         Mat4::from_translation(spos) * Mat4::from_scale(Vec3::splat(r_disp)),
                         earth_light,
                         [0.45, 0.34, 0.28, 1.0], // cooling rock
-                        [1.0, 0.55, 0.25, 0.5],  // a faint warm glow — recently molten
+                        [1.0, 0.55, 0.25, 0.5],  // a faint warm glow — recently molten,
+                        AIRLESS,
                     );
                 }
                 n
@@ -2560,6 +2566,7 @@ mod app {
                     write_space_uniform(
                         &self.queue, uni, view_proj, Mat4::from_scale(Vec3::ZERO),
                         earth_light, [0.0; 4], [0.0; 4],
+                        AIRLESS,
                     );
                     continue;
                 }
@@ -2575,7 +2582,8 @@ mod app {
                     Mat4::from_translation(mpos) * Mat4::from_scale(Vec3::splat(mshell_grain_r)),
                     mlight,
                     self.moon_tint, // aggregate albedo of basalt (docs/17); dark, lit bright by the sun
-                    [0.0; 4],       // intact moon: reflected light only (its hot core is buried)
+                    [0.0; 4],       // intact moon: reflected light only (its hot core is buried),
+                    AIRLESS,
                 );
             }
             // The shattered Moon: each surviving fragment is drawn as a small basalt sphere at its real
@@ -2625,6 +2633,7 @@ mod app {
                         flight,
                         tint,
                         glow,
+                        AIRLESS,
                     );
                     debris_count += 1;
                 }
@@ -2652,7 +2661,8 @@ mod app {
                         Mat4::from_translation(fpos) * Mat4::from_scale(Vec3::splat(r_disp)),
                         flight,
                         self.moon_tint,
-                        [0.0; 4], // crusted over: reflected light only (interior heat is sub-surface)
+                        [0.0; 4], // crusted over: reflected light only (interior heat is sub-surface),
+                        AIRLESS,
                     );
                     debris_count += 1;
                 }
@@ -2869,6 +2879,25 @@ mod app {
         UniformSlot { buf, bind }
     }
 
+    /// A body with NO declared atmosphere: zero optical depth. The shared Rayleigh model then returns
+    /// exactly black — the airless Moon needs no special case, it just has no air.
+    const AIRLESS: [f32; 4] = [0.0, 0.0, 0.0, crate::atmosphere::SUN_GAIN];
+
+    impl Terra {
+        /// This world's air, as the shared Rayleigh model wants it: the optical depth derived from the
+        /// DECLARED atmosphere's mass (a world never declares τ, and never declares surface pressure —
+        /// both fall out of the air's own weight), at the one canonical exposure. A world with no
+        /// atmosphere yields zeros here and renders with a hard terminator, correctly.
+        fn air(&self) -> [f32; 4] {
+            [
+                self.atm_tau[0] as f32,
+                self.atm_tau[1] as f32,
+                self.atm_tau[2] as f32,
+                crate::atmosphere::SUN_GAIN,
+            ]
+        }
+    }
+
     fn write_space_uniform(
         queue: &wgpu::Queue,
         slot: &UniformSlot,
@@ -2877,6 +2906,7 @@ mod app {
         light: Vec3,
         tint: [f32; 4],
         emissive: [f32; 4],
+        atm: [f32; 4],
     ) {
         let u = SpaceUniforms {
             view_proj: view_proj.to_cols_array_2d(),
@@ -2884,6 +2914,7 @@ mod app {
             light_dir: [light.x, light.y, light.z, 0.0],
             tint,
             emissive,
+            atm,
         };
         queue.write_buffer(&slot.buf, 0, bytemuck::bytes_of(&u));
     }
@@ -2985,7 +3016,7 @@ mod app {
     ) -> wgpu::RenderPipeline {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("globe-shader"),
-            source: wgpu::ShaderSource::Wgsl(concat!(include_str!("../../../shaders/surface_normal.wgsl"), include_str!("../../../shaders/globe.wgsl")).into()),
+            source: wgpu::ShaderSource::Wgsl(concat!(include_str!("../../../shaders/rayleigh.wgsl"), include_str!("../../../shaders/surface_normal.wgsl"), include_str!("../../../shaders/globe.wgsl")).into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("globe-pipeline-layout"),
@@ -3506,6 +3537,7 @@ mod app {
                 self.build_cap(&view, sun_light, cap_fade);
             }
 
+            let air = self.air();
             if self.globe_mesh.is_some() {
                 // docs/43 Phase 3 — the displaced globe: one draw. Identity model (the mesh is already in
                 // display units, Earth-centred at the origin); white tint (the mesh carries the per-vertex biome
@@ -3518,7 +3550,8 @@ mod app {
                     Mat4::IDENTITY,
                     sun_light,
                     [1.0, 1.0, 1.0, 1.0],
-                    [eye.x as f32, eye.y as f32, eye.z as f32, 0.8],
+                    [eye.x as f32, eye.y as f32, eye.z as f32, 1.0],
+                    air,
                 );
             } else {
                 // Fallback: the Phase-2 grain shell (used until a world's surface rasters build the globe mesh).
@@ -3569,6 +3602,7 @@ mod app {
                         sun_light,
                         tint,
                         [veil[0], veil[1], veil[2], 1.0],
+                        air,
                     );
                 }
             }
@@ -3755,7 +3789,8 @@ mod app {
                 Mat4::IDENTITY,
                 sun_light,
                 [1.0, 1.0, 1.0, cap_fade],
-                [0.0, 0.0, 0.0, 0.8],
+                [0.0, 0.0, 0.0, 1.0],
+                self.air(),
             );
         }
 

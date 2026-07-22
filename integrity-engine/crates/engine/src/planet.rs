@@ -22,9 +22,11 @@ use glam::DVec3;
 
 /// One concentric layer: real material + observed mean density/temperature profile across it.
 #[derive(Clone, Debug)]
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Layer {
     /// Material id in the catalog (`materials.json`).
-    pub material: &'static str,
+    pub material: String,
     /// Outer radius of the layer (m), from the body centre.
     pub outer_r: f64,
     /// Mean in-situ density (kg/m³) — compressed (PREM), not the surface-condition material density.
@@ -36,13 +38,19 @@ pub struct Layer {
 
 /// A layered body: layers ordered inside-out; `layers.last().outer_r` is the surface.
 #[derive(Clone, Debug)]
+#[derive(serde::Deserialize)]
 pub struct LayeredBody {
     pub layers: Vec<Layer>,
     /// Total atmosphere mass (kg) — DECLARED (measured; Earth: 5.15e18 kg). The surface pressure is
     /// never declared: it EMERGES as the weight of this column, P = M·g/(4πR²) — which for Earth's
     /// declared mass comes out ≈1 atm. Zero for an airless body (the Moon): then open liquids boil off
     /// (see `surface_phase`) — water on a vacuum world is not stable, as a consequence of the model.
+    #[serde(rename = "atmosphere_mass_kg")]
     pub atmosphere_mass: f64,
+    #[serde(default, rename = "name")]
+    pub name: String,
+    #[serde(default, rename = "$comment")]
+    _comment: String,
 }
 
 /// Phase of matter at a point — computed from T vs the material's pressure-dependent melting AND
@@ -166,7 +174,7 @@ impl LayeredBody {
     /// assigned.
     pub fn phase_at(&self, r: f64, mats: &[Material]) -> Phase {
         let layer = self.layer_at(r);
-        let mat = &mats[crate::materials::index_of(mats, layer.material)];
+        let mat = &mats[crate::materials::index_of(mats, &layer.material)];
         surface_phase(mat, self.temperature_at(r), self.pressure_at(r))
     }
 }
@@ -192,28 +200,31 @@ pub fn surface_phase(mat: &Material, t: f64, p: f64) -> Phase {
 /// EARTH, declared as its real construction (PREM densities, observed geotherm):
 /// solid-iron inner core, iron outer core, peridotite mantle, basalt crust. The ocean/continents live on
 /// the surface columns (rendering + impact sampling), not as a layer here (mean depth ~3.7 km ≪ grain).
-pub fn earth() -> LayeredBody {
-    LayeredBody {
-        layers: vec![
-            // Inner core: iron, ρ̄ ≈ 12,900 kg/m³, ~5,700→5,900 K. SOLID — but that must EMERGE.
-            Layer { material: "iron", outer_r: 1.2215e6, density: 12_900.0, t_inner: 5_900.0, t_outer: 5_800.0 },
-            // Outer core: liquid iron, in TWO segments — the core adiabat is convex in radius (it hugs
-            // the melting curve from just above, touching it at the ICB where the core freezes), so one
-            // linear segment sags dishonestly below the melt curve mid-core. Two segments with the
-            // published mid-core anchor (~5,150 K at ~240 GPa) represent the observed adiabat honestly.
-            // PREM densities: ~12,160 (ICB) → ~9,900 (CMB); segment means 11,900 / 10,600.
-            Layer { material: "iron", outer_r: 2.35e6, density: 11_900.0, t_inner: 5_800.0, t_outer: 5_150.0 },
-            Layer { material: "iron", outer_r: 3.48e6, density: 10_600.0, t_inner: 5_150.0, t_outer: 4_150.0 },
-            // Mantle: peridotite, ρ̄ ≈ 4,500 kg/m³ (compressed), 2,900 K (CMB side) → 1,600 K (top).
-            Layer { material: "peridotite", outer_r: 6.346e6, density: 4_500.0, t_inner: 2_900.0, t_outer: 1_600.0 },
-            // Crust: basalt (oceanic bulk; continental granite is a surface-column detail), ~25 km.
-            Layer { material: "basalt", outer_r: 6.371e6, density: 2_900.0, t_inner: 900.0, t_outer: 288.0 },
-        ],
-        // DECLARED: the measured mass of Earth's atmosphere. Its weight ⇒ ~1 atm at the surface —
-        // the pressure that keeps the oceans liquid (surface_phase). Never a declared pressure.
-        atmosphere_mass: 5.15e18,
-    }
+/// Load a BODY DEFINITION by id. Bodies are **fixtures, not engine code**: Earth is a thing the engine
+/// is pointed at, not a behaviour it implements. Keeping them in `assets/bodies/*.json` means there is
+/// exactly ONE Earth — every scene that names `earth` gets the same layers, the same air, the same
+/// emergent surface pressure — and improving Earth improves every world at once, with no recompile of
+/// the physics. The engine knows how to turn *a* layered body into gravity, pressure and phase; it does
+/// not know which body you meant until you say.
+///
+/// FLAGGED (IOU): these are `include_str!`d at build time, so shipping a NEW body still needs a rebuild.
+/// Fetching them like `worlds/*.json` (so anyone can define a planet without touching the engine) is the
+/// next step, and the reason they already live in their own directory rather than inside a world file.
+pub fn body(id: &str) -> LayeredBody {
+    let src = match id {
+        "earth" => include_str!("../../../assets/bodies/earth.json"),
+        "moon" => include_str!("../../../assets/bodies/moon.json"),
+        "sun" => include_str!("../../../assets/bodies/sun.json"),
+        "theia" => include_str!("../../../assets/bodies/theia.json"),
+        other => panic!("unknown body definition {other:?} (add assets/bodies/{other}.json)"),
+    };
+    serde_json::from_str(src).unwrap_or_else(|e| panic!("body {id:?} is malformed: {e}"))
 }
+
+pub fn earth() -> LayeredBody {
+    body("earth")
+}
+
 
 /// The MOON, declared as its real construction (GRAIL/Apollo seismology): small solid inner core,
 /// fluid outer core (the "hot molten core"), thick peridotite mantle, basalt crust. HONESTY NOTE: the
@@ -222,16 +233,9 @@ pub fn earth() -> LayeredBody {
 /// upper range of the published selenotherm (Weber et al. 2011: partially molten outer core,
 /// ~1,900–2,000 K); an Fe–S material entry is the honest refinement (flagged).
 pub fn moon() -> LayeredBody {
-    LayeredBody {
-        layers: vec![
-            Layer { material: "iron", outer_r: 2.4e5, density: 7_800.0, t_inner: 1_800.0, t_outer: 1_820.0 },
-            Layer { material: "iron", outer_r: 3.3e5, density: 7_000.0, t_inner: 2_000.0, t_outer: 1_960.0 },
-            Layer { material: "peridotite", outer_r: 1.697e6, density: 3_350.0, t_inner: 1_800.0, t_outer: 500.0 },
-            Layer { material: "basalt", outer_r: 1.737e6, density: 2_900.0, t_inner: 500.0, t_outer: 250.0 },
-        ],
-        atmosphere_mass: 0.0, // airless — so any exposed liquid boils off (as observed: no lunar seas)
-    }
+    body("moon")
 }
+
 
 /// Earth's land/ocean mask at 10°×10° — matched to the ~9° angular spacing of the 512-grain render
 /// shell, so each grain samples one cell ("average area particles"). '#' = land, '.' = ocean. Rows from
@@ -286,31 +290,17 @@ pub fn earth_surface_material(dir: glam::DVec3) -> &'static str {
 /// EMERGES from the declared composition; SUN_MASS-the-constant retires (docs/27: "calculate the sun's
 /// mass as a material so the gravity manifests naturally", Robin).
 pub fn sun() -> LayeredBody {
-    LayeredBody {
-        layers: vec![
-            // Core (0–0.25 R☉): ~half the mass. Fusion region, ~15.7e6 K.
-            Layer { material: "hh_plasma", outer_r: 1.74e8, density: 45_200.0, t_inner: 1.57e7, t_outer: 7.0e6 },
-            // Radiative zone (0.25–0.7 R☉).
-            Layer { material: "hh_plasma", outer_r: 4.87e8, density: 1_940.0, t_inner: 7.0e6, t_outer: 2.0e6 },
-            // Convective zone to the photosphere (5,772 K).
-            Layer { material: "hh_plasma", outer_r: 6.96e8, density: 97.0, t_inner: 2.0e6, t_outer: 5_772.0 },
-        ],
-        atmosphere_mass: 0.0, // the corona is future physics (flagged)
-    }
+    body("sun")
 }
+
 
 /// THEIA — the Mars-sized impactor of the giant-impact hypothesis (docs/27: the birth of the Moon).
 /// Declared as a differentiated Mars-like body: iron core, peridotite mantle, hot from accretion.
 /// Layer masses integrate to ~6.5e23 kg (Mars-scale, the theorized impactor class).
 pub fn theia() -> LayeredBody {
-    LayeredBody {
-        layers: vec![
-            Layer { material: "iron", outer_r: 1.8e6, density: 7_200.0, t_inner: 2_600.0, t_outer: 2_400.0 },
-            Layer { material: "peridotite", outer_r: 3.39e6, density: 3_400.0, t_inner: 2_200.0, t_outer: 1_200.0 },
-        ],
-        atmosphere_mass: 0.0,
-    }
+    body("theia")
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -478,5 +468,41 @@ mod tests {
             (mass - 7.342e22).abs() / 7.342e22 < 0.05,
             "lunar layers integrate to the Moon's real mass (got {mass:.3e})"
         );
+    }
+}
+
+#[cfg(test)]
+mod body_definition_tests {
+    /// Every body definition on disk must LOAD, and every id the engine offers must RESOLVE. This exists
+    /// because the first cut of the extraction shipped `theia.json` without its match arm: the file was
+    /// right there and the engine still panicked "unknown body". A body is data, so the data directory is
+    /// the source of truth — if these two ever disagree again, this fails instead of a scene.
+    #[test]
+    fn every_body_definition_loads_and_every_id_resolves() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/bodies");
+        let mut on_disk: Vec<String> = std::fs::read_dir(dir)
+            .expect("assets/bodies must exist")
+            .filter_map(|e| {
+                let p = e.ok()?.path();
+                (p.extension()? == "json").then(|| p.file_stem()?.to_str().map(str::to_owned))?
+            })
+            .collect();
+        on_disk.sort();
+        assert!(!on_disk.is_empty(), "no body definitions found in {dir}");
+
+        for id in &on_disk {
+            let b = super::body(id);
+            assert!(!b.layers.is_empty(), "{id} declares no layers");
+            // Layers must be ordered outward from the centre — the pressure integral walks them inward.
+            for w in b.layers.windows(2) {
+                assert!(w[1].outer_r > w[0].outer_r, "{id}: layers must be ordered outward");
+            }
+            assert!(b.atmosphere_mass >= 0.0, "{id}: negative atmosphere mass");
+        }
+        // Earth must be Earth, from the file — the single definition every scene now shares.
+        let e = super::earth();
+        assert!((e.radius() - 6.371e6).abs() < 1e3, "earth.json radius {} m", e.radius());
+        assert!((e.surface_pressure() / 101_325.0 - 1.0).abs() < 0.06,
+            "Earth's declared air must still weigh ~1 atm at the surface (got {:.0} Pa)", e.surface_pressure());
     }
 }
