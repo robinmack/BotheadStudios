@@ -107,6 +107,22 @@ pub(crate) fn metres_per_pixel_at(dist_m: f64, fov_y: f64, viewport_h: f64) -> f
 }
 
 /// The rendering + browser-host layer. wasm/`wgpu`-only; excluded from native builds and tests.
+/// The rasters a body's surface needs, so a SCENE never hardcodes Earth's continents. The engine holds
+/// the definitive body; the host just fetches what it names. Returns `[]` for a body with no surface.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen)]
+pub fn body_surface_urls(id: &str) -> String {
+    let urls = crate::planet::body(id)
+        .surface
+        .map(|s| {
+            [s.landmask_url, s.elevation_url, s.landcover_url]
+                .into_iter()
+                .map(|u| u.unwrap_or_default())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    serde_json::to_string(&urls).unwrap_or_else(|_| "[]".into())
+}
+
 #[cfg(target_arch = "wasm32")]
 mod app {
     use crate::mesher::{self, Mesh, Vertex};
@@ -677,6 +693,14 @@ mod app {
         /// post-impact day length EMERGES from the collision geometry. Fed by the boundary-shear mirror,
         /// demoted matter's orbital L, and drained by tidal torque on the moonlets.
         spin_l: glam::DVec3,
+        /// **The definitive Earth.** The same globe mesh Terra renders, built by the same shared builder
+        /// from the same body definition — because Earth is one object, not one per scene. `None` until
+        /// the host hands over the body's surface rasters; the scene then shows the real planet instead of
+        /// the 512-grain shell that used to stand in for it.
+        globe_pipeline: wgpu::RenderPipeline,
+        globe_mesh: Option<GpuMesh>,
+        globe_uni: UniformSlot,
+        earth_surface: Option<EarthSurface>,
         /// GEOLOGIC time-LOD (docs/27): once the aftermath is quiet, each settled clump IS one body
         /// (orbital elements), evolved by the validated secular tidal law — millennia per real second.
         geologic: bool,
@@ -891,6 +915,9 @@ mod app {
                 .map(|_| make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler))
                 .collect();
             let pipeline = build_space_pipeline(&device, &bind_layout, config.format);
+            let globe_pipeline =
+                build_globe_pipeline(&device, &bind_layout, config.format, wgpu::BlendState::REPLACE);
+            let globe_uni = make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
             // GPU SPH deformable-Earth impact (stage 4c.4): its instanced-particle pipeline + a camera
             // uniform (reuses the uniform-only `bind_layout`; the buffer is sized for `SphCam`).
             // The SPH particle render is NOT a textured surface — it draws particles from the physics
@@ -1037,6 +1064,10 @@ mod app {
                 sun_uni,
                 atm_tau,
                 atm_twilight,
+                globe_pipeline,
+                globe_mesh: None,
+                globe_uni,
+                earth_surface: None,
                 interior_tint,
                 interior_glow,
                 wall_unis,
@@ -1074,6 +1105,76 @@ mod app {
         /// frame-of-reference focus, and the orbit-camera framing. The deorbit stays a user control
         /// (`brake_moon`/`drop_moon`) — no scripted outcome. (The planet's render radius still uses the
         /// `EARTH_RADIUS_M` constant in v1; per-body render radii from data is a flagged follow-up.)
+        /// This scene's air — Earth's, from Earth's own definition, at the shared exposure. Identical to
+        /// `Terra::air()` by construction: one body, one atmosphere.
+        fn air(&self) -> Air {
+            [
+                self.atm_tau[0] as f32,
+                self.atm_tau[1] as f32,
+                self.atm_tau[2] as f32,
+                crate::atmosphere::SUN_GAIN,
+                self.atm_twilight as f32,
+            ]
+        }
+
+        /// Hand the scene the DEFINITIVE Earth's surface rasters (the host fetches whatever
+        /// `body_surface_urls("earth")` names). Builds the same globe mesh Terra builds, from the same
+        /// shared builder — so this scene stops standing in a grain shell for the planet.
+        #[allow(clippy::too_many_arguments)]
+        pub fn load_earth_surface(
+            &mut self,
+            landmask: &[u8], lm_w: usize, lm_h: usize,
+            elevation: &[u8], ev_w: usize, ev_h: usize,
+            landcover: &[u8], lc_w: usize, lc_h: usize,
+        ) -> Result<(), JsValue> {
+            let body = crate::planet::body("earth");
+            let def = body
+                .surface
+                .ok_or_else(|| JsValue::from_str("earth.json declares no surface"))?;
+            // RGBA from the host's canvas decode; a missing/!=RGBA raster is treated as absent rather
+            // than fatal, exactly as Terra treats it.
+            let mk = |d: &[u8], w: usize, h: usize| {
+                (!d.is_empty() && w > 0 && h > 0)
+                    .then(|| crate::terra::raster::Raster::new(w, h, 4, d.to_vec()).ok())
+                    .flatten()
+            };
+            let biome_mats = {
+                let max_idx = def.biomes.keys().filter_map(|k| k.parse::<usize>().ok()).max().unwrap_or(0);
+                (0..=max_idx)
+                    .map(|i| {
+                        let id = def.biomes.get(&i.to_string()).map(String::as_str).unwrap_or("granite");
+                        materials::index_of(&self.mats, id)
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let surf = EarthSurface {
+                landmask: mk(landmask, lm_w, lm_h),
+                elevation: mk(elevation, ev_w, ev_h),
+                landcover: mk(landcover, lc_w, lc_h),
+                biome_mats,
+                elev_range: def.elevation_range_m.unwrap_or([-11_000.0, 9_000.0]),
+                relief_exag: def.relief_exaggeration.unwrap_or(1.0),
+            };
+            // Unit radius: the draw scales it to whichever radius this scene renders Earth at (real, or
+            // the sub-scale SPH body during the impact), so one mesh serves both.
+            let mesh = crate::terra::globe_mesh::build_body_globe(
+                192,
+                1.0,
+                1.0 / EARTH_RADIUS_M,
+                surf.relief_exag,
+                &self.mats,
+                &surf.biome_mats,
+                surf.landmask.as_ref(),
+                surf.elevation.as_ref(),
+                surf.landcover.as_ref(),
+                surf.elev_range,
+            );
+            log::info!("space: definitive Earth built — {} triangles", mesh.indices.len() / 3);
+            self.globe_mesh = Some(upload_mesh(&self.device, "earth-globe", &mesh));
+            self.earth_surface = Some(surf);
+            Ok(())
+        }
+
         pub fn load_world(&mut self, world_json: &str) -> Result<(), JsValue> {
             use crate::terra::world_def::{BodyDef, World};
             let w = World::parse(world_json).map_err(|e| JsValue::from_str(&e))?;
@@ -2325,10 +2426,13 @@ mod app {
             // particle field — so it is sized to the sub-scale (5000 km) SPH body and rendered at SPH_VIS_SCALE
             // (not the real 6371 km at DISPLAY_SCALE), and its grains fade out by `1−render_blend` (the slider
             // cross-fades to the raw physics billboards). Otherwise (CPU scene) it's the real Earth as before.
+            // Earth's RADIUS comes from Earth's definition — the scene does not get to say how big Earth
+            // is. (During the GPU impact the body is deliberately rendered at the sub-scale radius the SPH
+            // field actually occupies, which is a declared visualization scale, not a second Earth.)
             let (pretty_scale, pretty_r_surf) = if self.sph_active {
-                (SPH_VIS_SCALE, 5.0e6_f64)
+                (SPH_VIS_SCALE, self.impact_def.target.radius_m)
             } else {
-                (DISPLAY_SCALE, EARTH_RADIUS_M)
+                (DISPLAY_SCALE, crate::planet::body("earth").radius())
             };
             let pretty_fade = if self.sph_active { (1.0 - self.render_blend) as f32 } else { 1.0 };
             // docs/42 Phase 3 — atmosphere MIST: the giant impact vaporizes rock into a thick, shocked vapor
@@ -2404,6 +2508,36 @@ mod app {
             let flat = crate::tides::flattening_from_spin(
                 spin_omega_r, self.bodies[1].mass, EARTH_RADIUS_M,
             );
+            // **The definitive Earth's transform.** One draw: spin the CRUST (so continents co-rotate,
+            // exactly as they must), flatten it by the spin's own oblateness, and scale to the display.
+            // The Rayleigh veil is not applied here — globe.wgsl scatters the declared air itself, using
+            // the one shared model, so this scene and Terra cannot disagree about Earth's atmosphere.
+            if self.globe_mesh.is_some() {
+                let spos = ((earth_center - focus) * pretty_scale).as_vec3();
+                let f = flat as f32;
+                // Volume-preserving to first order: +f/3 at the equator, −2f/3 at the poles, about the
+                // spin axis. At today's day this is 1/298 (invisible); at the post-impact 3.8-h day it is
+                // a visibly squashed world — and it is the SAME flattening the shell used.
+                let r = (pretty_r_surf * pretty_scale) as f32;
+                let oblate = Mat4::from_scale(Vec3::new(
+                    r * (1.0 + f / 3.0),
+                    r * (1.0 - 2.0 * f / 3.0),
+                    r * (1.0 + f / 3.0),
+                ));
+                let spin_m = Mat4::from_quat(glam::Quat::from_xyzw(
+                    spin_rot.x as f32, spin_rot.y as f32, spin_rot.z as f32, spin_rot.w as f32,
+                ));
+                write_space_uniform(
+                    &self.queue,
+                    &self.globe_uni,
+                    view_proj,
+                    Mat4::from_translation(spos) * spin_m * oblate,
+                    earth_light,
+                    [1.0, 1.0, 1.0, pretty_fade],
+                    [eye_disp.x as f32, eye_disp.y as f32, eye_disp.z as f32, 0.0],
+                    self.air(),
+                );
+            }
             for (i, uni) in self.shell_unis.iter().enumerate() {
                 let body_dir = crate::impact::fib_dir(i, SHELL_N); // this grain's fixed BODY direction
                 let dir = spin_rot * body_dir; // its current WORLD direction (rotated by the spin)
@@ -2742,8 +2876,19 @@ mod app {
                 if !self.sph_active || self.render_blend < 1.0 {
                     // the glowing deep interior first (shows through the crater), then the crust shell over it
                     draw(&mut pass, &self.interior_uni, &self.sphere_gpu);
-                    for uni in self.shell_unis.iter() {
-                        draw(&mut pass, uni, &self.sphere_gpu); // Earth: a shell of coarse grains
+                    // **EARTH.** The definitive body — the same globe mesh, from the same shared builder,
+                    // that Terra renders. What stood here was a 512-grain shell: a stand-in that made the
+                    // planet look warty and, being its own render path, quietly gave this scene a different
+                    // Earth from the one next door. Excavation is not this mesh's job — the impact resolves
+                    // real particles at the impact site, and THEY are the matter (and the crater) there.
+                    if let Some(globe) = self.globe_mesh.as_ref() {
+                        pass.set_pipeline(&self.globe_pipeline);
+                        draw(&mut pass, &self.globe_uni, globe);
+                        pass.set_pipeline(&self.pipeline);
+                    } else {
+                        for uni in self.shell_unis.iter() {
+                            draw(&mut pass, uni, &self.sphere_gpu); // no surface handed over yet
+                        }
                     }
                     // accreting moonlet spheres (docs/42 Phase 4), from the disk's self-bound clumps
                     for uni in self.debris_unis.iter().take(n_moonlets) {
@@ -2928,6 +3073,17 @@ mod app {
             .map(|air| crate::atmosphere::scale_height(air, 288.0, g))
             .unwrap_or(0.0);
         crate::atmosphere::twilight_half_angle(h, radius_m)
+    }
+
+    /// Earth's DEFINITIVE surface, handed over by the host once and reused by every draw. The scene
+    /// does not own these continents — the body definition does; this is just the decoded copy.
+    struct EarthSurface {
+        landmask: Option<crate::terra::raster::Raster>,
+        elevation: Option<crate::terra::raster::Raster>,
+        landcover: Option<crate::terra::raster::Raster>,
+        biome_mats: Vec<usize>,
+        elev_range: [f64; 2],
+        relief_exag: f64,
     }
 
     fn write_space_uniform(
@@ -3446,7 +3602,14 @@ mod app {
             self.biome_mats.clear();
             self.elev_range = [-11000.0, 9000.0];
             self.relief_exag = TERRA_RELIEF_EXAG;
-            if let Some(s) = w.surface.as_ref() {
+            // Earth's surface belongs to Earth, not to this world file. Prefer the body definition; a
+            // world's own `surface` is only honoured for a body the engine has no definition for yet.
+            let body_surface = w
+                .body
+                .as_deref()
+                .map(crate::planet::body)
+                .and_then(|b| b.surface);
+            if let Some(s) = body_surface.as_ref().or(w.surface.as_ref()) {
                 if let Some(r) = s.elevation_range_m {
                     self.elev_range = r;
                 }
@@ -3735,34 +3898,21 @@ mod app {
             peak * DISPLAY_SCALE * self.relief_exag
         }
 
+        /// Terra's globe — built by the ONE shared body-globe builder, so Terra and the space scenes
+        /// cannot drift into showing two different Earths.
         fn build_surface_mesh(&self) -> Mesh {
-            let r_disp = self.planet_radius * DISPLAY_SCALE; // = 1.0 for Earth
-            let exag = self.relief_exag;
-            let ds = DISPLAY_SCALE;
-            let water_idx = materials::index_of(&self.mats, "water");
-            let water_alb = self.mats[water_idx].albedo;
-            crate::terra::globe_mesh::build_globe(256, r_disp, |dir| {
-                let lat = dir.y.asin().to_degrees();
-                let lon = dir.z.atan2(dir.x).to_degrees();
-                let is_land = self
-                    .landmask
-                    .as_ref()
-                    .map(|r| r.land_at(lat, lon))
-                    .unwrap_or_else(|| crate::planet::earth_surface_material(dir) == "granite");
-                if is_land {
-                    let biome = self.landcover.as_ref().map_or(1, |r| r.biome_at(lat, lon) as usize);
-                    let mi = self.biome_mats.get(biome).copied().unwrap_or(water_idx);
-                    let e = self
-                        .elevation
-                        .as_ref()
-                        .map_or(0.0, |r| r.elevation_m_at(lat, lon, self.elev_range[0], self.elev_range[1]));
-                    // Land above sea level; below-sea-level land (Dead Sea etc.) clamps to the shore.
-                    (self.mats[mi].albedo, e.max(0.0) * ds * exag, mi as u32)
-                } else {
-                    // Ocean surface: flat at sea level with the water albedo (bathymetry is hidden, so unused).
-                    (water_alb, 0.0, water_idx as u32)
-                }
-            })
+            crate::terra::globe_mesh::build_body_globe(
+                256,
+                self.planet_radius * DISPLAY_SCALE,
+                DISPLAY_SCALE,
+                self.relief_exag,
+                &self.mats,
+                &self.biome_mats,
+                self.landmask.as_ref(),
+                self.elevation.as_ref(),
+                self.landcover.as_ref(),
+                self.elev_range,
+            )
         }
 
         /// docs/43 Phase 5 — rebuild the camera-relative ground cap under the camera and upload it (vertices only;

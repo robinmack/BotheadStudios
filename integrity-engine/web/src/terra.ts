@@ -2,7 +2,7 @@
 // this thin host fetches it, hands it to the engine's `Terra` scene, and drives the render loop. Phase 1 uses
 // an orbit camera (drag / wheel-zoom); the continuous fly camera (WASD + zoom + look) lands in Phase 4.
 
-import init, { Terra } from "./wasm/engine.js";
+import init, { Terra, body_surface_urls } from "./wasm/engine.js";
 import "./scene-nav";
 import { createShareView } from "./share-view";
 import { createSimHud } from "./sim-hud";
@@ -87,7 +87,7 @@ async function main(): Promise<void> {
     type Raster = { data: Uint8Array; w: number; h: number };
     async function decode(url?: string): Promise<Raster> {
       if (!url) return { data: new Uint8Array(0), w: 0, h: 0 };
-      const bmp = await fetch(base + url)
+      const bmp = await fetch(url.startsWith("/") ? url : base + url)
         .then((r) => r.blob())
         .then((b) => createImageBitmap(b));
       const cv = new OffscreenCanvas(bmp.width, bmp.height);
@@ -97,12 +97,10 @@ async function main(): Promise<void> {
       return { data: new Uint8Array(img.data.buffer.slice(0)), w: bmp.width, h: bmp.height };
     }
     setStatus("Loading surface rasters…");
-    const s = world.surface ?? {};
-    const [lm, ev, lc] = await Promise.all([
-      decode(s.landmask_url),
-      decode(s.elevation_url),
-      decode(s.landcover_url),
-    ]);
+    // Earth's continents come from Earth's DEFINITION, not from this world file — the same rasters the
+    // space and impact scenes load, so every scene shows one Earth.
+    const urls: string[] = JSON.parse(body_surface_urls(world.body ?? "earth"));
+    const [lm, ev, lc] = await Promise.all(urls.map((u) => decode(u)));
     report("info", `rasters: land ${lm.w}x${lm.h}, elev ${ev.w}x${ev.h}, cover ${lc.w}x${lc.h}`);
 
     setStatus("Requesting GPU device…");

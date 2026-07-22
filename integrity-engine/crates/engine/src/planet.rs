@@ -47,6 +47,11 @@ pub struct LayeredBody {
     /// (see `surface_phase`) — water on a vacuum world is not stable, as a consequence of the model.
     #[serde(rename = "atmosphere_mass_kg")]
     pub atmosphere_mass: f64,
+    /// This body's SURFACE — its continents, elevation and land cover. It belongs to the BODY, not to a
+    /// scene: Earth has one set of continents no matter which world places it, so a scene may position
+    /// Earth but may never redefine it. `None` for a body we have no surface data for.
+    #[serde(default)]
+    pub surface: Option<crate::terra::world_def::Surface>,
     #[serde(default, rename = "name")]
     pub name: String,
     #[serde(default, rename = "$comment")]

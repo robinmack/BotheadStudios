@@ -5,7 +5,7 @@
 // is a spectator view of celestial motion. Mirrors main.ts's log relay + status banner so a
 // console-less device (iPad) can still be debugged.
 
-import init, { OrbitDemo } from "./wasm/engine.js";
+import init, { OrbitDemo, body_surface_urls } from "./wasm/engine.js";
 import "./scene-nav";
 import { createSimHud } from "./sim-hud";
 import { createShareView } from "./share-view";
@@ -126,6 +126,28 @@ async function main(): Promise<void> {
     // Moon count / birth flag were resolved from the page above (orbit.html and twomoons.html share
     // this one script via <body data-moons>/<body data-scene>).
     const demo = await OrbitDemo.create(canvas, numMoons);
+
+    // THE DEFINITIVE EARTH. The engine holds Earth's definition (layers, air, continents) and tells us
+    // which rasters it needs — this scene does not get to invent a planet. Fetch them and hand them over;
+    // the engine then builds the same globe Terra builds. Without this the scene falls back to the old
+    // grain shell, which is what made Earth look warty here and, worse, made it a DIFFERENT Earth.
+    try {
+      const urls: string[] = JSON.parse(body_surface_urls("earth"));
+      const decode = async (url: string) => {
+        if (!url) return { data: new Uint8Array(0), w: 0, h: 0 };
+        const bmp = await fetch(url).then((r) => r.blob()).then((b) => createImageBitmap(b));
+        const cv = new OffscreenCanvas(bmp.width, bmp.height);
+        const ctx = cv.getContext("2d", { willReadFrequently: true }) as OffscreenCanvasRenderingContext2D;
+        ctx.drawImage(bmp, 0, 0);
+        const img = ctx.getImageData(0, 0, bmp.width, bmp.height);
+        return { data: new Uint8Array(img.data.buffer.slice(0)), w: bmp.width, h: bmp.height };
+      };
+      const [lm, ev, lc] = await Promise.all(urls.map(decode));
+      demo.load_earth_surface(lm.data, lm.w, lm.h, ev.data, ev.w, ev.h, lc.data, lc.w, lc.h);
+      report("info", `Earth surface: land ${lm.w}x${lm.h}, elev ${ev.w}x${ev.h}, cover ${lc.w}x${lc.h}`);
+    } catch (e) {
+      report("warn", `definitive Earth surface unavailable (${e}); falling back to the grain shell`);
+    }
     // docs/43: for a DATA world (the deorbit scenes), hand the engine the JSON — it replaces the built-in
     // Sun/Earth/Moon constants with the world's declared initial conditions, spin, tints, time scale, and
     // orbit-camera framing. `create` above was given the world's moon count so the GPU per-moon buffers match.

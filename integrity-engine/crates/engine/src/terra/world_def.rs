@@ -11,6 +11,10 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Deserialize)]
 pub struct World {
     pub name: String,
+    /// Which DEFINED body this world places (`assets/bodies/<id>.json`). A world positions a body and
+    /// sets its initial conditions; it never redefines one. Earth is Earth in every scene that names it.
+    #[serde(default)]
+    pub body: Option<String>,
     #[serde(default, rename = "type")]
     pub kind: String,
     /// The single planet (a `"planet"`/terrain world). Absent for a `"system"` world.
@@ -341,7 +345,7 @@ pub struct Planet {
     pub profile: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct Surface {
     #[serde(default)]
     pub landmask_url: Option<String>,
