@@ -14,6 +14,9 @@ struct Uniforms {
 @group(0) @binding(2) var samp : sampler;
 // Per-material params: x = roughness, y = metallic (rest reserved).
 @group(0) @binding(3) var<uniform> matparams : array<vec4<f32>, 32>;
+// The material NORMAL maps (docs/12): relief lighting without relief geometry. Same array shape and the
+// same sampler as the albedo — one texture set describing one surface, not two that can disagree.
+@group(0) @binding(4) var ntex : texture_2d_array<f32>;
 
 struct VOut {
     @builtin(position) clip      : vec4<f32>,
@@ -50,9 +53,32 @@ fn triplanar(local : vec3<f32>, n : vec3<f32>, layer : u32) -> vec3<f32> {
     return cx * w.x + cy * w.y + cz * w.z;
 }
 
+// Triplanar NORMAL mapping. The albedo already projects along the three axis planes; the normal map
+// rides the same projection, so each plane contributes a tangent-space perturbation whose frame IS that
+// plane's axes — no tangent vectors to generate or interpolate.
+//
+// This is the cheap half of surface detail (docs/49): a material's real micro-relief is lit as relief
+// for one texture fetch, instead of costing a vertex per feature. It is a DECLARED model standing in for
+// grain-scale geometry we do not resolve — bounded by the material's own cited roughness, so it can
+// never imply relief the material does not have.
+fn triplanar_normal(local : vec3<f32>, n : vec3<f32>, layer : u32) -> vec3<f32> {
+    var w = abs(n);
+    w = w / (w.x + w.y + w.z);
+    let tx = textureSample(ntex, samp, local.yz * TEX_SCALE, layer).xyz * 2.0 - 1.0;
+    let ty = textureSample(ntex, samp, local.xz * TEX_SCALE, layer).xyz * 2.0 - 1.0;
+    let tz = textureSample(ntex, samp, local.xy * TEX_SCALE, layer).xyz * 2.0 - 1.0;
+    // Whiteout blend: re-orient each plane's tangent normal into world space by swizzling, keep the
+    // geometric normal's sign so a surface facing -x is perturbed the same way as one facing +x.
+    let sn = sign(n);
+    let nx = vec3<f32>(tx.z * sn.x, tx.x, tx.y);
+    let ny = vec3<f32>(ty.x, ty.z * sn.y, ty.y);
+    let nz = vec3<f32>(tz.x, tz.y, tz.z * sn.z);
+    return normalize(nx * w.x + ny * w.y + nz * w.z + n);
+}
+
 @fragment
 fn fs_main(i : VOut) -> @location(0) vec4<f32> {
-    let n = normalize(i.normal);
+    let n = triplanar_normal(i.local, normalize(i.normal), i.mat);
     let l = normalize(u.light_dir.xyz);
 
     let albedo = triplanar(i.local, n, i.mat);

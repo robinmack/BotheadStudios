@@ -41,6 +41,7 @@ fn make_world_bind(
     tex_view: &wgpu::TextureView,
     sampler: &wgpu::Sampler,
     matparams: &wgpu::Buffer,
+    normal_view: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("world-bind-group"),
@@ -61,6 +62,10 @@ fn make_world_bind(
             wgpu::BindGroupEntry {
                 binding: 3,
                 resource: matparams.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(normal_view),
             },
         ],
     })
@@ -426,6 +431,47 @@ impl Ground {
                 );
             }
         }
+        // The NORMAL array: same shape, same mips, uploaded from the same `Texture` values, so the
+        // albedo and the relief can never describe different surfaces (docs/12).
+        let normal_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("material-normals"),
+            size: wgpu::Extent3d {
+                width: texture::TEX_SIZE as u32,
+                height: texture::TEX_SIZE as u32,
+                depth_or_array_layers: n_layers,
+            },
+            mip_level_count: mip_count,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        for (layer, t) in textures.iter().enumerate() {
+            for (mip, data) in t.normal_mips.iter().enumerate() {
+                let msize = (texture::TEX_SIZE >> mip) as u32;
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &normal_tex,
+                        mip_level: mip as u32,
+                        origin: wgpu::Origin3d { x: 0, y: 0, z: layer as u32 },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    data,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4 * msize),
+                        rows_per_image: Some(msize),
+                    },
+                    wgpu::Extent3d { width: msize, height: msize, depth_or_array_layers: 1 },
+                );
+            }
+        }
+        let normal_view = normal_tex.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+
         let tex_view = material_tex.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
             ..Default::default()
@@ -475,10 +521,20 @@ impl Ground {
                     count: None,
                 },
                 uniform_entry(3, wgpu::ShaderStages::FRAGMENT),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let world_ubuf = make_uniform_buffer(&device);
-        let world_bind = make_world_bind(&device, &world_bind_layout, &world_ubuf, &tex_view, &sampler, &matparams_buf);
+        let world_bind = make_world_bind(&device, &world_bind_layout, &world_ubuf, &tex_view, &sampler, &matparams_buf, &normal_view);
         let world_uni = UniformSlot { buf: world_ubuf, bind: world_bind };
         let world_pipeline = build_pipeline(&device, &world_bind_layout, format);
 

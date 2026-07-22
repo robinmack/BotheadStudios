@@ -79,9 +79,22 @@ pub fn generate(material: &Material) -> Texture {
 
 /// The surface height field a material's relief comes from, in [-1, 1]. Same fbm as the colour, so bump
 /// and albedo describe ONE surface.
+///
+/// **Amplitude comes from ROUGHNESS — the real surface statistic — not from `color_variance`.** Colour
+/// variance describes how the material's *colour* varies; roughness describes how its *surface* varies,
+/// and it is the latter that has relief. Scaling height by the colour parameter was both wrong in kind
+/// and wrong in size: sand's `color_variance` is 0.25 against a roughness of 0.85, so the gradient came
+/// out too small to see at all (an 8x amplification of the result was visually indistinguishable).
+///
+/// **Why this is a model and not a fake** (Law VIII — does it embody the physics or imitate it?): the
+/// relief IS there, in the material's grain structure, below any resolution we can afford as geometry.
+/// Evaluating light's response to a known sub-resolution surface statistic is what a microfacet model
+/// is, and it is Law III's "compute what you can't [simulate]" — not a picture-fixing trick. It stays
+/// honest exactly as long as the parameter is the material's own cited roughness and the result would
+/// converge to resolved micro-geometry.
 fn height_at(material: &Material, x: usize, y: usize, size: usize, seed: u32) -> f32 {
     let (u, v) = (x as f32 / size as f32, y as f32 / size as f32);
-    fbm(u, v, seed) * material.color_variance.clamp(0.05, 1.0).max(0.15)
+    fbm(u, v, seed) * material.roughness.clamp(0.0, 1.0)
 }
 
 /// Generate one texture per material (used to fill a GPU texture array).
@@ -222,6 +235,33 @@ fn build_mips(level0: Vec<u8>, size: usize) -> Vec<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Relief must scale with ROUGHNESS (the surface statistic), not `color_variance` (a colour one).
+    /// Sand has variance 0.25 and roughness 0.85: driving height from the wrong parameter made the
+    /// gradient too small to see, and it was the wrong quantity in kind as well as size.
+    #[test]
+    fn relief_amplitude_follows_roughness_not_colour_variance() {
+        let mats = crate::materials::load();
+        let pick = |id: &str| mats.iter().find(|m| m.id == id).expect(id).clone();
+        // granite: roughness 0.6, variance 0.40  |  sand: roughness 0.85, variance 0.25
+        // Roughness says sand is the rougher surface; colour variance would say the opposite.
+        let (granite, sand) = (pick("granite"), pick("sand"));
+        assert!(sand.roughness > granite.roughness, "premise: sand is the rougher SURFACE");
+        assert!(sand.color_variance < granite.color_variance, "premise: but the less varied COLOUR");
+
+        let peak = |m: &crate::materials::Material| -> f32 {
+            let t = generate(m);
+            let px = &t.normal_mips[0];
+            (0..px.len() / 4)
+                .map(|i| (px[i * 4 + 3] as f32 / 255.0 * 2.0 - 1.0).abs())
+                .fold(0.0f32, f32::max)
+        };
+        assert!(
+            peak(&sand) > peak(&granite),
+            "sand must have the greater relief ({} vs {}) — following roughness, not colour variance",
+            peak(&sand), peak(&granite)
+        );
+    }
 
     /// The point of the normal map: relief WITHOUT geometry. A material's bump must be real (non-flat),
     /// must follow its CITED roughness, and must tile — otherwise the cheap path cannot replace the

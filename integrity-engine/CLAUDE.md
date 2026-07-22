@@ -17,8 +17,18 @@ decide it. Full text + rationale: [`docs/00-laws-of-integrity.md`](docs/00-laws-
 7. **Measure and derive; never assume.** A number you did not measure or derive is a guess — wrong until
    checked. Test, then conclude. Pin acceleration to brute force. A negative result, honestly measured, ships.
 
+8. **This is a NEW KIND of engine — challenge what you "know".** Traditional engines only *emulate*
+   physics; Integrity *embodies* it — **to the best of our ability with the compute available**. That
+   clause is the honest bound, not a loophole: the question is never "physics or shortcut?" but *"is
+   this the most physical thing this budget can buy, and does it converge as the budget grows?"* LOD ladders, baked lighting, colliders standing in for objects,
+   bump maps standing in for surfaces — these answer a different question. The test is never "is this
+   how engines do it?" but **"does this embody the physics, or imitate it?"** A borrowed technique is
+   admissible only as a declared stand-in (Law 5): derived from the real quantity, flagged, convergent.
+   When a familiar solution arrives fully formed and obvious, THAT is when to stop and ask what the
+   honest version is.
+
 *In one breath: real physics, one law at every scale, faked nowhere — simulated where seen, computed where
-not, and never assumed where it can be measured.* If any doc, comment, or past decision contradicts a Law,
+not, never assumed where it can be measured, and never borrowed merely because it is familiar.* If any doc, comment, or past decision contradicts a Law,
 the Law wins and the other is the bug.
 
 ---

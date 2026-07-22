@@ -63,10 +63,39 @@ brute-force reference so speed cannot change the answer. Report findings, not tr
 honestly measured, is a real deliverable. When in doubt, run the experiment — the engine's whole reason
 for existing is that reality is the authority, not our expectation of it.
 
+## VIII. This is a new kind of engine. Challenge what you "know".
+
+**We are building a completely new type of game engine. Challenge assumptions fed by understanding of
+traditional game engines that only EMULATE physics. Integrity EMBODIES physics — to the best of our
+ability with the compute available.**
+
+That last clause is not a loophole, it is the honest bound. Embodiment is the goal and the compute is
+finite, so the real question is never "physics or shortcut?" but **"is this the most physical thing this
+budget can buy, and does it converge as the budget grows?"** A technique that evaluates a real quantity
+analytically because resolving it is unaffordable is embodiment under a constraint (Law III). A technique
+that produces a convincing result by a route the physics would never take is emulation, however cheap.
+The difference is whether you can name the computation you are standing in for and show your answer
+approaching it.
+
+Almost everything you have absorbed about how a renderer or a game engine is built was invented to make
+a picture convincing at a price — LOD ladders, baked lighting, canned animation, colliders that stand in
+for objects, "good enough" cheats promoted to architecture. Those are answers to a different question.
+Here the simulation is the thing and the picture reports it, so a technique that is standard practice
+elsewhere can still be the wrong shape here, and reaching for it *because it is standard* is not a
+reason.
+
+The test is not "is this how engines do it?" but **"does this embody the physics, or imitate it?"** A
+borrowed technique is admissible only where it is a declared stand-in for a computation we cannot yet
+afford (Law V) — derived from the real quantity, flagged, and convergent to it. If it is load-bearing
+because it *looks* right, it is the enemy of this engine (Law I).
+
+When a familiar solution arrives fully formed and obvious, that is exactly when to stop and ask what the
+honest version would be.
+
 ---
 
 **In one breath:** *real physics, one law at every scale, faked nowhere — simulated where seen, computed
-where not, and never assumed where it can be measured.*
+where not, and never assumed where it can be measured; and never borrowed merely because it is familiar.*
 
 These Laws are elaborated across the docs (notably the one-physics charter, resolution-by-necessity, the
 resolution controller, and the scale-relative north star), but the docs serve the Laws, not the other way
