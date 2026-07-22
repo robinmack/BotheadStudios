@@ -128,6 +128,17 @@ async function main(): Promise<void> {
     // this one script via <body data-moons>/<body data-scene>).
     const demo = await OrbitDemo.create(canvas, numMoons);
 
+    // THE SKY. Real stars at real positions (HYG), shared by every scene — the sky is not a property of a
+    // planet, nor of a scene: it is the universe everything here is inside. A scene contributes only where
+    // the observer stands. Failure is non-fatal: you lose the stars, never the scene.
+    try {
+      const bytes = new Uint8Array(await fetch("/sky/stars.bin").then((r) => r.arrayBuffer()));
+      demo.load_star_catalog(bytes);
+      report("info", `sky: ${bytes.length / 16} catalogued stars`);
+    } catch (e) {
+      report("warn", `star catalogue unavailable (${e}); the sky will be empty`);
+    }
+
     // THE DEFINITIVE EARTH. The engine holds Earth's definition (layers, air, continents) and tells us
     // which rasters it needs — this scene does not get to invent a planet. Fetch them and hand them over;
     // the engine then builds the same globe Terra builds. Without this the scene falls back to the old

@@ -1,0 +1,51 @@
+stars.bin — the real sky, from the HYG database.
+
+SOURCE
+  HYG Database v4.4 (astronexus / David Nash)
+  https://codeberg.org/astronexus/hyg
+  Compiled from the Hipparcos, Yale Bright Star and Gliese catalogues.
+
+LICENSE — Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0)
+  https://creativecommons.org/licenses/by-sa/4.0/
+  The Integrity engine's CODE is MIT. This DATA is not: it is CC BY-SA 4.0, and so is any
+  catalogue derived from it — including this file, which is a filtered subset. Keep that in mind
+  before re-cutting it. The two licences sit side by side rather than mixing: the data is shipped
+  as its own asset and fetched at runtime, never compiled into the binary.
+
+WHY 3-D POSITIONS AND NOT A SKY SPHERE
+  A sphere of stars painted at "infinity" is a Sol-centric universe: it silently asserts that every
+  star is equidistant and that the observer is always here. It is wrong the moment anything moves far
+  enough to matter, and it cannot survive interstellar travel at all -- the shell would simply drag
+  along with the camera and the constellations would never change.
+  So the file carries each star's real CARTESIAN POSITION and its ABSOLUTE magnitude. The engine
+  computes direction and brightness from the actual geometry every frame: direction from
+  (star - observer), brightness from the inverse-square law over that true distance. From here that
+  reproduces the sky we see -- because it IS the sky we see. From Sirius it would show Sirius's sky,
+  with Sol among the stars, for free and with no extra code.
+
+HOW THIS FILE WAS MADE (from hyg_v44.csv.gz, sha256 00b349893b9a53106dd488d8371e8d2fa586043e500bb3cdb8bff3931682197d)
+  * dropped HYG id 0 — that row is the Sun, which the engine renders as the real body it is
+  * kept apparent magnitude <= 6.5, the naked-eye limit
+  * dropped 205 stars whose parallax gives no usable distance (HYG marks these dist = 100000). A star
+    with no distance has no position, and guessing one would be inventing a universe. 8,715 remain.
+  * converted HYG's axes to the engine's: HYG has X -> vernal equinox, Y -> RA 6h, Z -> north celestial
+    pole; the engine (crate::geo) has X -> RA 0, Y -> north pole, Z -> -(RA 6h). So (x, z, -y).
+  * sorted by apparent magnitude AS SEEN FROM SOL, so taking a prefix is an honest way to draw fewer
+    stars from here (it is not a brightness order from anywhere else, and must not be treated as one)
+  * 32 stars have no measured colour index; those carry B-V = 0.65 (solar). A stated 0.37%, not a
+    silent fill.
+
+FORMAT — 8,715 records x 20 bytes, little-endian, no header:
+  f32 x, f32 y, f32 z   position in PARSECS, Sol at the origin, engine axes (see above), J2000/ICRS
+  f32 absolute magnitude (the star's own luminosity — apparent brightness is derived, not stored)
+  f32 colour index B-V
+
+WHAT IS *NOT* IN HERE, deliberately
+  Nothing derived. No temperatures, no RGB, no sizes, and no APPARENT magnitudes. B-V and absolute
+  magnitude are what was MEASURED; the engine turns B-V into a temperature (Ballesteros) and a colour
+  (Planck through the CIE observer), and turns absolute magnitude plus true distance into apparent
+  brightness. That is physics, and physics belongs in the engine. Baking any of it into the asset
+  would make the sky a picture instead of a consequence.
+
+  No constellation lines: they are a cultural figure drawn between unrelated stars at wildly
+  different distances, not a physical relationship. The stars are real; the joins would not be.

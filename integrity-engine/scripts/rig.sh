@@ -60,7 +60,24 @@ fi
 
 # 3. Vite. A rebuild MUST restart it (the build-stamp trap above); otherwise reuse a live server.
 serving() { [[ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/birth.html" || true)" == "200" ]]; }
-if (( need_build )) || (( RESTART )) || ! serving; then
+
+# ...but "did WE rebuild?" is the wrong question, and asking it cost another wrong measurement. Anyone
+# can run `npm run wasm` by hand; this script then says "wasm up to date", reuses a server that started
+# BEFORE those bytes existed, and the rig verifies stale code while reporting green. Twice now the fix
+# was a hand-typed pkill, which is exactly the unreliable ritual this script exists to replace.
+#
+# So test the INVARIANT instead of the history: the running server must be NEWER than the wasm it is
+# serving. That holds no matter who built what, or when.
+stamp="/tmp/rig-vite-started-$PORT"
+stale_server=0
+if serving; then
+  if [[ ! -f "$stamp" ]] || [[ "$wasm" -nt "$stamp" ]]; then
+    stale_server=1
+    echo "rig: server predates the current wasm -> restarting (stale-serve guard)"
+  fi
+fi
+
+if (( need_build )) || (( RESTART )) || (( stale_server )) || ! serving; then
   # NOTE the bracket in "[v]ite": `pkill -f "vite --port $PORT"` matches ANY process whose command line
   # contains that string — including the very shell running this script when it was invoked with the
   # pattern on its own command line. That self-match killed the caller (exit 144) repeatedly before it
@@ -77,6 +94,8 @@ if (( need_build )) || (( RESTART )) || ! serving; then
   disown || true
   for _ in $(seq 1 60); do serving && break; sleep 0.5; done
   serving || { echo "vite did not come up; see /tmp/rig-vite.log" >&2; tail -5 /tmp/rig-vite.log >&2; exit 1; }
+  # Record WHEN this server started, so the guard above can compare it against the wasm next time.
+  touch "$stamp"
   echo "rig: vite (re)started on :$PORT"
 else
   echo "rig: reusing vite on :$PORT"

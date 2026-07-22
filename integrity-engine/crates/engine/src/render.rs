@@ -169,3 +169,160 @@ pub(crate) fn make_dynamic_mesh(device: &wgpu::Device, label: &str, vert_capacit
     let index_buf = make_buffer(device, label, bytemuck::cast_slice(indices), wgpu::BufferUsages::INDEX);
     GpuMesh { vertex_buf, index_buf, index_count: indices.len() as u32 }
 }
+
+/// Uniforms for the star field (matches `StarU` in `shaders/stars.wgsl`).
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct StarUniforms {
+    pub(crate) view_proj: [[f32; 4]; 4],
+    /// Inertial (ICRS) → world. Identity where the scene's frame is already inertial; Earth's rotation
+    /// where the world frame is Earth-fixed.
+    pub(crate) spin: [[f32; 4]; 4],
+    /// The eye in DISPLAY units — where to hang the billboards so they ride with the camera.
+    pub(crate) cam_pos: [f32; 4],
+    /// The eye in PARSECS from Sol, in the catalogue's own frame. This is what makes the sky real rather
+    /// than a shell: every star's direction and brightness is computed against it, so moving the observer
+    /// moves the sky. Inside a solar system it is ~1e-5 pc and the parallax is correctly invisible.
+    pub(crate) cam_pc: [f32; 4],
+    /// x = billboard distance (display units), y = PSF width (px), z = viewport height (px), w = exposure.
+    pub(crate) params: [f32; 4],
+}
+
+/// One catalogued star, as the GPU wants it.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct StarInstance {
+    /// The star's real position, parsecs, Sol at the origin.
+    pub(crate) pos_pc: [f32; 3],
+    pub(crate) _pad0: f32,
+    pub(crate) color: [f32; 3],
+    /// Flux the star would show at 10 pc; the shader applies the inverse-square law for the real distance.
+    pub(crate) luminosity: f32,
+}
+
+/// **The sky, as engine machinery.** A scene owns one of these and draws it; it does not get to decide
+/// what the sky looks like. The catalogue is real, the colours are derived from real temperatures, and
+/// the placement uses the same geography conversion as the continents.
+pub(crate) struct StarField {
+    pipeline: wgpu::RenderPipeline,
+    instances: wgpu::Buffer,
+    count: u32,
+    uni: wgpu::Buffer,
+    bind: wgpu::BindGroup,
+}
+
+impl StarField {
+    /// Build from a parsed catalogue. `format` is the surface format; the pipeline reads but never writes
+    /// depth, and is meant to be drawn FIRST — nothing occludes a star except whatever is drawn over it.
+    pub(crate) fn new(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        stars: &[crate::sky::Star],
+    ) -> Self {
+        use wgpu::util::DeviceExt;
+        let data: Vec<StarInstance> = stars
+            .iter()
+            .map(|s| StarInstance { pos_pc: s.pos_pc, _pad0: 0.0, color: s.color, luminosity: s.luminosity })
+            .collect();
+        let instances = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("stars"),
+            contents: bytemuck::cast_slice(&data),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let uni = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("star-uniforms"),
+            size: std::mem::size_of::<StarUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("star-bind-layout"),
+            entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT)],
+        });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("star-bind"),
+            layout: &layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: uni.as_entire_binding() }],
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("stars"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/stars.wgsl").into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("star-pipeline-layout"),
+            bind_group_layouts: &[&layout],
+            push_constant_ranges: &[],
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("stars"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<StarInstance>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[
+                        wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
+                        wgpu::VertexAttribute { offset: 16, shader_location: 1, format: wgpu::VertexFormat::Float32x3 },
+                        wgpu::VertexAttribute { offset: 28, shader_location: 2, format: wgpu::VertexFormat::Float32 },
+                    ],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            // Stars sit behind everything: test nothing, write nothing, and draw first.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview: None,
+            cache: None,
+        });
+        Self { pipeline, instances, count: data.len() as u32, uni, bind }
+    }
+
+    /// Update and draw. `spin` carries the scene's frame (identity for an inertial world); `radius` places
+    /// the sphere well inside the far plane; `exposure` scales measured flux to display.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw(
+        &self,
+        queue: &wgpu::Queue,
+        pass: &mut wgpu::RenderPass<'_>,
+        view_proj: glam::Mat4,
+        spin: glam::Mat4,
+        cam_pos: glam::Vec3,
+        cam_pc: glam::Vec3,
+        radius: f32,
+        viewport_w: f32,
+        viewport_h: f32,
+        exposure: f32,
+    ) {
+        let u = StarUniforms {
+            view_proj: view_proj.to_cols_array_2d(),
+            spin: spin.to_cols_array_2d(),
+            cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, 1.0],
+            cam_pc: [cam_pc.x, cam_pc.y, cam_pc.z, (viewport_w / viewport_h.max(1.0)).max(1e-6)],
+            params: [radius, 2.2, viewport_h.max(1.0), exposure],
+        };
+        queue.write_buffer(&self.uni, 0, bytemuck::bytes_of(&u));
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind, &[]);
+        pass.set_vertex_buffer(0, self.instances.slice(..));
+        pass.draw(0..6, 0..self.count);
+    }
+}

@@ -105,6 +105,17 @@ async function main(): Promise<void> {
 
     setStatus("Requesting GPU device…");
     const terra = await Terra.create(canvas);
+
+    // THE SKY. Real stars at real positions (HYG), shared by every scene — the sky is not a property of a
+    // planet, nor of a scene: it is the universe everything here is inside. A scene contributes only where
+    // the observer stands. Failure is non-fatal: you lose the stars, never the scene.
+    try {
+      const bytes = new Uint8Array(await fetch("/sky/stars.bin").then((r) => r.arrayBuffer()));
+      terra.load_star_catalog(bytes);
+      report("info", `sky: ${bytes.length / 16} catalogued stars`);
+    } catch (e) {
+      report("warn", `star catalogue unavailable (${e}); the sky will be empty`);
+    }
     terra.load_world(worldJson, lm.data, lm.w, lm.h, ev.data, ev.w, ev.h, lc.data, lc.w, lc.h);
     hideStatus();
     report("info", `Terra world loaded: ${terra.world_name()}`);

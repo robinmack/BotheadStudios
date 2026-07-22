@@ -25,6 +25,7 @@ mod aggregate;
 mod atmosphere;
 mod axle; // docs/47 §3 — the revolute joint: holds a wheel's hub, frees ONE spin axis
 mod bhtree;
+mod blackbody; // Planck + the CIE observer: colour from temperature, for stars and (a follow-up) hot ejecta
 mod body;
 mod damage;
 mod emission;
@@ -62,6 +63,7 @@ mod render;
 pub mod resolution; // docs/44 — resolution by necessity: the quasi-static admission test
 /// docs/49 — surface detail that follows the camera CONTINUOUSLY. The consumer
 /// `ResolutionController::camera_grain_radius` never had.
+mod sky;
 mod surface_detail;
 mod tides;
 /// docs/53 — the engine driven by a DEFINITION: builds the world, applies declared matter events through
@@ -698,6 +700,9 @@ mod app {
         /// from the same body definition — because Earth is one object, not one per scene. `None` until
         /// the host hands over the body's surface rasters; the scene then shows the real planet instead of
         /// the 512-grain shell that used to stand in for it.
+        /// The real sky (HYG). `None` until the host hands over the catalogue — a scene without it simply
+        /// has no stars, rather than inventing any.
+        stars: Option<StarField>,
         globe_pipeline: wgpu::RenderPipeline,
         globe_mesh: Option<GpuMesh>,
         globe_uni: UniformSlot,
@@ -1065,6 +1070,7 @@ mod app {
                 sun_uni,
                 atm_tau,
                 atm_twilight,
+                stars: None,
                 globe_pipeline,
                 globe_mesh: None,
                 globe_uni,
@@ -1106,6 +1112,15 @@ mod app {
         /// frame-of-reference focus, and the orbit-camera framing. The deorbit stays a user control
         /// (`brake_moon`/`drop_moon`) — no scripted outcome. (The planet's render radius still uses the
         /// `EARTH_RADIUS_M` constant in v1; per-body render radii from data is a flagged follow-up.)
+        /// Hand the scene the real star catalogue (`sky/stars.bin`). The engine derives each star's
+        /// temperature and colour from its measured colour index; nothing about the sky is authored.
+        pub fn load_star_catalog(&mut self, bytes: &[u8]) -> Result<(), JsValue> {
+            let stars = crate::sky::parse_catalog(bytes).map_err(|e| JsValue::from_str(&e))?;
+            log::info!("sky: {} catalogued stars", stars.len());
+            self.stars = Some(StarField::new(&self.device, self.config.format, &stars));
+            Ok(())
+        }
+
         /// This scene's air — Earth's, from Earth's own definition, at the shared exposure. Identical to
         /// `Terra::air()` by construction: one body, one atmosphere.
         fn air(&self) -> Air {
@@ -2865,6 +2880,22 @@ mod app {
                     timestamp_writes: None,
                     occlusion_query_set: None,
                 });
+                // THE SKY FIRST. Real stars at real positions; everything else paints over them. This
+                // band's world frame is inertial, so the catalogue's own frame needs no rotation.
+                if let Some(stars) = self.stars.as_ref() {
+                    // The eye's REAL position relative to Sol, in parsecs — this is what makes the sky
+                    // honest rather than a shell. Across the whole solar system it is ~1e-4 pc, so the
+                    // parallax is correctly invisible; the machinery is the same one that would show a
+                    // different sky from another star.
+                    const PC_M: f64 = 3.085_677_581e16;
+                    let eye_from_sol = (focus + eye_disp / DISPLAY_SCALE) - r_bodies[0];
+                    let cam_pc = (eye_from_sol / PC_M).as_vec3();
+                    stars.draw(
+                        &self.queue, &mut pass, view_proj, Mat4::IDENTITY,
+                        eye_disp.as_vec3(), cam_pc, 50_000.0,
+                        self.config.width as f32, self.config.height as f32, 80.0,
+                    );
+                }
                 pass.set_pipeline(&self.pipeline);
                 draw(&mut pass, &self.sun_uni, &self.sphere_gpu); // the Sun, where it really is
                 // The rigid-Earth + sphere-debris model draws only when the GPU SPH impact is NOT running
@@ -3063,6 +3094,14 @@ mod app {
         /// DECLARED atmosphere's mass (a world never declares τ, and never declares surface pressure —
         /// both fall out of the air's own weight), at the one canonical exposure. A world with no
         /// atmosphere yields zeros here and renders with a hard terminator, correctly.
+        /// Hand Terra the real star catalogue (`sky/stars.bin`) — the same asset the space band loads.
+        pub fn load_star_catalog(&mut self, bytes: &[u8]) -> Result<(), JsValue> {
+            let stars = crate::sky::parse_catalog(bytes).map_err(|e| JsValue::from_str(&e))?;
+            log::info!("sky: {} catalogued stars", stars.len());
+            self.stars = Some(StarField::new(&self.device, self.config.format, &stars));
+            Ok(())
+        }
+
         fn air(&self) -> Air {
             [
                 self.atm_tau[0] as f32,
@@ -3381,6 +3420,9 @@ mod app {
         // material) replaces the grain shell for the scene. `None` until then (falls back to the grain shell).
         globe_pipeline: wgpu::RenderPipeline,
         globe_mesh: Option<GpuMesh>,
+        /// The real sky. Terra's world frame is Earth-FIXED, so the catalogue is rotated by Greenwich
+        /// sidereal time each frame — which is what makes the stars wheel overhead, once per sidereal day.
+        stars: Option<StarField>,
         globe_uni: UniformSlot,
         // docs/43 Phase 5 — the fine, camera-relative ground cap (rebuilt each frame under the camera) + its
         // alpha-blend pipeline, and a reused CPU vertex scratch buffer. Cross-faded with the globe by altitude.
@@ -3528,6 +3570,7 @@ mod app {
                 shell_count,
                 globe_pipeline,
                 globe_mesh: None,
+                stars: None,
                 globe_uni,
                 cap_pipeline,
                 cap_gpu,
@@ -3851,6 +3894,31 @@ mod app {
                     timestamp_writes: None,
                     occlusion_query_set: None,
                 });
+                // THE SKY FIRST. Terra's world frame is Earth-FIXED, so the inertial catalogue is turned
+                // by Greenwich sidereal time: the stars wheel overhead once per SIDEREAL day, four minutes
+                // shy of a solar one, which is why they rise earlier each night. Nothing is animated —
+                // the same clock that puts the Sun in the sky puts the stars in it.
+                if let Some(stars) = self.stars.as_ref() {
+                    let gmst = crate::sky::gmst_rad(crate::orbit::unix_now_seconds());
+                    stars.draw(
+                        &self.queue,
+                        &mut pass,
+                        view_proj,
+                        Mat4::from_rotation_y(-gmst as f32),
+                        eye.as_vec3(),
+                        // Terra does not carry a heliocentric position, so the observer is taken as Sol.
+                        // The error is Earth's 1 AU baseline: at most 1 arcsecond of parallax for the
+                        // nearest star, against a ~4 arcminute pixel — a thousandth of a pixel. FLAGGED,
+                        // and it becomes exact the moment this scene knows where Earth is in its orbit.
+                        glam::Vec3::ZERO,
+                        // Any distance works (the shader pins depth); this keeps the billboards clear of
+                        // the globe so the near plane never cuts into them.
+                        1_000.0,
+                        self.config.width as f32,
+                        self.config.height as f32,
+                        80.0,
+                    );
+                }
                 if let Some(globe) = &self.globe_mesh {
                     pass.set_pipeline(&self.globe_pipeline);
                     draw(&mut pass, &self.globe_uni, globe);
