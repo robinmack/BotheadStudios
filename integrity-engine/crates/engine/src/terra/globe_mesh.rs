@@ -127,3 +127,44 @@ mod tests {
         assert!((max_r - 1.3).abs() < 1e-3, "displaced apex radius {max_r} != 1.3");
     }
 }
+
+/// **Build a body's globe from its DEFINITIVE surface.** One implementation, so every scene that shows
+/// Earth shows the same Earth: the same continents, the same coastlines, the same elevation. A scene
+/// positions a body; it never redefines one. Terra and the space/impact scenes both call this.
+///
+/// `res` is the cube-face grid resolution, `r_disp` the display radius, `ds` the display scale, `exag`
+/// the declared relief exaggeration. The rasters and biome→material map come from the body definition.
+#[allow(clippy::too_many_arguments)]
+pub fn build_body_globe(
+    res: usize,
+    r_disp: f64,
+    ds: f64,
+    exag: f64,
+    mats: &[crate::materials::Material],
+    biome_mats: &[usize],
+    landmask: Option<&crate::terra::raster::Raster>,
+    elevation: Option<&crate::terra::raster::Raster>,
+    landcover: Option<&crate::terra::raster::Raster>,
+    elev_range: [f64; 2],
+) -> Mesh {
+    let water_idx = crate::materials::index_of(mats, "water");
+    let water_alb = mats[water_idx].albedo;
+    build_globe(res, r_disp, |dir| {
+        let lat = dir.y.asin().to_degrees();
+        let lon = dir.z.atan2(dir.x).to_degrees();
+        // Fall back to the built-in coarse landmask only when a body ships no raster — never to
+        // "re-invent" a surface a scene made up.
+        let is_land = landmask
+            .map(|r| r.land_at(lat, lon))
+            .unwrap_or_else(|| crate::planet::earth_surface_material(dir) == "granite");
+        if is_land {
+            let biome = landcover.map_or(1, |r| r.biome_at(lat, lon) as usize);
+            let mi = biome_mats.get(biome).copied().unwrap_or(water_idx);
+            let e = elevation.map_or(0.0, |r| r.elevation_m_at(lat, lon, elev_range[0], elev_range[1]));
+            // Land above sea level; below-sea-level land (Dead Sea etc.) clamps to the shore.
+            (mats[mi].albedo, e.max(0.0) * ds * exag, mi as u32)
+        } else {
+            (water_alb, 0.0, water_idx as u32)
+        }
+    })
+}
