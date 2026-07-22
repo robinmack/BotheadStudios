@@ -78,7 +78,16 @@ impl Simulation {
         let planet_mass = planet.total_mass();
         let surface_g = planet.gravity_at(planet_radius) as f32;
         let world = crate::world::generate_from(&ground.surface, &materials);
-        let field = MassField::build(&world, &materials, 8);
+        // **The patch belongs to the planet.** Without this the field is the patch's own self-gravity —
+        // measured at 0.000214 m/s² against this planet's 9.8808, one forty-six-thousandth of Earth — and
+        // the grains fall in microgravity while the analytic effects a few lines below use the correct
+        // `surface_g`. Two answers to "what is down", and the grains had the wrong one.
+        //
+        // The surface sits at the patch's own ground height in centred coordinates, so the host's centre
+        // is a planet-radius below that and "down" is a direction rather than an assumption.
+        let surface_y = world.bulk_height(0.0, 0.0);
+        let field = MassField::build(&world, &materials, 8)
+            .on_host(planet_mass, planet_radius, surface_y);
         let mut sim = Simulation {
             world,
             matter: MatterSim::new(60_000),
@@ -539,23 +548,26 @@ mod gravity_audit_tests {
 
         assert!(g_planet > 9.0, "the planet's own gravity is Earth-like: {g_planet}");
 
-        // **A CHARACTERIZATION TEST: this asserts the DEFECT, not the desired behaviour.**
+        // **Grains fall under the PLANET.** This test was written the other way round: it asserted the
+        // defect, because the Ground scene stepped its grains under the self-gravity of the loaded patch
+        // — a box of voxels tens of metres across — which measured 0.000214 m/s² against the planet's
+        // 9.8808. Microgravity, at one forty-six-thousandth of Earth, so every settling time, ejecta arc,
+        // crater profile and angle of repose was wrong by four orders of magnitude and a grain took ~215×
+        // too long to fall.
         //
-        // Grains in the Ground scene fall under the self-gravity of the loaded surface PATCH — a box of
-        // voxels a few tens of metres across, which pulls at 0.0002 m/s². The planet they are supposedly
-        // standing on pulls at 9.88. They are in MICROGRAVITY, at about one forty-six-thousandth of
-        // Earth's, so every settling time, ejecta arc and crater profile in that scene is wrong by four
-        // orders of magnitude: a grain takes ~215x too long to fall.
-        //
-        // It is locked here so the fix cannot happen silently and so the burn-down has a number. WHEN IT
-        // IS FIXED THIS TEST WILL FAIL — that is the point. Invert it then: assert the field agrees with
-        // the planet's own surface gravity, which is what `MassField` should be reporting once the patch
-        // is a patch OF something rather than a lump alone in space.
+        // Now the field knows which body its patch belongs to, and answers with the planet's own gravity
+        // plus the local terrain as the perturbation it actually is.
         let ratio = a.length() as f64 / g_planet as f64;
         assert!(
-            ratio < 1.0e-3,
-            "EXPECTED FAILURE — the patch-gravity defect appears to be FIXED (ratio {ratio:.3e}). \
-             Good. Now invert this test: assert |a| ≈ g_planet, and delete this message."
+            (ratio - 1.0).abs() < 0.01,
+            "a grain must fall under the PLANET, not under the patch: got {:.6} m/s² against the \
+             planet's {g_planet:.4} (ratio {ratio:.3e})",
+            a.length()
         );
+        // And down is a DIRECTION, computed toward the host's centre, not an assumed −Y: on a patch this
+        // small against Earth the two agree to a part in millions, which is exactly why it must be
+        // derived rather than typed.
+        assert!(a.y < 0.0 && a.x.abs() < 1e-3 * a.length() && a.z.abs() < 1e-3 * a.length(),
+            "down points at the planet's centre: {a:?}");
     }
 }

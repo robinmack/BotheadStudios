@@ -2221,7 +2221,12 @@ mod app {
         /// mutual-impact materialization + the debris cloud. Pure physics — no rendering state.
         fn step_substep(&mut self, dt: f64) {
             let contact = EARTH_RADIUS_M + self.impactor_radius; // surfaces touch here
-            let mut shatter: Option<(glam::DVec3, glam::DVec3, f64)> = None; // (site, v_contact, energy)
+            // EVERY impactor that lands, not just the first. This was a single Option and the loop below
+            // filled it only for `k == 0`, so a second body striking the same planet added its energy to
+            // the total and was parked at the contact point intact — Two Moons dropped together produced
+            // one impact and one silently absorbed collision. The same event cannot get two treatments
+            // because of an array index.
+            let mut shatters: Vec<(glam::DVec3, glam::DVec3, f64, f64, usize)> = Vec::new(); // (site, v, E, mass, body index)
             let n_moons = self.bodies.len() - 2;
 
             // Position AND velocity relative to Earth BEFORE the step: the swept CCD finds *where* the
@@ -2261,11 +2266,10 @@ mod app {
                     let m_red = self.bodies[1].mass * moon.mass / (self.bodies[1].mass + moon.mass);
                     let energy = 0.5 * m_red * v_contact.length_squared();
                     self.impact_energy_j += energy;
-                    if k == 0 && shatter.is_none() {
-                        // The impactor's fragments CARRY this velocity; the one contact law transfers
-                        // the momentum into Earth's materialized matter and dissipation heats it.
-                        shatter = Some((site, v_contact, energy));
-                    }
+                    // The impactor's fragments CARRY this velocity; the one contact law transfers the
+                    // momentum into Earth's materialized matter and dissipation heats it. Each impactor
+                    // brings its OWN mass, so a small one cannot borrow a large one's debris budget.
+                    shatters.push((site, v_contact, energy, moon.mass, 2 + k));
                     // Park the point mass AT the impact point, co-moving with Earth.
                     self.bodies[2 + k].pos = site;
                     self.bodies[2 + k].vel = earth_vel;
@@ -2315,9 +2319,9 @@ mod app {
 
             // The substep the Moon first strikes: MATERIALIZE both bodies at the interface (docs/24,
             // docs/25) — layered composition, real internal temperatures, one contact law.
-            if let Some((site, v_contact, _energy)) = shatter {
-                if self.moon_debris.is_none() {
-                    let moon_mass = self.initial_bodies[2].mass;
+            for (site, v_contact, _energy, impactor_mass, body_idx) in std::mem::take(&mut shatters) {
+                {
+                    let moon_mass = impactor_mass;
                     let (earth_pos, earth_vel) = (self.bodies[1].pos, self.bodies[1].vel);
                     // Which matter arrives depends on the scenario: the Moon, or Theia (docs/27).
                     let impactor_profile = if self.birth_mode {
@@ -2352,12 +2356,21 @@ mod app {
                         .filter(|(_, &s)| s == crate::aggregate::SOURCE_TARGET)
                         .map(|(p, _)| p.mass)
                         .sum();
-                    self.bodies[1].mass -= cap_mass;
-                    self.moon_debris = Some(agg);
-                    // The impactor IS the debris now — its matter exists exactly once. Reduce the parked
-                    // point mass to nothing (a 1 kg marker keeps the body-array shape) so its mass isn't
-                    // counted twice in the N-body (Theia is 11% of Earth — a real double-count).
-                    self.bodies[2].mass = 1.0;
+                    // Guard the subtraction: it now runs ONCE PER IMPACT, and an unguarded repeat drove
+                    // the target's mass toward zero (and its gravity to NaN) on the second strike.
+                    self.bodies[1].mass = (self.bodies[1].mass - cap_mass).max(1.0);
+                    // ABSORB, never replace: two impacts on one planet make ONE debris field, whose
+                    // fragments share a gravity field and are stepped together. Replacing would have made
+                    // the second impact delete the first one's matter.
+                    match self.moon_debris.as_mut() {
+                        Some(existing) => existing.absorb(agg),
+                        None => self.moon_debris = Some(agg),
+                    }
+                    // The impactor IS the debris now — its matter exists exactly once. Reduce THIS
+                    // impactor's parked point mass to nothing (a 1 kg marker keeps the body-array shape)
+                    // so it isn't counted twice in the N-body. Hardcoding index 2 here zeroed the first
+                    // moon twice and left the second's mass double-counted.
+                    self.bodies[body_idx].mass = 1.0;
                 }
             }
 

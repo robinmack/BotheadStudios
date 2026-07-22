@@ -314,8 +314,12 @@ async function main(): Promise<void> {
     // Orbital decay: brake the Moon until its orbit crashes into the planet. (The birth scene has no
     // such controls — the encounter IS the scene; Reset replays it.)
     if (!birthScene) {
-      mkBtn("Brake Moon ½×", () => demo.brake_moon());
-      mkBtn("Drop Moon", () => {
+      // Plural where there are several: both controls have always acted on EVERY moon (the engine loops
+      // from body index 2), and calling them singular hid that — and hid that only the first impactor
+      // used to produce debris.
+      const moonWord = numMoons === 1 ? "Moon" : "Moons";
+      mkBtn(`Brake ${moonWord} ½×`, () => demo.brake_moon());
+      mkBtn(`Drop ${moonWord}`, () => {
         demo.drop_moon();
         followMoon = true; // ride the descent down
       });

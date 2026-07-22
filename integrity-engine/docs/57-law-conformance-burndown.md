@@ -13,9 +13,26 @@ implementation looks like ordinary new code.
 
 ---
 
+## Status
+
+**#1 (microgravity) and #2 (first-impactor-only) are FIXED** — see below; both now carry tests. The rest
+stand.
+
+**Added during the burn-down**, and not yet fixed:
+
+* **The follow-camera collapses after a drop.** `orbit.ts:381` — `followZoom()` returns
+  `moon_distance_km() / LUNAR_KM`, and once an impactor is parked at the contact site that distance is a
+  planet radius rather than a lunar one, so the camera zooms to its closest clamp and ends up inside the
+  body it is meant to be watching. Pre-existing, and unrelated to the impact fixes. **Test:** after a
+  drop, assert the eye is outside the target's radius.
+* **The granular tests validate under patch self-gravity.** Every `matter.rs` test builds a bare
+  `MassField` (`host: None`), which is correct for an asteroid and wrong for anything claiming to model an
+  Earth surface — the same defect as #1, still live in the test fixtures. **Test:** give those fixtures a
+  host and re-derive whatever they assert about settling and repose.
+
 ## HIGH — the physics is wrong, or one question has two answers
 
-### 1. Ground-scene grains fall in MICROGRAVITY — measured at 1/46,000 g
+### 1. ~~Ground-scene grains fall in MICROGRAVITY~~ — FIXED
 
 **Law I, V, VII.** `matter.rs:1031` steps every grain under
 `field.acceleration_point_approx(p.pos, 6.0)` — the self-gravity of the loaded surface **patch**. A patch
@@ -35,12 +52,13 @@ correct `-surface_g` and hands it to the analytic effects, so the scene holds *b
 gives the grains the wrong one. This is very likely implicated in the crater-refill behaviour that
 `docs/55` attributes to missing grain–grain contact.
 
-**Fix.** The patch is a patch OF a planet: the field a grain feels must be the planet's, with the local
-voxels as a perturbation — not the lump alone in space.
-**Test.** Already written and currently asserting the DEFECT. Fixing it makes it fail, by design; invert
-it to assert `|a| ≈ g_planet`.
+**FIXED.** `MassField` now carries a `HostBody` — the planet a patch belongs to — and reports its gravity
+with the local voxels as the perturbation they are. "Down" is computed toward the host's centre rather
+than assumed to be −Y, so it stays right on a patch large enough for the difference to matter. Measured
+after: **9.881 m/s², ratio 1.000**. The characterization test fired on the fix exactly as designed and is
+now inverted to assert the correct behaviour.
 
-### 2. Only the first impactor is real
+### 2. ~~Only the first impactor is real~~ — FIXED
 
 **Law II.** `lib.rs:2264` — `if k == 0 && shatter.is_none()`. The impact loop correctly sweeps every moon
 for contact, but **only index 0 shatters or produces debris**. A second impactor adds its energy to the
@@ -49,9 +67,16 @@ total and is parked at the contact site, intact.
 So *Two Moons → Drop* is not a three-body impact; it is one impact plus one silently absorbed collision.
 The same event gets two different treatments depending on an array index.
 
-**Fix.** Debris per impact; `moon_debris` becomes a collection.
-**Test.** Drop two moons onto the same body; assert both produce debris and the total ejected mass scales
-with the number of impactors. Fails now.
+**FIXED.** Every impactor that lands now shatters, each carrying its own mass and body index, and the
+clouds ABSORB into one debris field rather than replacing each other. Two follow-on defects surfaced while
+fixing it: `bodies[2].mass = 1.0` was hardcoded, so moon 0 was zeroed twice and moon 1's mass stayed
+double-counted; and `bodies[1].mass -= cap_mass` now runs per impact, which drove the target's mass toward
+zero on the second strike. `Aggregate::absorb` extends EVERY per-particle array and offsets the incoming
+bonds' particle indices — the first version extended three of seven and the scene panicked
+(`per_grain_contact[i]` out of bounds) the instant two clouds existed.
+
+Measured after: Two Moons → Drop reports **3,071 fragments, 7.05e30 J, a 0.96 M☾ disk in 4 moonlets** —
+against one cloud before.
 
 ### 3. The Ground meteor bypasses the shared collision rule
 
