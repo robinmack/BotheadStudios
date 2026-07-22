@@ -7,9 +7,10 @@
 struct U {
     view_proj : mat4x4<f32>,
     model     : mat4x4<f32>,
-    light_dir : vec4<f32>,  // xyz = direction TO the sun
+    light_dir : vec4<f32>,  // xyz = direction TO the sun, w = twilight half-angle (rad)
     tint      : vec4<f32>,  // multiplies the vertex colour
-    emissive  : vec4<f32>,  // xyz = camera eye (display units), w = atmosphere strength
+    emissive  : vec4<f32>,  // xyz = camera eye (display units)
+    atm       : vec4<f32>,  // xyz = Rayleigh optical depth per band (docs/26), w = sun gain
 };
 @group(0) @binding(0) var<uniform> u : U;
 // The material texture arrays (docs/12): albedo for reference, NORMAL for relief lighting. Terra bakes
@@ -54,17 +55,22 @@ fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     let l = normalize(u.light_dir.xyz);
     let ndl = max(dot(n, l), 0.0);
     // Reflected sunlight (albedo × illumination), same SUN_GAIN + Reinhard as the space band; black night side.
-    let SUN_GAIN = 22.0;
+    let SUN_GAIN = u.atm.w; // atmosphere::SUN_GAIN — one exposure for every view of this world
     let albedo = i.col * u.tint.rgb;
     var radiance = albedo * (ndl * SUN_GAIN);
-    // Atmospheric limb: a soft blue rim where the surface faces away from the camera (grazing angle), on the
-    // lit side — a cheap stand-in for the Rayleigh limb (the full per-vertex Rayleigh integral is a refinement).
+    // **The atmosphere — Earth's own air, from the ONE Rayleigh model (the shared chunk).** For a point
+    // on the globe the local zenith IS its surface normal, so the sky's own angles apply unchanged:
+    // mu_v = n·view, mu_s = n·sun, phase = view·sun. What this replaces was a Fresnel rim that could
+    // not soften the terminator or redden a sunset, because a rim highlight is not scattering.
+    //
+    // There is no "atmosphere strength" dial any more: the brightness is whatever the declared air's
+    // optical depth scatters at the shared exposure. A body with no declared atmosphere carries tau = 0
+    // and gets exactly nothing — the airless case needs no branch.
     let view = normalize(u.emissive.xyz - i.wpos);
-    let rim = pow(1.0 - max(dot(n, view), 0.0), 3.0);
-    radiance += vec3<f32>(0.35, 0.55, 1.0) * (rim * u.emissive.w * (0.15 + ndl));
+    radiance += rayleigh_veil(dot(n, view), dot(n, l), dot(view, l), u.atm.xyz, u.atm.w, u.light_dir.w);
     let mapped = radiance / (vec3<f32>(1.0) + radiance); // Reinhard tone-map
-    // Alpha = tint.a: 1.0 for the opaque globe, the cross-fade factor for the ground cap (which is drawn with
-    // alpha blending on top of the globe as the camera descends). `emissive.xyz` is the eye for the globe (world
-    // space) and the ORIGIN for the camera-relative cap, so `view` is correct in both.
+    // Alpha = tint.a: 1.0 for the opaque globe, the cross-fade factor for the ground cap. `emissive.xyz`
+    // is the eye for the globe (world space) and the ORIGIN for the camera-relative cap, so `view` holds
+    // in both.
     return vec4<f32>(mapped, u.tint.a);
 }

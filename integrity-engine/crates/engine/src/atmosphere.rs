@@ -333,9 +333,36 @@ impl AirField {
 /// Travis 1974); the λ⁻⁴ is molecular (Rayleigh) physics, the coefficient is our declared N₂/O₂
 /// column doing the scattering. THE BLUE MARBLE IS DERIVED, NEVER PAINTED: remove the atmosphere and
 /// the blue leaves with it.
+/// The exposure the Rayleigh veil is displayed at — the sun's radiance in the same arbitrary units as
+/// albedo, before the Reinhard tonemap. It is a DISPLAY constant (a camera exposure), not a physical
+/// dial: it scales what the eye sees, never what the air does. It lives here because every view of the
+/// same air must use the SAME exposure — the ground sky and the globe seen from orbit are one
+/// atmosphere, and two gains would make one planet look like two.
+pub const SUN_GAIN: f32 = 22.0;
+
 pub fn rayleigh_tau(pressure_ratio: f64) -> [f64; 3] {
     let t = |um: f64| 0.0088 * pressure_ratio * um.powf(-4.05);
     [t(0.650), t(0.550), t(0.450)]
+}
+
+/// **Why the day/night line is soft.** When the Sun sets at a point on the ground, the AIR ABOVE that
+/// point is still in sunlight — and stays lit until the shadow of the planet climbs past the top of the
+/// dense atmosphere. That is twilight, and the angle it spans is not a taste parameter: for a shell of
+/// scale height `H` on a planet of radius `R`, the terminator is geometrically blurred by
+///
+///   w ≈ sqrt(2·H / R)
+///
+/// which for Earth's ~8.4 km scale height on a 6371 km radius is 0.051 rad ≈ 2.9°. A body with no air
+/// gets w = 0 and a knife-edge terminator, which is exactly what the airless Moon shows.
+///
+/// FLAGGED: this is the geometric height of the scattering shell, so it reproduces the bright part of
+/// twilight. The long red tail (civil/nautical twilight out to ~12°) needs multiple scattering, which
+/// this single-scatter model does not carry.
+pub fn twilight_half_angle(scale_height_m: f64, radius_m: f64) -> f64 {
+    if scale_height_m <= 0.0 || radius_m <= 0.0 {
+        return 0.0; // airless: the terminator is a hard edge, as on the Moon
+    }
+    (2.0 * scale_height_m / radius_m).sqrt()
 }
 
 /// Single-scatter Rayleigh VEIL toward a viewer: the added radiance (pre-tonemap, in the same units
@@ -343,8 +370,14 @@ pub fn rayleigh_tau(pressure_ratio: f64) -> [f64; 3] {
 /// sun-to-view angle cosine `cos_theta`. In-scatter = phase·(1 − e^−τ/μᵥ)·(sunlight attenuated on the
 /// way in). Flat-slab slant path (Chapman function is the refinement, flagged); single scatter only
 /// (multiple scattering + ozone are the refinement). Night side → 0, honestly.
-pub fn rayleigh_veil(mu_v: f64, mu_s: f64, cos_theta: f64, tau: [f64; 3], sun_gain: f64) -> [f32; 3] {
-    if mu_s <= 0.0 {
+pub fn rayleigh_veil(mu_v: f64, mu_s: f64, cos_theta: f64, tau: [f64; 3], sun_gain: f64, twilight: f64) -> [f32; 3] {
+    // TWILIGHT: the ground here may have turned away from the Sun, but the AIR ABOVE IT has not. The
+    // shell stays lit for `twilight` radians past the geometric terminator (see `twilight_half_angle`),
+    // so the day/night line is a gradient the width of the atmosphere itself rather than a knife edge.
+    // Day side (mu_s > 0) is untouched: `lit` clamps to 1 there. An airless body passes twilight = 0 and
+    // gets the hard terminator it should have.
+    let lit = if twilight > 0.0 { ((mu_s + twilight) / twilight).clamp(0.0, 1.0) } else { (mu_s > 0.0) as u8 as f64 };
+    if lit <= 0.0 {
         return [0.0; 3];
     }
     // FIRST-ORDER slab scattering (Chandrasekhar): the reflected single-scatter radiance of an
@@ -359,7 +392,7 @@ pub fn rayleigh_veil(mu_v: f64, mu_s: f64, cos_theta: f64, tau: [f64; 3], sun_ga
     let path = 1.0 / mu_v + 1.0 / mu_s_c;
     let mut out = [0.0f32; 3];
     for (i, t) in tau.iter().enumerate() {
-        out[i] = (sun_gain * geom * (1.0 - (-t * path).exp())) as f32;
+        out[i] = ((sun_gain * lit) * geom * (1.0 - (-t * path).exp())) as f32;
     }
     out
 }
@@ -392,15 +425,15 @@ mod tests {
             "the λ⁻⁴ law (got ratio {:.2})", tau[2] / tau[0]
         );
         // The day-side veil is BLUE-dominant…
-        let v = rayleigh_veil(0.8, 0.8, 0.5, tau, 22.0);
+        let v = rayleigh_veil(0.8, 0.8, 0.5, tau, 22.0, 0.0);
         assert!(v[2] > v[1] && v[1] > v[0], "blue > green > red veil (got {v:?})");
         // …brighter at the limb (long slant path)…
-        let limb = rayleigh_veil(0.1, 0.8, 0.5, tau, 22.0);
+        let limb = rayleigh_veil(0.1, 0.8, 0.5, tau, 22.0, 0.0);
         assert!(limb[2] > v[2], "limb glow exceeds nadir (got {} vs {})", limb[2], v[2]);
         // …zero on the night side, and zero on an airless world. No atmosphere, no blue. Honest.
-        assert_eq!(rayleigh_veil(0.8, -0.1, 0.5, tau, 22.0), [0.0; 3], "night is dark");
+        assert_eq!(rayleigh_veil(0.8, -0.1, 0.5, tau, 22.0, 0.0), [0.0; 3], "night is dark");
         let vacuum = rayleigh_tau(0.0);
-        assert_eq!(rayleigh_veil(0.8, 0.8, 0.5, vacuum, 22.0), [0.0; 3], "the Moon stays colorless");
+        assert_eq!(rayleigh_veil(0.8, 0.8, 0.5, vacuum, 22.0, 0.0), [0.0; 3], "the Moon stays colorless");
         // And the ground under the air reddens slightly (blue is scattered OUT of the beam).
         let t = rayleigh_transmit(0.8, 0.8, tau);
         assert!(t[0] > t[2], "transmittance favors red (got {t:?})");
@@ -416,8 +449,8 @@ mod tests {
         let sun_y = 0.9f64; // a sun most of the way up
         // Look straight up (short air path) vs out at the horizon (long slant path). cos_theta uses the
         // ray·sun geometry for each; the horizon sample looks away from the sun (its dimmest azimuth).
-        let zenith = rayleigh_veil(1.0, sun_y, sun_y, tau, 22.0); // ray=up ⇒ cosθ = sun.y
-        let horizon = rayleigh_veil(0.02, sun_y, -0.2, tau, 22.0); // ray near-horizontal, anti-sun
+        let zenith = rayleigh_veil(1.0, sun_y, sun_y, tau, 22.0, 0.0); // ray=up ⇒ cosθ = sun.y
+        let horizon = rayleigh_veil(0.02, sun_y, -0.2, tau, 22.0, 0.0); // ray near-horizontal, anti-sun
 
         // (1) OVERHEAD IS BLUE: short path ⇒ (1−e^{−τ·path}) ≈ τ·path, so radiance ∝ τ ∝ λ⁻⁴ — blue
         //     dominates. The blue/red ratio at the zenith is far above 1.
@@ -442,7 +475,7 @@ mod tests {
         // (3) NO AIR, NO SKY: strip the declared atmosphere and the whole gradient goes black — derived,
         //     never painted, exactly like the space band's airless Moon.
         let vacuum = rayleigh_tau(0.0);
-        assert_eq!(rayleigh_veil(1.0, sun_y, sun_y, vacuum, 22.0), [0.0; 3], "airless ⇒ black sky");
+        assert_eq!(rayleigh_veil(1.0, sun_y, sun_y, vacuum, 22.0, 0.0), [0.0; 3], "airless ⇒ black sky");
     }
 
     #[test]
@@ -921,5 +954,48 @@ mod tests {
             "the cluster expands (gas fills space; got {:.2}× the initial radius)",
             agg.rms_radius() / r0
         );
+    }
+}
+
+#[cfg(test)]
+mod twilight_tests {
+    use super::*;
+
+    /// The day/night line must be a GRADIENT the width of the atmosphere, not a knife edge — the thing
+    /// you actually see from orbit. Before this, the veil returned black the instant the Sun dropped
+    /// below a point's own horizon, so Earth from space had a hard-edged terminator no real photograph
+    /// shows.
+    #[test]
+    fn the_terminator_is_soft_and_its_width_is_the_atmospheres_own_geometry() {
+        let tau = rayleigh_tau(1.0);
+        let mats = crate::materials::load();
+        let air = &mats[crate::materials::index_of(&mats, "air")];
+        let e = crate::planet::earth();
+        let g = e.gravity_at(e.radius());
+        let h = scale_height(air, 288.0, g);
+        let w = twilight_half_angle(h, e.radius());
+
+        // Earth's twilight wedge is a few degrees — set by sqrt(2H/R), nothing else.
+        let deg = w.to_degrees();
+        assert!((2.0..4.0).contains(&deg), "Earth's twilight wedge ≈ 3°, got {deg:.2}°");
+
+        // Just PAST the geometric terminator the sky is still lit (the air above is in sunlight)...
+        let past = rayleigh_veil(0.5, -0.3 * w, 0.5, tau, SUN_GAIN as f64, w);
+        assert!(past[2] > 0.0, "just past the terminator must still scatter, got {past:?}");
+        // ...and it fades MONOTONICALLY to black by the far edge of the wedge.
+        let deeper = rayleigh_veil(0.5, -0.8 * w, 0.5, tau, SUN_GAIN as f64, w);
+        assert!(deeper[2] < past[2], "deeper into night must be dimmer ({deeper:?} vs {past:?})");
+        let night = rayleigh_veil(0.5, -1.5 * w, 0.5, tau, SUN_GAIN as f64, w);
+        assert_eq!(night, [0.0; 3], "well past the wedge is honestly black, got {night:?}");
+
+        // The DAY side is untouched by any of this — the same value with or without twilight.
+        let day_hard = rayleigh_veil(0.7, 0.6, 0.5, tau, SUN_GAIN as f64, 0.0);
+        let day_soft = rayleigh_veil(0.7, 0.6, 0.5, tau, SUN_GAIN as f64, w);
+        assert_eq!(day_hard, day_soft, "twilight must not change the lit hemisphere");
+
+        // AIRLESS: no atmosphere, no twilight, hard edge — the Moon, with no special case in the code.
+        assert_eq!(twilight_half_angle(0.0, e.radius()), 0.0, "no air ⇒ no twilight");
+        let moon_night = rayleigh_veil(0.5, -0.001, 0.5, rayleigh_tau(0.0), SUN_GAIN as f64, 0.0);
+        assert_eq!(moon_night, [0.0; 3], "airless body keeps its knife-edge terminator");
     }
 }

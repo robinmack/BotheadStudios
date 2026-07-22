@@ -1,0 +1,42 @@
+{
+  "$comment": "THE definition of Earth - data, not code. ONE file, referenced by every scene, so improving this body improves every world that uses it. Radii m; densities kg/m3 (in-situ/compressed, PREM-style); temperatures K at each layer's inner and outer boundary, linear between. atmosphere_mass_kg is DECLARED (measured) - surface pressure is NEVER declared, it emerges as the weight of that column, P = M*g/(4*pi*R^2).",
+  "name": "Earth",
+  "layers": [
+    {
+      "material": "iron",
+      "outer_r": 1221500.0,
+      "density": 12900.0,
+      "t_inner": 5900.0,
+      "t_outer": 5800.0
+    },
+    {
+      "material": "iron",
+      "outer_r": 2350000.0,
+      "density": 11900.0,
+      "t_inner": 5800.0,
+      "t_outer": 5150.0
+    },
+    {
+      "material": "iron",
+      "outer_r": 3480000.0,
+      "density": 10600.0,
+      "t_inner": 5150.0,
+      "t_outer": 4150.0
+    },
+    {
+      "material": "peridotite",
+      "outer_r": 6346000.0,
+      "density": 4500.0,
+      "t_inner": 2900.0,
+      "t_outer": 1600.0
+    },
+    {
+      "material": "basalt",
+      "outer_r": 6371000.0,
+      "density": 2900.0,
+      "t_inner": 900.0,
+      "t_outer": 288.0
+    }
+  ],
+  "atmosphere_mass_kg": 5.15e+18
+}

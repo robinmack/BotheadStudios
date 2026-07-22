@@ -40,17 +40,7 @@ fn vs_main(@builtin(vertex_index) vi : u32) -> VOut {
 // The SAME first-order Chandrasekhar slab single-scatter as atmosphere::rayleigh_veil (Rust), mirrored
 // verbatim: L = F·P(Θ)/(4(μᵥ+μₛ))·μₛ·(1 − e^{−τ(1/μᵥ+1/μₛ)}), Rayleigh phase P(Θ) = ¾(1+cos²Θ).
 // μᵥ is the view cosine from the zenith (short path overhead, long path at the horizon); μₛ the sun's.
-fn rayleigh_veil(mu_v_in : f32, mu_s_in : f32, cos_theta : f32, tau : vec3<f32>, sun_gain : f32) -> vec3<f32> {
-    if (mu_s_in <= 0.0) {
-        return vec3<f32>(0.0); // night side: no in-scatter, honestly black
-    }
-    let mu_v = max(mu_v_in, 0.08); // grazing cap in lieu of the true Chapman function (flagged)
-    let mu_s = max(mu_s_in, 0.08);
-    let phase = 0.75 * (1.0 + cos_theta * cos_theta);
-    let geom = phase / (4.0 * (mu_v + mu_s)) * mu_s;
-    let path = 1.0 / mu_v + 1.0 / mu_s;
-    return sun_gain * geom * (vec3<f32>(1.0) - exp(-tau * path));
-}
+
 
 @fragment
 fn fs_main(i : VOut) -> @location(0) vec4<f32> {
@@ -64,7 +54,7 @@ fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     let mu_s = sun.y;           // the sun's elevation cosine
     let cos_theta = dot(rd, sun); // forward-scatter angle: brightens toward the sun via the phase lobe
 
-    let radiance = rayleigh_veil(mu_v, mu_s, cos_theta, u.tau.xyz, u.tau.w);
+    let radiance = rayleigh_veil(mu_v, mu_s, cos_theta, u.tau.xyz, u.tau.w, u.sun_dir.w);
     let mapped = radiance / (vec3<f32>(1.0) + radiance); // Reinhard tone-map (same as the space band)
     return vec4<f32>(mapped, 1.0);
 }

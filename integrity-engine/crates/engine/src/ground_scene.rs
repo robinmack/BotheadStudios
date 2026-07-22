@@ -148,7 +148,7 @@ fn build_sky_pipeline(
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("sky-shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/sky.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(concat!(include_str!("../../../shaders/rayleigh.wgsl"), include_str!("../../../shaders/sky.wgsl")).into()),
     });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("sky-pipeline-layout"),
@@ -332,6 +332,7 @@ pub struct Ground {
     /// Rayleigh optical depth DERIVED from the declared atmosphere's emergent surface pressure — the
     /// same λ⁻⁴ scattering that gives the blue marble its veil (docs/26). Not a painted sky colour.
     atm_tau: [f64; 3],
+    atm_twilight: f64,
     frame: u64,
     max_particles: usize,
 }
@@ -581,6 +582,18 @@ impl Ground {
         let sea_gpu = upload_mesh(&device, "sea", &mesher::build_sea(&sim.world, &mats));
 
         let eye_height_m = sim.eye_height_m();
+        // The same air the globe scatters, so standing on Earth and orbiting it agree about how wide the
+        // twilight is. Derived: sqrt(2H/R) from the declared air's own scale height at this body's gravity.
+        // Computed before `mats` moves into the struct.
+        let atm_twilight = {
+            let e = crate::planet::earth();
+            let h = mats
+                .iter()
+                .find(|m| m.id == "air")
+                .map(|air| crate::atmosphere::scale_height(air, 288.0, e.gravity_at(e.radius())))
+                .unwrap_or(0.0);
+            crate::atmosphere::twilight_half_angle(h, e.radius())
+        };
         Ok(Ground {
             surface, device, queue, config, depth_view,
             world_pipeline, world_uni, sky_pipeline, sky_uni,
@@ -591,6 +604,7 @@ impl Ground {
             last_eye: Vec3::new(0.0, eye_height_m * 3.0, eye_height_m * 3.0),
             atm_tau: crate::atmosphere::rayleigh_tau(
                 crate::planet::earth().surface_pressure() / 101_325.0),
+            atm_twilight,
             frame: 0,
             max_particles,
         })
@@ -673,7 +687,7 @@ impl Ground {
         let submerged = self.eye_is_inside_matter(eye);
         let light = Vec3::new(0.45, 0.9, 0.4).normalize();
         write_uniform(&self.queue, &self.world_uni, view_proj, Mat4::IDENTITY, eye, light);
-        write_sky(&self.queue, &self.sky_uni, view_proj, eye, light, self.atm_tau);
+        write_sky(&self.queue, &self.sky_uni, view_proj, eye, light, self.atm_tau, self.atm_twilight);
 
         // Grain instances: position + the material's own albedo + incandescence from its temperature.
         let inst: Vec<GpuParticle> = self
@@ -896,15 +910,17 @@ fn write_uniform(queue: &wgpu::Queue, slot: &UniformSlot, vp: Mat4, model: Mat4,
     queue.write_buffer(&slot.buf, 0, bytemuck::bytes_of(&u));
 }
 
-fn write_sky(queue: &wgpu::Queue, slot: &UniformSlot, vp: Mat4, eye: Vec3, light: Vec3, tau: [f64; 3]) {
-    // Sun gain: the exposure the veil is displayed at. Recovered from the working terrain scene — with
-    // the 1.0 first guessed here the Rayleigh term is far below display range and the sky renders BLACK,
-    // which is exactly what the first rig shot showed.
-    const SUN_GAIN: f32 = 22.0;
+fn write_sky(queue: &wgpu::Queue, slot: &UniformSlot, vp: Mat4, eye: Vec3, light: Vec3, tau: [f64; 3], twilight: f64) {
+    // Sun gain: the exposure the veil is displayed at (atmosphere::SUN_GAIN — shared with the globe, so
+    // one atmosphere is shown at one exposure whether you are under it or above it). Recovered from the
+    // working terrain scene: with the 1.0 first guessed here the Rayleigh term is far below display range
+    // and the sky renders BLACK, which is exactly what the first rig shot showed.
+    use crate::atmosphere::SUN_GAIN;
     // The sky reads the SAME sun direction the ground is lit by, so there is one illumination, not two.
     let u = SkyUniforms {
         inv_view_proj: vp.inverse().to_cols_array_2d(),
-        sun_dir: [light.x, light.y, light.z, 0.0],
+        // .w = the twilight half-angle — the air stays lit past the ground's own sunset.
+        sun_dir: [light.x, light.y, light.z, twilight as f32],
         tau: [tau[0] as f32, tau[1] as f32, tau[2] as f32, SUN_GAIN],
         camera_pos: [eye.x, eye.y, eye.z, 1.0],
     };

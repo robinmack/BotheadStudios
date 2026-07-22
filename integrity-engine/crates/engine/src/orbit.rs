@@ -659,3 +659,99 @@ mod tests {
         );
     }
 }
+
+/// **Where the Sun actually is, for an Earth-fixed frame.**
+///
+/// This replaces a hardcoded `DVec3::new(1.0, 0.45, 0.6)` whose own comment admitted it was chosen for
+/// "a pleasant ¾ lighting" — a direction picked because it looked good, which is exactly the thing the
+/// Laws forbid, and which put the terminator wherever it happened to fall rather than where the Sun puts
+/// it. With the globe already oriented to real time, a decorative sun made noon land in the wrong ocean.
+///
+/// The returned unit vector points TO the Sun in the same frame `FlyCamera::frame` uses: +Y is the spin
+/// axis (north), longitude 0 is +X, longitude 90°E is +Z. In an Earth-FIXED frame the Sun's declination
+/// swings ±ε over the year and its longitude sweeps a full turn each day — so the axial tilt enters here,
+/// as declination, rather than by tilting the mesh.
+///
+/// Low-precision solar position from the Astronomical Almanac (~0.01° over 1950–2050): good to a few
+/// kilometres of subsolar point, far below anything a viewer can see. FLAGGED: it ignores nutation and
+/// aberration, and uses mean rather than apparent sidereal time.
+pub fn solar_direction_earth_fixed(unix_seconds: f64) -> glam::DVec3 {
+    // Days since the J2000.0 epoch (2000-01-01 12:00 UTC = Unix 946_728_000).
+    let n = (unix_seconds - 946_728_000.0) / 86_400.0;
+    let mean_longitude = (280.460 + 0.985_647_4 * n).to_radians();
+    let mean_anomaly = (357.528 + 0.985_600_3 * n).to_radians();
+    // Ecliptic longitude: the mean longitude plus the equation of centre (Earth's orbit is an ellipse,
+    // so the Sun runs ahead of / behind the mean by up to ~2°).
+    let ecliptic = mean_longitude + (1.915_f64.to_radians()) * mean_anomaly.sin()
+        + (0.020_f64.to_radians()) * (2.0 * mean_anomaly).sin();
+    let obliquity = (23.439 - 4.0e-7 * n).to_radians(); // Earth's axial tilt — the reason there are seasons
+    let declination = (obliquity.sin() * ecliptic.sin()).asin();
+    let right_ascension = (obliquity.cos() * ecliptic.sin()).atan2(ecliptic.cos());
+    // Greenwich mean sidereal time — how far Earth has turned under the stars. The subsolar longitude is
+    // the Sun's right ascension measured from the Greenwich meridian.
+    let gmst_hours = 18.697_374_558 + 24.065_709_824_419_08 * n;
+    let gmst = (gmst_hours * std::f64::consts::PI / 12.0).rem_euclid(std::f64::consts::TAU);
+    let subsolar_longitude = right_ascension - gmst;
+    let (sin_dec, cos_dec) = declination.sin_cos();
+    let (sin_lon, cos_lon) = subsolar_longitude.sin_cos();
+    glam::DVec3::new(cos_dec * cos_lon, sin_dec, cos_dec * sin_lon)
+}
+
+/// Wall-clock seconds since the Unix epoch, on either target.
+pub fn unix_now_seconds() -> f64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        js_sys::Date::now() / 1000.0
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0)
+    }
+}
+
+#[cfg(test)]
+mod solar_position_tests {
+    use super::solar_direction_earth_fixed;
+
+    /// The Sun's declination IS the seasons. Checked against the real solstices and equinoxes, which
+    /// anyone can look up — if this drifts, the terminator is lying about the time of year.
+    #[test]
+    fn declination_tracks_the_real_seasons() {
+        // The REAL instants of the 2024 equinoxes and solstices (UTC), not the nearest round noon — the
+        // first cut of this test used 2024-09-19 for the September equinox and failed by 1.18°, which is
+        // precisely three days of the Sun's own 0.39°/day march. The code was right and the fixture was
+        // wrong; these are the published times.
+        let cases = [
+            (1_710_903_960.0, 0.0, 0.2),    // 2024-03-20 03:06 equinox: Sun over the equator
+            (1_718_916_660.0, 23.44, 0.2),  // 2024-06-20 20:51 solstice: over the Tropic of Cancer
+            (1_727_009_040.0, 0.0, 0.2),    // 2024-09-22 12:44 equinox
+            (1_734_772_800.0, -23.44, 0.2), // 2024-12-21 09:20 solstice: over the Tropic of Capricorn
+        ];
+        for (t, want, tol) in cases {
+            let d = solar_direction_earth_fixed(t);
+            let dec = d.y.asin().to_degrees();
+            assert!((dec - want).abs() < tol, "declination at {t}: got {dec:.2}°, want {want}±{tol}");
+            assert!((d.length() - 1.0).abs() < 1e-12, "must be a unit vector");
+        }
+    }
+
+    /// Local noon must be under the Sun. At 12:00 UTC the subsolar point sits near the Greenwich
+    /// meridian, and it marches west at 15°/hour — this is what puts the terminator in the right ocean.
+    #[test]
+    fn the_subsolar_point_marches_west_at_fifteen_degrees_an_hour() {
+        let noon = 1_718_884_800.0; // 2024-06-20 12:00 UTC
+        let lon_at = |t: f64| {
+            let d = solar_direction_earth_fixed(t);
+            d.z.atan2(d.x).to_degrees()
+        };
+        let at_noon = lon_at(noon);
+        assert!(at_noon.abs() < 4.0, "subsolar longitude at 12:00 UTC ≈ Greenwich, got {at_noon:.2}°");
+        // Six hours later it must be ~90° west (allowing the equation of time).
+        let later = lon_at(noon + 6.0 * 3600.0);
+        let moved = (at_noon - later).rem_euclid(360.0);
+        assert!((moved - 90.0).abs() < 2.0, "6 h ⇒ ~90° west, got {moved:.2}°");
+    }
+}
