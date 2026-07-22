@@ -17,7 +17,7 @@ use glam::{DVec3, Vec3};
 /// - `r_disp`: planet radius in display units.
 /// - `cap_angle`: angular radius (radians) the patch spans from `center` — size it to ~the horizon.
 /// - `res`: grid points per side.
-/// - `sample(dir) -> (albedo, radius_offset_display)`: Terra reads the rasters (real elevation × the declared
+/// - `sample(dir) -> (albedo, radius_offset_display, material_index)`: Terra reads the rasters (real elevation × the declared
 ///   exaggeration, biome albedo) for a surface direction.
 #[allow(clippy::too_many_arguments)]
 pub fn fill_ground_cap(
@@ -29,7 +29,7 @@ pub fn fill_ground_cap(
     r_disp: f64,
     cap_angle: f64,
     res: usize,
-    sample: impl Fn(DVec3) -> ([f32; 3], f64),
+    sample: impl Fn(DVec3) -> ([f32; 3], f64, u32),
 ) {
     assert!(res >= 2);
     out.clear();
@@ -37,6 +37,8 @@ pub fn fill_ground_cap(
 
     let mut rel = vec![Vec3::ZERO; res * res]; // positions relative to the eye (display units)
     let mut cols = vec![[0f32; 3]; res * res];
+    // The material each cap vertex is made OF — the shader needs it to pick the right relief layer.
+    let mut mats = vec![0u32; res * res];
     for j in 0..res {
         for i in 0..res {
             // Angular offsets east/north in [-cap_angle, cap_angle]; a denser-toward-centre curve (u³) keeps
@@ -46,11 +48,12 @@ pub fn fill_ground_cap(
             let du = su * su.abs() * cap_angle; // signed-square: |curve| toward centre
             let dv = sv * sv.abs() * cap_angle;
             let dir = (center + east * du + north * dv).normalize();
-            let (col, off) = sample(dir);
+            let (col, off, mat) = sample(dir);
             let p = dir * (r_disp + off);
             let r = p - eye;
             rel[j * res + i] = Vec3::new(r.x as f32, r.y as f32, r.z as f32);
             cols[j * res + i] = col;
+            mats[j * res + i] = mat;
         }
     }
 
@@ -77,7 +80,7 @@ pub fn fill_ground_cap(
             } else {
                 outward
             };
-            out.push(Vertex { pos: rel[j * res + i].to_array(), nrm: nrm.to_array(), col: cols[j * res + i], mat: 0 });
+            out.push(Vertex { pos: rel[j * res + i].to_array(), nrm: nrm.to_array(), col: cols[j * res + i], mat: mats[j * res + i] });
         }
     }
 }
@@ -109,7 +112,7 @@ mod tests {
         let (east, north) = (DVec3::new(0.0, 0.0, -1.0), DVec3::Y);
         let eye = center * 1.001; // 0.001 display units up
         let mut v = Vec::new();
-        fill_ground_cap(&mut v, center, east, north, eye, 1.0, 0.02, res, |_| ([0.3, 0.4, 0.5], 0.0));
+        fill_ground_cap(&mut v, center, east, north, eye, 1.0, 0.02, res, |_| ([0.3, 0.4, 0.5], 0.0, 0));
         assert_eq!(v.len(), res * res);
         let idx = cap_indices(res);
         assert_eq!(idx.len(), (res - 1) * (res - 1) * 6);
@@ -128,7 +131,7 @@ mod tests {
         let h = 0.004;
         let eye = center * (1.0 + h);
         let mut v = Vec::new();
-        fill_ground_cap(&mut v, center, east, north, eye, 1.0, 0.02, res, |_| ([0.0, 0.0, 0.0], 0.0));
+        fill_ground_cap(&mut v, center, east, north, eye, 1.0, 0.02, res, |_| ([0.0, 0.0, 0.0], 0.0, 0));
         let mid = (res / 2) * res + res / 2;
         let c = v[mid].pos;
         let cv = Vec3::from_array(c);

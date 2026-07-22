@@ -49,7 +49,15 @@ pub fn generate(material: &Material) -> Texture {
     }
     // Height field from the same noise as the colour, then its gradient -> a tangent-space normal.
     // Central differences on the torus (the noise is seamless), so the map tiles without a seam.
-    let h = |x: usize, y: usize| -> f32 { height_at(material, x, y, size, seed) };
+    //
+    // COMPUTE IT ONCE. Calling `height_at` per difference recomputes the fbm four times per pixel:
+    // 512² × 4 differences × 4 octaves × 24 materials = 100 MILLION noise evaluations at startup, which
+    // in wasm hung scene creation outright (the space band never got past "Requesting GPU device…").
+    // Filling the field first makes the differences array reads and cuts the noise work 4×.
+    let field: Vec<f32> = (0..size * size)
+        .map(|i| height_at(material, i % size, i / size, size, seed))
+        .collect();
+    let h = |x: usize, y: usize| -> f32 { field[y * size + x] };
     let mut nrm = vec![0u8; size * size * 4];
     // Bump strength follows the material's CITED optical roughness: a polished surface has a flat
     // normal map, gravel has a violent one. Not an art dial.
@@ -235,6 +243,26 @@ fn build_mips(level0: Vec<u8>, size: usize) -> Vec<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Startup budget. Every scene generates these for all materials before its first frame, so a slow
+    /// generator does not look slow — it looks like the scene FAILED TO START. That is exactly what
+    /// happened: recomputing the fbm per central difference put ~100M noise evaluations in the path and
+    /// the space band never got past "Requesting GPU device…".
+    #[test]
+    fn generation_is_fast_enough_to_run_at_scene_startup() {
+        let mats = crate::materials::load();
+        let t0 = std::time::Instant::now();
+        let all = generate_all(&mats);
+        let ms = t0.elapsed().as_millis();
+        assert_eq!(all.len(), mats.len());
+        assert!(
+            ms < 4000,
+            "generating {} material textures took {ms} ms natively; wasm is slower still and this runs \
+             before the first frame of every scene",
+            mats.len()
+        );
+        eprintln!("generated {} material textures in {ms} ms", mats.len());
+    }
 
     /// Relief must scale with ROUGHNESS (the surface statistic), not `color_variance` (a colour one).
     /// Sand has variance 0.25 and roughness 0.85: driving height from the wrong parameter made the

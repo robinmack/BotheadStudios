@@ -17,9 +17,9 @@ const FACES: [([f64; 3], [f64; 3], [f64; 3]); 6] = [
 ];
 
 /// Build the globe surface. `res` = grid points per cube-face edge; `r_disp` = the sphere radius in display
-/// units; `sample(dir)` returns `(albedo, radius_offset_display)` for a unit surface direction — the caller
+/// units; `sample(dir)` returns `(albedo, radius_offset_display, material_index)` for a unit surface direction — the caller
 /// (Terra) reads the rasters there (land biome + elevation lift, or ocean-floor depth).
-pub fn build_globe(res: usize, r_disp: f64, sample: impl Fn(DVec3) -> ([f32; 3], f64)) -> Mesh {
+pub fn build_globe(res: usize, r_disp: f64, sample: impl Fn(DVec3) -> ([f32; 3], f64, u32)) -> Mesh {
     assert!(res >= 2);
     let mut vertices: Vec<Vertex> = Vec::with_capacity(6 * res * res);
     let mut indices: Vec<u32> = Vec::with_capacity(6 * (res - 1) * (res - 1) * 6);
@@ -31,16 +31,19 @@ pub fn build_globe(res: usize, r_disp: f64, sample: impl Fn(DVec3) -> ([f32; 3],
         let mut pos = vec![Vec3::ZERO; res * res];
         let mut dirs = vec![DVec3::ZERO; res * res];
         let mut cols = vec![[0f32; 3]; res * res];
+    // Which material each vertex is made OF — the shader picks its relief layer with it.
+    let mut mats = vec![0u32; res * res];
         for j in 0..res {
             for i in 0..res {
                 let u = -1.0 + 2.0 * i as f64 / (res - 1) as f64;
                 let v = -1.0 + 2.0 * j as f64 / (res - 1) as f64;
                 let dir = (n + right * u + up * v).normalize();
-                let (col, off) = sample(dir);
+                let (col, off, mat) = sample(dir);
                 let p = dir * (r_disp + off);
                 dirs[j * res + i] = dir;
                 pos[j * res + i] = Vec3::new(p.x as f32, p.y as f32, p.z as f32);
                 cols[j * res + i] = col;
+                mats[j * res + i] = mat;
             }
         }
         // Vertices — normals from central differences of the DISPLACED grid (relief shading); edges fall back
@@ -67,7 +70,7 @@ pub fn build_globe(res: usize, r_disp: f64, sample: impl Fn(DVec3) -> ([f32; 3],
                     pos: pos[j * res + i].to_array(),
                     nrm: nrm.to_array(),
                     col: cols[j * res + i],
-                    mat: 0,
+                    mat: mats[j * res + i],
                 });
             }
         }
@@ -92,7 +95,7 @@ mod tests {
     #[test]
     fn globe_counts_and_indices_are_well_formed() {
         let res = 8;
-        let m = build_globe(res, 1.0, |_| ([0.5, 0.5, 0.5], 0.0));
+        let m = build_globe(res, 1.0, |_| ([0.5, 0.5, 0.5], 0.0, 0));
         assert_eq!(m.vertices.len(), 6 * res * res, "6 faces × res² vertices");
         assert_eq!(m.indices.len(), 6 * (res - 1) * (res - 1) * 6, "2 tris × 3 idx per quad");
         let n = m.vertices.len() as u32;
@@ -104,7 +107,7 @@ mod tests {
         // A zero-offset sampler must yield a sphere of the given radius, with every normal pointing outward
         // (positive dot with the position) so the lit shader shades the day side, not the interior.
         let r = 2.5;
-        let m = build_globe(6, r, |_| ([1.0, 0.0, 0.0], 0.0));
+        let m = build_globe(6, r, |_| ([1.0, 0.0, 0.0], 0.0, 0));
         for v in &m.vertices {
             let p = Vec3::from_array(v.pos);
             assert!((p.length() - r as f32).abs() < 1e-4, "radius {} != {}", p.length(), r);
@@ -118,7 +121,7 @@ mod tests {
         // A face-centre sample gets a positive offset; that vertex must sit at radius r + off along its dir.
         let m = build_globe(3, 1.0, |dir| {
             let off = if dir.x > 0.9 { 0.3 } else { 0.0 };
-            ([0.0, 0.0, 0.0], off)
+            ([0.0, 0.0, 0.0], off, 0)
         });
         let max_r = m.vertices.iter().map(|v| Vec3::from_array(v.pos).length()).fold(0.0f32, f32::max);
         assert!((max_r - 1.3).abs() < 1e-3, "displaced apex radius {max_r} != 1.3");

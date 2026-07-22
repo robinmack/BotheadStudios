@@ -78,7 +78,7 @@ fn build_pipeline(
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("world-shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/world.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(concat!(include_str!("../../../shaders/surface_normal.wgsl"), include_str!("../../../shaders/world.wgsl")).into()),
     });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("pipeline-layout"),

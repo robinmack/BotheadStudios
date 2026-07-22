@@ -828,38 +828,69 @@ mod app {
                 &mesher::build_uv_sphere(1.0, 0, [1.0, 1.0, 1.0], 48, 64),
             );
 
-            // Uniform-only bind layout + the simple lit-sphere pipeline.
+            // Materials first: the surface layout and its textures are built FROM them.
+            let mats = materials::load();
+            // **One surface bind layout for every scene.** There is nothing special about the orbit
+            // view: it is a camera position looking at the same rendered world, so it carries the same
+            // material albedo + NORMAL arrays. Giving the space band a uniform-only layout was what made
+            // "Earth in orbit" a differently-rendered object from "Earth underfoot".
+            let tex_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            };
             let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("space-bind-layout"),
-                entries: &[uniform_entry(
-                    0,
-                    wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                )],
+                label: Some("surface-bind-layout"),
+                entries: &[
+                    uniform_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
+                    tex_entry(1),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    tex_entry(4),
+                ],
             });
+            let (tex_view, normal_view, sampler) = upload_material_textures(&device, &queue, &mats);
             let num_moons = num_moons.clamp(1, 2) as usize;
             let debris_unis: Vec<UniformSlot> = (0..SCENE_IMPACT_N)
-                .map(|_| make_space_uniform(&device, &bind_layout))
+                .map(|_| make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler))
                 .collect();
             let shell_unis: Vec<UniformSlot> = (0..SHELL_N)
-                .map(|_| make_space_uniform(&device, &bind_layout))
+                .map(|_| make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler))
                 .collect();
-            let interior_uni = make_space_uniform(&device, &bind_layout);
-            let sun_uni = make_space_uniform(&device, &bind_layout);
+            let interior_uni = make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
+            let sun_uni = make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
             // Rayleigh optical depths from the EMERGENT surface pressure (planet::earth's declared
             // atmosphere mass) — the blue marble is derived from the air, never painted (docs/26).
             let atm_tau = crate::atmosphere::rayleigh_tau(
                 crate::planet::earth().surface_pressure() / 101_325.0,
             );
             let wall_unis: Vec<UniformSlot> = (0..WALL_N)
-                .map(|_| make_space_uniform(&device, &bind_layout))
+                .map(|_| make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler))
                 .collect();
             let moon_unis: Vec<UniformSlot> = (0..num_moons * MOON_SHELL_N)
-                .map(|_| make_space_uniform(&device, &bind_layout))
+                .map(|_| make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler))
                 .collect();
             let pipeline = build_space_pipeline(&device, &bind_layout, config.format);
             // GPU SPH deformable-Earth impact (stage 4c.4): its instanced-particle pipeline + a camera
             // uniform (reuses the uniform-only `bind_layout`; the buffer is sized for `SphCam`).
-            let sph_pipeline = build_sph_pipeline(&device, &bind_layout, config.format);
+            // The SPH particle render is NOT a textured surface — it draws particles from the physics
+            // buffer and needs only a camera uniform. It gets its own layout rather than carrying the
+            // surface layout's material arrays. (Universality is about every SURFACE being the same
+            // rendered world; it is not a reason to hand texture bindings to a particle shader.)
+            let particle_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("particle-bind-layout"),
+                entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT)],
+            });
+            let sph_pipeline = build_sph_pipeline(&device, &particle_bind_layout, config.format);
             let sph_cam = {
                 let buf = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("sph-cam"),
@@ -869,7 +900,7 @@ mod app {
                 });
                 let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("sph-cam-bind"),
-                    layout: &bind_layout,
+                    layout: &particle_bind_layout,
                     entries: &[wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() }],
                 });
                 UniformSlot { buf, bind }
@@ -920,7 +951,6 @@ mod app {
             // atmospheric effect we don't yet model, and faking it here would be a fudge. Moon: maria
             // basalt; the brighter highland anorthosite isn't in the DB yet, so the Moon renders darker
             // than reality until it's added (a flagged data gap, not a paint job).
-            let mats = materials::load();
             // The interior sphere's material/temperature: the layer at the depth the crater exposes
             // (the cap bottom) — for a Moon-scale impact that is the top of the molten outer core.
             // The bulk just under the crust: OPAQUE DARK ROCK. It sits right beneath the shell grains
@@ -2742,7 +2772,84 @@ mod app {
         }
     }
 
-    fn make_space_uniform(device: &wgpu::Device, layout: &wgpu::BindGroupLayout) -> UniformSlot {
+    /// Generate + upload the material albedo and NORMAL arrays, returning views and a shared sampler.
+    /// One function, so every surface in the engine samples the same texture set (Law II).
+    fn upload_material_textures(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        mats: &[materials::Material],
+    ) -> (wgpu::TextureView, wgpu::TextureView, wgpu::Sampler) {
+        let textures = texture::generate_all(mats);
+        let (n_layers, mip_count) = (textures.len() as u32, textures[0].mips.len() as u32);
+        let mk = |label: &str| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: texture::TEX_SIZE as u32,
+                    height: texture::TEX_SIZE as u32,
+                    depth_or_array_layers: n_layers,
+                },
+                mip_level_count: mip_count,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        };
+        let (albedo_tex, normal_tex) = (mk("material-textures"), mk("material-normals"));
+        for (layer, t) in textures.iter().enumerate() {
+            for (which, mips) in [(&albedo_tex, &t.mips), (&normal_tex, &t.normal_mips)] {
+                for (mip, data) in mips.iter().enumerate() {
+                    let msize = (texture::TEX_SIZE >> mip) as u32;
+                    queue.write_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: which,
+                            mip_level: mip as u32,
+                            origin: wgpu::Origin3d { x: 0, y: 0, z: layer as u32 },
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        data,
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(4 * msize),
+                            rows_per_image: Some(msize),
+                        },
+                        wgpu::Extent3d { width: msize, height: msize, depth_or_array_layers: 1 },
+                    );
+                }
+            }
+        }
+        let view = |t: &wgpu::Texture| {
+            t.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            })
+        };
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("material-sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            ..Default::default()
+        });
+        (view(&albedo_tex), view(&normal_tex), sampler)
+    }
+
+    /// `surfaces` is `None` for scenes whose layout is the uniform alone (the space band draws bodies,
+    /// not textured surfaces) and `Some` where the shader samples material relief. One function rather
+    /// than two near-identical ones that would drift.
+    /// A uniform slot on THE surface bind layout — the same one every scene uses.
+    fn make_space_uniform(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        tex: &wgpu::TextureView,
+        normal: &wgpu::TextureView,
+        samp: &wgpu::Sampler,
+    ) -> UniformSlot {
         let buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("space-uniform"),
             size: std::mem::size_of::<SpaceUniforms>() as u64,
@@ -2752,10 +2859,12 @@ mod app {
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("space-bind"),
             layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: buf.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(tex) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(samp) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(normal) },
+            ],
         });
         UniformSlot { buf, bind }
     }
@@ -2876,7 +2985,7 @@ mod app {
     ) -> wgpu::RenderPipeline {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("globe-shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/globe.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(concat!(include_str!("../../../shaders/surface_normal.wgsl"), include_str!("../../../shaders/globe.wgsl")).into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("globe-pipeline-layout"),
@@ -3116,14 +3225,41 @@ mod app {
                 "terra-grain",
                 &mesher::build_uv_sphere(1.0, 0, [1.0, 1.0, 1.0], 10, 14),
             );
+            // Materials first: the surface layout and its textures are built FROM them.
+            let mats = materials::load();
+// **One surface bind layout for every scene.** There is nothing special about the orbit
+            // view: it is a camera position looking at the same rendered world, so it carries the same
+            // material albedo + NORMAL arrays. Giving the space band a uniform-only layout was what made
+            // "Earth in orbit" a differently-rendered object from "Earth underfoot".
+            let tex_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            };
             let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("terra-bind-layout"),
-                entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT)],
+                label: Some("surface-bind-layout"),
+                entries: &[
+                    uniform_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
+                    tex_entry(1),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    tex_entry(4),
+                ],
             });
+            let (tex_view, normal_view, sampler) = upload_material_textures(&device, &queue, &mats);
             let pipeline = build_space_pipeline(&device, &bind_layout, config.format);
             let globe_pipeline =
                 build_globe_pipeline(&device, &bind_layout, config.format, wgpu::BlendState::REPLACE);
-            let globe_uni = make_space_uniform(&device, &bind_layout);
+            let globe_uni = make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
             // The ground cap: same shader, alpha-blended for the cross-fade; a writable vertex buffer rebuilt each
             // frame, fixed index topology.
             let cap_pipeline =
@@ -3134,12 +3270,11 @@ mod app {
                 TERRA_CAP_RES * TERRA_CAP_RES,
                 &crate::terra::ground_cap::cap_indices(TERRA_CAP_RES),
             );
-            let cap_uni = make_space_uniform(&device, &bind_layout);
+            let cap_uni = make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
             let shell_count = 4096; // ~2.8° grain spacing — resolves continents/biomes (Phase 2, grain shell)
             let shell_unis: Vec<UniformSlot> =
-                (0..shell_count).map(|_| make_space_uniform(&device, &bind_layout)).collect();
+                (0..shell_count).map(|_| make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler)).collect();
             let atm_tau = crate::atmosphere::rayleigh_tau(crate::planet::earth().surface_pressure() / 101_325.0);
-            let mats = materials::load();
             // Default fly camera: orbital over the equator (a world file overrides this in `load_world`).
             let fly = crate::terra::fly_camera::FlyCamera::new(
                 20.0, 0.0, 12_000_000.0, 0.0, -1.2, 2.0, 40_000_000.0,
@@ -3545,10 +3680,10 @@ mod app {
                         .as_ref()
                         .map_or(0.0, |r| r.elevation_m_at(lat, lon, self.elev_range[0], self.elev_range[1]));
                     // Land above sea level; below-sea-level land (Dead Sea etc.) clamps to the shore.
-                    (self.mats[mi].albedo, e.max(0.0) * ds * exag)
+                    (self.mats[mi].albedo, e.max(0.0) * ds * exag, mi as u32)
                 } else {
                     // Ocean surface: flat at sea level with the water albedo (bathymetry is hidden, so unused).
-                    (water_alb, 0.0)
+                    (water_alb, 0.0, water_idx as u32)
                 }
             })
         }
@@ -3580,7 +3715,7 @@ mod app {
 
             let mut verts = std::mem::take(&mut self.cap_verts);
             {
-                let sample = |dir: glam::DVec3| -> ([f32; 3], f64) {
+                let sample = |dir: glam::DVec3| -> ([f32; 3], f64, u32) {
                     let lat = dir.y.asin().to_degrees();
                     let lon = dir.z.atan2(dir.x).to_degrees();
                     let is_land = self
@@ -3600,9 +3735,9 @@ mod app {
                         // cap — there is nowhere to put metre-scale relief, so it cost frame time and
                         // showed nothing. The rule it needs lives in `crate::surface_detail` with its
                         // tests; what is missing is a finer tier (docs/08's ladder), not the rule.
-                        (self.mats[mi].albedo, e.max(0.0) * ds * exag + lift)
+                        (self.mats[mi].albedo, e.max(0.0) * ds * exag + lift, mi as u32)
                     } else {
-                        (water_alb, lift)
+                        (water_alb, lift, water_idx as u32)
                     }
                 };
                 crate::terra::ground_cap::fill_ground_cap(
