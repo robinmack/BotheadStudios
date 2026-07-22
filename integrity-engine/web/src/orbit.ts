@@ -6,6 +6,7 @@
 // console-less device (iPad) can still be debugged.
 
 import init, { OrbitDemo, body_surface_urls } from "./wasm/engine.js";
+import { attachCameraInput, CAMERA_HINT } from "./camera-input";
 import "./scene-nav";
 import { createSimHud } from "./sim-hud";
 import { createShareView } from "./share-view";
@@ -385,9 +386,11 @@ async function main(): Promise<void> {
     // pleasant ¾ lighting.
     const cam = { yaw: -Math.PI / 2 + 0.35, pitch: 0.35, zoom: followZoom() };
     let userInteracted = false;
-    let dragging = false;
-    let lastX = 0;
-    let lastY = 0;
+    // The camera state, for rigs. This band renders near-empty space — Earth is a few dozen pixels on a
+    // black field — so a whole-frame pixel diff CANNOT tell a working camera from a dead one (rotating an
+    // orbit camera keeps its focus centred, so the picture barely changes). Reading the control's actual
+    // state is the honest check until there is a star field to move against.
+    (window as unknown as { __cam?: typeof cam }).__cam = cam;
     const active = new Map<number, { x: number; y: number }>();
     let pinchDist = 0;
 
@@ -396,42 +399,38 @@ async function main(): Promise<void> {
       return pts.length < 2 ? 0 : Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
     };
 
+    // THE shared camera controls (camera-input.ts): right-drag / alt-drag looks, left-or-ctrl goes
+    // forward, +shift reverses — the same grammar as Terra and Ground. This scene used to turn the view
+    // on a plain LEFT-drag, so the identical gesture meant "look here" in one scene and "walk" in the
+    // next; a viewer had to relearn the control per scene.
+    //
+    // This band's camera is anchored to the focus BODY (it frames Earth, or the Moon), so "forward" is a
+    // dolly toward what you are looking at rather than free flight. Same gesture, same meaning — move
+    // toward what is in front of you — expressed in the rig this scene actually has.
+    const camInput = attachCameraInput(canvas, (dyaw, dpitch) => {
+      cam.yaw -= dyaw;
+      cam.pitch = Math.max(-1.4, Math.min(1.4, cam.pitch + dpitch));
+      userInteracted = true;
+    });
+
+    // Multi-touch pinch-zoom stays with the scene (it is not part of the shared look/move grammar).
     canvas.addEventListener("pointerdown", (e) => {
       active.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      if (active.size === 1) {
-        dragging = true;
-        lastX = e.clientX;
-        lastY = e.clientY;
-      } else if (active.size === 2) {
-        dragging = false;
-        pinchDist = twoFingerDist();
-      }
-      canvas.setPointerCapture(e.pointerId);
+      if (active.size === 2) pinchDist = twoFingerDist();
     });
     canvas.addEventListener("pointerup", (e) => {
       active.delete(e.pointerId);
-      dragging = false;
-      canvas.releasePointerCapture(e.pointerId);
     });
     canvas.addEventListener("pointermove", (e) => {
-      if (active.has(e.pointerId)) active.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      if (active.size === 2) {
-        const d = twoFingerDist();
-        if (pinchDist > 0 && d > 0) {
-          cam.zoom *= pinchDist / d;
-          cam.zoom = Math.max(0.05, Math.min(6, cam.zoom));
-          followMoon = false; // manual zoom takes the camera over
-        }
-        pinchDist = d;
-        userInteracted = true;
-        return;
+      if (!active.has(e.pointerId)) return;
+      active.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (active.size !== 2) return;
+      const d = twoFingerDist();
+      if (pinchDist > 0 && d > 0) {
+        cam.zoom = Math.max(0.05, Math.min(6, cam.zoom * (pinchDist / d)));
+        followMoon = false; // manual zoom takes the camera over
       }
-      if (!dragging) return;
-      cam.yaw -= (e.clientX - lastX) * 0.008;
-      cam.pitch += (e.clientY - lastY) * 0.008;
-      cam.pitch = Math.max(-1.4, Math.min(1.4, cam.pitch));
-      lastX = e.clientX;
-      lastY = e.clientY;
+      pinchDist = d;
       userInteracted = true;
     });
     canvas.addEventListener(
@@ -555,7 +554,7 @@ async function main(): Promise<void> {
         timeScale: demo.time_scale_value(),
         fps,
         metersPerPixel: demo.meters_per_pixel(),
-        controls: `drag orbit · pinch / wheel zoom · buttons ↖`,
+        controls: `${CAMERA_HINT} · pinch / wheel zoom · buttons ↖`,
         events,
       });
     };
@@ -578,6 +577,16 @@ async function main(): Promise<void> {
       // ~100 ms behind, so every collision it draws is already resolved.
       const dtS = (nowT - lastFrameT) / 1000;
       lastFrameT = nowT;
+      // Shared camera: left-or-ctrl forward, +shift back. Polled per frame so the motion is smooth and
+      // frame-rate independent. Anchored to the focus body, so forward = closer; the rate is
+      // multiplicative, so each second moves the same FRACTION of the remaining distance whether you are
+      // a moon-width away or a solar-system away.
+      const dolly = camInput.forward();
+      if (dolly !== 0) {
+        cam.zoom = Math.max(0.05, Math.min(6, cam.zoom * Math.exp(-dolly * dtS * 0.9)));
+        followMoon = false; // taking the camera manually releases the follow, as wheel/pinch do
+        userInteracted = true;
+      }
       const __t0 = performance.now();
       demo.advance(dtS);
       const __t1 = performance.now();
