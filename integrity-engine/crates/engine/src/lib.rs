@@ -28,6 +28,7 @@ mod bhtree;
 mod body;
 mod damage;
 mod emission;
+mod geo; // THE lat/lon <-> direction conversion (one place, so the world cannot be mirrored in six)
 mod eos;
 /// docs/52 — acquiring a GPU with no browser and no canvas: the standalone engine's device entry point.
 /// Native only; in the browser the device comes from the canvas context.
@@ -3768,8 +3769,7 @@ mod app {
                 let water_idx = materials::index_of(&self.mats, "water");
                 for (i, uni) in self.shell_unis.iter().enumerate() {
                     let dir = crate::impact::fib_dir(i, self.shell_count);
-                    let lat = dir.y.asin().to_degrees();
-                    let lon = dir.z.atan2(dir.x).to_degrees();
+                    let (lat, lon) = crate::geo::lat_lon_from_dir(dir);
                     // Land/ocean from the real Natural Earth mask (fallback: the built-in ASCII mask).
                     let is_land = self
                         .landmask
@@ -3943,8 +3943,7 @@ mod app {
             let mut verts = std::mem::take(&mut self.cap_verts);
             {
                 let sample = |dir: glam::DVec3| -> ([f32; 3], f64, u32) {
-                    let lat = dir.y.asin().to_degrees();
-                    let lon = dir.z.atan2(dir.x).to_degrees();
+                    let (lat, lon) = crate::geo::lat_lon_from_dir(dir);
                     let is_land = self
                         .landmask
                         .as_ref()

@@ -52,12 +52,9 @@ impl FlyCamera {
 
     /// The local tangent frame (unit `up`, `north`, `east`) at the current lat/lon.
     pub fn frame(&self) -> (DVec3, DVec3, DVec3) {
-        let (sla, cla) = self.lat.to_radians().sin_cos();
-        let (slo, clo) = self.lon.to_radians().sin_cos();
-        let up = DVec3::new(cla * clo, sla, cla * slo);
-        let north = DVec3::new(-sla * clo, cla, -sla * slo);
-        let east = DVec3::new(-slo, 0.0, clo);
-        (up, north, east)
+        // THE shared conversion (crate::geo) — this frame was one of six hand-written copies, and the
+        // one sign they all shared put east on the left of the screen.
+        crate::geo::tangent_frame(self.lat, self.lon)
     }
 
     /// Fraction of "ground mode" (1 at/below `GROUND_ALT`, 0 at/above `ORBIT_ALT`), smoothstepped.

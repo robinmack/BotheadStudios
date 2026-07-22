@@ -150,8 +150,7 @@ pub fn build_body_globe(
     let water_idx = crate::materials::index_of(mats, "water");
     let water_alb = mats[water_idx].albedo;
     build_globe(res, r_disp, |dir| {
-        let lat = dir.y.asin().to_degrees();
-        let lon = dir.z.atan2(dir.x).to_degrees();
+        let (lat, lon) = crate::geo::lat_lon_from_dir(dir);
         // Fall back to the built-in coarse landmask only when a body ships no raster — never to
         // "re-invent" a surface a scene made up.
         let is_land = landmask

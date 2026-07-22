@@ -280,8 +280,7 @@ pub fn is_land(lat_deg: f64, lon_deg: f64) -> bool {
 /// (the ocean's mean depth ~3.7 km is far below one shell grain, so at this LOD water is the material of
 /// the grain's top — "filled with water" at the resolution we can honestly claim).
 pub fn earth_surface_material(dir: glam::DVec3) -> &'static str {
-    let lat = dir.y.asin().to_degrees();
-    let lon = dir.z.atan2(dir.x).to_degrees();
+    let (lat, lon) = crate::geo::lat_lon_from_dir(dir);
     if is_land(lat, lon) {
         "granite"
     } else {

@@ -692,9 +692,8 @@ pub fn solar_direction_earth_fixed(unix_seconds: f64) -> glam::DVec3 {
     let gmst_hours = 18.697_374_558 + 24.065_709_824_419_08 * n;
     let gmst = (gmst_hours * std::f64::consts::PI / 12.0).rem_euclid(std::f64::consts::TAU);
     let subsolar_longitude = right_ascension - gmst;
-    let (sin_dec, cos_dec) = declination.sin_cos();
-    let (sin_lon, cos_lon) = subsolar_longitude.sin_cos();
-    glam::DVec3::new(cos_dec * cos_lon, sin_dec, cos_dec * sin_lon)
+    // Built by THE shared conversion, so the Sun lands on the same globe the continents are painted on.
+    crate::geo::dir_from_lat_lon(declination.to_degrees(), subsolar_longitude.to_degrees())
 }
 
 /// Wall-clock seconds since the Unix epoch, on either target.
@@ -732,7 +731,7 @@ mod solar_position_tests {
         ];
         for (t, want, tol) in cases {
             let d = solar_direction_earth_fixed(t);
-            let dec = d.y.asin().to_degrees();
+            let dec = crate::geo::lat_lon_from_dir(d).0;
             assert!((dec - want).abs() < tol, "declination at {t}: got {dec:.2}°, want {want}±{tol}");
             assert!((d.length() - 1.0).abs() < 1e-12, "must be a unit vector");
         }
@@ -744,8 +743,7 @@ mod solar_position_tests {
     fn the_subsolar_point_marches_west_at_fifteen_degrees_an_hour() {
         let noon = 1_718_884_800.0; // 2024-06-20 12:00 UTC
         let lon_at = |t: f64| {
-            let d = solar_direction_earth_fixed(t);
-            d.z.atan2(d.x).to_degrees()
+            crate::geo::lat_lon_from_dir(solar_direction_earth_fixed(t)).1
         };
         let at_noon = lon_at(noon);
         assert!(at_noon.abs() < 4.0, "subsolar longitude at 12:00 UTC ≈ Greenwich, got {at_noon:.2}°");
