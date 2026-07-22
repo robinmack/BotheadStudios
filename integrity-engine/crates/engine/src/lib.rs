@@ -80,6 +80,9 @@ pub mod ground_scene;
 /// docs/00 — the Laws, made checkable: fails the build when a world file declares a quantity that must
 /// emerge from matter. Availability of the Laws proved insufficient on its own (2026-07-21).
 mod laws;
+/// ONE entry point for "two things met — what does the engine do?". Delegates to the laws that already
+/// own each half, so a new scene finds them instead of writing a third path.
+pub mod interaction;
 mod isotropy;
 pub mod materials;
 pub mod matter;
