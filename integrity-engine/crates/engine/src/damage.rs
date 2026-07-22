@@ -29,6 +29,9 @@ const REF_TEMP_K: f64 = 300.0;
 pub enum PhaseChange {
     Intact,
     Fractured,
+    /// Broken down irreversibly — charred, calcined, pyrolysed. The fate of a material that has no
+    /// melting point: wood, rubber, limestone, concrete. Unlike melting, it does not reverse on cooling.
+    Decomposed,
     Melted,
     Vaporized,
 }
@@ -36,29 +39,54 @@ pub enum PhaseChange {
 /// Energy density (J/m³) to melt the material from `REF_TEMP_K`: `ρ·(c·ΔT_to_melt + L_fusion)`.
 /// `None` if we have no thermal data (then we only claim fracture, not melt — honesty).
 pub fn melt_energy_density(m: &Material) -> Option<f64> {
-    m.thermal.as_ref().map(|t| {
-        let per_kg =
-            t.specific_heat as f64 * (t.melt_point as f64 - REF_TEMP_K) + t.latent_fusion as f64;
-        per_kg * m.density as f64
-    })
+    // Ask through the accessors: a material that DOES NOT MELT has no melting point, and reading the raw
+    // field gave 0 K — an energy of c·(0 − 293) + 0, i.e. NEGATIVE, which classified oak as molten at any
+    // energy whatsoever. Wood chars; it does not melt.
+    let (c, melt, fusion) = (m.specific_heat()?, m.melt_point()?, m.thermal.as_ref()?.latent_fusion as f64);
+    Some((c * (melt - REF_TEMP_K) + fusion) * m.density as f64)
+}
+
+/// Energy density (J/m³) to break a material down irreversibly, for those that decompose instead of
+/// melting: heat it from the reference temperature to its decomposition point. `None` if it melts (or if
+/// the breakdown temperature is unsourced).
+///
+/// FLAGGED: this counts only the sensible heat to reach breakdown, not the enthalpy of the reaction
+/// itself (calcination is strongly endothermic, pyrolysis mildly so), so it is a floor, not the full cost.
+pub fn decomposition_energy_density(m: &Material) -> Option<f64> {
+    let (c, t_d) = (m.specific_heat()?, m.decomposition_point()?);
+    Some(c * (t_d - REF_TEMP_K) * m.density as f64)
 }
 
 /// Energy density (J/m³) to fully vaporize the material: heat to melt + heat to boil + latent heats.
 /// A first model — it uses the solid specific heat throughout and ignores pressure (`docs/20`).
 pub fn vapor_energy_density(m: &Material) -> Option<f64> {
-    m.thermal.as_ref().map(|t| {
-        let per_kg = t.specific_heat as f64 * (t.melt_point as f64 - REF_TEMP_K)
-            + t.latent_fusion as f64
-            + t.specific_heat as f64 * (t.boil_point as f64 - t.melt_point as f64)
-            + t.latent_vaporization as f64;
-        per_kg * m.density as f64
-    })
+    // Requires BOTH a melting and a boiling point: something that decomposes on the way up never gets to
+    // be a vapour of itself.
+    let (c, melt, boil) = (m.specific_heat()?, m.melt_point()?, m.boil_point()?);
+    let t = m.thermal.as_ref()?;
+    let per_kg = c * (melt - REF_TEMP_K)
+        + t.latent_fusion as f64
+        + c * (boil - melt)
+        + t.latent_vaporization as f64;
+    Some(per_kg * m.density as f64)
 }
 
 /// Classify a parcel's fate from the deposited energy density (J/m³) and its material.
-pub fn classify(energy_density: f64, m: &Material) -> PhaseChange {
+pub fn classify(energy_density: f64, m: &Material, pressure_pa: f64) -> PhaseChange {
     if energy_density < m.fracture_strength as f64 {
         return PhaseChange::Intact;
+    }
+    // **Pressure picks the fate.** Melting and irreversible breakdown are a race, not a label: calcite
+    // calcines at 1,098 K on a kiln floor only because the CO₂ can leave. Under confinement the reaction
+    // is pushed back, the breakdown temperature climbs past the melting curve, and the same rock MELTS —
+    // which is the regime inside any impact worth simulating. Concrete does this too.
+    if m.decomposes_at(pressure_pa) {
+        if let Some(ed) = decomposition_energy_density(m) {
+            if energy_density >= ed {
+                return PhaseChange::Decomposed;
+            }
+        }
+        return PhaseChange::Fractured; // it will char before it can ever melt, so do not consider melting
     }
     if let Some(ev) = vapor_energy_density(m) {
         if energy_density >= ev {
@@ -72,6 +100,10 @@ pub fn classify(energy_density: f64, m: &Material) -> PhaseChange {
     }
     PhaseChange::Fractured
 }
+
+/// Standard sea-level pressure (Pa) — the ambient a bench-top experiment happens at, and the default for
+/// callers that genuinely have no confining pressure to offer.
+pub const ONE_ATM_PA: f64 = 101_325.0;
 
 /// Excavated crater volume (m³) for `energy` (J) into a material of yield `strength` (Pa), strength
 /// regime: `E ≈ σ·V`. A fluid (`strength ≈ 0`) holds no crater — it flows back — so this returns 0.
@@ -174,20 +206,28 @@ mod tests {
         // A single impact produces ALL of these at once — near-field vaporizes, mid melts, far
         // fractures — because the deposited energy density falls with distance. (Also a scale-of-detail
         // test: one event, several material fates.)
-        assert_eq!(classify(sigma * 0.5, basalt), PhaseChange::Intact);
-        assert_eq!(classify((sigma + em) * 0.5, basalt), PhaseChange::Fractured);
-        assert_eq!(classify((em + ev) * 0.5, basalt), PhaseChange::Melted);
-        assert_eq!(classify(ev * 2.0, basalt), PhaseChange::Vaporized);
+        assert_eq!(classify(sigma * 0.5, basalt, ONE_ATM_PA), PhaseChange::Intact);
+        assert_eq!(classify((sigma + em) * 0.5, basalt, ONE_ATM_PA), PhaseChange::Fractured);
+        assert_eq!(classify((em + ev) * 0.5, basalt, ONE_ATM_PA), PhaseChange::Melted);
+        assert_eq!(classify(ev * 2.0, basalt, ONE_ATM_PA), PhaseChange::Vaporized);
 
         // Planetary-scale sanity: a giant impact vaporizes rock (real giant impacts do — magma ocean +
         // rock-vapour atmosphere).
-        assert_eq!(classify(1.0e12, basalt), PhaseChange::Vaporized);
+        assert_eq!(classify(1.0e12, basalt, ONE_ATM_PA), PhaseChange::Vaporized);
 
-        // Honesty: with no thermal data we only claim fracture, never melt/vaporize. (Oak has none;
-        // the granular soils DID gain estimated thermal — flagged in the data — so impacts can vaporize
-        // them, docs/24. We only refuse to guess where we have nothing at all.)
+        // Wood has no melting point at ANY pressure — it pyrolyses. However much energy arrives, it can
+        // never be classified molten or vaporised; it chars. (This used to read `oak.thermal.is_none()`,
+        // back when the honesty came from having no data at all. The data is now sourced, and the honesty
+        // comes from the data saying what is actually true of wood.)
         let oak = &mats[crate::materials::index_of(&mats, "oak")];
-        assert!(oak.thermal.is_none());
-        assert_eq!(classify(1.0e12, oak), PhaseChange::Fractured);
+        assert!(oak.melt_point().is_none(), "wood does not melt");
+        assert_eq!(classify(1.0e12, oak, ONE_ATM_PA), PhaseChange::Decomposed);
+        assert_eq!(classify(1.0e12, oak, 1.0e11), PhaseChange::Decomposed, "not even under pressure");
+
+        // LIMESTONE, though, is decided by pressure — Robin's correction. On a kiln floor it calcines;
+        // inside an impact the CO₂ cannot escape, the reaction is suppressed, and the same rock melts.
+        let lime = &mats[crate::materials::index_of(&mats, "limestone")];
+        assert_eq!(classify(1.0e12, lime, ONE_ATM_PA), PhaseChange::Decomposed, "at 1 atm it calcines");
+        assert_eq!(classify(1.0e12, lime, 1.0e9), PhaseChange::Melted, "under a kilobar it melts");
     }
 }

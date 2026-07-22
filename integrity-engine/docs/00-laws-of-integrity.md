@@ -63,6 +63,30 @@ brute-force reference so speed cannot change the answer. Report findings, not tr
 honestly measured, is a real deliverable. When in doubt, run the experiment — the engine's whole reason
 for existing is that reality is the authority, not our expectation of it.
 
+**A distinction inside this law: check the MATERIALS DATA before making any claim about a material's
+physical behaviour.** Intuition about substances is unusually confident and unusually wrong, and it fails
+in a way the rest of this law does not catch — it feels like knowledge, not like a guess, so it never
+prompts a measurement.
+
+Both directions of that failure happened on the day this was written:
+
+* Filling in the catalogue's missing thermal data, oak and rubber were correctly given no melting point —
+  they pyrolyse — and limestone and concrete were put in the same box. **They do not belong there.**
+  Calcite calcines at 1,098 K on a kiln floor *only because the CO₂ can escape*; confine it and the
+  reaction is pushed back, the breakdown temperature climbs past the melting curve, and the same rock
+  melts near 1,612 K. That is precisely the regime inside an impact — the one place the engine most needs
+  to be right. Melting versus decomposition is not a label a material carries; it is a race that pressure
+  decides.
+* Going the other way, eleven of twenty-four materials had no thermal data at all, and three call sites
+  were quietly filling the gap with three different constants (specific heat 840, 1000, 1000) while a
+  fourth defaulted the boiling point to infinity — making an unsourced material unvaporizable however
+  much energy it absorbed. Nobody measured anything wrong; the numbers were simply assumed into being at
+  the point of use, where no reader would look for them.
+
+So: **read the entry before you assert the behaviour.** If the entry is silent, that is data to go and
+source, not a gap to paper over — and an unknown quantity must stay unknown at the boundary so the caller
+has to decide in the open whether it can proceed.
+
 ## VIII. This is a new kind of engine. Challenge what you "know".
 
 **We are building a completely new type of game engine. Challenge assumptions fed by understanding of

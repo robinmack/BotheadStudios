@@ -1,5 +1,5 @@
 {
-  "$comment": "PROTO-EARTH - the target of the giant impact, and a DIFFERENT BODY from modern Earth. Modern Earth is the RESULT: proto-Earth + Theia - the Moon - what escaped. Pointing the birth scene at earth.json produced a post-impact planet of 1.115 Earth masses, 11% too heavy, because it added a Mars-sized body to a planet that already included it. Mass here is 0.910 M_earth, which is what the budget demands (modern + Moon - Theia) and independently what the giant-impact literature gives (~0.9). Layer radii are modern Earth's scaled by (0.910)^(1/3) at unchanged densities - FLAGGED: a slightly less massive planet is also slightly less compressed, so the real proto-Earth's density profile differs a little from this. No atmosphere: modern air is a product of later outgassing and would not survive this impact anyway.",
+  "$comment": "PROTO-EARTH at the giant impact (~4.51 Ga) - a DIFFERENT BODY from modern Earth, which is the RESULT: proto-Earth + Theia - the Moon - what escaped. Pointing the birth scene at earth.json gave a post-impact planet of 1.115 Earth masses, 11% too heavy, because it added a Mars-sized body to a planet that already contained it. Mass here is 0.910 M_earth: what the budget demands, and independently what the giant-impact literature gives (~0.9). NO CONTINENTS, and no surface map, because there were none. At 4.51 Ga Earth was a MAGMA OCEAN: the oldest continental material we have is ~4.4 Ga zircon grains, the oldest surviving crust ~4.0 Ga, and paleogeographic reconstructions do not meaningfully reach past ~1 Ga. There is nothing to reconstruct, so nothing is drawn. The surface is molten peridotite rather than a basalt crust, and the declared geotherm (1,900 K at the surface) sits above peridotite's 1,393 K melt point - so MOLTEN emerges from the phase model and the glow emerges from the incandescence law. Neither is painted on. Layer radii are modern Earth's scaled by (0.910)^(1/3) at unchanged densities - FLAGGED: a less massive, hotter, fully molten planet is less compressed than this, so the real density profile differs somewhat. No atmosphere: modern air is later outgassing, and this impact would strip it regardless.",
   "name": "Proto-Earth",
   "layers": [
     {
@@ -27,15 +27,15 @@
       "material": "peridotite",
       "outer_r": 6137026,
       "density": 4500.0,
-      "t_inner": 2900.0,
-      "t_outer": 1600.0
+      "t_inner": 3200.0,
+      "t_outer": 2200.0
     },
     {
-      "material": "basalt",
+      "material": "peridotite",
       "outer_r": 6161203,
       "density": 2900.0,
-      "t_inner": 900.0,
-      "t_outer": 288.0
+      "t_inner": 2200.0,
+      "t_outer": 1900.0
     }
   ],
   "atmosphere_mass_kg": 0.0

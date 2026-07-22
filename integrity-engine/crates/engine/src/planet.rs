@@ -599,3 +599,52 @@ mod giant_impact_budget_tests {
         assert_eq!(super::body("proto-earth").atmosphere_mass, 0.0, "proto-Earth carries no declared air");
     }
 }
+
+#[cfg(test)]
+mod hadean_surface_tests {
+    /// **What did the continents look like at the giant impact? There weren't any.**
+    ///
+    /// The scene was previously going to show Theia striking a planet wearing modern Earth's coastlines,
+    /// 4.5 billion years before either the continents or the oceans existed. There is no paleogeographic
+    /// map to assign instead: the oldest continental material is ~4.4 Ga zircon, the oldest surviving
+    /// crust ~4.0 Ga, and reconstructions do not meaningfully reach past ~1 Ga. At 4.51 Ga Earth was a
+    /// magma ocean over a freshly differentiated core.
+    ///
+    /// So proto-Earth carries no surface map at all, and its molten state is DERIVED: the declared
+    /// geotherm is compared against the material's own melt point. Nothing here says "draw it glowing".
+    #[test]
+    fn proto_earth_is_a_magma_ocean_with_no_continents_to_draw() {
+        let proto = super::body("proto-earth");
+        let mats = crate::materials::load();
+
+        // No surface map, and none to be had — this is the answer, not an omission.
+        assert!(proto.surface.is_none(), "proto-Earth must carry no continents: there were none");
+
+        // The surface is mantle rock, not crust. Continental and oceanic crust are both later products.
+        let top = proto.layers.last().expect("layers");
+        assert_eq!(top.material, "peridotite", "no crust existed yet — the surface IS the mantle");
+
+        // MOLTEN, and emergent: the declared temperature exceeds the declared melt point. If either
+        // number changes, this conclusion changes with it, which is the point.
+        let rock = &mats[crate::materials::index_of(&mats, &top.material)];
+        let melt = rock.thermal.as_ref().expect("peridotite declares thermal properties").melt_point as f64;
+        assert!(
+            top.t_outer > melt,
+            "proto-Earth's surface ({} K) must be above peridotite's melt point ({melt} K) — molten is \
+             derived from the geotherm, never asserted",
+            top.t_outer
+        );
+        // ...and modern Earth's surface is not, by the same comparison. One rule, two answers, both right.
+        let modern = super::body("earth");
+        let modern_top = modern.layers.last().unwrap();
+        let modern_rock = &mats[crate::materials::index_of(&mats, &modern_top.material)];
+        assert!(
+            modern_top.t_outer < modern_rock.thermal.as_ref().unwrap().melt_point as f64,
+            "modern Earth's surface is solid rock, by the same test"
+        );
+
+        // Hot enough to glow visibly, which is what makes it read as a magma ocean without any art:
+        // the incandescence law starts at ~800 K.
+        assert!(top.t_outer > 800.0, "a magma ocean glows: {} K", top.t_outer);
+    }
+}
