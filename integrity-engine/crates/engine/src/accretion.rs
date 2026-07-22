@@ -532,8 +532,10 @@ mod resolution_tests {
 /// How the engine should represent a piece of matter right now.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Representation {
-    /// Still one body: draw its surface, at this centre and this radius.
-    Surface { centre: glam::DVec3, radius: f64 },
+    /// Still one body: draw its surface, at this centre and this radius. `coherence` is how much of it
+    /// is still itself (1.0 = untouched) — carried here because the caller needs it to hand over to the
+    /// particles smoothly, and because computing it twice is how the two answers start to disagree.
+    Surface { centre: glam::DVec3, radius: f64, coherence: f64 },
     /// No longer one body: the particles ARE the matter, draw those.
     Particles,
 }
@@ -568,8 +570,9 @@ pub fn representation(
                 // also require that it still occupies roughly the space a body of this kind occupies.
                 // Beyond that it is a debris field, whatever shape it happens to hold.
                 let compact = radius <= 2.0 * declared_radius;
-                if compact && coherence(pos, mass, 1.2 * radius) >= coherence_floor {
-                    Representation::Surface { centre, radius }
+                let c = coherence(pos, mass, 1.2 * radius);
+                if compact && c >= coherence_floor {
+                    Representation::Surface { centre, radius, coherence: c }
                 } else {
                     Representation::Particles
                 }
@@ -577,7 +580,8 @@ pub fn representation(
             None => Representation::Particles,
         },
         // Nothing resolved: the body is whole by definition, because nothing has happened to it.
-        _ => Representation::Surface { centre: declared_centre, radius: declared_radius },
+        // Nothing resolved: whole by definition, because nothing has happened to it.
+        _ => Representation::Surface { centre: declared_centre, radius: declared_radius, coherence: 1.0 },
     }
 }
 
@@ -605,7 +609,11 @@ mod representation_tests {
 
             // 1. UNRESOLVED — nothing has happened to it, so it is a body, wherever the scene put it.
             let whole = representation(None, centre, r, 0.75);
-            assert_eq!(whole, Representation::Surface { centre, radius: r }, "{what}: untouched ⇒ a body");
+            assert_eq!(
+                whole,
+                Representation::Surface { centre, radius: r, coherence: 1.0 },
+                "{what}: untouched ⇒ a whole body"
+            );
 
             // 2. RESOLVED AND INTACT — matter exists but still holds together, so still a surface, now
             //    measured from the matter itself rather than from the declaration.
@@ -617,7 +625,8 @@ mod representation_tests {
                 .collect();
             let m = vec![1.0; ball.len()];
             match representation(Some((&ball, &m)), centre, r, 0.75) {
-                Representation::Surface { centre: c, radius } => {
+                Representation::Surface { centre: c, radius, coherence } => {
+                    assert!(coherence > 0.9, "{what}: intact matter reads as coherent ({coherence:.2})");
                     assert!((c - centre).length() < 0.1 * r, "{what}: measured where the matter is");
                     assert!(radius > 0.5 * r && radius < 1.5 * r, "{what}: and at its measured size");
                 }
@@ -652,3 +661,18 @@ mod representation_tests {
         assert!((planet - drop).abs() < 1e-9, "the resolve threshold is scale-free ({planet} vs {drop})");
     }
 }
+
+/// The hand-over between a surface and its particles, as a 0..1 weight on the SURFACE.
+///
+/// Written once, here, beside the measurement it consumes. It was written twice — for the target and for
+/// the impactor — with the same intent and no guarantee the two would stay equal, which is the ordinary
+/// way one rule quietly becomes two.
+pub fn surface_weight(coherence: f64, floor: f64) -> f32 {
+    let t = ((coherence - floor) / 0.25).clamp(0.0, 1.0);
+    (t * t * (3.0 - 2.0 * t)) as f32
+}
+
+/// The tidal fraction at which the engine resolves matter into particles: 1% of a body's own surface
+/// gravity. Named because it was typed at two call sites that must never disagree — one deciding when to
+/// resolve, the other deciding where to start the approach.
+pub const RESOLVE_TIDAL_FRACTION: f64 = 0.01;

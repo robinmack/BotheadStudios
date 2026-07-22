@@ -39,7 +39,8 @@ fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     // tone-map it back into [0,1] — a dark, strongly-lit body ends up correctly bright.
     // NOTE (honesty): the sun DIRECTION here is still a placeholder; the real Sun body (proper
     // mass/distance) becomes the illuminant when the heliocentric view lands (docs/17).
-    let SUN_GAIN = 22.0;
+    // The exposure comes from the uniform (atmosphere::SUN_GAIN), not a second copy of the number.
+    let SUN_GAIN = u.atm.w;
     // NO ambient term: the Sun is the only appreciable light source in this universe (no other
     // stars are modelled), so the night side is genuinely BLACK. The old 0.02 "starlight fill" was a
     // fudged light source — Robin caught backlit bodies glowing that should have been dark crescents.

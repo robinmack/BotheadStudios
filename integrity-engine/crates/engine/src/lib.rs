@@ -1861,20 +1861,9 @@ mod app {
         ///
         /// FLAGGED: 1.2× is a coherence radius, not a physical boundary — the honest refinement is a
         /// self-bound clump test (`accretion`), which already exists and costs more per frame.
-        /// **What a body currently IS**: where it sits, how big it still is, and how much of it is still
-        /// itself. Measured from the particles, for EVERY body — not just the one the scene happens to
-        /// care about.
-        ///
-        /// This is the rule the engine should have been applying all along: a body is a body, drawn as a
-        /// resolved surface, until an event actually takes it apart. The first cut had it backwards — the
-        /// impact band built particles for both bodies at scene start and drew a surface over only the
-        /// target, so Theia arrived as a visible bundle of specks that had never been disrupted by
-        /// anything, and the struck Earth could only FADE rather than shrink, which made it flicker and
-        /// then disappear while a perfectly good remnant sat there.
-        ///
-        /// Returns `None` when this body has no particles at all.
-        /// This body's particles, if the engine has resolved any. Selection only — every decision about
-        /// what they MEAN belongs to `accretion`.
+
+        /// This body's particles, if the engine has resolved any. SELECTION ONLY — every decision about
+        /// what they mean belongs to `accretion`, so that a planet and a raindrop are judged by one rule.
         fn body_particles(&self, prov: u32) -> (Vec<glam::DVec3>, Vec<f64>) {
             self.sph_snapshot
                 .iter()
@@ -1883,23 +1872,6 @@ mod app {
                     (glam::DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64), p.mass as f64)
                 })
                 .unzip()
-        }
-
-        fn body_state(&self, prov: u32) -> Option<(glam::DVec3, f64, f64)> {
-            let (pos, mass): (Vec<glam::DVec3>, Vec<f64>) = self
-                .sph_snapshot
-                .iter()
-                .filter(|p| p.prov == prov)
-                .map(|p| {
-                    (glam::DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64), p.mass as f64)
-                })
-                .unzip();
-            let (centre, radius) = crate::accretion::body_extent(&pos, &mass)?;
-            // Coherence against the body's OWN measured radius, not its original one. A remnant that has
-            // lost mass is a smaller intact body, and must read as intact — otherwise the render fades
-            // out something that is plainly still there.
-            let coherent = crate::accretion::coherence(&pos, &mass, 1.2 * radius);
-            Some((centre, radius, coherent))
         }
 
         /// Mass, centre of mass and mean velocity of each impact body, straight from the live particle
@@ -1996,7 +1968,8 @@ mod app {
                 let (m_t, r_t) = (t_def.total_mass(), t_def.radius());
                 let (m_i, r_i) = (i_def.total_mass(), i_def.radius());
                 let contact = r_t + r_i;
-                let resolve_at = crate::accretion::resolution_distance(m_t, r_t, m_i, 0.01);
+                let resolve_at =
+                    crate::accretion::resolution_distance(m_t, r_t, m_i, crate::accretion::RESOLVE_TIDAL_FRACTION);
                 let d0 = 3.0 * resolve_at; // room to watch two solid worlds converge
                 let v_esc = (2.0 * crate::orbit::G * (m_t + m_i) / contact).sqrt();
                 // Speed at d0 for a trajectory whose speed at contact is the declared multiple of escape:
@@ -2128,7 +2101,7 @@ mod app {
                             target.total_mass(),
                             target.radius(),
                             impactor.total_mass(),
-                            0.01,
+                            crate::accretion::RESOLVE_TIDAL_FRACTION,
                         );
                         let sep = (self.bodies[2].pos - self.bodies[1].pos).length();
                         if sep <= resolve_at {
@@ -2685,7 +2658,7 @@ mod app {
                 let r_dec = self.impact_def.target.radius_m();
                 let resolved = (!pos.is_empty()).then_some((&pos[..], &mass[..]));
                 match crate::accretion::representation(resolved, earth_center, r_dec, 0.75) {
-                    crate::accretion::Representation::Surface { centre, radius } => Some((centre, radius, 1.0_f64)),
+                    crate::accretion::Representation::Surface { centre, radius, coherence } => Some((centre, radius, coherence)),
                     crate::accretion::Representation::Particles => None,
                 }
             };
@@ -2698,10 +2671,7 @@ mod app {
             // apart ⇒ the particles that ARE the matter; re-accreted ⇒ a surface again. Smoothstepped so
             // the handover is continuous rather than a pop.
             let coherence = target.map_or(1.0, |(_, _, c)| c);
-            let pretty_fade = {
-                let t = ((coherence - 0.55) / 0.25).clamp(0.0, 1.0);
-                (t * t * (3.0 - 2.0 * t)) as f32
-            };
+            let pretty_fade = crate::accretion::surface_weight(coherence, 0.55);
             self.render_blend = 1.0 - pretty_fade as f64; // particles take over as the surface loses meaning
             // **The impactor, by the same rule.** Measured position, measured radius, drawn as a solid
             // body for as long as it IS one — and it is one, all the way in, because nothing has touched
@@ -2724,16 +2694,13 @@ mod app {
                 let r_dec = self.impact_def.impactor.definition().radius();
                 let resolved = (!pos.is_empty()).then_some((&pos[..], &mass[..]));
                 match crate::accretion::representation(resolved, declared, r_dec, 0.75) {
-                    crate::accretion::Representation::Surface { centre, radius } => Some((centre, radius, 1.0_f64)),
+                    crate::accretion::Representation::Surface { centre, radius, coherence } => Some((centre, radius, coherence)),
                     crate::accretion::Representation::Particles => None,
                 }
             };
             // Its OWN coherence, independent of the target's — the two bodies are disrupted at different
             // times by different amounts, and each is drawn as what it currently is.
-            let impactor_fade = impactor.map_or(0.0, |(_, _, c)| {
-                let t = ((c - 0.55) / 0.25).clamp(0.0, 1.0);
-                (t * t * (3.0 - 2.0 * t)) as f32
-            });
+            let impactor_fade = impactor.map_or(0.0, |(_, _, c)| crate::accretion::surface_weight(c, 0.55));
             if let Some((ic, ir, _)) = impactor {
                 let ipos = ((ic - focus) * pretty_scale).as_vec3();
                 let idef = self.impact_def.impactor.definition();
