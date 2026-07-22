@@ -68,6 +68,33 @@ pub fn parse_catalog(bytes: &[u8]) -> Result<Vec<Star>, String> {
     Ok(stars)
 }
 
+/// **How long the sky can be treated as fixed**, in seconds: the time before the nearest star drifts by
+/// `angular_resolution_rad` for an observer moving at `speed_ms`. Pure geometry — a star's apparent
+/// motion is `v/d`, so the answer falls out of the nearest distance and nothing else.
+///
+/// This is the engine's version of Robin's rule: *"factor in the velocity relative to distance... stars
+/// are close enough to immobile even at solar escape velocity to only need position calculations once in
+/// a long interval."* Quantified, that is generous beyond belief — at 42 km/s (solar escape at 1 AU) the
+/// nearest naked-eye star moves ONE PIXEL IN 35 YEARS.
+///
+/// The renderer nonetheless recomputes every star every frame, and deliberately so: an ablation measured
+/// the star pass at 80 fps with and 80 fps without, i.e. free. Caching would mean a CPU pass plus a buffer
+/// upload on each refresh — strictly MORE work than the per-vertex arithmetic it replaces — in exchange
+/// for state, a staleness policy, and a correctness cliff at high speed. The stateless form is exact at
+/// any velocity and costs nothing measurable, so there is nothing to buy.
+///
+/// It becomes worth revisiting when the catalogue grows by orders of magnitude (the full HYG is 119,613
+/// stars; a galaxy is more), and the function is here so that decision is made against a NUMBER. Note the
+/// separate limit: near c, stellar ABERRATION shifts apparent positions far faster than parallax does,
+/// and that is a different correction, not a cache-invalidation interval.
+pub fn sky_fixed_for_seconds(nearest_pc: f64, speed_ms: f64, angular_resolution_rad: f64) -> f64 {
+    const PC_M: f64 = 3.085_677_581e16;
+    if speed_ms <= 0.0 {
+        return f64::INFINITY; // a stationary observer's sky never shifts by parallax
+    }
+    angular_resolution_rad * nearest_pc * PC_M / speed_ms
+}
+
 /// Greenwich Mean Sidereal Time (radians) — how far Earth has turned under the stars. Shared with the
 /// solar position so the Sun and the sky cannot disagree about what time it is.
 pub fn gmst_rad(unix_seconds: f64) -> f64 {
@@ -167,6 +194,30 @@ mod tests {
         assert!(parse_catalog(&[0u8; 21]).is_err(), "21 bytes is not whole 20-byte records");
         assert!(parse_catalog(&[]).is_err(), "an empty catalogue is not a sky");
         assert!(parse_catalog(&[0u8; 40]).is_ok(), "two whole records parse");
+    }
+
+    /// Quantify the "stars are effectively immobile" claim, because an engine should hold the RULE and
+    /// not a hardcoded interval. The numbers here are what justify recomputing the sky every frame
+    /// without a cache — and what would justify a cache if the catalogue ever grew enough to matter.
+    #[test]
+    fn the_sky_holds_still_for_decades_at_any_speed_we_can_reach() {
+        const NEAREST_PC: f64 = 1.34; // Alpha Centauri, the nearest naked-eye star
+        const ONE_PIXEL: f64 = 0.9 / 800.0; // the engine's FOV over a typical viewport
+        let years = |v: f64| sky_fixed_for_seconds(NEAREST_PC, v, ONE_PIXEL) / 3.15576e7;
+
+        // At solar escape velocity the nearest star drifts one pixel in ~35 YEARS.
+        let escape = years(4.2e4);
+        assert!((30.0..40.0).contains(&escape), "≈35 years at solar escape, got {escape:.1}");
+        // Even at 1% of light speed it is months, not frames.
+        assert!(years(3.0e6) > 0.4, "≈6 months at 0.01c, got {:.2} years", years(3.0e6));
+        // Slower observer ⇒ the sky holds still longer; a stationary one, for ever.
+        assert!(years(1.7e4) > escape, "Voyager's pace holds longer than escape velocity");
+        assert!(sky_fixed_for_seconds(NEAREST_PC, 0.0, ONE_PIXEL).is_infinite(), "standing still ⇒ no parallax");
+        // A more distant star holds still proportionally longer — the rule is v/d, nothing else.
+        assert!(
+            (sky_fixed_for_seconds(13.4, 4.2e4, ONE_PIXEL) / sky_fixed_for_seconds(1.34, 4.2e4, ONE_PIXEL) - 10.0).abs() < 1e-9,
+            "ten times farther ⇒ ten times longer"
+        );
     }
 
     /// Sidereal time must advance one full turn per SIDEREAL day (23h56m04s), not per solar day — that
