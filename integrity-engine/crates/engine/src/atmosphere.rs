@@ -333,6 +333,13 @@ impl AirField {
 /// Travis 1974); the λ⁻⁴ is molecular (Rayleigh) physics, the coefficient is our declared N₂/O₂
 /// column doing the scattering. THE BLUE MARBLE IS DERIVED, NEVER PAINTED: remove the atmosphere and
 /// the blue leaves with it.
+/// The exposure the Rayleigh veil is displayed at — the sun's radiance in the same arbitrary units as
+/// albedo, before the Reinhard tonemap. It is a DISPLAY constant (a camera exposure), not a physical
+/// dial: it scales what the eye sees, never what the air does. It lives here because every view of the
+/// same air must use the SAME exposure — the ground sky and the globe seen from orbit are one
+/// atmosphere, and two gains would make one planet look like two.
+pub const SUN_GAIN: f32 = 22.0;
+
 pub fn rayleigh_tau(pressure_ratio: f64) -> [f64; 3] {
     let t = |um: f64| 0.0088 * pressure_ratio * um.powf(-4.05);
     [t(0.650), t(0.550), t(0.450)]

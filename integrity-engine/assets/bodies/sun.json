@@ -1,0 +1,28 @@
+{
+  "$comment": "THE SUN, declared as its real construction (standard solar model, coarse 3-layer binning): H\u2013He plasma whose layer mean densities carry the enormous compression (150,000 kg/m\u00b3 core \u2192 ~0.1 near the surface), exactly as PREM's do for Earth. Its mass \u2014 and therefore every orbit in the system \u2014 EMERGES from the declared composition; SUN_MASS-the-constant retires (docs/27: 'calculate the sun's mass as a material so the gravity manifests naturally', Robin).",
+  "name": "The Sun",
+  "layers": [
+    {
+      "material": "hh_plasma",
+      "outer_r": 174000000.0,
+      "density": 45200.0,
+      "t_inner": 15700000.0,
+      "t_outer": 7000000.0
+    },
+    {
+      "material": "hh_plasma",
+      "outer_r": 487000000.0,
+      "density": 1940.0,
+      "t_inner": 7000000.0,
+      "t_outer": 2000000.0
+    },
+    {
+      "material": "hh_plasma",
+      "outer_r": 696000000.0,
+      "density": 97.0,
+      "t_inner": 2000000.0,
+      "t_outer": 5772.0
+    }
+  ],
+  "atmosphere_mass_kg": 0.0
+}

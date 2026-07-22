@@ -1,0 +1,21 @@
+{
+  "$comment": "THEIA \u2014 the Mars-sized impactor of the giant-impact hypothesis (docs/27: the birth of the Moon). Declared as a differentiated Mars-like body: iron core, peridotite mantle, hot from accretion. Layer masses integrate to ~6.5e23 kg (Mars-scale, the theorized impactor class).",
+  "name": "Theia",
+  "layers": [
+    {
+      "material": "iron",
+      "outer_r": 1800000.0,
+      "density": 7200.0,
+      "t_inner": 2600.0,
+      "t_outer": 2400.0
+    },
+    {
+      "material": "peridotite",
+      "outer_r": 3390000.0,
+      "density": 3400.0,
+      "t_inner": 2200.0,
+      "t_outer": 1200.0
+    }
+  ],
+  "atmosphere_mass_kg": 0.0
+}

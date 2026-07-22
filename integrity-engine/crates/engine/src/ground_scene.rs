@@ -148,7 +148,7 @@ fn build_sky_pipeline(
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("sky-shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/sky.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(concat!(include_str!("../../../shaders/rayleigh.wgsl"), include_str!("../../../shaders/sky.wgsl")).into()),
     });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("sky-pipeline-layout"),
@@ -897,10 +897,11 @@ fn write_uniform(queue: &wgpu::Queue, slot: &UniformSlot, vp: Mat4, model: Mat4,
 }
 
 fn write_sky(queue: &wgpu::Queue, slot: &UniformSlot, vp: Mat4, eye: Vec3, light: Vec3, tau: [f64; 3]) {
-    // Sun gain: the exposure the veil is displayed at. Recovered from the working terrain scene — with
-    // the 1.0 first guessed here the Rayleigh term is far below display range and the sky renders BLACK,
-    // which is exactly what the first rig shot showed.
-    const SUN_GAIN: f32 = 22.0;
+    // Sun gain: the exposure the veil is displayed at (atmosphere::SUN_GAIN — shared with the globe, so
+    // one atmosphere is shown at one exposure whether you are under it or above it). Recovered from the
+    // working terrain scene: with the 1.0 first guessed here the Rayleigh term is far below display range
+    // and the sky renders BLACK, which is exactly what the first rig shot showed.
+    use crate::atmosphere::SUN_GAIN;
     // The sky reads the SAME sun direction the ground is lit by, so there is one illumination, not two.
     let u = SkyUniforms {
         inv_view_proj: vp.inverse().to_cols_array_2d(),

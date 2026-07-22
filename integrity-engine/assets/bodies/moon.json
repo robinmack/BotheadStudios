@@ -1,0 +1,35 @@
+{
+  "$comment": "THE definition of the Moon - data, not code. ONE file, referenced by every scene, so improving this body improves every world that uses it. Radii m; densities kg/m3 (in-situ/compressed, PREM-style); temperatures K at each layer's inner and outer boundary, linear between. atmosphere_mass_kg is DECLARED (measured) - surface pressure is NEVER declared, it emerges as the weight of that column, P = M*g/(4*pi*R^2).",
+  "name": "the Moon",
+  "layers": [
+    {
+      "material": "iron",
+      "outer_r": 240000.0,
+      "density": 7800.0,
+      "t_inner": 1800.0,
+      "t_outer": 1820.0
+    },
+    {
+      "material": "iron",
+      "outer_r": 330000.0,
+      "density": 7000.0,
+      "t_inner": 2000.0,
+      "t_outer": 1960.0
+    },
+    {
+      "material": "peridotite",
+      "outer_r": 1697000.0,
+      "density": 3350.0,
+      "t_inner": 1800.0,
+      "t_outer": 500.0
+    },
+    {
+      "material": "basalt",
+      "outer_r": 1737000.0,
+      "density": 2900.0,
+      "t_inner": 500.0,
+      "t_outer": 250.0
+    }
+  ],
+  "atmosphere_mass_kg": 0.0
+}
