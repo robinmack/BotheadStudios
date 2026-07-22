@@ -247,3 +247,62 @@ mod pinned_constant_tests {
         );
     }
 }
+
+/// The low-level collision primitives. A SCENE must never call these — detecting a collision is the
+/// engine's job (`interaction::detect_swept`), and a scene that forecasts contact or recovers a contact
+/// state by hand is a scene dictating its own physics.
+pub(crate) const COLLISION_PRIMITIVES: &[&str] = &["swept_first_contact", "contact_velocity"];
+
+/// The scene-facing modules: they own a canvas, a camera and a set of declared bodies, and nothing else.
+/// A scene describes objects, trajectories and user controls; the engine does the physics.
+pub(crate) const SCENE_MODULES: &[&str] = &["lib.rs", "ground_scene.rs"];
+
+#[cfg(test)]
+mod scene_purity_tests {
+    /// **A scene describes; the engine simulates.**
+    ///
+    /// Robin: "we should be able to inject user controls (camera, etc) but not drive any physics from the
+    /// scene itself... ensuring we don't try to dictate our own collision physics." This is that,
+    /// mechanically: the collision-DETECTION primitives (forecast the contact, recover the true contact
+    /// state) may be CALLED only by the engine's one collision owner, `interaction`. A scene reaches
+    /// collisions through `interaction::detect_swept` and reads back what the engine found — it never runs
+    /// its own swept-CCD loop, which is what `OrbitDemo` used to do, twice.
+    ///
+    /// The test scans the scene modules' source and asserts the primitives appear only as FIELD READS of
+    /// a `DetectedCollision` (`c.contact_velocity`), never as function CALLS (`contact_velocity(`).
+    #[test]
+    fn a_scene_never_calls_the_collision_primitives_itself() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        for &scene in super::SCENE_MODULES {
+            let path = format!("{dir}/{scene}");
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("{scene} must exist"));
+            // Strip line comments — prose may name a primitive while explaining that the scene no longer
+            // calls it, which is exactly what the migration comments do.
+            let code: String = text
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            for &prim in super::COLLISION_PRIMITIVES {
+                let call = format!("{prim}(");
+                assert!(
+                    !code.contains(&call),
+                    "{scene} calls `{call}` — collision detection belongs to the engine \
+                     (`interaction::detect_swept`), not a scene. A scene declares which bodies exist and \
+                     where; it does not forecast their contacts."
+                );
+            }
+        }
+
+        // And the owner really does own it — the primitives ARE called there, or the invariant is vacuous.
+        let owner = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/interaction.rs"))
+            .expect("interaction.rs exists");
+        for &prim in super::COLLISION_PRIMITIVES {
+            assert!(
+                owner.contains(&format!("{prim}(")),
+                "the collision owner `interaction` must actually call `{prim}` — otherwise this test \
+                 guards nothing"
+            );
+        }
+    }
+}

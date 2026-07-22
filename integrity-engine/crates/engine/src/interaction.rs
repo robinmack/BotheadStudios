@@ -37,14 +37,22 @@ pub struct BodyState {
     pub strength_pa: f64,
 }
 
-/// A contact the engine detected on its own, and what to do about it.
+/// A contact the engine detected on its own — everything a response needs, computed by the engine from
+/// the bodies it holds. A scene reads these; it does not compute them.
 #[derive(Debug, Clone, Copy)]
 pub struct DetectedCollision {
-    /// Indices into the body slice: the struck body and the striking one.
+    /// Indices into the body slice: the struck body (the more massive) and the striking one.
     pub struck: usize,
     pub striker: usize,
     /// Fraction of the step at which contact first occurs (0 = already touching).
     pub toi: f64,
+    /// The contact point, in world coordinates.
+    pub site: DVec3,
+    /// The TRUE relative velocity at the moment of contact — recovered from the conservation laws
+    /// (vis-viva + angular momentum), NOT the raw post-step sample, which fast-forward renders garbage.
+    pub contact_velocity: DVec3,
+    /// Reduced-mass impact energy at contact (J): ½·μ·v_contact².
+    pub energy_j: f64,
     pub response: Response,
 }
 
@@ -119,34 +127,74 @@ pub fn respond(i: &Interaction) -> Response {
 /// is ½·μ·v_rel² with the reduced mass μ, which is the energy actually available at the contact frame,
 /// not either body's kinetic energy in an arbitrary frame.
 pub fn detect(bodies: &[BodyState], dt: f64) -> Vec<DetectedCollision> {
+    // Linear projection of where each body will be — the convenience entry for a caller holding only the
+    // current state. The scene path uses `detect_swept` with its real integrated endpoints.
+    let after: Vec<DVec3> = bodies.iter().map(|b| b.pos + b.vel * dt).collect();
+    let active = vec![true; bodies.len()];
+    detect_swept(bodies, &after, &active)
+}
+
+/// **The detection core.** `before` is every body's state at the START of the step; `after_pos` is where
+/// the integrator ACTUALLY put each one (so gravity's curvature within the step is respected, not
+/// linearised away); `active[i]` is false for a body already resolved this event, so it is not detected
+/// twice.
+///
+/// Sweeps every ordered pair, forecasts contact on the continuous segment (a fast body cannot tunnel
+/// through a slow one between samples), and for each hit recovers the TRUE contact state from the
+/// conservation laws — the vis-viva speed at the surface and the angular-momentum tangent — rather than
+/// trusting a post-step sample. The reduced-mass energy uses that contact speed. Everything here is the
+/// engine reading its own state; nothing is handed in by a scene.
+pub fn detect_swept(
+    before: &[BodyState],
+    after_pos: &[DVec3],
+    active: &[bool],
+) -> Vec<DetectedCollision> {
     let mut out = Vec::new();
-    for a in 0..bodies.len() {
-        for b in (a + 1)..bodies.len() {
-            let (ba, bb) = (bodies[a], bodies[b]);
+    for a in 0..before.len() {
+        for b in (a + 1)..before.len() {
+            if !active[a] || !active[b] {
+                continue;
+            }
+            let (ba, bb) = (before[a], before[b]);
             let r_sum = ba.radius_m + bb.radius_m;
             let rel_old = bb.pos - ba.pos;
-            let rel_new = (bb.pos + bb.vel * dt) - (ba.pos + ba.vel * dt);
-            // Forecast, don't sample: the same continuous-trajectory test the N-body loop uses.
+            let rel_new = after_pos[b] - after_pos[a];
             let Some(toi) = crate::orbit::swept_first_contact(rel_old, rel_new, r_sum) else {
                 continue;
             };
-            // The more massive body is the one struck; the lighter is the impactor.
+            // The more massive body is struck; the lighter is the impactor.
             let (struck, striker) = if ba.mass_kg >= bb.mass_kg { (a, b) } else { (b, a) };
-            let (s, k) = (bodies[struck], bodies[striker]);
-            let v_rel = (k.vel - s.vel).length();
-            let mu = s.mass_kg * k.mass_kg / (s.mass_kg + k.mass_kg).max(1e-30);
-            let energy_j = 0.5 * mu * v_rel * v_rel;
-            // A forecast time-of-impact in [0,1] IS contact by definition, so the interaction's separation
-            // is exactly the contact radius — not a subtracted float that can land a hair outside it and
-            // make `respond` report "not touching" about a collision the engine just forecast.
-            let interaction = Interaction {
+            let (sbody, kbody) = (before[struck], before[striker]);
+            // Relative kinematics in the struck body's frame — the frame `contact_velocity` works in.
+            let rel_old_s = kbody.pos - sbody.pos;
+            let vel_old_s = kbody.vel - sbody.vel;
+            let rel_contact = rel_old_s + ((after_pos[striker] - after_pos[struck]) - rel_old_s) * toi;
+            let n_hat = rel_contact.normalize_or_zero();
+            let mu_grav = crate::orbit::G * (sbody.mass_kg + kbody.mass_kg);
+            let contact_velocity =
+                crate::orbit::contact_velocity(rel_old_s, vel_old_s, n_hat, r_sum, mu_grav);
+            let m_red = sbody.mass_kg * kbody.mass_kg / (sbody.mass_kg + kbody.mass_kg).max(1e-30);
+            let energy_j = 0.5 * m_red * contact_velocity.length_squared();
+            let site = after_pos[struck] + rel_contact;
+            // A forecast time-of-impact IS contact, so the interaction's separation is exactly the contact
+            // radius — never a subtracted float that lands a hair outside it and makes `respond` deny a
+            // collision the engine just forecast.
+            let response = respond(&Interaction {
                 energy_j,
-                strength_pa: s.strength_pa,
+                strength_pa: sbody.strength_pa,
                 separation_m: r_sum,
-                bodies: [(s.mass_kg, s.radius_m), (k.mass_kg, k.radius_m)],
-                at: s.pos + (k.pos - s.pos) * (s.radius_m / r_sum),
-            };
-            out.push(DetectedCollision { struck, striker, toi, response: respond(&interaction) });
+                bodies: [(sbody.mass_kg, sbody.radius_m), (kbody.mass_kg, kbody.radius_m)],
+                at: site,
+            });
+            out.push(DetectedCollision {
+                struck,
+                striker,
+                toi,
+                site,
+                contact_velocity,
+                energy_j,
+                response,
+            });
         }
     }
     out

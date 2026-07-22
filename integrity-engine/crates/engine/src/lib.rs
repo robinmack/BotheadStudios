@@ -2101,6 +2101,11 @@ mod app {
                     // moment tidal stress across the target reaches a percent of its own surface gravity
                     // — a distance the physics gives (17,700 km here, 1.86x contact), not a cue.
                     SphPhase::Approaching => {
+                        // **The two SOLID bodies actually converge.** This phase used only to CHECK the
+                        // separation and return — it never moved the bodies, so the approach never closed:
+                        // they sat at arm's length while the analytical "IMPACT IN T−N" countdown promised
+                        // a collision that could not arrive. They are whole bodies on an inbound
+                        // trajectory; integrate them under gravity at the scene's fast-forward rate.
                         let target = self.impact_def.target.definition();
                         let impactor = self.impact_def.impactor.definition();
                         let resolve_at = crate::accretion::resolution_distance(
@@ -2109,10 +2114,24 @@ mod app {
                             impactor.total_mass(),
                             crate::accretion::RESOLVE_TIDAL_FRACTION,
                         );
-                        let sep = (self.bodies[2].pos - self.bodies[1].pos).length();
-                        if sep <= resolve_at {
-                            self.sph_phase = SphPhase::Assembling;
+                        self.real_accum += real_dt;
+                        let real_per_sub = 1.0 / 960.0;
+                        let dt_sub = self.time_scale / 960.0;
+                        let mut steps = 0u32;
+                        while self.real_accum >= real_per_sub && steps < 96 {
+                            // Hand off to the resolved SPH the moment tides make "two point masses" a lie
+                            // — which is above contact, so `step_substep` never detects an N-body collision
+                            // here and never materialises the wrong kind of debris.
+                            let sep = (self.bodies[2].pos - self.bodies[1].pos).length();
+                            if sep <= resolve_at {
+                                self.sph_phase = SphPhase::Assembling;
+                                break;
+                            }
+                            self.real_accum -= real_per_sub;
+                            self.step_substep(dt_sub);
+                            steps += 1;
                         }
+                        self.push_snapshot();
                         return;
                     }
                     // ASSEMBLE: once the relaxed bodies are read back, compute the collision geometry from the
@@ -2226,92 +2245,73 @@ mod app {
         /// One physics substep: N-body verlet + swept CCD (conservation-law contact state) + the
         /// mutual-impact materialization + the debris cloud. Pure physics — no rendering state.
         fn step_substep(&mut self, dt: f64) {
-            let contact = EARTH_RADIUS_M + self.impactor_radius; // surfaces touch here
-            // EVERY impactor that lands, not just the first. This was a single Option and the loop below
-            // filled it only for `k == 0`, so a second body striking the same planet added its energy to
-            // the total and was parked at the contact point intact — Two Moons dropped together produced
-            // one impact and one silently absorbed collision. The same event cannot get two treatments
-            // because of an array index.
-            let mut shatters: Vec<(glam::DVec3, glam::DVec3, f64, f64, usize)> = Vec::new(); // (site, v, E, mass, body index)
-            let n_moons = self.bodies.len() - 2;
+            // Surfaces touch here — used by the parking pass below (the detector reads each body's own
+            // radius, so it does not need this).
+            let contact = EARTH_RADIUS_M + self.impactor_radius;
 
-            // Position AND velocity relative to Earth BEFORE the step: the swept CCD finds *where* the
-            // path crosses the surface, and the conservation laws recover the true state *there*.
-            let earth_before = self.bodies[1].pos;
-            let earth_vel_before = self.bodies[1].vel;
-            let rel_old: Vec<glam::DVec3> =
-                (0..n_moons).map(|k| self.bodies[2 + k].pos - earth_before).collect();
-            let vel_old: Vec<glam::DVec3> =
-                (0..n_moons).map(|k| self.bodies[2 + k].vel - earth_vel_before).collect();
+            // **Detection is the ENGINE's job, not the scene's** (Robin: "the engine should detect an
+            // imminent collision and prepare everything on its own... It must be the sole owner of
+            // collisions"). This scene used to run its own two swept-CCD loops — Earth-vs-moon and
+            // moon-vs-moon — each re-deriving the contact state by hand. That is the render reaching into
+            // physics. It now hands the engine the bodies it holds and reads back the collisions the
+            // engine found; the scene only EXECUTES the responses, using its own materialisation.
+            let strength = self.mats[materials::index_of(&self.mats, "basalt")].fracture_strength as f64;
+            let body_state = |i: usize| {
+                let r = if i == 1 { EARTH_RADIUS_M } else { self.impactor_radius };
+                crate::interaction::BodyState {
+                    pos: self.bodies[i].pos,
+                    vel: self.bodies[i].vel,
+                    mass_kg: self.bodies[i].mass,
+                    radius_m: r,
+                    strength_pa: strength,
+                }
+            };
+            let before: Vec<crate::interaction::BodyState> =
+                (0..self.bodies.len()).map(body_state).collect();
 
             crate::orbit::verlet_step(&mut self.bodies, &mut self.acc, dt);
             // The planet visibly ROTATES at the rate its spin angular momentum implies.
             self.spin_angle += dt * self.spin_l.length()
                 / crate::tides::moment_of_inertia(self.bodies[1].mass, EARTH_RADIUS_M);
 
-            // SWEPT continuous collision (the general "forecast the path" primitive, docs/13).
-            let (earth_pos, earth_vel) = (self.bodies[1].pos, self.bodies[1].vel);
-            for k in 0..n_moons {
-                if self.moon_hit[k] {
-                    continue;
-                }
-                let moon = self.bodies[2 + k];
-                let rel_new = moon.pos - earth_pos;
-                if let Some(t) = crate::orbit::swept_first_contact(rel_old[k], rel_new, contact) {
-                    self.moon_hit[k] = true;
-                    self.impacted = true;
-                    // First-contact point on Earth's surface, from the path fraction t; the TRUE state
-                    // there from the two-body conservation laws (vis-viva + angular momentum) — never
-                    // the post-step sample, which fast-forward renders garbage.
-                    let rel_contact = rel_old[k] + (rel_new - rel_old[k]) * t;
-                    let site = earth_pos + rel_contact;
-                    let n_hat = rel_contact.normalize_or_zero();
-                    let mu = crate::orbit::G * (self.bodies[1].mass + moon.mass);
-                    let v_contact =
-                        crate::orbit::contact_velocity(rel_old[k], vel_old[k], n_hat, contact, mu);
-                    let m_red = self.bodies[1].mass * moon.mass / (self.bodies[1].mass + moon.mass);
-                    let energy = 0.5 * m_red * v_contact.length_squared();
-                    self.impact_energy_j += energy;
-                    // The impactor's fragments CARRY this velocity; the one contact law transfers the
-                    // momentum into Earth's materialized matter and dissipation heats it. Each impactor
-                    // brings its OWN mass, so a small one cannot borrow a large one's debris budget.
-                    shatters.push((site, v_contact, energy, moon.mass, 2 + k));
-                    // Park the point mass AT the impact point, co-moving with Earth.
-                    self.bodies[2 + k].pos = site;
-                    self.bodies[2 + k].vel = earth_vel;
-                }
-            }
+            // The integrated endpoints, and which bodies may still collide (a moon already materialised
+            // into Earth is no longer a distinct body to detect). The Sun (index 0) never reaches anything
+            // — it is checked and correctly finds nothing, which is more honest than special-casing it out.
+            let after_pos: Vec<glam::DVec3> = self.bodies.iter().map(|b| b.pos).collect();
+            let active: Vec<bool> = (0..self.bodies.len())
+                .map(|i| i < 2 || !self.moon_hit[i - 2])
+                .collect();
+            let collisions = crate::interaction::detect_swept(&before, &after_pos, &active);
 
-            // MOON-vs-MOON collisions — the SAME primitives as moon-vs-Earth (every solid object is
-            // matter): swept CCD on the pre-step relative path, the true contact state from the
-            // conservation laws, an inelastic momentum-conserving merge, and the dissipated energy
-            // accounted. (Materializing a moon-moon impact cloud — the same builder with the target's
-            // layered profile — is the flagged next step; detection/resolution no longer special-cases
-            // Earth.)
-            let mm_contact = 2.0 * MOON_RADIUS_M;
-            for i in 0..n_moons {
-                for j in (i + 1)..n_moons {
-                    let (a, b) = (self.bodies[2 + i], self.bodies[2 + j]);
-                    let rel_o = rel_old[i] - rel_old[j];
-                    let rel_n = (a.pos - self.bodies[1].pos) - (b.pos - self.bodies[1].pos);
-                    if let Some(t) = crate::orbit::swept_first_contact(rel_o, rel_n, mm_contact) {
-                        let v_rel_o = vel_old[i] - vel_old[j];
-                        let rel_c = rel_o + (rel_n - rel_o) * t;
-                        let n_hat = rel_c.normalize_or_zero();
-                        let mu_g = crate::orbit::G * (a.mass + b.mass);
-                        let v_c = crate::orbit::contact_velocity(rel_o, v_rel_o, n_hat, mm_contact, mu_g);
-                        let m_red = a.mass * b.mass / (a.mass + b.mass);
-                        self.impact_energy_j += 0.5 * m_red * v_c.length_squared();
-                        self.impacted = true;
-                        // Inelastic merge at the contact configuration: both to the COM velocity,
-                        // separated by exactly the contact distance (momentum conserved).
-                        let v_com = (a.vel * a.mass + b.vel * b.mass) / (a.mass + b.mass);
-                        let mid = (a.pos * a.mass + b.pos * b.mass) / (a.mass + b.mass);
-                        self.bodies[2 + i].pos = mid + n_hat * (mm_contact * a.mass / (a.mass + b.mass));
-                        self.bodies[2 + j].pos = mid - n_hat * (mm_contact * b.mass / (a.mass + b.mass));
-                        self.bodies[2 + i].vel = v_com;
-                        self.bodies[2 + j].vel = v_com;
-                    }
+            // EVERY impactor that lands materialises — the per-impactor debris the multi-body fix added.
+            let mut shatters: Vec<(glam::DVec3, glam::DVec3, f64, f64, usize)> = Vec::new(); // (site, v, E, mass, index)
+            for c in &collisions {
+                self.impacted = true;
+                self.impact_energy_j += c.energy_j;
+                if c.struck == 1 {
+                    // Earth was struck: the impactor becomes matter at the interface. The engine already
+                    // recovered the true contact site and velocity; the scene only materialises them.
+                    let k = c.striker - 2;
+                    self.moon_hit[k] = true;
+                    shatters.push((c.site, c.contact_velocity, c.energy_j, before[c.striker].mass_kg, c.striker));
+                    // Park the point mass at the impact point, co-moving with Earth.
+                    self.bodies[c.striker].pos = c.site;
+                    self.bodies[c.striker].vel = self.bodies[1].vel;
+                } else if c.struck >= 2 && c.striker >= 2 {
+                    // Moon-vs-moon: an inelastic momentum-conserving merge at the contact configuration.
+                    // (Materialising this cloud with the target's layered profile is the flagged next
+                    // step; detection no longer special-cases which pair it is.)
+                    let (i, j) = (c.struck, c.striker);
+                    let (a, b) = (self.bodies[i], self.bodies[j]);
+                    let m = a.mass + b.mass;
+                    let n_hat = (self.bodies[j].pos - self.bodies[i].pos).normalize_or_zero();
+                    let mm_contact = before[i].radius_m + before[j].radius_m;
+                    let v_com = (a.vel * a.mass + b.vel * b.mass) / m;
+                    let mid = (a.pos * a.mass + b.pos * b.mass) / m;
+                    self.bodies[i].pos = mid + n_hat * (mm_contact * a.mass / m);
+                    self.bodies[j].pos = mid - n_hat * (mm_contact * b.mass / m);
+                    self.bodies[i].vel = v_com;
+                    self.bodies[j].vel = v_com;
                 }
             }
 
