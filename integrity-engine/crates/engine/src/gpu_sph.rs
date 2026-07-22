@@ -268,12 +268,15 @@ pub fn disk_stats_json(particles: &[SphParticle]) -> String {
     let (mut e_disk, mut t_disk, mut esc) = (0.0f64, 0.0f64, 0.0f64);
     for p in particles {
         let m = p.mass as f64;
-        match crate::orbit::perigee(pos(p) - com, vel(p) - v_com, mu) {
-            None => esc += m,
-            Some(pg) if pg > r_remnant => {
-                if p.prov == 0 { e_disk += m } else { t_disk += m }
-            }
-            Some(_) => {}
+        let (rel_p, rel_v) = (pos(p) - com, vel(p) - v_com);
+        // BOUND first, then geometry. Asking `perigee` for boundedness was safe only while it refused to
+        // describe hyperbolic orbits; once it could, everything leaving counted as disk.
+        if !crate::orbit::is_bound(rel_p, rel_v, mu) {
+            esc += m;
+            continue;
+        }
+        if matches!(crate::orbit::perigee(rel_p, rel_v, mu), Some(pg) if pg > r_remnant) {
+            if p.prov == 0 { e_disk += m } else { t_disk += m }
         }
     }
     let disk = e_disk + t_disk;
@@ -282,8 +285,9 @@ pub fn disk_stats_json(particles: &[SphParticle]) -> String {
     let (dp, dv, dm, dr): (Vec<DVec3>, Vec<DVec3>, Vec<f64>, Vec<f64>) = {
         let (mut p, mut v, mut m, mut r) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for pt in particles {
-            let peri = crate::orbit::perigee(pos(pt) - com, vel(pt) - v_com, mu);
-            if matches!(peri, Some(pg) if pg > r_remnant) {
+            let (rel_p, rel_v) = (pos(pt) - com, vel(pt) - v_com);
+            let peri = crate::orbit::perigee(rel_p, rel_v, mu);
+            if crate::orbit::is_bound(rel_p, rel_v, mu) && matches!(peri, Some(pg) if pg > r_remnant) {
                 p.push(pos(pt));
                 v.push(vel(pt));
                 m.push(pt.mass as f64);

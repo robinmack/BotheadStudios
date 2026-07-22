@@ -1843,26 +1843,17 @@ mod app {
         /// FLAGGED: 1.2× is a coherence radius, not a physical boundary — the honest refinement is a
         /// self-bound clump test (`accretion`), which already exists and costs more per frame.
         fn body_coherence(&self, prov: u32, radius_m: f64) -> f64 {
-            let mut inside = 0.0f64;
-            let mut total = 0.0f64;
-            let mut c = glam::DVec3::ZERO;
-            for p in self.sph_snapshot.iter().filter(|p| p.prov == prov) {
-                let m = p.mass as f64;
-                c += glam::DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64) * m;
-                total += m;
-            }
-            if total <= 0.0 {
-                return 0.0;
-            }
-            c /= total;
-            let r2 = (1.2 * radius_m).powi(2);
-            for p in self.sph_snapshot.iter().filter(|p| p.prov == prov) {
-                let d = glam::DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64) - c;
-                if d.length_squared() <= r2 {
-                    inside += p.mass as f64;
-                }
-            }
-            inside / total
+            // The measurement itself lives in `accretion` — it is a question about matter, not about a
+            // scene. Here we only pick out which particles belong to this body.
+            let (pos, mass): (Vec<glam::DVec3>, Vec<f64>) = self
+                .sph_snapshot
+                .iter()
+                .filter(|p| p.prov == prov)
+                .map(|p| {
+                    (glam::DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64), p.mass as f64)
+                })
+                .unzip();
+            crate::accretion::coherence(&pos, &mass, 1.2 * radius_m)
         }
 
         /// Mass, centre of mass and mean velocity of each impact body, straight from the live particle
@@ -2019,9 +2010,18 @@ mod app {
                     // RELAX (on the GPU): the two bodies sit far apart and settle under their own gravity via
                     // `cs_relax`. Fast enough to run many steps/frame; on completion, kick off the read-back.
                     SphPhase::Relaxing(steps) => {
-                        // Relax steps/frame ride the same adaptive budget (a relax step ≈ half a KDK substep, so
-                        // ~2× the count) — bounded so even the relax phase can't stall the device.
-                        let chunk: u32 = (2 * self.sph_substeps).clamp(2, 48);
+                        // Relax steps/frame. This used to ride the DYNAMICS budget — `clamp(2·substeps, 2, 48)`
+                        // — which is self-defeating: the adaptive substep count collapses to its floor under GPU
+                        // load, so the chunk became 2, and 2,400 steps took 1,200 frames. At the ~10 fps this
+                        // scene runs during setup that is TWO MINUTES of watching two blobs drift toward each
+                        // other before anything happens. Almost certainly what Robin saw as "Theia moving away
+                        // from earth at beginning".
+                        //
+                        // Relaxation is not the dynamics and should not be paced like it: it is a damped settle
+                        // with artificial viscosity switched off, over ~2,800 particles — cheap enough that the
+                        // floor was the only thing making it slow. A far higher floor finishes the settle in a
+                        // second or two; the ceiling still bounds any single frame.
+                        let chunk: u32 = (8 * self.sph_substeps).clamp(64, 512);
                         const TARGET: u32 = 2400; // AV-free relax is stable at the normal Courant dt ⇒ few steps
                         if let Some(sph) = self.gpu_sph.as_mut() {
                             let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sph-relax") });
