@@ -1786,3 +1786,171 @@ mod tests {
         assert!(final_sep > 2.0 * r, "they rebounded and separated");
     }
 }
+
+impl Aggregate {
+    /// **Take another cloud into this one.** Two impacts on the same body make ONE debris field, whose
+    /// fragments share a gravity field and are stepped together — not two simulations.
+    ///
+    /// This exists because the impact loop could only ever materialise the FIRST impactor: it kept one
+    /// `Option<Aggregate>`, so a second body striking the same planet added its energy to the total and
+    /// was parked at the contact point, intact. Two moons dropped together produced one impact and one
+    /// silently absorbed collision — the same event treated two ways depending on an array index.
+    ///
+    /// EVERY per-particle array has to grow together, and `bonds` hold particle INDICES, so the incoming
+    /// ones are offset. The first version of this extended three of the seven arrays and left the rest
+    /// short; the force loop then indexed `per_grain_contact[i]` past its end and the scene panicked the
+    /// moment two clouds existed. The debug assertion below is there so that failure is loud and
+    /// immediate next time, rather than a panic three call frames away.
+    pub fn absorb(&mut self, other: Aggregate) {
+        let offset = self.particles.len();
+
+        self.particles.extend(other.particles);
+        self.temps.extend(other.temps);
+        self.mat_ids.extend(other.mat_ids);
+        self.per_grain_contact.extend(other.per_grain_contact);
+        self.vapor.extend(other.vapor);
+        self.vapor_rho.extend(other.vapor_rho);
+        self.source.extend(other.source);
+        // Bonds reference particles by index; the incoming cloud's indices shift by however many
+        // particles were already here. Left unshifted they would bind the new cloud's fragments to the
+        // old cloud's, inventing a solid where two separate impacts happened.
+        self.bonds.extend(other.bonds.into_iter().map(|b| Bond { a: b.a + offset, b: b.b + offset, ..b }));
+
+        debug_assert!(self.arrays_in_step(), "absorb left the per-particle arrays out of step");
+    }
+
+    /// Every per-particle array is the same length, or something indexes past its end. Cheap, and checked
+    /// in debug builds after any operation that changes the population.
+    pub fn arrays_in_step(&self) -> bool {
+        let n = self.particles.len();
+        self.temps.len() == n
+            && self.mat_ids.len() == n
+            && (self.per_grain_contact.is_empty() || self.per_grain_contact.len() == n)
+            && (self.vapor.is_empty() || self.vapor.len() == n)
+            && (self.vapor_rho.is_empty() || self.vapor_rho.len() == n)
+            && (self.source.is_empty() || self.source.len() == n)
+            && self.bonds.iter().all(|b| b.a < n && b.b < n)
+    }
+}
+
+#[cfg(test)]
+mod absorb_tests {
+    /// A second impact must ADD matter, not replace it or vanish.
+    #[test]
+    fn absorbing_a_second_cloud_keeps_both() {
+        let mats = crate::materials::load();
+        let _ = &mats;
+        let mk = |n: usize| {
+            let bodies: Vec<crate::orbit::Body> = (0..n)
+                .map(|i| crate::orbit::Body {
+                    pos: glam::DVec3::new(i as f64, 0.0, 0.0),
+                    vel: glam::DVec3::ZERO,
+                    mass: 10.0,
+                })
+                .collect();
+            super::Aggregate::new(bodies, 1.0)
+        };
+        let (mut first, second) = (mk(7), mk(5));
+        let (m0, m1) = (first.particles.len(), second.particles.len());
+        let mass_before: f64 = first.particles.iter().map(|p| p.mass).sum::<f64>()
+            + second.particles.iter().map(|p| p.mass).sum::<f64>();
+
+        first.absorb(second);
+
+        assert_eq!(first.particles.len(), m0 + m1, "both clouds' fragments survive");
+        assert_eq!(first.temps.len(), first.particles.len(), "temps stay in step");
+        assert_eq!(first.mat_ids.len(), first.particles.len(), "materials stay in step");
+        let mass_after: f64 = first.particles.iter().map(|p| p.mass).sum();
+        assert!((mass_after - mass_before).abs() < 1e-9, "and no mass is created or lost");
+    }
+
+    /// **Every per-particle array must grow together.** The first version of `absorb` extended three of
+    /// the seven and left the rest short; the force loop then indexed `per_grain_contact[i]` past its end
+    /// and the Two Moons scene panicked the instant a second impact landed. A length check is trivial and
+    /// would have caught it before it ever reached a browser.
+    #[test]
+    fn absorb_keeps_every_parallel_array_in_step_and_offsets_bonds() {
+        let mats = crate::materials::load();
+        let basalt = &mats[crate::materials::index_of(&mats, "basalt")];
+        let law = crate::granular::contact_from_material(basalt, 1.0, 10.0);
+        let mk = |n: usize, tag: u8| {
+            let bodies: Vec<crate::orbit::Body> = (0..n)
+                .map(|i| crate::orbit::Body {
+                    pos: glam::DVec3::new(i as f64, 0.0, 0.0),
+                    vel: glam::DVec3::ZERO,
+                    mass: 10.0,
+                })
+                .collect();
+            let mut a = super::Aggregate::new(bodies, 1.0);
+            // Populate the arrays the force loop actually indexes.
+            a.per_grain_contact = vec![law; n];
+            a.vapor = vec![false; n];
+            a.vapor_rho = vec![0.0; n];
+            a.source = vec![tag; n];
+            // A bond chain, so index offsetting is exercised.
+            a.bonds = (1..n).map(|i| super::Bond { a: i - 1, b: i, rest: 1.0, active: true }).collect();
+            a
+        };
+        let (mut first, second) = (mk(6, 0), mk(4, 1));
+        first.absorb(second);
+
+        assert!(first.arrays_in_step(), "all per-particle arrays are the same length");
+        assert_eq!(first.particles.len(), 10);
+        assert_eq!(first.per_grain_contact.len(), 10, "the array the panic came from");
+
+        // Bonds were offset, so none of the second cloud's bonds reach back into the first — two impacts
+        // do not silently become one welded object.
+        assert!(first.bonds.iter().all(|b| b.a < 10 && b.b < 10), "no bond points past the end");
+        let crossing = first.bonds.iter().filter(|b| (b.a < 6) != (b.b < 6)).count();
+        assert_eq!(crossing, 0, "no bond joins the two clouds — they are separate events");
+        // And the provenance tags survive, so the two clouds stay distinguishable.
+        assert_eq!(first.source.iter().filter(|&&t| t == 0).count(), 6);
+        assert_eq!(first.source.iter().filter(|&&t| t == 1).count(), 4);
+    }
+}
+
+#[cfg(test)]
+mod multi_impact_tests {
+    /// **Two impactors must both be real.** This is the scalability question in miniature: if the engine
+    /// truly applies one mechanic regardless of scale or count, then dropping two moons produces two
+    /// impacts — not one impact plus one collision that is quietly absorbed because it arrived second.
+    ///
+    /// The defect was a single line, `if k == 0 && shatter.is_none()`, and a single `Option<Aggregate>`
+    /// to put the result in.
+    #[test]
+    fn a_second_impactor_contributes_its_own_debris() {
+        let mats = crate::materials::load();
+        let mk = |n: usize, offset: f64| {
+            let bodies: Vec<crate::orbit::Body> = (0..n)
+                .map(|i| crate::orbit::Body {
+                    pos: glam::DVec3::new(offset + i as f64, 0.0, 0.0),
+                    vel: glam::DVec3::ZERO,
+                    mass: 1.0e6,
+                })
+                .collect();
+            super::Aggregate::new(bodies, 1.0)
+        };
+        let _ = &mats;
+
+        // One impact.
+        let mut field = mk(40, 0.0);
+        let after_one = field.particles.len();
+        let mass_one: f64 = field.particles.iter().map(|p| p.mass).sum();
+
+        // A second, elsewhere on the planet, absorbed into the same field.
+        field.absorb(mk(40, 5000.0));
+        let after_two = field.particles.len();
+        let mass_two: f64 = field.particles.iter().map(|p| p.mass).sum();
+
+        assert!(after_two > after_one, "a second impactor adds fragments ({after_one} → {after_two})");
+        assert!(
+            (mass_two - 2.0 * mass_one).abs() < 1e-6 * mass_one,
+            "and its mass is all there: {mass_two:.3e} vs {:.3e}", 2.0 * mass_one
+        );
+        // The two clouds stay distinguishable in space — they are separate events on one body, not a
+        // single cloud twice as dense.
+        let spread = field.particles.iter().map(|p| p.pos.x).fold(f64::MIN, f64::max)
+            - field.particles.iter().map(|p| p.pos.x).fold(f64::MAX, f64::min);
+        assert!(spread > 4000.0, "the two impact sites remain distinct ({spread:.0} m apart)");
+    }
+}

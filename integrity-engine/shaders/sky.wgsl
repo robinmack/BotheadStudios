@@ -55,6 +55,6 @@ fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     let cos_theta = dot(rd, sun); // forward-scatter angle: brightens toward the sun via the phase lobe
 
     let radiance = rayleigh_veil(mu_v, mu_s, cos_theta, u.tau.xyz, u.tau.w, u.sun_dir.w);
-    let mapped = radiance / (vec3<f32>(1.0) + radiance); // Reinhard tone-map (same as the space band)
+    let mapped = tonemap(radiance); // the shared display law — compresses brightness, keeps hue
     return vec4<f32>(mapped, 1.0);
 }

@@ -148,7 +148,7 @@ fn build_sky_pipeline(
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("sky-shader"),
-        source: wgpu::ShaderSource::Wgsl(concat!(include_str!("../../../shaders/rayleigh.wgsl"), include_str!("../../../shaders/sky.wgsl")).into()),
+        source: wgpu::ShaderSource::Wgsl(concat!(include_str!("../../../shaders/tonemap.wgsl"), include_str!("../../../shaders/rayleigh.wgsl"), include_str!("../../../shaders/sky.wgsl")).into()),
     });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("sky-pipeline-layout"),

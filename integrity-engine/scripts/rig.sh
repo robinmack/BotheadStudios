@@ -44,11 +44,17 @@ RIG="${1:?usage: rig.sh [--video|--build] <rig-file.mjs> [args...]}"; shift || t
 # 1. GPU-backed X server (idempotent; the software X path cannot composite WebGPU).
 bash "$here/start-render-xorg.sh" >/dev/null
 
-# 2. Rebuild wasm only when the Rust core is newer than the artifact — or when asked.
+# 2. Rebuild wasm only when the SOURCE is newer than the artifact — or when asked.
+#
+# "Source" includes assets/ and data/, not just code. The body definitions and the material catalogue are
+# `include_str!`d into the binary, so editing one changes the engine as surely as editing a .rs file — but
+# this only watched crates/ and shaders/, so a corrected surface temperature sat in the JSON while the rig
+# faithfully re-verified the old value baked into the wasm. Same class of silent-stale failure as the
+# server predating the build, and just as convincing while it lasts.
 wasm="$web/src/wasm/engine_bg.wasm"
 need_build=$FORCE_BUILD
 if [[ ! -f "$wasm" ]]; then need_build=1
-elif [[ -n "$(find "$root/crates" "$root/shaders" -newer "$wasm" \( -name '*.rs' -o -name '*.wgsl' \) -print -quit 2>/dev/null)" ]]; then
+elif [[ -n "$(find "$root/crates" "$root/shaders" "$root/assets" "$root/data" -newer "$wasm" \( -name '*.rs' -o -name '*.wgsl' -o -name '*.json' \) -print -quit 2>/dev/null)" ]]; then
   need_build=1
 fi
 if (( need_build )); then

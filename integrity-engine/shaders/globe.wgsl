@@ -75,7 +75,7 @@ fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     // and gets exactly nothing — the airless case needs no branch.
     let view = normalize(u.emissive.xyz - i.wpos);
     radiance += rayleigh_veil(dot(n, view), dot(n, l), dot(view, l), u.atm.xyz, u.atm.w, u.light_dir.w);
-    let mapped = radiance / (vec3<f32>(1.0) + radiance); // Reinhard tone-map
+    let mapped = tonemap(radiance); // the shared display law — compresses brightness, keeps hue
     // Alpha = tint.a: 1.0 for the opaque globe, the cross-fade factor for the ground cap. `emissive.xyz`
     // is the eye for the globe (world space) and the ORIGIN for the camera-relative cap, so `view` holds
     // in both.

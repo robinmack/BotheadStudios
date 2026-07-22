@@ -370,3 +370,309 @@ mod coherence_tests {
         assert_eq!(coherence(&intact, &vec![0.0; intact.len()], r), 0.0, "massless is not a body");
     }
 }
+
+/// **Where a body is and how big it still is**, measured from its particles: the clipped centre of mass
+/// and the radius enclosing 98% of the mass around it. Returns `None` for an empty set.
+///
+/// Both halves are clipped because neither a mass-weighted mean nor a farthest-particle radius survives
+/// a few escapees — a single particle carrying under a percent of the mass, flung twenty radii out, moves
+/// the centre by a quarter of the body's radius. Two passes converge immediately and are a no-op on a
+/// clean body.
+///
+/// This is what lets a struck planet SHRINK instead of vanishing. Drawing a body at a fixed radius and
+/// fading it out as it loses mass makes it flicker and disappear, because the fade is answering the wrong
+/// question: the remnant is still a body, just a smaller one. Re-measuring every frame draws what is
+/// actually there.
+pub fn body_extent(positions: &[glam::DVec3], masses: &[f64]) -> Option<(glam::DVec3, f64)> {
+    let total: f64 = masses.iter().sum();
+    if positions.is_empty() || total <= 0.0 {
+        return None;
+    }
+    let com = |keep: &[usize]| -> glam::DVec3 {
+        let m: f64 = keep.iter().map(|&i| masses[i]).sum();
+        if m <= 0.0 {
+            return glam::DVec3::ZERO;
+        }
+        keep.iter().map(|&i| positions[i] * masses[i]).sum::<glam::DVec3>() / m
+    };
+    let radius = |keep: &[usize], c: glam::DVec3| -> f64 {
+        let m: f64 = keep.iter().map(|&i| masses[i]).sum();
+        let mut rr: Vec<(f64, f64)> =
+            keep.iter().map(|&i| ((positions[i] - c).length(), masses[i])).collect();
+        rr.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let (mut cum, mut r) = (0.0, 0.0);
+        for &(rad, mass) in &rr {
+            cum += mass;
+            r = rad;
+            if cum >= 0.98 * m {
+                break;
+            }
+        }
+        r
+    };
+    // Seed with the per-axis MEDIAN, not the mean. A giant impact can throw off tens of percent of a
+    // body, and a mean seeded from that lands between the remnant and the ejecta. A median ignores any
+    // minority however far it has gone.
+    let median = |mut v: Vec<f64>| -> f64 {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        v[v.len() / 2]
+    };
+    let mut c = glam::DVec3::new(
+        median(positions.iter().map(|p| p.x).collect()),
+        median(positions.iter().map(|p| p.y).collect()),
+        median(positions.iter().map(|p| p.z).collect()),
+    );
+    // Clip on the MEDIAN DISTANCE, not on a mass percentile. The percentile is computed over whatever it
+    // is given, so on the first pass it includes the ejecta, comes out huge, and the clip then keeps
+    // everything — the robustness never engages. A median distance describes the bulk by construction.
+    let mut keep: Vec<usize> = (0..positions.len()).collect();
+    for _ in 0..4 {
+        let med = median(positions.iter().map(|p| (*p - c).length()).collect());
+        let next: Vec<usize> =
+            (0..positions.len()).filter(|&i| (positions[i] - c).length() <= 3.0 * med).collect();
+        if next.is_empty() {
+            break;
+        }
+        keep = next;
+        c = com(&keep);
+    }
+    // Now that `keep` is the bulk, the 98%-of-mass radius describes it honestly.
+    let r = radius(&keep, c);
+    (r > 0.0).then_some((c, r))
+}
+
+#[cfg(test)]
+mod extent_tests {
+    use super::body_extent;
+    use glam::DVec3;
+
+    /// A struck body must be measured as the body that is LEFT, not written off because some of it flew
+    /// away. Earth was drawn at a fixed radius and faded by the fraction of mass still nearby, so as the
+    /// impact dispersed material it flickered and then vanished — while a perfectly good remnant was
+    /// sitting there.
+    #[test]
+    fn a_struck_body_shrinks_rather_than_vanishing() {
+        let r = 1.0e6;
+        let shell: Vec<DVec3> = (0..200)
+            .map(|i| {
+                let t = i as f64 / 200.0 * std::f64::consts::TAU;
+                DVec3::new(t.cos(), t.sin(), 0.0) * r
+            })
+            .collect();
+        let m = vec![1.0; shell.len()];
+        let (c0, r0) = body_extent(&shell, &m).expect("an intact body has an extent");
+        assert!(c0.length() < 1e-6 * r, "centred at the origin");
+        assert!((r0 - r).abs() < 0.05 * r, "and measured at its own radius");
+
+        // Blow 40% of it far away. What is left is a smaller body — still centred, still measurable.
+        let mut struck = shell.clone();
+        for p in struck.iter_mut().take(80) {
+            *p *= 30.0;
+        }
+        let (c1, r1) = body_extent(&struck, &m).expect("a remnant is still a body");
+        // The remnant's centre DOES move — 40% was blown off one side, so its centre of mass really is
+        // displaced. What must not happen is the measurement chasing the ejecta out to 30 radii.
+        assert!(c1.length() < 1.0 * r, "the remnant is found, not the debris ({:.2e} vs r {r:.1e})", c1.length());
+        assert!(r1 < 3.0 * r, "and its radius describes the remnant, not the debris field ({r1:.3e})");
+        // Decisive: the measured body is nowhere near where a naive mass-weighted mean would put it.
+        let naive: DVec3 = struck.iter().sum::<DVec3>() / struck.len() as f64;
+        assert!(
+            c1.length() < 0.5 * naive.length(),
+            "clipping must beat the plain mean ({:.2e} vs {:.2e})", c1.length(), naive.length()
+        );
+
+        assert!(body_extent(&[], &[]).is_none(), "nothing has no extent");
+    }
+}
+
+/// **When a solid body must become particles.** The separation at which tidal stress across a body of
+/// mass `m1`, radius `r1` reaches `tidal_fraction` of its own surface gravity, with a companion `m2`:
+///
+///   a_tide/g = 2·(m2/m1)·(r1/d)³   ⇒   d = r1·(2·(m2/m1)/f)^⅓
+///
+/// Above it, a body is a body: rigid, whole, and drawn as a surface. Below it, the interaction can no
+/// longer be represented by two point masses and the engine must resolve real matter — JIT, from the
+/// body's own definition. Coming back out the other side, coalesced matter resolves into a body again
+/// (see [`coherence`] and [`body_extent`]).
+///
+/// The number is derived, not chosen: for proto-Earth and Theia at f = 1% it lands at 17,700 km, which is
+/// 1.86× their contact distance. A body is not particles because a scene said so; it is particles because
+/// the physics stopped being representable any other way.
+pub fn resolution_distance(m1: f64, r1: f64, m2: f64, tidal_fraction: f64) -> f64 {
+    if m1 <= 0.0 || r1 <= 0.0 || m2 <= 0.0 || tidal_fraction <= 0.0 {
+        return 0.0;
+    }
+    r1 * (2.0 * (m2 / m1) / tidal_fraction).cbrt()
+}
+
+#[cfg(test)]
+mod resolution_tests {
+    use super::resolution_distance;
+
+    /// The threshold has to behave like tides do, or "resolve when it matters" means nothing.
+    #[test]
+    fn bodies_resolve_into_particles_when_tides_start_to_matter() {
+        const M_EARTH: f64 = 5.435e24; // proto-Earth
+        const R_EARTH: f64 = 6.161e6;
+        const M_THEIA: f64 = 6.477e23;
+
+        let d = resolution_distance(M_EARTH, R_EARTH, M_THEIA, 0.01);
+        assert!((17.0e6..19.0e6).contains(&d), "1% tidal stress at ~17,700 km, got {:.0} km", d / 1e3);
+        // Comfortably outside contact — matter is resolved BEFORE the bodies touch, not after.
+        assert!(d > 9.551e6, "resolution must begin before contact");
+
+        // A heavier companion reaches in further; a stricter tolerance does too. Both are ∛ scalings.
+        assert!(resolution_distance(M_EARTH, R_EARTH, 2.0 * M_THEIA, 0.01) > d, "a bigger companion, sooner");
+        assert!(resolution_distance(M_EARTH, R_EARTH, M_THEIA, 0.001) > d, "a stricter threshold, sooner");
+        // And a body with no companion never needs resolving.
+        assert_eq!(resolution_distance(M_EARTH, R_EARTH, 0.0, 0.01), 0.0);
+    }
+}
+
+/// How the engine should represent a piece of matter right now.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Representation {
+    /// Still one body: draw its surface, at this centre and this radius. `coherence` is how much of it
+    /// is still itself (1.0 = untouched) — carried here because the caller needs it to hand over to the
+    /// particles smoothly, and because computing it twice is how the two answers start to disagree.
+    Surface { centre: glam::DVec3, radius: f64, coherence: f64 },
+    /// No longer one body: the particles ARE the matter, draw those.
+    Particles,
+}
+
+/// **THE representation decision, for any matter at any scale.**
+///
+/// This is the engine's answer to "is this a body or is this particles", and it is deliberately the ONE
+/// answer: a Mars-sized impactor striking a proto-planet and a droplet striking a petal are the same
+/// mechanic. What differs between them is the energy involved and whether the interaction is close enough
+/// to need real matter resolved — not the rules, and not the code path.
+///
+/// The decision, in order:
+///   1. If matter has already been resolved and it is no longer coherent, it is particles. Matter that
+///      has come apart cannot be drawn as a surface without lying about where it is.
+///   2. Otherwise it is a body — measured from its particles when they exist, and from its declared
+///      position and radius when they do not. A body that has not been touched is drawn as a body,
+///      whether or not the engine happens to be holding a particle field for it.
+///
+/// `companion` is `(mass, separation)` of whatever it is interacting with; with it, callers can ask
+/// [`resolution_distance`] whether matter needs resolving at all yet.
+pub fn representation(
+    resolved: Option<(&[glam::DVec3], &[f64])>,
+    declared_centre: glam::DVec3,
+    declared_radius: f64,
+    coherence_floor: f64,
+) -> Representation {
+    match resolved {
+        Some((pos, mass)) if !pos.is_empty() => match body_extent(pos, mass) {
+            Some((centre, radius)) => {
+                // TWO conditions, because coherence alone is not enough: matter blown outward as a shell
+                // keeps a perfectly tidy centre and radius and would read as an enormous intact body. So
+                // also require that it still occupies roughly the space a body of this kind occupies.
+                // Beyond that it is a debris field, whatever shape it happens to hold.
+                let compact = radius <= 2.0 * declared_radius;
+                let c = coherence(pos, mass, 1.2 * radius);
+                if compact && c >= coherence_floor {
+                    Representation::Surface { centre, radius, coherence: c }
+                } else {
+                    Representation::Particles
+                }
+            }
+            None => Representation::Particles,
+        },
+        // Nothing resolved: the body is whole by definition, because nothing has happened to it.
+        // Nothing resolved: whole by definition, because nothing has happened to it.
+        _ => Representation::Surface { centre: declared_centre, radius: declared_radius, coherence: 1.0 },
+    }
+}
+
+#[cfg(test)]
+mod representation_tests {
+    use super::*;
+    use glam::DVec3;
+
+    /// **The same rule, eleven orders of magnitude apart.** This is the engine's whole premise: a
+    /// Mars-sized body striking a proto-planet and a water droplet striking a petal are the same
+    /// mechanic, differing in energy and in whether matter must be resolved — never in the rules.
+    ///
+    /// So the test runs both through the IDENTICAL functions and asserts the identical behaviour: whole
+    /// while whole, particles once disrupted, a body again once gathered. If the two ever need different
+    /// code, that is the bug.
+    #[test]
+    fn a_planet_and_a_droplet_follow_the_same_rule() {
+        // (name, body radius in metres, companion mass ratio)
+        let scales = [
+            ("Theia striking proto-Earth", 3.39e6_f64, 0.12_f64),
+            ("a raindrop striking a petal", 1.5e-3_f64, 0.12_f64),
+        ];
+        for (what, r, _ratio) in scales {
+            let centre = DVec3::new(7.0 * r, 0.0, 0.0);
+
+            // 1. UNRESOLVED — nothing has happened to it, so it is a body, wherever the scene put it.
+            let whole = representation(None, centre, r, 0.75);
+            assert_eq!(
+                whole,
+                Representation::Surface { centre, radius: r, coherence: 1.0 },
+                "{what}: untouched ⇒ a whole body"
+            );
+
+            // 2. RESOLVED AND INTACT — matter exists but still holds together, so still a surface, now
+            //    measured from the matter itself rather than from the declaration.
+            let ball: Vec<DVec3> = (0..120)
+                .map(|i| {
+                    let t = i as f64 / 120.0 * std::f64::consts::TAU;
+                    centre + DVec3::new(t.cos(), t.sin(), 0.0) * (0.9 * r)
+                })
+                .collect();
+            let m = vec![1.0; ball.len()];
+            match representation(Some((&ball, &m)), centre, r, 0.75) {
+                Representation::Surface { centre: c, radius, coherence } => {
+                    assert!(coherence > 0.9, "{what}: intact matter reads as coherent ({coherence:.2})");
+                    assert!((c - centre).length() < 0.1 * r, "{what}: measured where the matter is");
+                    assert!(radius > 0.5 * r && radius < 1.5 * r, "{what}: and at its measured size");
+                }
+                other => panic!("{what}: intact matter must be a surface, got {other:?}"),
+            }
+
+            // 3. DISRUPTED — flung across a hundred radii, it is no longer one thing.
+            let spray: Vec<DVec3> = (0..120)
+                .map(|i| {
+                    let t = i as f64 / 120.0 * std::f64::consts::TAU;
+                    centre + DVec3::new(t.cos(), t.sin(), 0.3) * (100.0 * r * (i % 7 + 1) as f64)
+                })
+                .collect();
+            assert_eq!(
+                representation(Some((&spray, &m)), centre, r, 0.75),
+                Representation::Particles,
+                "{what}: matter that has come apart is particles"
+            );
+
+            // 4. GATHERED AGAIN — and it resolves back into a body. Both directions, same rule.
+            let regathered: Vec<DVec3> = spray.iter().map(|p| centre + (*p - centre) * 0.002).collect();
+            assert!(
+                matches!(representation(Some((&regathered, &m)), centre, r, 0.75), Representation::Surface { .. }),
+                "{what}: re-gathered matter is a body again"
+            );
+        }
+
+        // And the threshold that decides WHEN to resolve scales the same way — it is a ratio, so the
+        // droplet's resolve distance is the same multiple of its own radius as the planet's is.
+        let planet = resolution_distance(5.4e24, 6.16e6, 6.5e23, 0.01) / 6.16e6;
+        let drop = resolution_distance(5.4e-6, 1.5e-3, 6.5e-7, 0.01) / 1.5e-3;
+        assert!((planet - drop).abs() < 1e-9, "the resolve threshold is scale-free ({planet} vs {drop})");
+    }
+}
+
+/// The hand-over between a surface and its particles, as a 0..1 weight on the SURFACE.
+///
+/// Written once, here, beside the measurement it consumes. It was written twice — for the target and for
+/// the impactor — with the same intent and no guarantee the two would stay equal, which is the ordinary
+/// way one rule quietly becomes two.
+pub fn surface_weight(coherence: f64, floor: f64) -> f32 {
+    let t = ((coherence - floor) / 0.25).clamp(0.0, 1.0);
+    (t * t * (3.0 - 2.0 * t)) as f32
+}
+
+/// The tidal fraction at which the engine resolves matter into particles: 1% of a body's own surface
+/// gravity. Named because it was typed at two call sites that must never disagree — one deciding when to
+/// resolve, the other deciding where to start the approach.
+pub const RESOLVE_TIDAL_FRACTION: f64 = 0.01;

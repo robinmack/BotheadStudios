@@ -78,7 +78,16 @@ impl Simulation {
         let planet_mass = planet.total_mass();
         let surface_g = planet.gravity_at(planet_radius) as f32;
         let world = crate::world::generate_from(&ground.surface, &materials);
-        let field = MassField::build(&world, &materials, 8);
+        // **The patch belongs to the planet.** Without this the field is the patch's own self-gravity —
+        // measured at 0.000214 m/s² against this planet's 9.8808, one forty-six-thousandth of Earth — and
+        // the grains fall in microgravity while the analytic effects a few lines below use the correct
+        // `surface_g`. Two answers to "what is down", and the grains had the wrong one.
+        //
+        // The surface sits at the patch's own ground height in centred coordinates, so the host's centre
+        // is a planet-radius below that and "down" is a direction rather than an assumption.
+        let surface_y = world.bulk_height(0.0, 0.0);
+        let field = MassField::build(&world, &materials, 8)
+            .on_host(planet_mass, planet_radius, surface_y);
         let mut sim = Simulation {
             world,
             matter: MatterSim::new(60_000),
@@ -179,6 +188,13 @@ impl Simulation {
     }
     /// Surface gravity, EMERGENT from the planet this ground is a patch of: `g = GM/R²` over that
     /// body's real layered mass. Never a declared constant.
+    /// The acceleration the MASS FIELD reports at a point — what a grain actually falls under
+    /// (`matter::step` uses exactly this). Exposed so the discrepancy against the planet's own surface
+    /// gravity can be measured rather than argued about.
+    pub fn probe_field_acceleration(&self, at: glam::Vec3) -> glam::Vec3 {
+        self.field.acceleration_point_approx(at, 6.0)
+    }
+
     pub fn gravity_ms2(&self) -> f32 {
         self.surface_g
     }
@@ -498,5 +514,60 @@ mod tests {
             Ok(_) => panic!("must not build a ground sim from an impact world"),
         };
         assert!(err.contains("ground"), "the error should say what was wrong: {err}");
+    }
+}
+
+#[cfg(test)]
+mod gravity_audit_tests {
+    /// **What acceleration does a grain in the Ground scene actually feel?**
+    ///
+    /// The grains are stepped under `field.acceleration_point_approx` (matter.rs:1031) — the self-gravity
+    /// of the loaded surface PATCH. A patch is a small box of voxels; a planet is not. If the patch is all
+    /// a grain feels, it is falling in microgravity toward the middle of the box rather than toward the
+    /// planet, and every settling time, ejecta arc and crater profile in the scene is wrong by orders of
+    /// magnitude.
+    ///
+    /// This test does not assert a fix; it MEASURES the discrepancy so the burn-down has a number.
+    #[test]
+    fn measure_what_gravity_a_ground_grain_actually_feels() {
+        let mats = crate::materials::load();
+        let sim = super::Simulation::from_json(
+            r#"{"name":"probe","type":"ground","ground":{"surface":{"amplitude_m":0.0}}}"#,
+            mats,
+        )
+        .expect("the probe world parses");
+
+        let g_planet = sim.gravity_ms2();
+        // A point a couple of metres above the patch, where a grain would sit.
+        let probe = glam::Vec3::new(0.0, 30.0, 0.0);
+        let a = sim.probe_field_acceleration(probe);
+
+        println!("planet surface gravity : {g_planet:.4} m/s²");
+        println!("patch field at the surface: {:?} (|a| = {:.6} m/s²)", a, a.length());
+        println!("ratio                  : {:.3e}", a.length() as f64 / g_planet as f64);
+
+        assert!(g_planet > 9.0, "the planet's own gravity is Earth-like: {g_planet}");
+
+        // **Grains fall under the PLANET.** This test was written the other way round: it asserted the
+        // defect, because the Ground scene stepped its grains under the self-gravity of the loaded patch
+        // — a box of voxels tens of metres across — which measured 0.000214 m/s² against the planet's
+        // 9.8808. Microgravity, at one forty-six-thousandth of Earth, so every settling time, ejecta arc,
+        // crater profile and angle of repose was wrong by four orders of magnitude and a grain took ~215×
+        // too long to fall.
+        //
+        // Now the field knows which body its patch belongs to, and answers with the planet's own gravity
+        // plus the local terrain as the perturbation it actually is.
+        let ratio = a.length() as f64 / g_planet as f64;
+        assert!(
+            (ratio - 1.0).abs() < 0.01,
+            "a grain must fall under the PLANET, not under the patch: got {:.6} m/s² against the \
+             planet's {g_planet:.4} (ratio {ratio:.3e})",
+            a.length()
+        );
+        // And down is a DIRECTION, computed toward the host's centre, not an assumed −Y: on a patch this
+        // small against Earth the two agree to a part in millions, which is exactly why it must be
+        // derived rather than typed.
+        assert!(a.y < 0.0 && a.x.abs() < 1e-3 * a.length() && a.z.abs() < 1e-3 * a.length(),
+            "down points at the planet's centre: {a:?}");
     }
 }
