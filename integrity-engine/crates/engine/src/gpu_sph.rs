@@ -196,8 +196,49 @@ pub fn assemble_from_relaxed_with(def: &crate::terra::world_def::ImpactDef, part
     let subset = |prov: u32| -> (Vec<&SphParticle>, DVec3, f64, f64) {
         let ps: Vec<&SphParticle> = particles.iter().filter(|p| p.prov == prov).collect();
         let m: f64 = ps.iter().map(|p| p.mass as f64).sum();
-        let c: DVec3 = ps.iter().map(|p| pos(p) * p.mass as f64).sum::<DVec3>() / m.max(1.0);
-        let r = ps.iter().map(|p| (pos(p) - c).length()).fold(0.0, f64::max);
+        // **Both the centre and the radius must survive a few loose particles**, because the relaxed field
+        // always has some, and this pair sets the entire collision: the radius feeds the contact distance
+        // (start = 1.6·contact) AND the aim (b = impact_parameter·r_target). Get it wrong and the impact
+        // misses — which it did. Measured live, the scene opened at ~96,000 km and passed Earth with a
+        // closest approach of 39,338 km against a true contact of 9,551 km. No collision, so no disk and
+        // no Moon, and every correct piece of machinery downstream sat waiting for an event that never came.
+        //
+        // The first cut here took the radius of the FARTHEST particle, which one stray obviously ruins.
+        // Taking a mass percentile fixed that and still failed, for a subtler reason: a mass-weighted MEAN
+        // is not robust either. A single particle carrying 0.7% of the mass, flung twenty radii out, drags
+        // the centre by nearly a quarter of the body's radius — and every radius is measured from that
+        // centre. So clip: find the bulk, re-centre on the bulk, and measure from there.
+        let com = |sel: &[&SphParticle]| -> DVec3 {
+            let mm: f64 = sel.iter().map(|p| p.mass as f64).sum();
+            if mm <= 0.0 { return DVec3::ZERO; }
+            sel.iter().map(|p| pos(p) * p.mass as f64).sum::<DVec3>() / mm
+        };
+        // Radius enclosing 98% of the mass about `centre`. 98 and not 99 because the impactor is seeded
+        // with far fewer particles than the target, so one stray there is already ~1% of its mass — a
+        // threshold a single particle can cross is not a threshold.
+        let bulk_radius = |sel: &[&SphParticle], centre: DVec3| -> f64 {
+            let mm: f64 = sel.iter().map(|p| p.mass as f64).sum();
+            let mut rr: Vec<(f64, f64)> = sel.iter().map(|p| ((pos(p) - centre).length(), p.mass as f64)).collect();
+            rr.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            let (mut cum, mut r) = (0.0, 0.0);
+            for &(rad, mass) in &rr {
+                cum += mass;
+                r = rad;
+                if cum >= 0.98 * mm { break; }
+            }
+            r
+        };
+        // Two clipping passes: re-centre on what is inside 1.5× the bulk radius, then re-measure. Converges
+        // immediately for a body with a few escapees, and is a no-op for a clean one.
+        let mut c = com(&ps);
+        let mut r = bulk_radius(&ps, c);
+        for _ in 0..2 {
+            let keep: Vec<&SphParticle> =
+                ps.iter().copied().filter(|p| (pos(p) - c).length() <= 1.5 * r).collect();
+            if keep.is_empty() { break; }
+            c = com(&keep);
+            r = bulk_radius(&keep, c);
+        }
         (ps, c, m, r)
     };
     let (earth, ec, m_earth, r_e) = subset(0);
@@ -777,5 +818,77 @@ mod tests {
         // The two-line-comment case: `omega` is followed by a wrapped comment, then a shared line.
         let tail: Vec<&str> = p[p.len() - 3..].iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(tail, ["omega", "_p1", "_p2"], "the wrapped-comment tail must all be seen");
+    }
+}
+
+#[cfg(test)]
+mod impact_geometry_tests {
+    use super::*;
+    use glam::DVec3;
+
+    /// **The assembled collision must actually collide — and must stay a collision when a few particles
+    /// have wandered off.**
+    ///
+    /// The body radius used to be the distance to the FARTHEST particle, and that radius sets both the
+    /// start distance (1.6·contact) and the aim (b = impact_parameter·r_target). One strayed particle
+    /// therefore launched Theia too far out AND aimed it too wide. Live, the scene opened at ~96,000 km
+    /// and passed Earth with a closest approach of 39,338 km against a true contact of 9,551 km: a clean
+    /// oblique hit turned into a miss by four times, so no disk formed, no Moon accreted, and every
+    /// correct piece of machinery downstream sat waiting for an impact that never came.
+    ///
+    /// The relaxed field always has a few loose particles, so this is not a hypothetical.
+    #[test]
+    fn the_assembled_geometry_hits_even_with_stray_particles() {
+        let def = crate::terra::world_def::ImpactDef::default();
+        let (earth, theia) = build_impact_bodies_from(&def, 800);
+        let mut field: Vec<SphParticle> = Vec::new();
+        push_body(&mut field, &earth, 0, DVec3::ZERO, DVec3::ZERO);
+        push_body(&mut field, &theia, 1, DVec3::new(4.0e7, 0.0, 0.0), DVec3::ZERO);
+
+        let closest_approach = |particles: &[SphParticle]| -> (f64, f64) {
+            let (assembled, ..) = assemble_from_relaxed_with(&def, particles);
+            let body = |prov: u32| {
+                let ps: Vec<&SphParticle> = assembled.iter().filter(|p| p.prov == prov).collect();
+                let m: f64 = ps.iter().map(|p| p.mass as f64).sum();
+                let c: DVec3 = ps.iter()
+                    .map(|p| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64) * p.mass as f64)
+                    .sum::<DVec3>() / m;
+                let v: DVec3 = ps.iter()
+                    .map(|p| DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64) * p.mass as f64)
+                    .sum::<DVec3>() / m;
+                (c, v, m)
+            };
+            let (ec, ev, me) = body(0);
+            let (tc, tv, mt) = body(1);
+            let mu = crate::orbit::G * (me + mt);
+            let q = crate::orbit::perigee(tc - ec, tv - ev, mu).unwrap_or(0.0);
+            (q, (tc - ec).length())
+        };
+
+        // The true contact distance, from the two bodies' own definitions.
+        let contact = def.target.radius_m() + def.impactor.radius_m();
+
+        // Clean field: a hit.
+        let (q_clean, d_clean) = closest_approach(&field);
+        assert!(q_clean < contact, "the assembled approach must strike: q {q_clean:.3e} vs contact {contact:.3e}");
+        assert!(d_clean < 6.0 * contact, "and start near the bodies, not far away (d {d_clean:.3e})");
+
+        // Now strand ONE particle of each body twenty radii out — exactly what a relax leaves behind.
+        let mut strayed = field.clone();
+        for prov in [0u32, 1u32] {
+            if let Some(p) = strayed.iter_mut().find(|p| p.prov == prov) {
+                p.pos[0] += 20.0 * contact as f32;
+            }
+        }
+        let (q_stray, d_stray) = closest_approach(&strayed);
+        assert!(
+            q_stray < contact,
+            "two stray particles must not turn the impact into a miss: q {q_stray:.3e} vs contact {contact:.3e}"
+        );
+        // The geometry should barely notice them at all.
+        assert!(
+            (d_stray - d_clean).abs() < 0.1 * d_clean,
+            "the start distance must be robust to strays ({d_stray:.3e} vs {d_clean:.3e})"
+        );
     }
 }
