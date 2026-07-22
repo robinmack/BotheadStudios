@@ -895,13 +895,15 @@ impl Ground {
     /// is the whole test — and it uses the SAME surface the physics rests grains on, so the picture and
     /// the physics cannot disagree about whether you are buried.
     fn eye_is_inside_matter(&self, eye: Vec3) -> bool {
-        eye.y < self.sim.world.surface_height_bilinear(Vec3::new(eye.x, 0.0, eye.z))
+        eye.y < self.sim.world.ground_height(eye.x, eye.z)
     }
 
+    /// The ground under the camera — THE shared answer, not a second one. This used to read
+    /// `surface_top_voxel`, an integer voxel top, while `eye_is_inside_matter` two methods up used the
+    /// bilinear surface: up to a metre apart on a slope, so the camera rested at one height and decided
+    /// it was buried at another.
     fn ground_at(&self, x: f32, z: f32) -> f32 {
-        let c = self.sim.world.center();
-        let (xi, zi) = ((x + c.x).floor() as i32, (z + c.z).floor() as i32);
-        self.sim.world.surface_top_voxel(xi, zi).map(|t| t as f32 - c.y).unwrap_or(-c.y)
+        self.sim.world.ground_height(x, z)
     }
 
     fn view_proj(&self) -> (Mat4, Vec3) {

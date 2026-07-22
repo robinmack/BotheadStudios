@@ -82,17 +82,33 @@ bonds' particle indices — the first version extended three of seven and the sc
 Measured after: Two Moons → Drop reports **3,071 fragments, 7.05e30 J, a 0.96 M☾ disk in 4 moonlets** —
 against one cloud before.
 
-### 3. The Ground meteor bypasses the shared collision rule
+### 3. ~~The Ground meteor bypasses the shared collision rule~~ — PARTLY FIXED, and the finding was overstated
 
 **Law II.** `accretion::representation` is the engine's one answer to surface-vs-particles at any scale,
 and `matter::impact` is a second, parallel answer for the same question. Ground computes ½mv² and calls
 its own voxel excavation; Birth resolves an SPH body at the tidal threshold. Two paths, one mechanic.
 
-They already agree in principle — the ground path sizes its resolved region by energy, which is right.
-**Fix.** One entry point taking an interaction (energy, place, bodies) and returning how much matter to
-resolve and in what form, with voxel/granular and SPH as backends beneath it.
-**Test.** Assert both scenes route through the same function; assert a scale sweep (droplet → Theia)
-produces monotonically growing resolved-matter counts through one API.
+**The finding was overstated, and the correction matters more than the original claim.** `matter::impact`
+spends its energy budget voxel by voxel at σ·V each, which IS `crater_volume`'s E/σ applied incrementally
+— and `matter.rs` already carries a bridge test asserting the two agree ("voxel crater ≈ summary volume,
+same σ·V accounting"). The ground path was never using a different law.
+
+The real defect was narrower: **there was no single named door.** The two halves of the answer lived in
+two modules that neither scene mentioned —
+`damage::crater_volume` (how much matter an interaction makes real) and
+`accretion::resolution_distance` (when bodies stop being points) — so a third scene would have found
+neither and written a third path. That is how "the same mechanic implemented twice" actually happens: not
+by argument, but by an author reasonably not finding what exists.
+
+**FIXED:** `crate::interaction::respond` is that door. It takes an interaction (energy, strength,
+separation, the two bodies) and returns Untouched / ResolveBodies / ResolveMatter, delegating to the laws
+that already own each half rather than reimplementing them. Tested across **eleven orders of magnitude**:
+a giant impact and a 3 mm raindrop on a petal go through the same function, and the ratio of resolved
+volumes is exactly the ratio of E/σ — the law is scale-free, which is what lets one engine do both.
+
+**STILL OPEN:** the scenes do not yet CALL it — they call the underlying laws directly, which is correct
+but leaves the door unused. Routing both through it is the remaining work, and is what would stop a fourth
+path being written.
 
 ### 4. ~~Settling is decided by a frame counter~~ — FIXED
 

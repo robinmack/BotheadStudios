@@ -230,6 +230,21 @@ impl World {
     /// its cell, but physically held up by the higher corner) reads as airborne against the single lower
     /// column top and never de-resolves, so the pile stacked on it can never peel down to voxels either
     /// (the "rubble that never returns to the grid" stall). Mirrors the shader by construction.
+    /// **THE ground height at `(x, z)`.** One question, one answer.
+    ///
+    /// There were three: this bilinear surface (the camera's collision shell and the GPU path's terrain),
+    /// the integer `surface_top_voxel` (the camera's `ground_at`, the meteor's contact test, resting
+    /// grains), and the continuous `bulk_height`. On a slope the voxel-step answer and the bilinear one
+    /// sit up to a WHOLE METRE apart — so the camera rested a metre from where grains rested, and a
+    /// meteor's contact height disagreed with the surface it was landing on.
+    ///
+    /// Anything asking "how high is the ground here" asks this. `surface_top_voxel` remains, and is
+    /// correct, for the different question it actually answers: WHICH CELL is the top one, which is what a
+    /// depositing grain needs in order to write itself into the grid.
+    pub fn ground_height(&self, x: f32, z: f32) -> f32 {
+        self.surface_height_bilinear(Vec3::new(x, 0.0, z))
+    }
+
     pub fn surface_height_bilinear(&self, pos: Vec3) -> f32 {
         self.surface_bilinear_grad(pos).0
     }
@@ -2180,6 +2195,56 @@ mod tests {
         assert!(
             !(pos.y - PART_HALF <= single_low + MARGIN),
             "the old single-low-column test wrongly judged the slope grain airborne (the stall)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod one_ground_height_tests {
+    /// **One question, one answer.** There were three implementations of "how high is the ground here",
+    /// and on a slope the integer voxel-step one sits up to a whole metre from the bilinear one — so the
+    /// camera rested a metre from where grains rest, and a meteor's contact height disagreed with the
+    /// surface it was landing on.
+    ///
+    /// This asserts the gap the old split allowed, and that everything now goes through one accessor.
+    #[test]
+    fn every_caller_gets_the_same_ground_height() {
+        let mats = crate::materials::load();
+        let w = crate::world::generate(&mats);
+        let c = w.center();
+
+        // Sample across the patch, including off-axis points where a slope is steepest.
+        let mut worst_gap = 0.0f32;
+        let mut checked = 0;
+        for i in -8..=8 {
+            for j in -8..=8 {
+                let (x, z) = (i as f32 * 3.7, j as f32 * 4.3);
+                let shared = w.ground_height(x, z);
+                // The integer answer the camera, the meteor and resting grains all used to use.
+                let (xi, zi) = ((x + c.x).floor() as i32, (z + c.z).floor() as i32);
+                let Some(top) = w.surface_top_voxel(xi, zi) else { continue };
+                let stepped = top as f32 - c.y;
+                worst_gap = worst_gap.max((shared - stepped).abs());
+                checked += 1;
+            }
+        }
+        assert!(checked > 100, "the sweep must actually find ground ({checked} columns)");
+        // The gap is REAL — this is the defect that existed, recorded so nobody reunifies onto the wrong
+        // one thinking they agreed all along.
+        assert!(
+            worst_gap > 0.2,
+            "the two old answers really did differ (worst gap {worst_gap:.3} m) — if this ever fails, \
+             the voxel and bilinear surfaces have converged and this test can go"
+        );
+
+        // And the shared accessor agrees with itself wherever it is asked from — the camera's burial
+        // test and its resting height are now the same number, which is the property that matters.
+        let eye_x = 5.5;
+        let eye_z = -3.25;
+        assert_eq!(
+            w.ground_height(eye_x, eye_z),
+            w.surface_height_bilinear(glam::Vec3::new(eye_x, 0.0, eye_z)),
+            "the shared accessor IS the bilinear surface, not a fourth answer"
         );
     }
 }

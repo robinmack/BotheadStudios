@@ -237,13 +237,10 @@ impl Simulation {
         for mut m in self.meteors.drain(..) {
             m.vel += g * dt;
             m.pos += m.vel * dt;
-            let c = self.world.center();
-            let (xi, zi) = ((m.pos.x + c.x).floor() as i32, (m.pos.z + c.z).floor() as i32);
-            let ground = self
-                .world
-                .surface_top_voxel(xi, zi)
-                .map(|t| t as f32 - c.y)
-                .unwrap_or(f32::NEG_INFINITY);
+            // THE shared ground height (`World::ground_height`). This asked `surface_top_voxel` — an
+            // integer voxel top — while the camera's collision shell used the bilinear surface, up to a
+            // metre apart on a slope. A meteor's contact height disagreed with the surface it landed on.
+            let ground = self.world.ground_height(m.pos.x, m.pos.z);
             if m.pos.y <= ground {
                 landed.push(m);
             } else {
