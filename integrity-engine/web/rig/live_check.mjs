@@ -1,6 +1,6 @@
 import { launch, OUT } from './_launch.mjs';
 const b = await launch();
-for (const [name, page] of [['birth','birth.html'],['terra','terra.html']]) {
+for (const [name, page] of [['ground','ground.html'],['birth','birth.html'],['terra','terra.html']]) {
   const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
   const errs = []; p.on('pageerror', e => errs.push(e.message));
   await p.goto(`https://integrity.bothead.net/${page}`, { waitUntil: 'load' });
