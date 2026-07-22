@@ -433,7 +433,19 @@ pub fn build_surface_nets(world: &World, materials: &[Material]) -> Mesh {
         &mut buffer,
     );
 
-    // The smoothed field gives Surface Nets good, consistently-outward normals — use them directly.
+    // **Normals: NORMALISE only — the direction was already right.** Surface Nets returns the gradient
+    // of the occupancy field, correctly oriented outward, but NOT unit length: measured |n| ≈ 0.31 on a
+    // pristine world, which scales every lighting term by a third and makes the ground read flat and dim.
+    //
+    // It is worth recording how this was nearly "fixed" wrongly. The first diagnostic printed the first
+    // five vertices' `n.y` and saw ≈ −0.13, which looked like inward-facing normals — but Surface Nets
+    // emits the patch FLOOR first, where a downward normal is correct. Negating on that evidence flipped
+    // every normal, lit the ground from underneath, and broke the material tests that locate the top
+    // surface BY its normal. Measuring the wrong sample is not measuring (Law VII).
+    //
+    // This also has to agree with the CONTACT normal the physics uses — `world::surface_bilinear_grad`
+    // gives `(−∂h/∂x, 1, −∂h/∂z)` normalised — because they describe the same surface, and one surface
+    // must not have two normals (Law II). `mesh_normals_agree_with_the_contact_normal` pins that.
     let center = world.center();
     let mut vertices = Vec::with_capacity(buffer.positions.len());
     for (p, nrm) in buffer.positions.iter().zip(buffer.normals.iter()) {
@@ -441,9 +453,17 @@ pub fn build_surface_nets(world: &World, materials: &[Material]) -> Mesh {
         let pad = PAD as f32;
         let (wx, wy, wz) = (p[0] - pad, p[1] - pad, p[2] - pad);
         let mat = surface_material(world, wx, wy, wz);
+        let len = (nrm[0] * nrm[0] + nrm[1] * nrm[1] + nrm[2] * nrm[2]).sqrt();
+        // A degenerate gradient (a lone voxel, a flat interior cell) has no direction to offer; fall back
+        // to "up" rather than emitting a zero normal that would render as a black facet.
+        let out = if len > 1e-6 {
+            [nrm[0] / len, nrm[1] / len, nrm[2] / len]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
         vertices.push(Vertex {
             pos: [wx - center.x, wy - center.y, wz - center.z],
-            nrm: *nrm,
+            nrm: out,
             col: materials[mat].albedo,
             mat: mat as u32,
         });
@@ -677,6 +697,83 @@ fn shade(albedo: [f32; 3], x: usize, y: usize, z: usize) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
+    /// Normals must be UNIT length and point OUT of the matter. Surface Nets hands back the gradient of
+    /// the occupancy field, which points INTO the solid and is not normalised — measured before the fix
+    /// as |n| ≈ 0.31 with n.y ≈ −0.13 on the top surface. An inward normal lights the ground from
+    /// underneath; a short one scales every lighting term by a third.
+    #[test]
+    fn surface_normals_are_unit_length_and_point_outward() {
+        let mats = crate::materials::load();
+        let world = crate::world::generate(&mats);
+        let mesh = super::build_surface_nets(&world, &mats);
+        assert!(!mesh.vertices.is_empty());
+
+        let mut worst_len = 0.0f32;
+        for v in &mesh.vertices {
+            let l = (v.nrm[0] * v.nrm[0] + v.nrm[1] * v.nrm[1] + v.nrm[2] * v.nrm[2]).sqrt();
+            worst_len = worst_len.max((l - 1.0).abs());
+        }
+        assert!(worst_len < 1e-3, "normals are not unit length (worst deviation {worst_len})");
+
+        // The top of a heightfield world faces UP. Take the highest vertex in each column and check it.
+        use std::collections::HashMap;
+        let mut top: HashMap<(i32, i32), (f32, [f32; 3])> = HashMap::new();
+        for v in &mesh.vertices {
+            let k = (v.pos[0].floor() as i32, v.pos[2].floor() as i32);
+            let e = top.entry(k).or_insert((f32::NEG_INFINITY, [0.0; 3]));
+            if v.pos[1] > e.0 {
+                *e = (v.pos[1], v.nrm);
+            }
+        }
+        let n = top.len();
+        let up = top.values().filter(|(_, nr)| nr[1] > 0.0).count();
+        assert!(n > 1000, "not enough columns ({n})");
+        assert!(
+            up * 100 / n >= 99,
+            "only {up}/{n} column tops face upward — the ground is lit from underneath"
+        );
+    }
+
+    /// **One surface, one normal.** The render normal and the CONTACT normal the physics resolves
+    /// against must agree, or a grain slides along one surface while the picture shows another (Law II).
+    #[test]
+    fn mesh_normals_agree_with_the_contact_normal() {
+        let mats = crate::materials::load();
+        let world = crate::world::generate(&mats);
+        let mesh = super::build_surface_nets(&world, &mats);
+        let c = world.center();
+
+        use std::collections::HashMap;
+        let mut top: HashMap<(i32, i32), (f32, [f32; 3])> = HashMap::new();
+        for v in &mesh.vertices {
+            let k = (v.pos[0].floor() as i32, v.pos[2].floor() as i32);
+            let e = top.entry(k).or_insert((f32::NEG_INFINITY, [0.0; 3]));
+            if v.pos[1] > e.0 {
+                *e = (v.pos[1], v.nrm);
+            }
+        }
+        let (mut checked, mut agreeing) = (0, 0);
+        for (&(xi, zi), &(_, nr)) in top.iter() {
+            let (x, z) = (xi as f32 + 0.5, zi as f32 + 0.5);
+            // Interior only: rim columns have no full neighbourhood.
+            if (x + c.x) < 8.0 || (x + c.x) > (world.w as f32 - 8.0) { continue; }
+            if (z + c.z) < 8.0 || (z + c.z) > (world.d as f32 - 8.0) { continue; }
+            let (_, dhdx, dhdz) = world.surface_bilinear_grad(glam::Vec3::new(x, 0.0, z));
+            let contact = glam::Vec3::new(-dhdx, 1.0, -dhdz).normalize();
+            let m = glam::Vec3::new(nr[0], nr[1], nr[2]);
+            checked += 1;
+            // Same hemisphere and broadly the same direction. Surface Nets smooths across a voxel, so
+            // exact equality is not expected — pointing the same WAY is.
+            if m.dot(contact) > 0.5 { agreeing += 1; }
+        }
+        assert!(checked > 1000, "not enough interior columns ({checked})");
+        assert!(
+            agreeing * 100 / checked >= 90,
+            "only {agreeing}/{checked} mesh normals agree with the contact normal — the surface you see \
+             and the surface you land on disagree"
+        );
+    }
+
     use super::*;
     use crate::materials;
     use crate::planet;
