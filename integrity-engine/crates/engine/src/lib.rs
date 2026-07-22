@@ -59,6 +59,9 @@ mod planet;
 /// they were never scene code, and living there kept them out of every native build.
 mod render;
 pub mod resolution; // docs/44 — resolution by necessity: the quasi-static admission test
+/// docs/49 — surface detail that follows the camera CONTINUOUSLY. The consumer
+/// `ResolutionController::camera_grain_radius` never had.
+mod surface_detail;
 mod tides;
 /// docs/53 — the engine driven by a DEFINITION: builds the world, applies declared matter events through
 /// the shared primitives, and steps. No scene struct, no canvas. This is what re-consumes the systems
@@ -3012,9 +3015,16 @@ mod app {
     /// Ground-cap grid resolution per side (Phase 5). The vertex buffer is rebuilt each frame; the index buffer
     /// (fixed topology) is built once.
     const TERRA_CAP_RES: usize = 192;
+    /// The finest REAL feature the elevation raster carries (m). Detail below this is not in the data,
+    /// so it must come from the material — see the micro-relief in the cap sample.
+    const RASTER_FEATURE_M: f64 = 20_000.0;
 
     #[wasm_bindgen]
     pub struct Terra {
+        /// The ONE resolution controller (docs/49). `alt_m` is the distance to the SURFACE, so it is the
+        /// right distance for the ground cap specifically — anything else drawn in this scene must ask
+        /// with its OWN distance, never reuse this one (the spacewalk rule in `surface_detail`).
+        detail: crate::resolution::ResolutionController,
         surface: wgpu::Surface<'static>,
         device: wgpu::Device,
         queue: wgpu::Queue,
@@ -3135,6 +3145,7 @@ mod app {
                 20.0, 0.0, 12_000_000.0, 0.0, -1.2, 2.0, 40_000_000.0,
             );
             Ok(Terra {
+                detail: Default::default(),
                 surface,
                 device,
                 queue,
@@ -3553,8 +3564,17 @@ mod app {
             let res = TERRA_CAP_RES;
             // Cover ~1.3× the horizon angle so the patch reaches past the visible horizon (its far edge then sits
             // below the horizon / is occluded — no visible cap boundary).
+            // NOTE (2026-07-21): sizing this to the camera-resolvable texel instead of the horizon was
+            // tried and REVERTED — it shrank the fine cap ~46x while the coarse globe is cross-faded out
+            // at low altitude, leaving nothing drawn at any altitude below orbital. The diagnosis stands
+            // (at 2 m a horizon-sized cap is ~34 m/cell while the eye resolves ~2 mm), but the fix has to
+            // add a finer LOD tier, not shrink the only one. See `surface_detail` and docs/08's tiers.
             let cap_angle = (1.3 * view.horizon / r_disp).clamp(1e-4, 0.6);
-            let lift = 20.0 * ds; // a few metres toward the camera so the fine cap sits in front of the coarse globe
+            // A few metres toward the camera so the fine cap wins the depth fight with the coarse globe.
+            // NOTE: at very low altitude this constant exceeds the eye height and puts the cap ABOVE the
+            // camera (at 2 m up, a 20 m lift leaves the eye underneath it, seeing its underside). Scaling
+            // it to the eye height is correct but was reverted with the cap-sizing change it came with.
+            let lift = 20.0 * ds;
             let water_idx = materials::index_of(&self.mats, "water");
             let water_alb = self.mats[water_idx].albedo;
 
@@ -3575,6 +3595,11 @@ mod app {
                             .elevation
                             .as_ref()
                             .map_or(0.0, |r| r.elevation_m_at(lat, lon, self.elev_range[0], self.elev_range[1]));
+                        // Sub-raster micro-relief (material-derived, via `surface_detail`) was written
+                        // and REMOVED here: with only one LOD tier — a 192² grid over a horizon-sized
+                        // cap — there is nowhere to put metre-scale relief, so it cost frame time and
+                        // showed nothing. The rule it needs lives in `crate::surface_detail` with its
+                        // tests; what is missing is a finer tier (docs/08's ladder), not the rule.
                         (self.mats[mi].albedo, e.max(0.0) * ds * exag + lift)
                     } else {
                         (water_alb, lift)

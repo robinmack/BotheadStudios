@@ -1021,6 +1021,24 @@ pub fn generate(materials: &[Material]) -> World {
 
 // --- deterministic value noise (no RNG; stable across runs/clients) ---
 
+/// Deterministic 3-D value noise in [-1, 1] for SURFACE micro-relief, sampled on a direction so it is
+/// continuous over a sphere (a 2-D lattice seams at the poles). Same hash family as the terrain noise —
+/// one noise, not two (Law II).
+pub fn surface_noise(x: f32, y: f32, z: f32) -> f32 {
+    let (xi, yi, zi) = (x.floor(), y.floor(), z.floor());
+    let (fx, fy, fz) = (smooth(x - xi), smooth(y - yi), smooth(z - zi));
+    let (x0, y0, z0) = (xi as i32, yi as i32, zi as i32);
+    let c = |dx: i32, dy: i32, dz: i32| -> f32 {
+        hash2(x0 + dx, (y0 + dy).wrapping_mul(7919) ^ (z0 + dz)) * 2.0 - 1.0
+    };
+    let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+    let x00 = lerp(c(0,0,0), c(1,0,0), fx);
+    let x10 = lerp(c(0,1,0), c(1,1,0), fx);
+    let x01 = lerp(c(0,0,1), c(1,0,1), fx);
+    let x11 = lerp(c(0,1,1), c(1,1,1), fx);
+    lerp(lerp(x00, x10, fy), lerp(x01, x11, fy), fz)
+}
+
 fn hash2(x: i32, z: i32) -> f32 {
     let mut h = (x.wrapping_mul(374_761_393)).wrapping_add(z.wrapping_mul(668_265_263)) as u32;
     h = (h ^ (h >> 13)).wrapping_mul(1_274_126_177);
