@@ -1106,8 +1106,15 @@ mod app {
         }
 
         /// docs/42: set the pretty⇄physics render blend (0 = pretty sphere, 1 = raw physics particles).
-        pub fn set_render_blend(&mut self, blend: f32) {
-            self.render_blend = (blend as f64).clamp(0.0, 1.0);
+        /// RETIRED as a control. Kept only so an old page cannot break; it does nothing.
+        ///
+        /// This was a "Pretty ⇄ Physics" slider cross-fading the resolved surface against the particle
+        /// field — two representations of the SAME matter, blended by hand. That is why the surface and
+        /// the particles were seen racing each other, the surface being swallowed by the disk and
+        /// reappearing: nothing decided where the matter actually was, so both answers were drawn at once
+        /// and a dial chose how much of each. Representation is now derived from the matter itself
+        /// (`body_coherence`).
+        pub fn set_render_blend(&mut self, _blend: f32) {
         }
 
         /// docs/43 — load a "system" world (Sun/Earth/Moon initial conditions) from JSON, replacing the built-in
@@ -1824,6 +1831,40 @@ mod app {
             (self.bodies[2].pos - self.bodies[1].pos).length() / 1000.0
         }
 
+        /// **How much of a body is still a body**: the fraction of its mass lying within 1.2× its own
+        /// radius of its centre of mass. 1.0 is an intact planet; it falls as the body is torn apart and
+        /// climbs again as debris re-accretes into a clump.
+        ///
+        /// This replaces the "Pretty ⇄ Physics" slider. Whether matter is drawn as a resolved surface or
+        /// as particles is not a preference — it is a question about the matter, and this is the measured
+        /// answer. An intact body has a surface; a disrupted one does not, and pretending otherwise is
+        /// what made the surface appear to be swallowed by the disk and peek out of it.
+        ///
+        /// FLAGGED: 1.2× is a coherence radius, not a physical boundary — the honest refinement is a
+        /// self-bound clump test (`accretion`), which already exists and costs more per frame.
+        fn body_coherence(&self, prov: u32, radius_m: f64) -> f64 {
+            let mut inside = 0.0f64;
+            let mut total = 0.0f64;
+            let mut c = glam::DVec3::ZERO;
+            for p in self.sph_snapshot.iter().filter(|p| p.prov == prov) {
+                let m = p.mass as f64;
+                c += glam::DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64) * m;
+                total += m;
+            }
+            if total <= 0.0 {
+                return 0.0;
+            }
+            c /= total;
+            let r2 = (1.2 * radius_m).powi(2);
+            for p in self.sph_snapshot.iter().filter(|p| p.prov == prov) {
+                let d = glam::DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64) - c;
+                if d.length_squared() <= r2 {
+                    inside += p.mass as f64;
+                }
+            }
+            inside / total
+        }
+
         /// Mass, centre of mass and mean velocity of each impact body, straight from the live particle
         /// field: (target, impactor). `None` when the impact is not running.
         ///
@@ -2513,6 +2554,7 @@ mod app {
                     // physics end. z/w (Phase 3): matter beyond ~6.5e6 m (just past the sub-scale remnant) is
                     // EJECTA — it keeps a glowing mote size (0.006) even at the pretty end, so the sphere wears a
                     // real ejecta plume.
+                    // Particles fade IN exactly as the surface fades out — one matter, one budget.
                     params: [SPH_VIS_SCALE as f32, 0.013 * self.render_blend as f32, 6.5e6, 0.006],
                 };
                 self.queue.write_buffer(&self.sph_cam.buf, 0, bytemuck::bytes_of(&cam));
@@ -2539,7 +2581,19 @@ mod app {
             } else {
                 (DISPLAY_SCALE, crate::planet::body("earth").radius())
             };
-            let pretty_fade = if self.sph_active { (1.0 - self.render_blend) as f32 } else { 1.0 };
+            // The target's own coherence decides how it is drawn — no dial. Intact ⇒ the resolved
+            // surface; torn apart ⇒ the particles that ARE the matter; re-accreted ⇒ a surface again.
+            // Smoothstepped over the last 20% so the handover is continuous rather than a pop.
+            let coherence = if self.sph_active {
+                self.body_coherence(0, self.impact_def.target.radius_m())
+            } else {
+                1.0
+            };
+            let pretty_fade = {
+                let t = ((coherence - 0.75) / 0.20).clamp(0.0, 1.0);
+                (t * t * (3.0 - 2.0 * t)) as f32
+            };
+            self.render_blend = 1.0 - pretty_fade as f64; // particles take over as the surface loses meaning
             // docs/42 Phase 3 — atmosphere MIST: the giant impact vaporizes rock into a thick, shocked vapor
             // atmosphere, so the Rayleigh veil is boosted while the impact is live → a hazy, glowing limb.
             let atm_tau_eff = if self.sph_active {
@@ -4191,12 +4245,17 @@ mod tests {
     fn material_database_loads() {
         let mats = materials::load();
         assert_eq!(mats.len(), 24, "seed database should have 24 materials");
-        // `rubber` (2026-07-19) — the tyre compound; the go-kart's grip, damping and hysteresis all live
-        // in this datum. Deliberately carries NO `thermal` block: rubber does not melt, it pyrolyses, so
-        // melt_point/latent_fusion have no honest value and the schema's optional thermal is how it says
-        // "not characterised" (oak, concrete and ice do the same). `damage.rs` then returns Fractured
-        // rather than ever claiming melt — the guard tested at damage.rs:190.
-        assert!(mats[materials::index_of(&mats, "rubber")].thermal.is_none());
+        // `rubber` — the tyre compound; the go-kart's grip, damping and hysteresis live in this datum.
+        // It used to carry NO thermal block at all, on the reasoning that rubber does not melt so
+        // melt_point had no honest value. The reasoning was right and the encoding was not: "does not
+        // melt" is a different claim from "nothing is known", and lumping them together threw away a heat
+        // capacity rubber certainly has — which is how three call sites ended up inventing one (840 in
+        // impact.rs, 1000 in aggregate.rs, 1000 in matter.rs). It now says the true thing: a specific
+        // heat, a pyrolysis temperature, and no melting point.
+        let rubber = &mats[materials::index_of(&mats, "rubber")];
+        assert!(rubber.specific_heat().is_some(), "rubber has a heat capacity like everything else");
+        assert_eq!(rubber.melt_point(), None, "but no melting point — it pyrolyses");
+        assert!(rubber.decomposition_point().is_some(), "and it says where it breaks down");
         for id in ["granite", "dirt", "grass", "iron", "nickel", "rubber"] {
             let i = materials::index_of(&mats, id);
             assert!(mats[i].density > 0.0, "{id} must have positive density");

@@ -38,6 +38,10 @@ struct RawThermal {
     simon_c: f32, // dimensionless Simon–Glatzel exponent
     #[serde(default)]
     molar_mass: f32, // kg/mol — for the Clausius–Clapeyron boiling curve (0 = not characterized)
+    #[serde(default)]
+    decomposes_k: f32, // K — irreversible breakdown instead of melting (0 = does not / not characterized)
+    #[serde(default)]
+    decomposition_suppressed_pa: f32, // Pa — above this confining pressure the breakdown cannot proceed
 }
 
 #[derive(Deserialize)]
@@ -95,6 +99,27 @@ pub struct Thermal {
     /// kg/mol — the vapor's molar mass, for the Clausius–Clapeyron boiling curve. 0 ⇒ not characterized
     /// ⇒ boil_point is used flat (honest fallback, flagged).
     pub molar_mass: f32,
+    /// K — the temperature at which this material breaks down IRREVERSIBLY instead of melting, and the
+    /// reason `melt_point` is 0 for several entries.
+    ///
+    /// Wood pyrolyses, limestone calcines (CaCO₃ → CaO + CO₂ above 825 °C), rubber and concrete break
+    /// down. None of them has a melting point, and filling one in to close a gap in the table would have
+    /// been inventing physics rather than sourcing it. A decomposed material does not come back when it
+    /// cools, which is the difference that matters: melting is reversible and this is not.
+    ///
+    /// 0 ⇒ does not decompose (or not characterized).
+    pub decomposes_k: f32,
+    /// Pa — the confining pressure above which decomposition CANNOT proceed, so the material melts
+    /// instead.
+    ///
+    /// Melting and decomposition are not properties a material has one of; they are a RACE, and pressure
+    /// decides it. Calcite calcines at 1,098 K at one atmosphere only because the CO₂ can escape: squeeze
+    /// it and Le Chatelier pushes the reaction back, the breakdown temperature climbs past the melting
+    /// curve, and it melts (~1,612 K near a kilobar) — which is exactly the regime inside an impact.
+    /// Concrete behaves the same way, and concrete melts are observed in real fires and accidents.
+    ///
+    /// 0 ⇒ nothing suppresses it (or not characterized).
+    pub decomposition_suppressed_pa: f32,
 }
 
 impl Thermal {
@@ -189,7 +214,52 @@ pub struct Material {
     /// 0 (uniform) .. 1 (high per-grain spread). Drives procedural texture contrast (Phase 4).
     pub color_variance: f32,
     /// Thermal properties for melt/vaporization (`docs/20`), when we have cited data for the material.
+    /// `None` for the 11 of 24 materials whose thermal data has not been sourced — an honest gap marker,
+    /// NOT a licence to invent one. Ask through [`Material::specific_heat`] and friends rather than
+    /// `map_or`-ing a number in at the call site (see those methods for what went wrong).
     pub thermal: Option<Thermal>,
+}
+
+impl Material {
+    /// Specific heat capacity (J/kg/K), or `None` when this material has no sourced thermal data.
+    ///
+    /// **This exists because the same missing number was being invented three different ways**: 840 in
+    /// `impact.rs`, 1000 in `aggregate.rs`, 1000 in `matter.rs` — one question with three answers, each a
+    /// stand-in for data nobody had. A quantity that is unknown must stay unknown at the boundary; the
+    /// caller then decides visibly whether it can proceed, instead of a plausible constant flowing into a
+    /// heat budget and out the other side as a temperature.
+    pub fn specific_heat(&self) -> Option<f64> {
+        self.thermal.as_ref().map(|t| t.specific_heat as f64)
+    }
+
+    /// Boiling point (K), or `None` when unsourced. Defaulting this to infinity — as `impact.rs` did —
+    /// silently makes a material unvaporizable, so shock-heated debris of unknown composition could never
+    /// turn to gas no matter how much energy it absorbed.
+    pub fn boil_point(&self) -> Option<f64> {
+        self.thermal.as_ref().map(|t| t.boil_point as f64).filter(|v| *v > 0.0)
+    }
+
+    /// Melting point (K), or `None` when unsourced.
+    pub fn melt_point(&self) -> Option<f64> {
+        self.thermal.as_ref().map(|t| t.melt_point as f64).filter(|v| *v > 0.0)
+    }
+
+    /// The temperature at which this material breaks down irreversibly instead of melting, if it does.
+    pub fn decomposition_point(&self) -> Option<f64> {
+        self.thermal.as_ref().map(|t| t.decomposes_k as f64).filter(|v| *v > 0.0)
+    }
+
+    /// Does this material break down at `pressure_pa`, or melt? Decomposition that releases a gas is
+    /// suppressed by confining pressure, so a rock that calcines on a kiln floor MELTS inside an impact.
+    pub fn decomposes_at(&self, pressure_pa: f64) -> bool {
+        match (self.decomposition_point(), self.thermal.as_ref()) {
+            (Some(_), Some(t)) => {
+                let limit = t.decomposition_suppressed_pa as f64;
+                limit <= 0.0 || pressure_pa < limit
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Parse the embedded database. Panics with a clear message if the bundled JSON is malformed
@@ -233,6 +303,8 @@ pub fn load() -> Vec<Material> {
                     simon_a: t.simon_a,
                     simon_c: t.simon_c,
                     molar_mass: t.molar_mass,
+                                    decomposes_k: t.decomposes_k,
+                                    decomposition_suppressed_pa: t.decomposition_suppressed_pa,
                 }),
             }
         })
@@ -334,5 +406,82 @@ mod tests {
             poke < granite.fracture_strength,
             "the same poke leaves granite intact"
         );
+    }
+}
+
+#[cfg(test)]
+mod thermal_data_tests {
+    /// **An unknown number must stay unknown — and a material that cannot melt must not be given a
+    /// melting point.**
+    ///
+    /// 11 of 24 materials had no thermal data at all, and three call sites were quietly filling the gap
+    /// with three different constants (specific heat 840 in `impact.rs`, 1000 in `aggregate.rs`, 1000 in
+    /// `matter.rs`), while a fourth defaulted the boiling point to INFINITY — making a material
+    /// unvaporizable however much energy it absorbed. The data is now sourced.
+    ///
+    /// Filling it in surfaced a distinction the table could not previously express: several of those
+    /// materials do not melt at all. Wood pyrolyses, limestone calcines, rubber and concrete break down.
+    /// Writing a plausible melt point into those rows would have been inventing physics to close a gap.
+    #[test]
+    fn every_material_reports_what_is_true_of_it_and_nothing_more() {
+        let mats = super::load();
+        let get = |id: &str| &mats[super::index_of(&mats, id)];
+
+        // Specific heat is measurable for everything, so everything has one.
+        for m in &mats {
+            assert!(m.specific_heat().is_some(), "{} must declare a specific heat", m.id);
+            assert!(m.specific_heat().unwrap() > 0.0, "{} has a positive specific heat", m.id);
+        }
+
+        // MELTERS carry real, citable numbers.
+        // (values are stored as f32, so compare within a tolerance rather than bit-for-bit)
+        let near = |got: Option<f64>, want: f64, what: &str| {
+            let g = got.unwrap_or_else(|| panic!("{what} must be declared"));
+            assert!((g - want).abs() < 0.01, "{what}: got {g}, want {want}");
+        };
+        near(get("copper").melt_point(), 1357.77, "copper melts (CRC)");
+        near(get("aluminium").melt_point(), 933.47, "aluminium melts (CRC)");
+        near(get("ice").melt_point(), 273.15, "ice melts");
+        near(get("ice").boil_point(), 373.15, "water boils");
+
+        // DECOMPOSERS declare where they break down.
+        for id in ["oak", "pine", "rubber", "limestone", "concrete"] {
+            assert!(get(id).decomposition_point().is_some(), "{id} must declare where it breaks down");
+        }
+        // The organics have no melting point at all, at any pressure.
+        for id in ["oak", "pine", "rubber"] {
+            assert_eq!(get(id).melt_point(), None, "{id} does not melt — it pyrolyses");
+        }
+        // Limestone calcines above 825 °C — CaCO₃ → CaO + CO₂, verified against the calcium-oxide data.
+        near(get("limestone").decomposition_point(), 1098.0, "limestone calcines");
+        // Wood pyrolyses far below any rock's melting point; that ordering must survive.
+        assert!(
+            get("oak").decomposition_point().unwrap() < get("copper").melt_point().unwrap(),
+            "wood breaks down long before metal melts"
+        );
+
+        // A material CAN do both, and pressure decides which — Robin's correction, and the physics is
+        // the point: calcite calcines at 1,098 K on a kiln floor only because the CO₂ escapes. Confine it
+        // and the reaction is pushed back, the breakdown temperature climbs past the melting curve, and
+        // the same rock melts near 1,612 K. That is the regime inside any impact.
+        let lime = get("limestone");
+        assert!(lime.decomposition_point().is_some() && lime.melt_point().is_some(), "limestone does both");
+        assert!(lime.decomposes_at(super::super::damage::ONE_ATM_PA), "at 1 atm it calcines");
+        assert!(!lime.decomposes_at(1.0e9), "under a kilobar it melts instead");
+        // Concrete likewise — concrete melts are observed in real fires and accidents.
+        assert!(!get("concrete").decomposes_at(1.0e9), "concrete melts under pressure");
+
+        // But a material that decomposes with NO suppression pressure does so at any pressure: wood
+        // chars however hard you squeeze it, because pyrolysis is not a pressure-reversible reaction the
+        // way calcination is.
+        for id in ["oak", "pine", "rubber"] {
+            assert!(get(id).decomposes_at(1.0e11), "{id} pyrolyses at any pressure");
+            assert_eq!(get(id).melt_point(), None, "{id} has no melting point at all");
+        }
+
+        // Crude oil is a MIXTURE: it fractionates across a range, so it has no single boiling point and
+        // none was invented for it.
+        assert_eq!(get("crude_oil").boil_point(), None, "a mixture has no one boiling point");
+        assert!(get("crude_oil").specific_heat().is_some(), "but its heat capacity is still known");
     }
 }

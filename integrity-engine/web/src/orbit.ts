@@ -265,26 +265,12 @@ async function main(): Promise<void> {
 
     // docs/42 render-layer slider: cross-fade the PRETTY render (sphere/atmosphere) ⇄ the raw PHYSICS particles.
     // The physics underneath is always the real GPU SPH impact; this only changes how it's drawn. Birth scene only.
-    if (birthScene) {
-      const slot = document.createElement("div");
-      Object.assign(slot.style, {
-        display: "flex", flexDirection: "column", gap: "3px",
-        padding: "8px 11px", color: "#fff",
-        font: "600 12px/1.2 system-ui, sans-serif",
-        background: "rgba(20,24,40,0.72)", border: "1px solid rgba(255,255,255,0.25)",
-        borderRadius: "10px", backdropFilter: "blur(6px)",
-      });
-      const lbl = document.createElement("div");
-      lbl.textContent = "Pretty ⇄ Physics";
-      const slider = document.createElement("input");
-      slider.type = "range";
-      slider.min = "0"; slider.max = "100"; slider.value = "0"; // pretty by default (docs/42)
-      slider.style.width = "128px";
-      slider.style.cursor = "pointer";
-      slider.addEventListener("input", () => demo.set_render_blend(Number(slider.value) / 100));
-      slot.append(lbl, slider);
-      bar.appendChild(slot);
-    }
+    // The "Pretty ⇄ Physics" slider is GONE. It cross-faded the resolved surface against the particle
+    // field — two representations of the same matter, blended by hand — which is why the surface and the
+    // particles were seen racing each other, the surface swallowed by the disk and peeking out of it.
+    // Nothing decided where the matter actually was, so both answers were drawn and a dial chose the mix.
+    // The engine now derives it: a body is drawn as a surface while it IS one, as particles once it is
+    // torn apart, and as a surface again once debris re-accretes (OrbitDemo::body_coherence).
 
     // Zoom slider — a reliable direct-value control. Under heavy GPU load the browser coalesces/drops wheel
     // events, so scroll-zoom becomes unreliable; a range input always registers. Universal to every scene.

@@ -16,6 +16,11 @@ decide it. Full text + rationale: [`docs/00-laws-of-integrity.md`](docs/00-laws-
    criterion decide what is simulated. Interest decides what is drawn; necessity decides what is computed.
 7. **Measure and derive; never assume.** A number you did not measure or derive is a guess — wrong until
    checked. Test, then conclude. Pin acceleration to brute force. A negative result, honestly measured, ships.
+   **Check `data/materials.json` before claiming anything about a material's behaviour** — intuition about
+   substances feels like knowledge, so it never prompts a measurement. (Limestone and concrete were filed
+   as "does not melt"; both melt under confining pressure, which is exactly the impact regime. And eleven
+   materials had no thermal data while three call sites invented three different specific heats to cover
+   it.) If an entry is silent, source it; an unknown must stay unknown at the boundary.
 
 8. **This is a NEW KIND of engine — challenge what you "know".** Traditional engines only *emulate*
    physics; Integrity *embodies* it — **to the best of our ability with the compute available**. That

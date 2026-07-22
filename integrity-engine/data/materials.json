@@ -63,7 +63,8 @@
         "latent_vaporization": 6000000.0,
         "simon_a": 17000000000.0,
         "simon_c": 2.0,
-        "molar_mass": 0.06
+        "molar_mass": 0.06,
+        "decomposition_suppressed_pa": 0.0
       },
       "ranges": {
         "density": [
@@ -134,7 +135,8 @@
         "latent_vaporization": 6000000.0,
         "simon_a": 17000000000.0,
         "simon_c": 2.0,
-        "molar_mass": 0.06
+        "molar_mass": 0.06,
+        "decomposition_suppressed_pa": 0.0
       },
       "ranges": {
         "density": [
@@ -201,7 +203,8 @@
         "latent_vaporization": 6000000.0,
         "simon_a": 17000000000.0,
         "simon_c": 2.0,
-        "molar_mass": 0.06
+        "molar_mass": 0.06,
+        "decomposition_suppressed_pa": 0.0
       },
       "ranges": {
         "density": [
@@ -274,7 +277,19 @@
         "https://www.sciencedirect.com/science/article/abs/pii/S0926985122000283",
         "https://iopscience.iop.org/article/10.1088/1755-1315/1175/1/012008/pdf",
         "https://www.mindat.org/article.php/1925/"
-      ]
+      ],
+      "thermal": {
+        "specific_heat": 920.0,
+        "melt_point": 1983.0,
+        "latent_fusion": 142000.0,
+        "boil_point": 3223.0,
+        "latent_vaporization": 12000000.0,
+        "simon_a": 0.0,
+        "simon_c": 0.0,
+        "molar_mass": 0.060084,
+        "decomposes_k": 0.0,
+        "decomposition_suppressed_pa": 0.0
+      }
     },
     {
       "id": "limestone",
@@ -331,7 +346,19 @@
         "https://www.mdpi.com/2075-5309/15/11/1924",
         "https://en.wikipedia.org/wiki/Limestone",
         "https://www.researchgate.net/figure/Range-of-restitution-coefficients-R-n-and-R-t-for-limestone_fig6_258685828"
-      ]
+      ],
+      "thermal": {
+        "specific_heat": 910.0,
+        "melt_point": 1612.0,
+        "latent_fusion": 330000.0,
+        "boil_point": 0.0,
+        "latent_vaporization": 0.0,
+        "simon_a": 0.0,
+        "simon_c": 0.0,
+        "molar_mass": 0.0,
+        "decomposes_k": 1098.0,
+        "decomposition_suppressed_pa": 100000000.0
+      }
     },
     {
       "id": "concrete",
@@ -389,7 +416,19 @@
         "https://www.engineeringtoolbox.com/concrete-properties-d_1223.html",
         "https://www.concrete.org/publications/internationalconcreteabstractsportal.aspx?m=details&i=51689676",
         "https://www.researchgate.net/publication/331304648_The_Friction_and_Dilatancy_Angle_of_Recycled_Concrete_Aggregate"
-      ]
+      ],
+      "thermal": {
+        "specific_heat": 880.0,
+        "melt_point": 1600.0,
+        "latent_fusion": 350000.0,
+        "boil_point": 0.0,
+        "latent_vaporization": 0.0,
+        "simon_a": 0.0,
+        "simon_c": 0.0,
+        "molar_mass": 0.0,
+        "decomposes_k": 1000.0,
+        "decomposition_suppressed_pa": 50000000.0
+      }
     },
     {
       "id": "iron",
@@ -432,7 +471,8 @@
         "latent_vaporization": 6090000.0,
         "simon_a": 40000000000.0,
         "simon_c": 1.9,
-        "molar_mass": 0.055845
+        "molar_mass": 0.055845,
+        "decomposition_suppressed_pa": 0.0
       },
       "ranges": {
         "density": [
@@ -498,7 +538,8 @@
         "melt_point": 1728,
         "latent_fusion": 291000.0,
         "boil_point": 3186,
-        "latent_vaporization": 6480000.0
+        "latent_vaporization": 6480000.0,
+        "decomposition_suppressed_pa": 0.0
       },
       "ranges": {
         "density": [
@@ -576,7 +617,19 @@
         "https://www.makeitfrom.com/material-properties/Annealed-OS050-C11000-Copper",
         "https://www.roymech.co.uk/Useful_Tables/Tribology/co_of_frict.htm",
         "https://helpx.adobe.com/substance-3d-designer/substance-compositing-graphs/nodes-reference-for-substance-compositing-graphs/node-library/material-filters/pbr-utilities/pbr-metal-reflectance.html"
-      ]
+      ],
+      "thermal": {
+        "specific_heat": 385.0,
+        "melt_point": 1357.77,
+        "latent_fusion": 205000.0,
+        "boil_point": 2835.0,
+        "latent_vaporization": 4730000.0,
+        "simon_a": 0.0,
+        "simon_c": 0.0,
+        "molar_mass": 0.063546,
+        "decomposes_k": 0.0,
+        "decomposition_suppressed_pa": 0.0
+      }
     },
     {
       "id": "aluminium",
@@ -630,7 +683,19 @@
         "https://en.wikipedia.org/wiki/6061_aluminium_alloy",
         "https://laserbeamproducts.wordpress.com/2014/06/19/reflectivity-of-aluminium-uv-visible-and-infrared/",
         "https://engineeringlibrary.org/reference/coefficient-of-friction"
-      ]
+      ],
+      "thermal": {
+        "specific_heat": 897.0,
+        "melt_point": 933.47,
+        "latent_fusion": 397000.0,
+        "boil_point": 2743.0,
+        "latent_vaporization": 10500000.0,
+        "simon_a": 0.0,
+        "simon_c": 0.0,
+        "molar_mass": 0.026982,
+        "decomposes_k": 0.0,
+        "decomposition_suppressed_pa": 0.0
+      }
     },
     {
       "id": "oak",
@@ -684,12 +749,24 @@
           61000000.0
         ]
       },
-      "notes": "Anisotropic: along-grain (_perp suffix = across-grain) modulus ~14x cross; tensile ∥ ~15x ⊥ (dominant failure). Values at 12% MC; wet wood weaker. Hardness: Janka 6000 N. Finished-surface roughness ~0.35. Albedo linear (sRGB ~0.57,0.45,0.30).",
+      "notes": "Anisotropic: along-grain (_perp suffix = across-grain) modulus ~14x cross; tensile \u2225 ~15x \u22a5 (dominant failure). Values at 12% MC; wet wood weaker. Hardness: Janka 6000 N. Finished-surface roughness ~0.35. Albedo linear (sRGB ~0.57,0.45,0.30).",
       "sources": [
         "https://www.wood-database.com/white-oak/",
         "https://www.fpl.fs.usda.gov/documnts/fplgtr/fplgtr190/chapter_05.pdf",
         "https://hypertextbook.com/facts/2005/wood.shtml"
-      ]
+      ],
+      "thermal": {
+        "specific_heat": 2000.0,
+        "melt_point": 0.0,
+        "latent_fusion": 0.0,
+        "boil_point": 0.0,
+        "latent_vaporization": 0.0,
+        "simon_a": 0.0,
+        "simon_c": 0.0,
+        "molar_mass": 0.0,
+        "decomposes_k": 573.0,
+        "decomposition_suppressed_pa": 0.0
+      }
     },
     {
       "id": "pine",
@@ -748,7 +825,19 @@
         "https://www.wood-database.com/eastern-white-pine/",
         "https://www.fpl.fs.usda.gov/documnts/fplgtr/fplgtr190/chapter_05.pdf",
         "https://hypertextbook.com/facts/2005/wood.shtml"
-      ]
+      ],
+      "thermal": {
+        "specific_heat": 2300.0,
+        "melt_point": 0.0,
+        "latent_fusion": 0.0,
+        "boil_point": 0.0,
+        "latent_vaporization": 0.0,
+        "simon_a": 0.0,
+        "simon_c": 0.0,
+        "molar_mass": 0.0,
+        "decomposes_k": 553.0,
+        "decomposition_suppressed_pa": 0.0
+      }
     },
     {
       "id": "grass",
@@ -777,7 +866,8 @@
         "latent_fusion": 300000.0,
         "boil_point": 600,
         "latent_vaporization": 2500000.0,
-        "estimated": "organic + moisture; chars/vaporizes easily like water/biomass; not separately cited — impact vaporization, docs/24"
+        "estimated": "organic + moisture; chars/vaporizes easily like water/biomass; not separately cited \u2014 impact vaporization, docs/24",
+        "decomposition_suppressed_pa": 0.0
       },
       "optical": {
         "albedo": [
@@ -843,7 +933,8 @@
         "latent_fusion": 300000.0,
         "boil_point": 2800,
         "latent_vaporization": 6000000.0,
-        "estimated": "from silicate (loam) composition, ~parent rock; not separately cited — for impact vaporization, docs/24"
+        "estimated": "from silicate (loam) composition, ~parent rock; not separately cited \u2014 for impact vaporization, docs/24",
+        "decomposition_suppressed_pa": 0.0
       },
       "optical": {
         "albedo": [
@@ -913,7 +1004,8 @@
         "latent_fusion": 300000.0,
         "boil_point": 2800,
         "latent_vaporization": 6000000.0,
-        "estimated": "from silicate (clay mineral) composition, ~parent rock; not separately cited — impact vaporization, docs/24"
+        "estimated": "from silicate (clay mineral) composition, ~parent rock; not separately cited \u2014 impact vaporization, docs/24",
+        "decomposition_suppressed_pa": 0.0
       },
       "optical": {
         "albedo": [
@@ -983,7 +1075,8 @@
         "latent_fusion": 140000.0,
         "boil_point": 2950,
         "latent_vaporization": 12000000.0,
-        "estimated": "quartz (SiO2); melt/boil of silica; not separately cited — impact vaporization, docs/24"
+        "estimated": "quartz (SiO2); melt/boil of silica; not separately cited \u2014 impact vaporization, docs/24",
+        "decomposition_suppressed_pa": 0.0
       },
       "optical": {
         "albedo": [
@@ -1045,7 +1138,8 @@
         "latent_fusion": 400000.0,
         "boil_point": 3000,
         "latent_vaporization": 6000000.0,
-        "estimated": "parent rock (granite/basalt); not separately cited — impact vaporization, docs/24"
+        "estimated": "parent rock (granite/basalt); not separately cited \u2014 impact vaporization, docs/24",
+        "decomposition_suppressed_pa": 0.0
       },
       "optical": {
         "albedo": [
@@ -1122,7 +1216,8 @@
         "latent_fusion": 334000.0,
         "boil_point": 373,
         "latent_vaporization": 2260000.0,
-        "molar_mass": 0.018015
+        "molar_mass": 0.018015,
+        "decomposition_suppressed_pa": 0.0
       },
       "ranges": {
         "density": [
@@ -1184,7 +1279,8 @@
         "latent_fusion": 26000.0,
         "boil_point": 79,
         "latent_vaporization": 200000.0,
-        "molar_mass": 0.028964
+        "molar_mass": 0.028964,
+        "decomposition_suppressed_pa": 0.0
       },
       "ranges": {
         "density": [
@@ -1235,7 +1331,8 @@
         "latent_fusion": 0,
         "boil_point": 0,
         "latent_vaporization": 0,
-        "molar_mass": 0.00061
+        "molar_mass": 0.00061,
+        "decomposition_suppressed_pa": 0.0
       },
       "notes": "Solar-composition plasma (X~0.73 H, Y~0.25 He; mean molecular weight ~0.61 g/mol ionized). density is the SUN'S MEAN (M/V) - the layered profile (planet::sun) carries the real compression from ~150,000 kg/m3 core to ~2e-4 photosphere, exactly as PREM does for Earth. Estimates flagged.",
       "sources": [
@@ -1297,7 +1394,19 @@
         "https://en.wikipedia.org/wiki/API_gravity",
         "https://www.sciencedirect.com/topics/engineering/oil-viscosity",
         "https://www.khronos.org/gltf/pbr/"
-      ]
+      ],
+      "thermal": {
+        "specific_heat": 2000.0,
+        "melt_point": 0.0,
+        "latent_fusion": 0.0,
+        "boil_point": 0.0,
+        "latent_vaporization": 0.0,
+        "simon_a": 0.0,
+        "simon_c": 0.0,
+        "molar_mass": 0.0,
+        "decomposes_k": 0.0,
+        "decomposition_suppressed_pa": 0.0
+      }
     },
     {
       "id": "rubber",
@@ -1360,13 +1469,25 @@
           6.0
         ]
       },
-      "notes": "Nearly incompressible (poisson ~0.49): bulk modulus is ~300x Young's, so it changes SHAPE not volume — a tyre's contact patch spreads rather than compressing. friction_coefficient is the most condition-sensitive field here and is NOT a constant: dry road 0.7-1.0, wet 0.4-0.6, ice <0.15, and it FALLS with both temperature and slip speed (the reason a locked wheel stops gripping). Grip is hysteretic and load-dependent, not Amontons-Coulomb, so mu is a first-order stand-in — flagged. High ductility (elongation at break 400-600%) and restitution well below a bouncy ball because tread compounds are deliberately damped (loss tangent ~0.1-0.3), which is why tyres do not ring. THERMAL DELIBERATELY OMITTED: rubber does not melt, it PYROLYSES (~570-670 K) — an irreversible chemical change, so melt_point/latent_fusion have no honest value. The schema's optional `thermal` is how it says 'not characterised' (oak, concrete and ice do the same), and damage.rs then returns Fractured rather than ever claiming melt. Glass transition ~210-220 K: below it the compound goes glassy and grip collapses — real, and not yet representable without a temperature-dependent mu.",
+      "notes": "Nearly incompressible (poisson ~0.49): bulk modulus is ~300x Young's, so it changes SHAPE not volume \u2014 a tyre's contact patch spreads rather than compressing. friction_coefficient is the most condition-sensitive field here and is NOT a constant: dry road 0.7-1.0, wet 0.4-0.6, ice <0.15, and it FALLS with both temperature and slip speed (the reason a locked wheel stops gripping). Grip is hysteretic and load-dependent, not Amontons-Coulomb, so mu is a first-order stand-in \u2014 flagged. High ductility (elongation at break 400-600%) and restitution well below a bouncy ball because tread compounds are deliberately damped (loss tangent ~0.1-0.3), which is why tyres do not ring. THERMAL DELIBERATELY OMITTED: rubber does not melt, it PYROLYSES (~570-670 K) \u2014 an irreversible chemical change, so melt_point/latent_fusion have no honest value. The schema's optional `thermal` is how it says 'not characterised' (oak, concrete and ice do the same), and damage.rs then returns Fractured rather than ever claiming melt. Glass transition ~210-220 K: below it the compound goes glassy and grip collapses \u2014 real, and not yet representable without a temperature-dependent mu.",
       "sources": [
         "https://www.engineeringtoolbox.com/friction-coefficients-d_778.html",
         "https://en.wikipedia.org/wiki/Natural_rubber",
         "https://en.wikipedia.org/wiki/Tire",
         "https://www.matweb.com/search/DataSheet.aspx?MatGUID=b1c46f0b9d2b4b1c9d0f2f0b7d3e1a2c"
-      ]
+      ],
+      "thermal": {
+        "specific_heat": 2000.0,
+        "melt_point": 0.0,
+        "latent_fusion": 0.0,
+        "boil_point": 0.0,
+        "latent_vaporization": 0.0,
+        "simon_a": 0.0,
+        "simon_c": 0.0,
+        "molar_mass": 0.0,
+        "decomposes_k": 573.0,
+        "decomposition_suppressed_pa": 0.0
+      }
     },
     {
       "id": "ice",
@@ -1424,7 +1545,19 @@
         "https://pubs.aip.org/aip/adv/article/8/12/125108/127679/Mechanical-properties-of-bi-and-poly-crystalline",
         "https://www.epj-conferences.org/articles/epjconf/pdf/2015/13/epjconf-dymat2015_01070.pdf",
         "https://link.aps.org/doi/10.1103/PhysRevX.11.011025"
-      ]
+      ],
+      "thermal": {
+        "specific_heat": 2090.0,
+        "melt_point": 273.15,
+        "latent_fusion": 333550.0,
+        "boil_point": 373.15,
+        "latent_vaporization": 2257000.0,
+        "simon_a": 0.0,
+        "simon_c": 0.0,
+        "molar_mass": 0.018015,
+        "decomposes_k": 0.0,
+        "decomposition_suppressed_pa": 0.0
+      }
     },
     {
       "id": "snow",
@@ -1482,7 +1615,19 @@
         "https://agupubs.onlinelibrary.wiley.com/doi/full/10.1002/2017GL075110",
         "https://arc.lib.montana.edu/snow-science/objects/ISSW-2006-008.pdf",
         "https://serc.carleton.edu/integrate/teaching_materials/climate_change/student_materials/unit4_article.html"
-      ]
+      ],
+      "thermal": {
+        "specific_heat": 2090.0,
+        "melt_point": 273.15,
+        "latent_fusion": 333550.0,
+        "boil_point": 373.15,
+        "latent_vaporization": 2257000.0,
+        "simon_a": 0.0,
+        "simon_c": 0.0,
+        "molar_mass": 0.018015,
+        "decomposes_k": 0.0,
+        "decomposition_suppressed_pa": 0.0
+      }
     }
   ]
 }

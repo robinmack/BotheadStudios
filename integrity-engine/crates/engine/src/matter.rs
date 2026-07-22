@@ -258,7 +258,12 @@ impl MatterSim {
                 // Fractured, and the hot core Melts / Vaporizes. The class drives behaviour — vaporized
                 // matter is gas/plasma, so it expands away fast (a vapour flash).
                 let e_class = e_shock.max(mat.fracture_strength);
-                if crate::damage::classify(e_class as f64, mat)
+                // The shock that carved this voxel IS the confining pressure deciding melt-vs-breakdown:
+                // an impact strong enough to excavate rock is far above the kilobar that suppresses
+                // calcination, so carbonate here melts rather than calcining. Passing the shock energy
+                // density as the pressure is a first-order stand-in (both are J/m³ = Pa) — FLAGGED; the
+                // honest input is the local shock pressure once the EOS carries it here.
+                if crate::damage::classify(e_class as f64, mat, e_shock as f64)
                     == crate::damage::PhaseChange::Vaporized
                 {
                     speed *= VAPOR_EXPANSION;
