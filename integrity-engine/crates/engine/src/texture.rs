@@ -18,6 +18,18 @@ pub struct Texture {
     #[allow(dead_code)]
     pub size: u32,
     pub mips: Vec<Vec<u8>>,
+    /// **Tangent-space normal map**, same size and mip chain, RGBA8 with xyz in [0,1] and a=height.
+    ///
+    /// This is the CHEAP half of surface detail, and the half the engine never had. Relief drawn as
+    /// GEOMETRY costs a vertex per feature — 430,080 verts a frame with nothing happening, against the
+    /// ~100 texels a crater actually needs. A normal map gives the same close-up appearance for one
+    /// texture fetch, so geometry can stay coarse and real texels are spent only where an interaction
+    /// is (`docs/44`). Robin, repeatedly: *"we should render texels (which are expensive) ONLY AS
+    /// NEEDED for interactions."*
+    ///
+    /// Derived from the SAME fbm that produces the albedo, so a material's visible grain and its bump
+    /// agree by construction rather than being two independent inventions (Law II).
+    pub normal_mips: Vec<Vec<u8>>,
 }
 
 /// Generate a texture for one material from its optical properties.
@@ -35,10 +47,41 @@ pub fn generate(material: &Material) -> Texture {
             level0[i + 3] = 255;
         }
     }
+    // Height field from the same noise as the colour, then its gradient -> a tangent-space normal.
+    // Central differences on the torus (the noise is seamless), so the map tiles without a seam.
+    let h = |x: usize, y: usize| -> f32 { height_at(material, x, y, size, seed) };
+    let mut nrm = vec![0u8; size * size * 4];
+    // Bump strength follows the material's CITED optical roughness: a polished surface has a flat
+    // normal map, gravel has a violent one. Not an art dial.
+    let strength = 2.0 * material.roughness.clamp(0.0, 1.0);
+    for y in 0..size {
+        for x in 0..size {
+            let (xm, xp) = ((x + size - 1) % size, (x + 1) % size);
+            let (ym, yp) = ((y + size - 1) % size, (y + 1) % size);
+            let dx = (h(xp, y) - h(xm, y)) * strength;
+            let dy = (h(x, yp) - h(x, ym)) * strength;
+            // n = normalize(-dh/dx, -dh/dy, 1)
+            let inv = 1.0 / (dx * dx + dy * dy + 1.0).sqrt();
+            let (nx, ny, nz) = (-dx * inv, -dy * inv, inv);
+            let i = (y * size + x) * 4;
+            nrm[i] = to_u8(nx * 0.5 + 0.5);
+            nrm[i + 1] = to_u8(ny * 0.5 + 0.5);
+            nrm[i + 2] = to_u8(nz * 0.5 + 0.5);
+            nrm[i + 3] = to_u8(h(x, y) * 0.5 + 0.5); // height, for anyone who wants displacement
+        }
+    }
     Texture {
         size: size as u32,
         mips: build_mips(level0, size),
+        normal_mips: build_mips(nrm, size),
     }
+}
+
+/// The surface height field a material's relief comes from, in [-1, 1]. Same fbm as the colour, so bump
+/// and albedo describe ONE surface.
+fn height_at(material: &Material, x: usize, y: usize, size: usize, seed: u32) -> f32 {
+    let (u, v) = (x as f32 / size as f32, y as f32 / size as f32);
+    fbm(u, v, seed) * material.color_variance.clamp(0.05, 1.0).max(0.15)
 }
 
 /// Generate one texture per material (used to fill a GPU texture array).
@@ -178,6 +221,98 @@ fn build_mips(level0: Vec<u8>, size: usize) -> Vec<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// The point of the normal map: relief WITHOUT geometry. A material's bump must be real (non-flat),
+    /// must follow its CITED roughness, and must tile — otherwise the cheap path cannot replace the
+    /// expensive one and detail goes back to costing a vertex per feature.
+    #[test]
+    fn the_normal_map_carries_real_relief_scaled_by_cited_roughness() {
+        let mats = crate::materials::load();
+        let pick = |id: &str| mats.iter().find(|m| m.id == id).expect(id).clone();
+        let (gravel, water) = (pick("gravel"), pick("water"));
+
+        // Mean deviation of the normal's z from 1.0: 0 = perfectly flat, larger = bumpier.
+        let bumpiness = |m: &crate::materials::Material| -> f32 {
+            let t = generate(m);
+            let px = &t.normal_mips[0];
+            let n = px.len() / 4;
+            let mut acc = 0.0f32;
+            for i in 0..n {
+                let z = px[i * 4 + 2] as f32 / 255.0 * 2.0 - 1.0;
+                acc += (1.0 - z).abs();
+            }
+            acc / n as f32
+        };
+
+        let g = bumpiness(&gravel);
+        let w = bumpiness(&water);
+        assert!(g > 0.0, "gravel must have a non-flat normal map, got {g}");
+        assert!(
+            g > w * 2.0,
+            "gravel (roughness {}) must be bumpier than water (roughness {}): {g} vs {w}",
+            gravel.roughness, water.roughness
+        );
+    }
+
+    /// It must TILE. A seam is instantly visible on ground you are standing on, and the whole point is
+    /// covering a large surface from one small texture.
+    #[test]
+    fn the_normal_map_is_seamless() {
+        let mats = crate::materials::load();
+        let sand = mats.iter().find(|m| m.id == "sand").expect("sand");
+        let t = generate(sand);
+        let px = &t.normal_mips[0];
+        let sz = TEX_SIZE;
+        let at = |x: usize, y: usize| -> [u8; 3] {
+            let i = (y * sz + x) * 4;
+            [px[i], px[i + 1], px[i + 2]]
+        };
+        // Opposite edges must be near-identical: they are neighbours once tiled.
+        for y in (0..sz).step_by(37) {
+            let (l, r) = (at(0, y), at(sz - 1, y));
+            for c in 0..3 {
+                assert!(
+                    (l[c] as i32 - r[c] as i32).abs() < 40,
+                    "vertical seam at y={y}, channel {c}: {} vs {}", l[c], r[c]
+                );
+            }
+        }
+    }
+
+    /// Bump and albedo must describe ONE surface — they come from the same fbm, so a bump ridge is where
+    /// the colour varies. Two independent noises would look like two overlaid materials (Law II).
+    #[test]
+    fn bump_and_albedo_describe_the_same_surface() {
+        let mats = crate::materials::load();
+        let granite = mats.iter().find(|m| m.id == "granite").expect("granite");
+        let t = generate(granite);
+        let sz = TEX_SIZE;
+        // Deviation must be measured against the material's OWN mean brightness, not mid-grey: a dark
+        // material's every texel is below 128, so comparing to 128 measures the albedo, not the noise.
+        // (That mistake made this test fail while the implementation was correct.)
+        let mean: f32 = {
+            let px = &t.mips[0];
+            let n = px.len() / 4;
+            (0..n).map(|i| px[i * 4] as f32).sum::<f32>() / n as f32
+        };
+        let (mut n, mut agree) = (0, 0);
+        for i in (0..sz * sz).step_by(101) {
+            let h = t.normal_mips[0][i * 4 + 3] as f32 - 128.0;
+            let c = t.mips[0][i * 4] as f32 - mean;
+            if h.abs() > 4.0 && c.abs() > 4.0 {
+                n += 1;
+                if (h > 0.0) == (c > 0.0) { agree += 1; }
+            }
+        }
+        assert!(n > 50, "not enough varying texels to judge ({n})");
+        assert!(
+            agree as f32 / n as f32 > 0.75,
+            "height and albedo disagree on {}% of texels — they are not one surface",
+            100 - 100 * agree / n
+        );
+    }
+
     use super::*;
     use crate::materials;
 
