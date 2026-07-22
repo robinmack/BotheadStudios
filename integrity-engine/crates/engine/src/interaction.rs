@@ -13,8 +13,40 @@
 //! path. That is how "the same mechanic implemented twice" happens: not by argument, but by a new author
 //! reasonably not finding what already exists. This module is the one door, and it delegates — it does
 //! not reimplement.
+//!
+//! **And the scenes do not walk through the door.** A scene declares which bodies exist and where; it
+//! never reaches into collision, never assembles an interaction, never asks whether two things hit. The
+//! ENGINE holds the bodies — their mass, radius, velocity, spin — so the engine is the one that knows a
+//! collision is coming, and it is the one that prepares for it. `detect` is that owner: hand it the
+//! bodies and a step, and it forecasts every imminent contact on the continuous trajectory and returns
+//! the response for each. A scene that could construct an `Interaction` by hand is a scene reaching into
+//! the engine's job; the engine constructs them, from what it already holds.
 
 use glam::DVec3;
+
+/// A body as the engine holds it — everything the collision owner needs to forecast and size a contact.
+/// The scene supplies these (which bodies, where, how fast); the engine reads them.
+#[derive(Debug, Clone, Copy)]
+pub struct BodyState {
+    pub pos: DVec3,
+    pub vel: DVec3,
+    pub mass_kg: f64,
+    pub radius_m: f64,
+    /// Yield strength of this body's surface material (Pa) — what resists being excavated when something
+    /// strikes it. From the body's own material, never declared by a scene.
+    pub strength_pa: f64,
+}
+
+/// A contact the engine detected on its own, and what to do about it.
+#[derive(Debug, Clone, Copy)]
+pub struct DetectedCollision {
+    /// Indices into the body slice: the struck body and the striking one.
+    pub struck: usize,
+    pub striker: usize,
+    /// Fraction of the step at which contact first occurs (0 = already touching).
+    pub toi: f64,
+    pub response: Response,
+}
 
 /// Two things meeting, described physically.
 #[derive(Debug, Clone, Copy)]
@@ -75,6 +107,49 @@ pub fn respond(i: &Interaction) -> Response {
     } else {
         Response::Untouched
     }
+}
+
+/// **The engine detecting its own collisions.** Sweep every ordered pair of bodies, forecast contact on
+/// the continuous path over the coming step (so a fast body cannot tunnel through a slow one between
+/// samples), and for each imminent contact BUILD the interaction and decide the response — all from the
+/// bodies the engine already holds. No scene is consulted, and none can be: the inputs are the engine's
+/// own state.
+///
+/// `struck` is whichever body is more massive (the smaller one is the impactor); the interaction's energy
+/// is ½·μ·v_rel² with the reduced mass μ, which is the energy actually available at the contact frame,
+/// not either body's kinetic energy in an arbitrary frame.
+pub fn detect(bodies: &[BodyState], dt: f64) -> Vec<DetectedCollision> {
+    let mut out = Vec::new();
+    for a in 0..bodies.len() {
+        for b in (a + 1)..bodies.len() {
+            let (ba, bb) = (bodies[a], bodies[b]);
+            let r_sum = ba.radius_m + bb.radius_m;
+            let rel_old = bb.pos - ba.pos;
+            let rel_new = (bb.pos + bb.vel * dt) - (ba.pos + ba.vel * dt);
+            // Forecast, don't sample: the same continuous-trajectory test the N-body loop uses.
+            let Some(toi) = crate::orbit::swept_first_contact(rel_old, rel_new, r_sum) else {
+                continue;
+            };
+            // The more massive body is the one struck; the lighter is the impactor.
+            let (struck, striker) = if ba.mass_kg >= bb.mass_kg { (a, b) } else { (b, a) };
+            let (s, k) = (bodies[struck], bodies[striker]);
+            let v_rel = (k.vel - s.vel).length();
+            let mu = s.mass_kg * k.mass_kg / (s.mass_kg + k.mass_kg).max(1e-30);
+            let energy_j = 0.5 * mu * v_rel * v_rel;
+            // A forecast time-of-impact in [0,1] IS contact by definition, so the interaction's separation
+            // is exactly the contact radius — not a subtracted float that can land a hair outside it and
+            // make `respond` report "not touching" about a collision the engine just forecast.
+            let interaction = Interaction {
+                energy_j,
+                strength_pa: s.strength_pa,
+                separation_m: r_sum,
+                bodies: [(s.mass_kg, s.radius_m), (k.mass_kg, k.radius_m)],
+                at: s.pos + (k.pos - s.pos) * (s.radius_m / r_sum),
+            };
+            out.push(DetectedCollision { struck, striker, toi, response: respond(&interaction) });
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -151,5 +226,60 @@ mod tests {
         // A grazing touch with NO energy excavates nothing — the response follows the physics, not the
         // geometry alone.
         assert_eq!(respond(&mk(9.0e6, 0.0)), Response::ResolveBodies, "contact without energy ⇒ no crater");
+    }
+
+    /// **The engine finds the collision itself.** No `Interaction` is constructed here — the test hands
+    /// `detect` a set of bodies, exactly what the engine already holds, and the engine forecasts the
+    /// contact, sizes it, and decides. A scene's only contribution is having placed the bodies.
+    #[test]
+    fn the_engine_detects_and_prepares_a_collision_from_bodies_alone() {
+        // A small fast body aimed at a large slow one.
+        let bodies = [
+            BodyState { pos: DVec3::ZERO, vel: DVec3::ZERO, mass_kg: 5.972e24, radius_m: 6.371e6, strength_pa: 1.0e8 },
+            BodyState {
+                pos: DVec3::new(2.0e7, 0.0, 0.0),
+                vel: DVec3::new(-1.1e4, 0.0, 0.0),
+                mass_kg: 7.342e22,
+                radius_m: 1.737e6,
+                strength_pa: 1.0e8,
+            },
+        ];
+        // One step long enough that the impactor crosses the gap — the engine must forecast the contact.
+        let hits = detect(&bodies, 2000.0);
+        assert_eq!(hits.len(), 1, "the engine finds exactly the one collision");
+        let h = hits[0];
+        assert_eq!(h.struck, 0, "the more massive body is the one struck");
+        assert_eq!(h.striker, 1, "the lighter one is the impactor");
+        assert!((0.0..=1.0).contains(&h.toi), "contact is forecast within the step ({})", h.toi);
+        assert!(matches!(h.response, Response::ResolveMatter { .. }), "a real hit resolves matter");
+
+        // Bodies flying apart are not a collision, however close they pass.
+        let apart = [
+            bodies[0],
+            BodyState { vel: DVec3::new(1.1e4, 0.0, 0.0), ..bodies[1] },
+        ];
+        assert!(detect(&apart, 2000.0).is_empty(), "receding bodies do not collide");
+    }
+
+    /// **Forecasting, not sampling.** A body moving fast enough to jump the target between one step and
+    /// the next must still be caught — this is the whole reason detection is the engine's job and not a
+    /// per-frame `pos == pos` check a scene could fumble.
+    #[test]
+    fn a_body_that_would_tunnel_through_in_one_step_is_still_caught() {
+        let target = BodyState { pos: DVec3::ZERO, vel: DVec3::ZERO, mass_kg: 6.0e24, radius_m: 6.4e6, strength_pa: 1.0e8 };
+        // Starts one side, ends the other side, in a single step — never sampled inside.
+        let bullet = BodyState {
+            pos: DVec3::new(-5.0e7, 0.0, 0.0),
+            vel: DVec3::new(2.0e6, 0.0, 0.0), // 50 s later it is at +5e7, straight through
+            mass_kg: 1.0e20,
+            radius_m: 1.0e5,
+            strength_pa: 1.0e8,
+        };
+        // A naive check at the endpoints sees no overlap; the swept forecast sees the crossing.
+        let start_overlap = (bullet.pos - target.pos).length() < target.radius_m + bullet.radius_m;
+        let end = bullet.pos + bullet.vel * 50.0;
+        let end_overlap = (end - target.pos).length() < target.radius_m + bullet.radius_m;
+        assert!(!start_overlap && !end_overlap, "neither endpoint overlaps — sampling would miss it");
+        assert_eq!(detect(&[target, bullet], 50.0).len(), 1, "but the engine forecasts the tunneling hit");
     }
 }

@@ -106,9 +106,26 @@ that already own each half rather than reimplementing them. Tested across **elev
 a giant impact and a 3 mm raindrop on a petal go through the same function, and the ratio of resolved
 volumes is exactly the ratio of E/σ — the law is scale-free, which is what lets one engine do both.
 
-**STILL OPEN:** the scenes do not yet CALL it — they call the underlying laws directly, which is correct
-but leaves the door unused. Routing both through it is the remaining work, and is what would stop a fourth
-path being written.
+**AND THE ENGINE NOW OWNS DETECTION** (Robin: "we should not have entry points to collision from the
+scenes. At all. The engine should detect an imminent collision and prepare everything on its own... It
+must be the sole owner of collisions" — "the most Law-abiding approach: the physics engine handles the
+physics"). Correct, and it is the point the whole burn-down keeps returning to.
+
+`interaction::detect(bodies, dt)` is that owner: hand it the bodies the engine already holds — mass,
+radius, velocity, strength — and it forecasts every imminent contact on the continuous trajectory (swept,
+so a fast body cannot tunnel through a slow one between samples), sizes each from the reduced-mass impact
+energy, and returns the response. No scene assembles an interaction; the inputs are the engine's own
+state, so no scene *can*. A scene declares which bodies exist and where, and nothing more. Tested: the
+engine finds a collision from bodies alone, distinguishes it from bodies flying apart, and catches a body
+that would tunnel clean through in one step — the case a per-frame check a scene might write would miss.
+
+This realises Law I (a scene saying "collision here" is the scene doing physics; the engine detecting it
+is the engine doing physics) and Law VI (a scene-triggered collision is the render driving physics;
+detection inverts that back).
+
+**STILL OPEN:** the live `OrbitDemo` still runs its own swept CCD loop rather than calling `detect`. The
+capability is engine-owned and tested; migrating the existing scene loop onto it — and deleting the scene's
+copy — is the remaining work.
 
 ### 4. ~~Settling is decided by a frame counter~~ — FIXED
 
