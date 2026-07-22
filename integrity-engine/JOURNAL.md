@@ -3,6 +3,45 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-21 — the ground scene: a world you can look at, built from a file (docs/55)
+
+**What.** `/ground.html` → `Ground` → `/worlds/ground/world.json`. The first thing since terrain's
+deletion that a person can actually look at, and **every number about the world is in the file**: patch
+size, relief octaves, sea level, the material column (sand → gravel → dirt → basalt → granite), camera
+altitude, gravity, grain size. The scene contributes a camera rig, a meteor button and three passes.
+
+**Verified in a real browser** on the 5060 Ti: renders (189 kB canvas crop vs a 1.9 kB blank control),
+**284 fps**, zero page errors; a meteor resolves ~20,000 grains which settle back into the ground.
+
+**Three things earned, each caught by the rig:**
+- **The texture is the material** — 512² mip-mapped, synthesized from each material's CITED optical
+  properties. No image assets. The sand you see is the database row the physics reads.
+- **The sky is derived, not painted** — `rayleigh_tau` from `planet::earth()`'s emergent surface pressure.
+  The first cut guessed `tau` and `SUN_GAIN = 1.0` and rendered a **BLACK SKY**; one rigshot showed it.
+- **The camera is MATTER** (Robin reminded me it is canonical, and I had broken it). A transparent shell
+  on the SAME `granular::terrain_contact_resolve` every grain obeys — contact and slide, never excavation.
+  My first cut was `eye.y = eye.y.max(ground + h)`: exactly the clamp fudge that principle retired, which
+  exempts the camera from the world's rules and only ever pushes UP, so a camera driven into a steep face
+  pops through it. Shell half-extent (0.35 m) ≥ near-clip (0.2 m) — that is what stops the FRUSTUM
+  crossing the surface — and the sweep from last frame stops a fast camera tunnelling the skin. **The rig
+  proposes, physics disposes.**
+
+**★ NOT DONE, and it is the interesting part: the crater does not persist.** Drop a meteor, get a real
+crater with thousands of grains — and seconds later the ground is exactly as it was. Measured headlessly:
+20,373 grains created, 20,345 returned to voxels, 28 in flight, **0 LOST**, voxels 643,269 → 663,614
+against a pristine 663,642. **Matter is perfectly conserved, and that is precisely why it refills**: the
+ejecta falls straight back into the hole it came from.
+
+**Root cause, already recorded in docs/32 §4:** `MatterSim::step` is the CPU *settle-only* stepper — "no
+grain-grain contact on CPU". Grains cannot push each other outward, so there is no ejecta blanket. The GPU
+granular path (`particle_step.wgsl` + `gpu_particles`) DOES have grain-grain contact and is what produced
+the measured local blanket (JOURNAL 2026-07-19). **The next increment is one thing that pays off twice:**
+step this scene's grains through the GPU container — a real blanket, therefore a crater that persists
+(Robin's "becoming part of a bump map"), AND the visible consumer `gpu_particles` has lacked since
+terrain was deleted.
+
+**Verified.** 259/259 native + 19 skipped, wasm and `tsc` clean, browser rig-verified.
+
 ## 2026-07-21 — the surface itself becomes data (docs/54)
 
 **What.** `world_def::GroundSurface` declares what the ground IS — patch size, the fbm octaves, the

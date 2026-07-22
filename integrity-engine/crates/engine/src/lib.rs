@@ -64,6 +64,9 @@ mod tides;
 /// the shared primitives, and steps. No scene struct, no canvas. This is what re-consumes the systems
 /// deleting terrain orphaned (docs/46 ledger row 15).
 pub mod simulation;
+/// docs/55 — the ground scene, rebuilt from a DEFINITION. Browser-only (it owns a canvas surface).
+#[cfg(target_arch = "wasm32")]
+pub mod ground_scene;
 #[cfg(test)]
 mod isotropy;
 pub mod materials;
@@ -80,7 +83,9 @@ mod wgsl_layout;
 pub mod world;
 
 #[cfg(target_arch = "wasm32")]
-pub use app::OrbitDemo; // terrain `Engine` deleted 2026-07-21 (docs/50) — the first scene, superseded
+pub use app::OrbitDemo;
+#[cfg(target_arch = "wasm32")]
+pub use ground_scene::Ground; // terrain `Engine` deleted 2026-07-21 (docs/50) — the first scene, superseded
 
 /// World metres spanned by ONE screen pixel at the focal plane (distance `dist_m` from the eye),
 /// for a perspective camera with vertical field of view `fov_y` (radians) rendered into a viewport

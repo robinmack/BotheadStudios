@@ -1,0 +1,30 @@
+{
+  "name": "Regolith ground",
+  "type": "ground",
+  "ground": {
+    "eye_height_m": 20.0,
+    "camera_m": [0, 20, 0],
+    "view_radius_m": 60.0,
+    "gravity_ms2": 9.81,
+    "grain_size_m": 1.0,
+    "surface": {
+      "size_voxels": [96, 96, 96],
+      "base_top_m": 84.0,
+      "amplitude_m": 22.0,
+      "sea_level_m": 0.0,
+      "octaves": [
+        { "frequency": 0.021, "weight": 0.55 },
+        { "frequency": 0.058, "weight": 0.30 },
+        { "frequency": 0.140, "weight": 0.15 }
+      ],
+      "strata": [
+        { "material": "sand",    "thickness_m": 2 },
+        { "material": "gravel",  "thickness_m": 4 },
+        { "material": "dirt",    "thickness_m": 6 },
+        { "material": "basalt",  "thickness_m": 24 },
+        { "material": "granite", "thickness_m": null }
+      ]
+    },
+    "events": []
+  }
+}

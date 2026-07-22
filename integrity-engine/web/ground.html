@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Discourage Safari from serving a stale document (hashed JS/wasm are cache-safe on their own). -->
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
+    <title>Integrity · Ground</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- Critical CSS inlined so styling can't fail and the canvas always fills. Mirrors index.html. -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #05060a;
+        overflow: hidden;
+        font-family: ui-monospace, "SF Mono", Menlo, monospace;
+        -webkit-text-size-adjust: 100%;
+      }
+      #gpu-canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+        touch-action: none;
+      }
+      #hud {
+        position: fixed;
+        top: 10px;
+        left: 12px;
+        font-size: 12px;
+        color: #9fb4d6;
+        pointer-events: none;
+      }
+      #stats {
+        position: fixed;
+        left: 12px;
+        bottom: 12px;
+        padding: 8px 12px;
+        border-radius: 6px;
+        background: rgba(6, 10, 18, 0.72);
+        border: 1px solid rgba(120, 150, 200, 0.25);
+        font-size: 12px;
+        line-height: 1.6;
+        color: #c7d6ef;
+        pointer-events: none;
+      }
+      #stats b {
+        color: #eaf2ff;
+      }
+      #status {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 2rem;
+        text-align: center;
+        color: #dfe8f5;
+        font-size: 16px;
+        line-height: 1.7;
+      }
+      #status.err {
+        color: #ffd7d7;
+        background: #1a0d10;
+      }
+      [hidden] {
+        display: none !important;
+      }
+    </style>
+  </head>
+  <body data-world="/worlds/ground/world.json">
+    <canvas id="gpu-canvas"></canvas>
+    <div id="ground-controls" style="position:fixed;left:16px;top:96px;z-index:5">
+      <button id="drop-meteor" style="font:600 15px system-ui;padding:10px 16px;border-radius:10px;border:1px solid #3a4356;background:#151a24;color:#e8edf6;cursor:pointer">☄ Drop meteor</button>
+    </div>
+    <div id="hud">Integrity · space band · real Earth + Moon · drag orbit · pinch zoom</div>
+    <div id="stats" hidden></div>
+    <div id="status">Loading Integrity…</div>
+    <script type="module" src="/src/ground.ts"></script>
+  </body>
+</html>

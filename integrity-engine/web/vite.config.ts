@@ -135,6 +135,7 @@ export default defineConfig({
         terra: resolve(root, "terra.html"), // docs/43 — the data-defined Earth world
         orbit: resolve(root, "orbit.html"),
         birth: resolve(root, "birth.html"),
+        ground: resolve(root, "ground.html"),
         twomoons: resolve(root, "twomoons.html"),
         gpuProbe: resolve(root, "gpu-probe.html"), // cross-device GPU probe (no scene, compute only)
       },

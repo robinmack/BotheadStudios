@@ -57,6 +57,13 @@ pub struct GroundDef {
     /// Surface gravity (m/s²) the analytic effects fall under.
     #[serde(default = "GroundDef::default_gravity")]
     pub gravity_ms2: f32,
+    /// Camera altitude above the surface beneath it (m) — the scene's framing, declared not compiled.
+    #[serde(default = "GroundDef::default_eye_height")]
+    pub eye_height_m: f32,
+    /// The size of a resolved grain (m). The interaction's own scale (docs/47): metre grains for ejecta,
+    /// centimetres for a contact patch. Drives how fine the crater's debris is.
+    #[serde(default = "GroundDef::default_grain")]
+    pub grain_size_m: f32,
     /// The events that make matter happen. Order is the order they are applied.
     #[serde(default)]
     pub events: Vec<GroundEvent>,
@@ -165,6 +172,8 @@ impl Default for GroundSurface {
 
 impl GroundDef {
     fn default_view_radius() -> f32 { 2_000.0 }
+    fn default_eye_height() -> f32 { 20.0 }
+    fn default_grain() -> f32 { 1.0 }
     fn default_gravity() -> f32 { 9.81 }
 }
 

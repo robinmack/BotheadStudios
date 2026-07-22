@@ -37,6 +37,7 @@ pub struct Simulation {
     materials: Vec<Material>,
     /// Effects materialised so far — the docs/49 Analytic→Resolved hand-off, counted.
     resolved_total: usize,
+    name: String,
     /// Grains ever created (impact excavation + effect materialisation).
     created_total: usize,
 }
@@ -61,6 +62,7 @@ impl Simulation {
             def: ground,
             materials,
             resolved_total: 0,
+            name: def.name.clone(),
             created_total: 0,
         };
         sim.apply_events();
@@ -120,6 +122,47 @@ impl Simulation {
         self.created_total += self.matter.particle_count().saturating_sub(before);
         self.matter.step(&mut self.world, &self.field, &[], dt);
         resolved
+    }
+
+    /// The world's declared name (for the HUD).
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    /// The declared surface (skin) material id — what you are standing on.
+    pub fn surface_material(&self) -> &str {
+        self.def.surface.strata.first().map(|s| s.material.as_str()).unwrap_or("?")
+    }
+    /// Did matter change the world since the last call (a crater dug, grains de-resolved)? Drives remesh.
+    pub fn take_dirty(&mut self) -> bool {
+        self.matter.take_dirty()
+    }
+
+    /// Declared camera altitude (m) above the surface.
+    pub fn eye_height_m(&self) -> f32 {
+        self.def.eye_height_m
+    }
+    /// Declared grain size (m) a resolved region breaks into.
+    pub fn grain_size_m(&self) -> f32 {
+        self.def.grain_size_m
+    }
+    /// Declared surface gravity (m/s²).
+    pub fn gravity_ms2(&self) -> f32 {
+        self.def.gravity_ms2
+    }
+    /// The materials this world was built from.
+    pub fn materials(&self) -> &[Material] {
+        &self.materials
+    }
+    /// Drop a meteor: resolve ONLY the region the energy disturbs, through the shared impact primitive.
+    /// Returns the grains created.
+    pub fn drop_meteor(&mut self, site: Vec3, direction: Vec3, energy_j: f32) -> usize {
+        let n = self.matter.impact(&mut self.world, &self.materials, site, direction, energy_j);
+        self.created_total += n;
+        n
+    }
+    /// Live particles, for the renderer.
+    pub fn particles(&self) -> &[crate::matter::Particle] {
+        &self.matter.particles
     }
 
     /// Live particle count in the shared matter sim.

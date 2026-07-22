@@ -9,6 +9,15 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **New scene: `/ground.html` (docs/55)** — a regolith ground world rendered from
+  `/worlds/ground/world.json`. Every world number is in the file (size, relief, strata, camera, gravity,
+  grain size); the scene supplies a camera rig, a "Drop meteor" button and three passes. Procedural
+  material textures from cited optical properties; sky derived from the declared atmosphere.
+  **The camera is MATTER** — a transparent shell on the shared `granular::terrain_contact_resolve`,
+  replacing the clamp; its half-extent ≥ near-clip so the frustum cannot cross the surface.
+  **Known gap:** the crater refills, because the CPU `MatterSim::step` has no grain-grain contact so
+  ejecta cannot form a blanket. Next: step these grains on the GPU granular container.
+
 - **The surface is data (docs/54).** `world_def::GroundSurface` declares patch size, fbm octaves, relief
   band, sea level and material strata; `world::generate_from` builds it; `Simulation` uses it.
   **Output-neutral** — the declared defaults are voxel-identical to the old hardcoded patch, asserted by
