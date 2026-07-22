@@ -8,6 +8,7 @@
 import init, { OrbitDemo } from "./wasm/engine.js";
 import "./scene-nav";
 import { createSimHud } from "./sim-hud";
+import { createShareView } from "./share-view";
 
 // --- Log relay: mirror console + global errors to the dev server ---
 function report(level: string, msg: string): void {
@@ -214,7 +215,6 @@ async function main(): Promise<void> {
 
     // The viewport is a physical frame of reference (docs/17): the camera rides a body, so we can watch
     // the encounter from either standpoint. "Camera on Moon" frames the impact site once it shatters.
-    let wantShot = false;
     // 👁 (eye) not 📷 (camera): these set the camera's FRAME OF REFERENCE (whose eyes we watch from); the
     // camera icon is reserved for "Share view" (capture the screen). Distinct icons so the two don't blur.
     const camEarth = mkBtn("👁 Earth", () => demo.focus_earth());
@@ -222,10 +222,10 @@ async function main(): Promise<void> {
     // Share view: upload exactly what's on screen (the canvas) so the agent can look at the debris swarm /
     // disk. Grabbed in the render loop right after present; POSTed to /__shot (dev server, or the deployed
     // shot receiver proxied at /__shot).
-    mkBtn("📷 Share view", () => {
-      wantShot = true;
-      setStatus("capturing view…");
-    });
+    // Share view now comes from the shared module — this scene's inline copy was the ONLY
+    // implementation, which is why the other scenes had no button at all.
+    const share = createShareView(canvas, { onStatus: (m, bad) => setStatus(m, bad) });
+    mkBtn("📷 Share view", () => share.request());
     void camEarth;
     void camMoon;
 
@@ -579,22 +579,7 @@ async function main(): Promise<void> {
         setStatus(`render error: ${String(err)}`, true);
         return;
       }
-      // Share view: capture the freshly-presented frame and upload it (see the button above).
-      if (wantShot) {
-        wantShot = false;
-        try {
-          const url = canvas.toDataURL("image/png");
-          void fetch("/__shot", {
-            method: "POST",
-            headers: { "content-type": "text/plain" },
-            body: url,
-          })
-            .then(() => report("info", `view posted (${url.length} chars)`))
-            .catch((e) => report("error", `view upload failed: ${String(e)}`));
-        } catch (e) {
-          report("error", `view capture failed: ${String(e)} (WebGPU canvas may need readback)`);
-        }
-      }
+      share.afterPresent(); // one shared implementation (share-view.ts)
       if (firstFrame) {
         report("info", "first orbit frame rendered OK");
         firstFrame = false;

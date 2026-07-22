@@ -4,6 +4,7 @@
 
 import init, { Terra } from "./wasm/engine.js";
 import "./scene-nav";
+import { createShareView } from "./share-view";
 
 // --- Log relay: mirror console + errors to the dev server (parity with the other scenes) ---
 function report(level: string, msg: string): void {
@@ -181,6 +182,15 @@ async function main(): Promise<void> {
     let firstFrame = true;
     let fps = 0;
     let lastT = performance.now();
+    // Share view — the same module every scene uses.
+    const share = createShareView(canvas, {
+      onStatus: (m, bad) => setStatus(m, bad),
+    });
+    const shareSlot = document.createElement("div");
+    Object.assign(shareSlot.style, { position: "fixed", left: "16px", bottom: "16px", zIndex: "5" });
+    shareSlot.appendChild(share.button);
+    document.body.appendChild(shareSlot);
+
     const frame = () => {
       // Held keys → move/altitude intents (the engine scales the step by altitude). Fully data-driven.
       const fwd = (active("forward") ? 1 : 0) - (active("back") ? 1 : 0);
@@ -194,6 +204,7 @@ async function main(): Promise<void> {
         setStatus(`render error: ${String(err)}`, true);
         return;
       }
+      share.afterPresent(); // while the WebGPU drawing buffer is still current
       const now = performance.now();
       const dt = now - lastT;
       lastT = now;

@@ -3,6 +3,7 @@
 import init, { Ground } from "./wasm/engine.js";
 import "./scene-nav";
 import { createSimHud } from "./sim-hud";
+import { createShareView } from "./share-view";
 
 const canvas = document.getElementById("gpu-canvas") as HTMLCanvasElement;
 const stats = document.getElementById("stats");
@@ -70,6 +71,10 @@ async function main() {
   drop?.addEventListener("click", fire);
   window.addEventListener("keydown", (e) => { if (e.key === "m") fire(); });
 
+  // Share view: one shared implementation (see share-view.ts), placed in this scene's control strip.
+  const share = createShareView(canvas, { onStatus: (m, bad) => setStatus(m, bad) });
+  document.getElementById("ground-controls")?.appendChild(share.button);
+
   const hud = createSimHud("ground");
   let fps = 0, frames = 0, last = performance.now();
   const frame = () => {
@@ -82,6 +87,8 @@ async function main() {
       setStatus(`render error: ${String(err)}`, true);
       return;
     }
+    // Immediately after present, while the WebGPU drawing buffer is still readable.
+    share.afterPresent();
     if (stats) {
       hud.update({
         title: `<b>${g.world_name()}</b>`,

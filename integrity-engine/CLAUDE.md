@@ -100,6 +100,14 @@ computation it defers** (Law V) — recorded in `docs/46`'s ledger, not a quiet 
 
 ## Hard rules (do not violate)
 
+0. **Every scene has a "Share view" button.** Use `web/src/share-view.ts` — do NOT write a second
+   capture path. A scene calls `createShareView(canvas, …)`, places the returned button in its control
+   strip, and calls `share.afterPresent()` **immediately after it presents** (a WebGPU canvas is only
+   readable while its drawing buffer is current; capture anywhere else silently yields a blank image).
+   The frame is POSTed to `/__shot` and written to `shots/shot-<ts>.png`, which is how a picture gets
+   from a scene to whoever is reading the repo. `web/rig/share_button.mjs` asserts the button exists AND
+   that a real PNG lands, on every scene.
+
 1. **Work directly in the main checkout on a feature branch** — `~/workspace/BotheadStudios`. Do NOT
    create git worktrees. (This reversed on 2026-07-19: worktrees existed to isolate parallel agents, and
    this is a single-developer project that is not doing multi-agent work. They cost a duplicated
