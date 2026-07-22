@@ -3,6 +3,59 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-21 — the ground scene was an abstraction; the physics corrections, and the real target (ledger row 16)
+
+**Robin's review, and it was right on every count.** The ground scene I shipped was *"a cube of ground
+that inexplicably has earth normal gravity while being suspended in space"*. Four violations, all of
+principles already written down in `CLAUDE.md`, docs, and memory:
+
+1. **A second physics path.** Grains ran on `MatterSim::step`, the CPU *settle-only* stepper with no
+   grain-grain contact. I documented that as a "known gap" and shipped it. It is not a gap; it is a
+   second answer to how matter interacts, which is exactly what docs/46 exists to forbid — and
+   straight-up-straight-down ejecta is not a thing in an impact.
+2. **Declared gravity.** `"gravity_ms2": 9.81` in the world file. The scene I had DELETED derived it from
+   `planet::earth()` — *"no magic 9.81"* — and I replaced that with the fudge.
+3. **No planet.** A 96 m cube in vacuum wearing Earth's number.
+4. **Resolved the whole patch**, ignoring resolution-by-necessity — the thing I had spent the week
+   building.
+
+**The failure mode, named so it is checkable:** I optimised for *something visible shipped* over *the
+physics is right*, which inverts Law 1 (physics is the product) and Law 6 (physics drives the render,
+never the reverse). The information was not missing — I had edited those very docs that day.
+
+**Corrected this session (all tested):**
+- **Gravity EMERGES.** `gravity_ms2` is deleted from the schema; a ground world names its `planet` and
+  `g = GM/R²` follows from that body's real layered mass. An unknown planet is refused, not defaulted.
+- **A meteor is MATTER you throw.** `Simulation::throw_meteor(Meteor { pos, vel, mass_kg, material })`.
+  The ENGINE flies it under the planet's gravity and lands it; impact energy is ½mv² of the matter that
+  actually arrives. The old `drop_meteor(energy_j)` — an abstract number, at a site the host computed —
+  was a dial wearing a physics coat. Tests assert 8× mass and 4× speed each dig more, and that the
+  caller never computes an impact site.
+- **A double-count fixed**: `created_total` read 45,380 for 22,690 grains because the meteor's excavation
+  was counted twice. A matter-accounting number that lies is worse than none, since its whole job is
+  catching lost matter. Guarded by test.
+- One test had been asserting behaviour in a *zero-gravity* world; it is now a real ballistic arc.
+
+**★ CAN YOU CIRCUMNAVIGATE? No — and the measurement is the point.** The patch is 96 m across =
+**0.00024% of Earth's circumference**. Walk ~48 m and you reach the edge of the world. `planet::earth()`
+is referenced only for gravity and air pressure: a *number supplier*, not a *place*.
+
+**The real target — and it was ALREADY WRITTEN DOWN.** docs/23 is the north star (*"place a metal ball
+on the Earth's surface, de-orbit the Moon into that spot, then zoom from the celestial view down to the
+ball"* — one Earth, everything is matter, no bespoke objects), with docs/13 (scale-relative) and docs/43
+(worlds as data). I started writing a NEW doc restating it, which is precisely the déjà-vu failure
+CLAUDE.md warns about; deleted. Ledger row 16 records only the measured VIOLATION. In Robin's words: *"Terra should occur naturally from
+definitions of material, biomes, etc… a fully materialized object, reusable between scenes. Then this
+scene would simply be using that planet/solar system… Being that close to the ground should make the
+detailed texture generate naturally (scaling based on viewable area)… We do the physics and everything
+else comes for free if we define the world and the objects within it well (externally)."* Plus: layer
+properties (heat, pressure) DERIVED from the materials and layer volumes — *"most of this is immaterial
+unless something like Theia comes along, which is why we worked so hard on Theia."*
+
+**Every piece already exists** (`LayeredBody`, Terra's rasters, `ResolutionController::camera_grain_radius`,
+`hydrostatic`/`eos`, the GPU granular container). They have never been COMPOSED into one Earth every scene
+shares. That is composition, not construction, and it is the next work — no new design doc required.
+
 ## 2026-07-21 — the ground scene: a world you can look at, built from a file (docs/55)
 
 **What.** `/ground.html` → `Ground` → `/worlds/ground/world.json`. The first thing since terrain's

@@ -38,8 +38,24 @@ pub struct Simulation {
     /// Effects materialised so far — the docs/49 Analytic→Resolved hand-off, counted.
     resolved_total: usize,
     name: String,
+    planet_mass: f64,
+    planet_radius: f64,
+    surface_g: f32,
     /// Grains ever created (impact excavation + effect materialisation).
     created_total: usize,
+    /// Meteors in flight. The engine flies and lands them; the caller only throws.
+    meteors: Vec<Meteor>,
+}
+
+/// A meteor: real matter with a mass, a material, a place and a velocity.
+#[derive(Debug, Clone, Copy)]
+pub struct Meteor {
+    pub pos: Vec3,
+    pub vel: Vec3,
+    pub mass_kg: f32,
+    pub material: usize,
+    /// Rendered radius (m), from its mass and its material's density: r = (3m/4πρ)^(1/3).
+    pub radius_m: f32,
 }
 
 impl Simulation {
@@ -52,6 +68,15 @@ impl Simulation {
             .ok_or_else(|| "not a ground world: no `ground` block".to_string())?;
         // The SURFACE comes from the definition too (docs/54) — size, relief, sea level and strata.
         // Omitted ⇒ declared defaults, which are voxel-identical to the old hardcoded patch.
+        // The ground is a surface patch OF a real planet. Its mass, radius and the gravity the patch
+        // feels all emerge from that body — there is no magic 9.81 anywhere in this path.
+        let planet = match ground.planet.as_str() {
+            "earth" | "" => crate::planet::earth(),
+            other => return Err(format!("unknown planet {other:?} (known: \"earth\")")),
+        };
+        let planet_radius = planet.radius();
+        let planet_mass = planet.total_mass();
+        let surface_g = planet.gravity_at(planet_radius) as f32;
         let world = crate::world::generate_from(&ground.surface, &materials);
         let field = MassField::build(&world, &materials, 8);
         let mut sim = Simulation {
@@ -63,7 +88,11 @@ impl Simulation {
             materials,
             resolved_total: 0,
             name: def.name.clone(),
+            planet_mass,
+            planet_radius,
+            surface_g,
             created_total: 0,
+            meteors: Vec::new(),
         };
         sim.apply_events();
         Ok(sim)
@@ -107,7 +136,7 @@ impl Simulation {
     pub fn step(&mut self, dt: f32) -> usize {
         let camera = Vec3::from_array(self.def.camera_m);
         let view_r = self.def.view_radius_m;
-        let gravity = Vec3::new(0.0, -self.def.gravity_ms2, 0.0);
+        let gravity = Vec3::new(0.0, -self.surface_g, 0.0);
         let before = self.matter.particle_count();
         let resolved = self.resolution.update(
             &mut self.matter,
@@ -118,8 +147,11 @@ impl Simulation {
             |c, _r| (c - camera).length() < view_r,
         );
         self.resolved_total += resolved;
-        // Effects materialise grains inside `update`; count the increase so the accounting is complete.
+        // Count what the RESOLUTION hand-off materialised, before flying meteors — `fly_meteors` counts
+        // its own excavation, and measuring the particle delta across both double-counted every impact
+        // (the HUD read 45,380 created for 22,690 grains, which is how it was spotted).
         self.created_total += self.matter.particle_count().saturating_sub(before);
+        self.fly_meteors(dt);
         self.matter.step(&mut self.world, &self.field, &[], dt);
         resolved
     }
@@ -145,20 +177,79 @@ impl Simulation {
     pub fn grain_size_m(&self) -> f32 {
         self.def.grain_size_m
     }
-    /// Declared surface gravity (m/s²).
+    /// Surface gravity, EMERGENT from the planet this ground is a patch of: `g = GM/R²` over that
+    /// body's real layered mass. Never a declared constant.
     pub fn gravity_ms2(&self) -> f32 {
-        self.def.gravity_ms2
+        self.surface_g
+    }
+    /// The planet's total mass (kg) — real matter, not a scene parameter.
+    pub fn planet_mass_kg(&self) -> f64 {
+        self.planet_mass
+    }
+    /// The planet's radius (m). The ground curves to a horizon at this radius.
+    pub fn planet_radius_m(&self) -> f64 {
+        self.planet_radius
     }
     /// The materials this world was built from.
     pub fn materials(&self) -> &[Material] {
         &self.materials
     }
-    /// Drop a meteor: resolve ONLY the region the energy disturbs, through the shared impact primitive.
-    /// Returns the grains created.
-    pub fn drop_meteor(&mut self, site: Vec3, direction: Vec3, energy_j: f32) -> usize {
-        let n = self.matter.impact(&mut self.world, &self.materials, site, direction, energy_j);
-        self.created_total += n;
-        n
+    /// **Throw a meteor. The engine does the rest.**
+    ///
+    /// You give it MATTER — a mass, a material, a position and a velocity — not an abstract "energy"
+    /// with a hand-computed impact site. It flies under the planet's own gravity, and when it reaches
+    /// the ground the engine excavates, throws the ejecta, and settles it. The caller's whole job is
+    /// creating the rock and letting go of it.
+    ///
+    /// The impact energy is ½mv² at the moment of contact — a consequence of the matter and its flight,
+    /// never a dial. A caller cannot ask for "a big crater"; it can only throw a bigger or faster rock.
+    pub fn throw_meteor(&mut self, m: Meteor) {
+        self.meteors.push(m);
+    }
+
+    /// Meteors currently in flight (for the renderer, and so a HUD can say one is incoming).
+    pub fn meteors(&self) -> &[Meteor] {
+        &self.meteors
+    }
+
+    /// Advance every meteor in flight under the planet's gravity and impact the ones that arrive.
+    /// Returns grains created this step.
+    fn fly_meteors(&mut self, dt: f32) -> usize {
+        let g = Vec3::new(0.0, -self.surface_g, 0.0);
+        let mut landed: Vec<Meteor> = Vec::new();
+        let mut still: Vec<Meteor> = Vec::with_capacity(self.meteors.len());
+        for mut m in self.meteors.drain(..) {
+            m.vel += g * dt;
+            m.pos += m.vel * dt;
+            let c = self.world.center();
+            let (xi, zi) = ((m.pos.x + c.x).floor() as i32, (m.pos.z + c.z).floor() as i32);
+            let ground = self
+                .world
+                .surface_top_voxel(xi, zi)
+                .map(|t| t as f32 - c.y)
+                .unwrap_or(f32::NEG_INFINITY);
+            if m.pos.y <= ground {
+                landed.push(m);
+            } else {
+                still.push(m);
+            }
+        }
+        self.meteors = still;
+        let mut created = 0;
+        for m in landed {
+            // Energy is ½mv² of the matter that actually arrived. Not a parameter.
+            let speed = m.vel.length();
+            let energy_j = 0.5 * m.mass_kg * speed * speed;
+            let dir = m.vel.normalize_or(Vec3::new(0.0, -1.0, 0.0));
+            let n = self.matter.impact(&mut self.world, &self.materials, m.pos, dir, energy_j);
+            log::info!(
+                "impact: {:.0} kg at {:.0} m/s = {:.2e} J -> {n} grains",
+                m.mass_kg, speed, energy_j
+            );
+            created += n;
+        }
+        self.created_total += created;
+        created
     }
     /// Live particles, for the renderer.
     pub fn particles(&self) -> &[crate::matter::Particle] {
@@ -217,16 +308,14 @@ mod tests {
     /// view. This is the whole Analytic→Resolved hand-off, driven by a definition.
     #[test]
     fn an_off_camera_effect_stays_analytic_then_resolves_when_it_enters_view() {
-        // Geometry kept INSIDE the voxel patch (96 m wide, centred ⇒ |x| ≲ 48). `matter::step` culls
-        // particles that drift off the world, so an effect resolving outside the footprint spawns grains
-        // that are removed in the same step — matter that appears and vanishes. The first version of this
-        // test resolved at x≈150 and looked green because it only asserted that the effect RESOLVED.
-        // Camera at the origin, view radius 20 m; the ejecta starts at x=40 closing at 10 m/s, so it
-        // crosses at t = 2.0 s (step ~20), well inside the 40-step window and well inside the patch.
+        // A real BALLISTIC arc under the planet's own gravity — this test used to declare zero gravity,
+        // which is not a thing on a planet. The ejecta is launched at 30 m altitude closing at 50 m/s and
+        // arcs into a 40 m view radius around t≈1.5 s, still inside the 96 m patch (`matter::step` culls
+        // anything that leaves the world, so an effect resolving outside it spawns grains that vanish).
         let json = r#"{
           "name":"ejecta","type":"ground",
-          "ground":{ "camera_m":[0,0,0], "view_radius_m":20, "gravity_ms2":0,
-            "events":[{"kind":"ejecta","at_m":[40,0,0],"velocity_ms":[-10,0,0],
+          "ground":{ "camera_m":[0,20,0], "view_radius_m":40, "planet":"earth",
+            "events":[{"kind":"ejecta","at_m":[90,30,0],"velocity_ms":[-50,0,0],
                        "radius_m":3,"grain_radius_m":0.5}] }
         }"#;
         let mut sim = Simulation::from_json(json, mats()).expect("builds");
@@ -260,8 +349,8 @@ mod tests {
     fn an_effect_that_is_never_seen_is_still_tracked_and_never_materialised() {
         let json = r#"{
           "name":"unseen","type":"ground",
-          "ground":{ "camera_m":[0,0,0], "view_radius_m":10, "gravity_ms2":0,
-            "events":[{"kind":"ejecta","at_m":[5000,0,0],"velocity_ms":[200,0,0],
+          "ground":{ "camera_m":[0,0,0], "view_radius_m":10, "planet":"earth",
+            "events":[{"kind":"ejecta","at_m":[5000,900,0],"velocity_ms":[200,0,0],
                        "radius_m":3,"grain_radius_m":0.5}] }
         }"#;
         let mut sim = Simulation::from_json(json, mats()).expect("builds");
@@ -292,6 +381,103 @@ mod tests {
             .map(|x| rolling.world.surface_top_voxel(x, 0).unwrap_or(-1))
             .collect();
         assert!(tops.windows(2).any(|p| p[0] != p[1]), "the default world has real relief");
+    }
+
+    /// **A meteor is MATTER, and its energy EMERGES.** The caller throws a rock; it must not be able
+    /// to ask for an outcome. A heavier or faster rock must dig more because ½mv² is larger — not
+    /// because a "power" parameter was turned up.
+    ///
+    /// This exists because the first version of this scene took `drop_meteor(energy_j)`: an abstract
+    /// number the host chose, at a site the host computed. That is a dial wearing a physics coat.
+    #[test]
+    fn a_thrown_meteor_digs_by_its_own_kinetic_energy() {
+        let world = r#"{"name":"g","type":"ground","ground":{"camera_m":[0,30,0],"view_radius_m":80}}"#;
+        let iron = crate::materials::index_of(&mats(), "iron");
+        let dig = |mass_kg: f32, speed: f32| -> usize {
+            let mut sim = Simulation::from_json(world, mats()).expect("builds");
+            let c = sim.world.center();
+            let ground = sim.world.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
+            sim.throw_meteor(Meteor {
+                pos: Vec3::new(0.0, ground + 60.0, 0.0),
+                vel: Vec3::new(0.0, -speed, 0.0),
+                mass_kg,
+                material: iron,
+                radius_m: 0.5,
+            });
+            // The ENGINE flies it and lands it; the caller never computes an impact site.
+            for _ in 0..600 {
+                sim.step(1.0 / 60.0);
+                if sim.meteors().is_empty() && sim.created_total() > 0 {
+                    break;
+                }
+            }
+            sim.created_total()
+        };
+
+        let small = dig(500.0, 40.0);
+        let heavy = dig(4_000.0, 40.0);
+        let fast = dig(500.0, 160.0);
+        assert!(small > 0, "a thrown meteor must actually excavate; got {small}");
+        assert!(heavy > small, "8x the MASS must dig more: {heavy} vs {small}");
+        assert!(fast > small, "4x the SPEED must dig more (v is squared): {fast} vs {small}");
+    }
+
+    /// The engine flies the meteor. A caller that throws one and steps must see it in flight, then gone.
+    #[test]
+    fn the_engine_flies_the_meteor_the_caller_only_throws_it() {
+        let mut sim = Simulation::from_json(
+            r#"{"name":"g","type":"ground","ground":{"camera_m":[0,30,0]}}"#, mats()).expect("builds");
+        let c = sim.world.center();
+        let ground = sim.world.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
+        sim.throw_meteor(Meteor {
+            pos: Vec3::new(0.0, ground + 80.0, 0.0),
+            vel: Vec3::new(0.0, -20.0, 0.0),
+            mass_kg: 800.0,
+            material: crate::materials::index_of(&mats(), "iron"),
+            radius_m: 0.5,
+        });
+        assert_eq!(sim.meteors().len(), 1, "it is in flight");
+        let start_y = sim.meteors()[0].pos.y;
+        sim.step(1.0 / 60.0);
+        assert!(sim.meteors()[0].pos.y < start_y, "gravity must pull it down without the caller helping");
+        for _ in 0..600 {
+            sim.step(1.0 / 60.0);
+            if sim.meteors().is_empty() { break; }
+        }
+        assert!(sim.meteors().is_empty(), "it must land on its own");
+        assert!(sim.created_total() > 0, "landing must excavate real matter");
+    }
+
+    /// Every grain is counted ONCE. A meteor's excavation was being counted both by `fly_meteors` and
+    /// by the generic particle-count delta, so `created_total` read double — and a matter-accounting
+    /// number that lies is worse than none, because the whole point of it is catching lost matter.
+    #[test]
+    fn created_total_counts_each_grain_exactly_once() {
+        let mut sim = Simulation::from_json(
+            r#"{"name":"g","type":"ground","ground":{"camera_m":[0,30,0]}}"#, mats()).expect("builds");
+        let c = sim.world.center();
+        let ground = sim.world.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
+        sim.throw_meteor(Meteor {
+            pos: Vec3::new(0.0, ground + 60.0, 0.0),
+            vel: Vec3::new(0.0, -50.0, 0.0),
+            mass_kg: 800.0,
+            material: crate::materials::index_of(&mats(), "iron"),
+            radius_m: 0.5,
+        });
+        // Step to the frame the impact lands on, and check the count against the grains that exist.
+        let mut peak = 0usize;
+        for _ in 0..600 {
+            sim.step(1.0 / 60.0);
+            peak = peak.max(sim.particle_count());
+            if sim.meteors().is_empty() && peak > 0 { break; }
+        }
+        assert!(peak > 0, "the meteor must excavate");
+        assert_eq!(
+            sim.created_total(), peak,
+            "created_total ({}) must equal the grains actually created ({peak}) — a double count here \
+             makes the lost-matter figure meaningless",
+            sim.created_total()
+        );
     }
 
     /// A definition with no events must do nothing. Guards against the engine quietly supplying a

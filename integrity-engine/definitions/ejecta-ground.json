@@ -5,7 +5,7 @@
   "ground": {
     "camera_m": [0, 20, 0],
     "view_radius_m": 40,
-    "gravity_ms2": 9.81,
+    "planet": "earth",
     "events": [
       { "kind": "impact", "at_m": [0, 0, 0], "direction": [0, -1, 0], "energy_j": 3.0e7 },
       { "kind": "ejecta", "at_m": [80, 60, 0], "velocity_ms": [-20, 0, 0],

@@ -9,7 +9,7 @@
       0
     ],
     "view_radius_m": 40,
-    "gravity_ms2": 9.81,
+    "planet": "earth",
     "surface": {
       "size_voxels": [
         48,

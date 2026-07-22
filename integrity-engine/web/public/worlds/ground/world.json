@@ -2,10 +2,10 @@
   "name": "Regolith ground",
   "type": "ground",
   "ground": {
-    "eye_height_m": 20.0,
+    "eye_height_m": 1.7,
     "camera_m": [0, 20, 0],
     "view_radius_m": 60.0,
-    "gravity_ms2": 9.81,
+    "planet": "earth",
     "grain_size_m": 1.0,
     "surface": {
       "size_voxels": [96, 96, 96],

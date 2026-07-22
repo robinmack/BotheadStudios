@@ -546,16 +546,31 @@ impl Ground {
     /// **Drop a meteor.** The impact resolves ONLY the region its energy actually disturbs — grains
     /// appear in the crater, not across the map (`docs/44`: necessity decides existence). Aimed at the
     /// point the camera is looking at, so what you clicked is what gets hit.
-    pub fn drop_meteor(&mut self, energy_j: f32) -> usize {
+    /// **Throw a meteor.** The caller creates a rock — mass, material, where it is, how fast it is
+    /// going — and lets go. The engine flies it under the planet's own gravity and handles the impact,
+    /// the excavation and the settling. There is no energy parameter: the crater is ½mv² of the matter
+    /// that arrives, so you get a bigger one by throwing a bigger or faster rock.
+    pub fn throw_meteor(&mut self, mass_kg: f32, speed_ms: f32) {
+        let iron = crate::materials::index_of(&self.mats, "iron");
+        let rho = self.mats.get(iron).map(|m| m.density).unwrap_or(7870.0);
+        let radius_m = (3.0 * mass_kg / (4.0 * std::f32::consts::PI * rho)).cbrt();
+        // Launched high and inbound at an angle, so it ARRIVES — an impactor that materialises at the
+        // surface is not an impact, it is a hole appearing.
         let (_, target) = self.eye_and_target();
-        // Land it on the surface under the aim point rather than at an arbitrary height.
-        let c = self.sim.world.center();
-        let (xi, zi) = ((target.x + c.x).floor() as i32, (target.z + c.z).floor() as i32);
-        let top = self.sim.world.surface_top_voxel(xi, zi).unwrap_or(0) as f32 - c.y;
-        let site = Vec3::new(target.x, top, target.z);
-        let n = self.sim.drop_meteor(site, Vec3::new(0.0, -1.0, 0.0), energy_j);
-        log::info!("meteor: {n} grains resolved at ({:.1}, {:.1})", site.x, site.z);
-        n
+        let start = target + Vec3::new(-140.0, 220.0, -90.0);
+        let dir = (target - start).normalize_or(Vec3::new(0.0, -1.0, 0.0));
+        self.sim.throw_meteor(crate::simulation::Meteor {
+            pos: start,
+            vel: dir * speed_ms,
+            mass_kg,
+            material: iron,
+            radius_m,
+        });
+    }
+
+    /// Meteors currently in flight — the HUD says one is incoming.
+    pub fn meteors_in_flight(&self) -> usize {
+        self.sim.meteors().len()
     }
 
     pub fn set_orbit(&mut self, yaw: f32, pitch: f32, zoom: f32) {
@@ -618,6 +633,24 @@ impl Ground {
                 _p0: 0.0, _p1: 0.0, _p2: 0.0,
             })
             .collect();
+        // Meteors in flight are matter too, drawn through the SAME instanced path as the grains —
+        // they are not a special effect layered on top.
+        let mut inst = inst;
+        for m in self.sim.meteors() {
+            inst.push(GpuParticle {
+                offset: m.pos.to_array(),
+                u: 0.0,
+                vel: m.vel.to_array(),
+                resting: 0.0,
+                color: self.mats.get(m.material).map(|mm| mm.albedo).unwrap_or([0.6, 0.5, 0.45]),
+                material: m.material as f32,
+                // Hypervelocity iron glows; the same incandescence law the ejecta uses.
+                emission: crate::emission::incandescence(1600.0),
+                rho: 0.0,
+                radius: m.radius_m,
+                _p0: 0.0, _p1: 0.0, _p2: 0.0,
+            });
+        }
         if !inst.is_empty() {
             self.queue.write_buffer(&self.particle_instances, 0, bytemuck::cast_slice(&inst));
         }
@@ -691,7 +724,7 @@ impl Ground {
         let dist = self.camera.base_distance * self.camera.zoom;
         let desired = Vec3::new(
             -dist * self.camera.yaw.sin(),
-            ground + self.eye_height_m * (1.0 - self.camera.pitch.min(0.0) * 0.5),
+            ground + self.eye_height_m,
             -dist * self.camera.yaw.cos(),
         );
         // PHYSICS decides where it may actually be. The shell cannot enter matter, so a rig pose that
