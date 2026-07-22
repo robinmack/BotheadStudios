@@ -213,3 +213,73 @@ mod glow_tests {
         assert!(c[0] > c[1] && c[1] > c[2], "1,900 K is orange: red > green > blue, got {c:?}");
     }
 }
+
+/// **The display law, in Rust — the reference for `shaders/tonemap.wgsl`.**
+///
+/// Compress LUMINANCE and carry chromaticity through unchanged. The per-channel form every shader used
+/// (`radiance / (1 + radiance)`) walks each channel toward 1 independently, so a bright coloured surface
+/// loses its hue — and the brighter and more saturated it is, the more wrong it gets.
+///
+/// WGSL cannot call this, so the two are kept in step by hand and this side carries the test. Any change
+/// to one is a change to both.
+pub fn tonemap(radiance: [f64; 3]) -> [f64; 3] {
+    let l = 0.2126 * radiance[0] + 0.7152 * radiance[1] + 0.0722 * radiance[2];
+    if l <= 0.0 {
+        return [0.0; 3];
+    }
+    let compressed = l / (1.0 + l);
+    let k = compressed / l;
+    [
+        (radiance[0] * k).min(1.0),
+        (radiance[1] * k).min(1.0),
+        (radiance[2] * k).min(1.0),
+    ]
+}
+
+#[cfg(test)]
+mod tonemap_tests {
+    use super::*;
+
+    /// **A hot surface must keep its colour.** proto-Earth's magma ocean is the case that exposed this:
+    /// Planck gives 1,900 K as linear sRGB (1.000, 0.243, 0.000) — a deep orange — and at the radiance it
+    /// actually emits the per-channel Reinhard returned (1.000, 1.000, 0.000), which is YELLOW. Green
+    /// saturating alongside red invented a colour the object does not have.
+    #[test]
+    fn brightness_is_compressed_but_hue_is_not_invented() {
+        let magma = blackbody_srgb(1900.0).map(|v| v as f64);
+        assert!(magma[0] > 0.9 && magma[1] < 0.4 && magma[2] < 0.05, "1,900 K is deep orange: {magma:?}");
+
+        // At the radiance a magma ocean really emits, against the scene's sunlit exposure.
+        let gain = thermal_glow_gain(1900.0) * 22.0;
+        let radiance = magma.map(|v| v * gain);
+
+        // The old per-channel form, for the record: green saturates and the hue is gone.
+        let per_channel = radiance.map(|v| v / (1.0 + v));
+        assert!(per_channel[1] > 0.99, "per channel, green saturates too ({:.3})", per_channel[1]);
+
+        // The shared law keeps the ratio the object actually has.
+        let out = tonemap(radiance);
+        assert!(out[1] < 0.75, "green must NOT saturate: {out:?}");
+        assert!(out[0] > out[1] && out[1] > out[2], "still orange after tone-mapping: {out:?}");
+        // Chromaticity preserved where the gamut allows: G/R must survive the compression.
+        let before = magma[1] / magma[0];
+        let after = out[1] / out[0];
+        assert!((after - before).abs() < 0.4, "hue roughly preserved ({before:.2} -> {after:.2})");
+
+        // Dim things are essentially untouched — this is not a look, it is a limit.
+        let dim = [0.02, 0.01, 0.005];
+        let t = tonemap(dim);
+        for i in 0..3 {
+            assert!((t[i] - dim[i]).abs() < 0.02 * dim[i].max(1e-6) + 1e-3, "dim values pass through");
+        }
+        // Monotonic in brightness, and black stays black.
+        assert_eq!(tonemap([0.0; 3]), [0.0; 3]);
+        let a = tonemap([1.0, 0.5, 0.2]);
+        let b = tonemap([2.0, 1.0, 0.4]);
+        assert!(b[0] > a[0], "brighter input, brighter output");
+        // Everything stays inside the display range.
+        for v in tonemap([1e6, 1e5, 1e4]) {
+            assert!((0.0..=1.0).contains(&v), "in range");
+        }
+    }
+}

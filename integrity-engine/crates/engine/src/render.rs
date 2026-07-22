@@ -246,7 +246,7 @@ impl StarField {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("stars"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/stars.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(concat!(include_str!("../../../shaders/tonemap.wgsl"), include_str!("../../../shaders/stars.wgsl")).into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("star-pipeline-layout"),

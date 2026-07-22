@@ -94,7 +94,8 @@ fn fs_main(i : VOut) -> @location(0) vec4<f32> {
         discard; // below what the display can show — do not pay for it
     }
     let c = i.color * v;
-    // Reinhard, as everywhere else in this engine, so a bright star clips to white rather than to a
-    // saturated hue — which is exactly what an overexposed point source does.
-    return vec4<f32>(c / (vec3<f32>(1.0) + c), 1.0);
+    // The shared display law. A very bright star still clips in its strongest channel, but it keeps its
+    // colour on the way there — Rigel stays blue-white and Betelgeuse stays orange instead of both
+    // washing out, which is the whole reason the catalogue carries a colour index.
+    return vec4<f32>(tonemap(c), 1.0);
 }

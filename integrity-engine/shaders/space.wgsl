@@ -48,6 +48,6 @@ fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     // on its own — visible on the night side, exactly like real shock-heated rock. The colour/intensity
     // are a blackbody ramp of the fragment's actual temperature (matter physics → light, nothing scripted).
     let radiance = u.emissive.rgb * u.emissive.w + u.tint.rgb * (AMBIENT + ndl * SUN_GAIN);
-    let mapped = radiance / (vec3<f32>(1.0) + radiance); // Reinhard tone-map
+    let mapped = tonemap(radiance); // the shared display law — compresses brightness, keeps hue
     return vec4<f32>(mapped, 1.0);
 }

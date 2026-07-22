@@ -630,6 +630,14 @@ mod app {
     #[derive(Clone, Copy)]
     enum SphPhase {
         Relaxing(u32), // GPU `cs_relax` steps completed so far
+        /// Both bodies are SOLID and approaching. They integrate as bodies, they are drawn as bodies, and
+        /// no particle exists yet — because nothing has happened that requires one.
+        ///
+        /// The scene used to open by building a particle field for both bodies and relaxing it in view,
+        /// so Theia arrived as a visible bundle of specks that nothing had disrupted. A body is a body
+        /// until an interaction cannot be represented any other way; `accretion::resolution_distance`
+        /// says when that is, from the tides, and the relax happens here where nobody is looking.
+        Approaching,
         Assembling,    // relax done; awaiting the async read-back to compute the collision geometry
         Dynamics,      // colliding — KDK substeps + read-back
     }
@@ -712,6 +720,11 @@ mod app {
         /// The real sky (HYG). `None` until the host hands over the catalogue — a scene without it simply
         /// has no stars, rather than inventing any.
         stars: Option<StarField>,
+        /// The IMPACTOR drawn as the body it is. Theia arrived as a visible bundle of specks that nothing
+        /// had disrupted yet — particles by default, with a surface bolted onto the target only. A body
+        /// is a body until an event takes it apart, and that rule is not about which body the scene
+        /// happens to care about.
+        impactor_uni: UniformSlot,
         globe_pipeline: wgpu::RenderPipeline,
         globe_mesh: Option<GpuMesh>,
         globe_uni: UniformSlot,
@@ -908,6 +921,7 @@ mod app {
                 .map(|_| make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler))
                 .collect();
             let interior_uni = make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
+            let impactor_uni = make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
             let sun_uni = make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
             // Rayleigh optical depths from the EMERGENT surface pressure (planet::earth's declared
             // atmosphere mass) — the blue marble is derived from the air, never painted (docs/26).
@@ -1080,6 +1094,7 @@ mod app {
                 atm_tau,
                 atm_twilight,
                 stars: None,
+                impactor_uni,
                 globe_pipeline,
                 globe_mesh: None,
                 globe_uni,
@@ -1846,9 +1861,31 @@ mod app {
         ///
         /// FLAGGED: 1.2× is a coherence radius, not a physical boundary — the honest refinement is a
         /// self-bound clump test (`accretion`), which already exists and costs more per frame.
-        fn body_coherence(&self, prov: u32, radius_m: f64) -> f64 {
-            // The measurement itself lives in `accretion` — it is a question about matter, not about a
-            // scene. Here we only pick out which particles belong to this body.
+        /// **What a body currently IS**: where it sits, how big it still is, and how much of it is still
+        /// itself. Measured from the particles, for EVERY body — not just the one the scene happens to
+        /// care about.
+        ///
+        /// This is the rule the engine should have been applying all along: a body is a body, drawn as a
+        /// resolved surface, until an event actually takes it apart. The first cut had it backwards — the
+        /// impact band built particles for both bodies at scene start and drew a surface over only the
+        /// target, so Theia arrived as a visible bundle of specks that had never been disrupted by
+        /// anything, and the struck Earth could only FADE rather than shrink, which made it flicker and
+        /// then disappear while a perfectly good remnant sat there.
+        ///
+        /// Returns `None` when this body has no particles at all.
+        /// This body's particles, if the engine has resolved any. Selection only — every decision about
+        /// what they MEAN belongs to `accretion`.
+        fn body_particles(&self, prov: u32) -> (Vec<glam::DVec3>, Vec<f64>) {
+            self.sph_snapshot
+                .iter()
+                .filter(|p| p.prov == prov)
+                .map(|p| {
+                    (glam::DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64), p.mass as f64)
+                })
+                .unzip()
+        }
+
+        fn body_state(&self, prov: u32) -> Option<(glam::DVec3, f64, f64)> {
             let (pos, mass): (Vec<glam::DVec3>, Vec<f64>) = self
                 .sph_snapshot
                 .iter()
@@ -1857,7 +1894,12 @@ mod app {
                     (glam::DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64), p.mass as f64)
                 })
                 .unzip();
-            crate::accretion::coherence(&pos, &mass, 1.2 * radius_m)
+            let (centre, radius) = crate::accretion::body_extent(&pos, &mass)?;
+            // Coherence against the body's OWN measured radius, not its original one. A remnant that has
+            // lost mass is a smaller intact body, and must read as intact — otherwise the render fades
+            // out something that is plainly still there.
+            let coherent = crate::accretion::coherence(&pos, &mass, 1.2 * radius);
+            Some((centre, radius, coherent))
         }
 
         /// Mass, centre of mass and mean velocity of each impact body, straight from the live particle
@@ -1940,6 +1982,40 @@ mod app {
             self.sph_dt = relax_dt;
             self.sph_active = true;
             self.sph_snapshot.clear();
+            // **Put the two bodies on their approach, AS BODIES.** The scene declares what they are and
+            // how they meet (which bodies, the approach speed as a multiple of mutual escape, the impact
+            // parameter); the engine turns that into a trajectory and integrates it. No particle exists
+            // yet and none should: nothing has happened to either body.
+            //
+            // The approach starts well outside `accretion::resolution_distance` so the bodies are visibly
+            // whole and closing before matter is resolved — that distance is where tides begin to matter,
+            // and it is the engine's call, not the scene's.
+            {
+                let t_def = self.impact_def.target.definition();
+                let i_def = self.impact_def.impactor.definition();
+                let (m_t, r_t) = (t_def.total_mass(), t_def.radius());
+                let (m_i, r_i) = (i_def.total_mass(), i_def.radius());
+                let contact = r_t + r_i;
+                let resolve_at = crate::accretion::resolution_distance(m_t, r_t, m_i, 0.01);
+                let d0 = 3.0 * resolve_at; // room to watch two solid worlds converge
+                let v_esc = (2.0 * crate::orbit::G * (m_t + m_i) / contact).sqrt();
+                // Speed at d0 for a trajectory whose speed at contact is the declared multiple of escape:
+                // energy conservation, v² = v_c² − 2GM(1/contact − 1/d0).
+                let v_c = self.impact_def.v_esc_multiple * v_esc;
+                let mu = crate::orbit::G * (m_t + m_i);
+                let v0 = (v_c * v_c - 2.0 * mu * (1.0 / contact - 1.0 / d0)).max(0.0).sqrt();
+                let b = self.impact_def.impact_parameter * r_t;
+                let earth = self.bodies[1];
+                self.bodies.truncate(2);
+                self.bodies.push(crate::orbit::Body {
+                    pos: earth.pos + glam::DVec3::new(d0, b, 0.0),
+                    vel: earth.vel + glam::DVec3::new(-v0, 0.0, 0.0),
+                    mass: m_i,
+                });
+                self.impactor_radius = r_i;
+                self.impactor_mass = m_i;
+                self.acc = crate::orbit::accelerations(&self.bodies);
+            }
             self.sph_phase = SphPhase::Relaxing(0);
             self.gpu_impact_site = None; // no crater until Theia makes contact (docs/42 Phase 2)
             self.gpu_crater_frac = 0.0;
@@ -2034,10 +2110,29 @@ mod app {
                             let done = steps + chunk >= TARGET;
                             if done {
                                 sph.begin_readback(&self.device, &self.queue);
-                                self.sph_phase = SphPhase::Assembling;
+                                self.sph_phase = SphPhase::Approaching;
                             } else {
                                 self.sph_phase = SphPhase::Relaxing(steps + chunk);
                             }
+                        }
+                        return;
+                    }
+                    // APPROACHING: the relaxed field is ready and waiting, but the bodies are still whole
+                    // and far apart, so they stay solid and keep flying as bodies. Matter is resolved the
+                    // moment tidal stress across the target reaches a percent of its own surface gravity
+                    // — a distance the physics gives (17,700 km here, 1.86x contact), not a cue.
+                    SphPhase::Approaching => {
+                        let target = self.impact_def.target.definition();
+                        let impactor = self.impact_def.impactor.definition();
+                        let resolve_at = crate::accretion::resolution_distance(
+                            target.total_mass(),
+                            target.radius(),
+                            impactor.total_mass(),
+                            0.01,
+                        );
+                        let sep = (self.bodies[2].pos - self.bodies[1].pos).length();
+                        if sep <= resolve_at {
+                            self.sph_phase = SphPhase::Assembling;
                         }
                         return;
                     }
@@ -2580,24 +2675,85 @@ mod app {
             // Earth's RADIUS comes from Earth's definition — the scene does not get to say how big Earth
             // is. (During the GPU impact the body is deliberately rendered at the sub-scale radius the SPH
             // field actually occupies, which is a declared visualization scale, not a second Earth.)
-            let (pretty_scale, pretty_r_surf) = if self.sph_active {
-                (SPH_VIS_SCALE, self.impact_def.target.radius_m())
-            } else {
-                (DISPLAY_SCALE, crate::planet::body("earth").radius())
+            // **The target, as it currently is.** Measured every frame: where it sits, how big it still
+            // is, and whether it is still one thing. A struck planet SHRINKS to its remnant rather than
+            // fading out — drawing it at its original radius and dimming it as mass left was what made it
+            // flicker and vanish while a perfectly good remnant sat there.
+            // Same call, same rule, for the target.
+            let target = {
+                let (pos, mass) = self.body_particles(0);
+                let r_dec = self.impact_def.target.radius_m();
+                let resolved = (!pos.is_empty()).then_some((&pos[..], &mass[..]));
+                match crate::accretion::representation(resolved, earth_center, r_dec, 0.75) {
+                    crate::accretion::Representation::Surface { centre, radius } => Some((centre, radius, 1.0_f64)),
+                    crate::accretion::Representation::Particles => None,
+                }
             };
-            // The target's own coherence decides how it is drawn — no dial. Intact ⇒ the resolved
-            // surface; torn apart ⇒ the particles that ARE the matter; re-accreted ⇒ a surface again.
-            // Smoothstepped over the last 20% so the handover is continuous rather than a pop.
-            let coherence = if self.sph_active {
-                self.body_coherence(0, self.impact_def.target.radius_m())
-            } else {
-                1.0
+            let (pretty_scale, pretty_r_surf) = match (&target, self.sph_active) {
+                (Some((_, r, _)), _) => (SPH_VIS_SCALE, *r),
+                (None, true) => (SPH_VIS_SCALE, self.impact_def.target.radius_m()),
+                (None, false) => (DISPLAY_SCALE, crate::planet::body("earth").radius()),
             };
+            // Coherence decides how it is drawn — no dial. Intact ⇒ the resolved surface; genuinely torn
+            // apart ⇒ the particles that ARE the matter; re-accreted ⇒ a surface again. Smoothstepped so
+            // the handover is continuous rather than a pop.
+            let coherence = target.map_or(1.0, |(_, _, c)| c);
             let pretty_fade = {
-                let t = ((coherence - 0.75) / 0.20).clamp(0.0, 1.0);
+                let t = ((coherence - 0.55) / 0.25).clamp(0.0, 1.0);
                 (t * t * (3.0 - 2.0 * t)) as f32
             };
             self.render_blend = 1.0 - pretty_fade as f64; // particles take over as the surface loses meaning
+            // **The impactor, by the same rule.** Measured position, measured radius, drawn as a solid
+            // body for as long as it IS one — and it is one, all the way in, because nothing has touched
+            // it yet. Its own declared geotherm decides whether it glows: Theia's mantle is 1,200 K, hot
+            // from accretion, so it does.
+            // Where the impactor is, and how big — from its PARTICLES once they exist, and from the body
+            // itself before that. The first cut asked only the particles, so during the approach (when
+            // there are none, by design) it drew nothing at all and Theia was invisible until it came
+            // apart. A body is drawn as a body from the moment the scene places it.
+            // THE shared representation rule (accretion::representation) — the same call a droplet
+            // striking a petal would make. The scene supplies this body's particles (if any) and its
+            // declared place and size; the engine decides whether that is a surface or a debris field.
+            let impactor = {
+                let (pos, mass) = self.body_particles(1);
+                let declared = self
+                    .bodies
+                    .get(2)
+                    .map(|b| b.pos)
+                    .unwrap_or(glam::DVec3::ZERO);
+                let r_dec = self.impact_def.impactor.definition().radius();
+                let resolved = (!pos.is_empty()).then_some((&pos[..], &mass[..]));
+                match crate::accretion::representation(resolved, declared, r_dec, 0.75) {
+                    crate::accretion::Representation::Surface { centre, radius } => Some((centre, radius, 1.0_f64)),
+                    crate::accretion::Representation::Particles => None,
+                }
+            };
+            // Its OWN coherence, independent of the target's — the two bodies are disrupted at different
+            // times by different amounts, and each is drawn as what it currently is.
+            let impactor_fade = impactor.map_or(0.0, |(_, _, c)| {
+                let t = ((c - 0.55) / 0.25).clamp(0.0, 1.0);
+                (t * t * (3.0 - 2.0 * t)) as f32
+            });
+            if let Some((ic, ir, _)) = impactor {
+                let ipos = ((ic - focus) * pretty_scale).as_vec3();
+                let idef = self.impact_def.impactor.definition();
+                let imat = idef.layers.last().map(|l| l.material.clone()).unwrap_or_else(|| "peridotite".into());
+                let ialb = self.mats[materials::index_of(&self.mats, &imat)].albedo;
+                write_space_uniform(
+                    &self.queue,
+                    &self.impactor_uni,
+                    view_proj,
+                    Mat4::from_translation(ipos) * Mat4::from_scale(Vec3::splat((ir * pretty_scale) as f32)),
+                    earth_light,
+                    [ialb[0], ialb[1], ialb[2], impactor_fade],
+                    {
+                        let g = glow_of(&idef);
+                        [g[0], g[1], g[2], g[3]]
+                    },
+                    AIRLESS,
+                    glow_of(&idef),
+                );
+            }
             // docs/42 Phase 3 — atmosphere MIST: the giant impact vaporizes rock into a thick, shocked vapor
             // atmosphere, so the Rayleigh veil is boosted while the impact is live → a hazy, glowing limb.
             let atm_tau_eff = if self.sph_active {
@@ -2676,7 +2832,10 @@ mod app {
             // The Rayleigh veil is not applied here — globe.wgsl scatters the declared air itself, using
             // the one shared model, so this scene and Terra cannot disagree about Earth's atmosphere.
             if self.globe_mesh.is_some() {
-                let spos = ((earth_center - focus) * pretty_scale).as_vec3();
+                // Draw it where the matter actually is. During the impact that is the measured remnant
+                // centre, which drifts as mass is lost; outside it, the body's own position.
+                let centre = target.map_or(earth_center, |(c, _, _)| c);
+                let spos = ((centre - focus) * pretty_scale).as_vec3();
                 let f = flat as f32;
                 // Volume-preserving to first order: +f/3 at the equator, −2f/3 at the poles, about the
                 // spin axis. At today's day this is 1/298 (invisible); at the post-impact 3.8-h day it is
@@ -2699,10 +2858,16 @@ mod app {
                     [1.0, 1.0, 1.0, pretty_fade],
                     [eye_disp.x as f32, eye_disp.y as f32, eye_disp.z as f32, 0.0],
                     self.air(),
-                    // The TARGET body's own heat. proto-Earth is a magma ocean, so this scene's planet
-                    // glows rather than being lit — which is why the birth scene had no business
-                    // borrowing modern Earth's daylit appearance.
-                    glow_of(&self.impact_def.target.definition()),
+                    // The heat of whichever body this scene actually PLACED. Only the birth scene goes
+                    // back in time: it targets proto-Earth, a magma ocean, which glows rather than being
+                    // lit. Space and Two Moons are the modern era and their Earth is cool rock, so they
+                    // must not inherit the impact scene's target — reading `impact_def` unconditionally
+                    // would have set the present-day Earth on fire.
+                    if self.sph_active {
+                        glow_of(&self.impact_def.target.definition())
+                    } else {
+                        glow_of(&crate::planet::body("earth"))
+                    },
                 );
             }
             for (i, uni) in self.shell_unis.iter().enumerate() {
@@ -3090,6 +3255,11 @@ mod app {
                         pass.set_pipeline(&self.globe_pipeline);
                         draw(&mut pass, &self.globe_uni, globe);
                         pass.set_pipeline(&self.pipeline);
+                        // The impactor, as the body it still is. Zero-alpha when it has come apart, at
+                        // which point its particles are the matter and are already being drawn.
+                        if impactor_fade > 0.0 {
+                            draw(&mut pass, &self.impactor_uni, &self.sphere_gpu);
+                        }
                     } else {
                         for uni in self.shell_unis.iter() {
                             draw(&mut pass, uni, &self.sphere_gpu); // no surface handed over yet
@@ -3101,7 +3271,10 @@ mod app {
                     }
                 }
                 // GPU SPH particles: instanced billboards straight from the physics buffer (zero-copy).
-                if self.sph_active {
+                // Particles are drawn only once they ARE the matter. During the relax and the approach the
+                // field exists — settled and waiting — but neither body has been touched, so drawing it
+                // put a scatter of specks over two perfectly whole worlds.
+                if self.sph_active && matches!(self.sph_phase, SphPhase::Dynamics) {
                     if let Some(sph) = self.gpu_sph.as_ref() {
                         if sph.count() > 0 {
                             pass.set_pipeline(&self.sph_pipeline);
@@ -3365,7 +3538,7 @@ mod app {
     ) -> wgpu::RenderPipeline {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("space-shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/space.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(concat!(include_str!("../../../shaders/tonemap.wgsl"), include_str!("../../../shaders/space.wgsl")).into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("space-pipeline-layout"),
@@ -3436,7 +3609,7 @@ mod app {
     ) -> wgpu::RenderPipeline {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("globe-shader"),
-            source: wgpu::ShaderSource::Wgsl(concat!(include_str!("../../../shaders/rayleigh.wgsl"), include_str!("../../../shaders/surface_normal.wgsl"), include_str!("../../../shaders/globe.wgsl")).into()),
+            source: wgpu::ShaderSource::Wgsl(concat!(include_str!("../../../shaders/tonemap.wgsl"), include_str!("../../../shaders/rayleigh.wgsl"), include_str!("../../../shaders/surface_normal.wgsl"), include_str!("../../../shaders/globe.wgsl")).into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("globe-pipeline-layout"),
