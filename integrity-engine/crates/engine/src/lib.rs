@@ -38,6 +38,9 @@ mod eos;
 /// Native only; in the browser the device comes from the canvas context.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod gpu_host;
+/// GPU direct-sum self-gravity: the exact per-particle N-body force on the GPU, dispatched to when a
+/// foreseen collision materialises particles above the CPU/GPU knee.
+mod gpu_gravity;
 mod gpu_layout; // docs/47 — GPU repr(C) layouts, pinned to the shader by test
 /// docs/33 — THE GPU particle container (granular). Lifted out of `#[cfg(wasm32)] mod app`, where a
 /// scene-agnostic container looked like the terrain scene's private machinery and no native build
