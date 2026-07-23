@@ -1392,9 +1392,13 @@ mod app {
                         planet_idx = i;
                         self.earth_tint = this_tint;
                         if let Some(p) = d.spin_period_s {
+                            // L = I·ω with the body's EMERGENT inertia (docs/58), so the declared day length
+                            // reproduces when the rotation reads the same emergent I back (spin_inertia()).
+                            let inertia = crate::body_definition(d.profile.as_deref())
+                                .map(|b| b.moment_of_inertia())
+                                .unwrap_or_else(|| crate::tides::moment_of_inertia(body_mass(d), body_radius(d)));
                             self.spin_l = glam::DVec3::new(0.0, 0.0, 1.0)
-                                * (crate::tides::moment_of_inertia(body_mass(d), body_radius(d))
-                                    * (2.0 * std::f64::consts::PI / p));
+                                * (inertia * (2.0 * std::f64::consts::PI / p));
                             self.initial_spin_l = self.spin_l;
                         }
                     }
@@ -1897,7 +1901,7 @@ mod app {
             if let Some(t) = self.sph_target_spin_period_s() {
                 return t / 3600.0;
             }
-            let t = crate::tides::spin_period_s(self.spin_l, self.bodies[1].mass, EARTH_RADIUS_M);
+            let t = crate::tides::spin_period_from_inertia(self.spin_l, self.spin_inertia());
             if t.is_finite() { t / 3600.0 } else { -1.0 }
         }
 
@@ -2018,6 +2022,19 @@ mod app {
         /// its own centre, over its measured moment of inertia. This is the honest "Earth day" during and
         /// after the impact — the quantity the scene exists to let EMERGE, rather than the modern 23.9 h
         /// the HUD was printing from an untouched N-body slot.
+        /// The planet's moment of inertia (kg·m²), EMERGENT from its matter (docs/58) — the actual layered
+        /// mass distribution, not the uniform-sphere ⅖mr² with a hardcoded Earth radius. Falls back to the
+        /// uniform form only where a scene has no per-body matter yet (the default/birth setup, whose spin
+        /// is zero), so a declared day length is read back with the SAME inertia it was set with.
+        /// (Index 1 = the planet for today's scenes; brick 3 addresses bodies by role, not index.)
+        fn spin_inertia(&self) -> f64 {
+            self.body_meta
+                .get(1)
+                .and_then(|m| m.matter.as_ref())
+                .map(|b| b.moment_of_inertia())
+                .unwrap_or_else(|| crate::tides::moment_of_inertia(self.bodies[1].mass, EARTH_RADIUS_M))
+        }
+
         fn sph_target_spin_period_s(&self) -> Option<f64> {
             let [(m_t, c, v_c), _] = self.sph_body_state()?;
             let _ = m_t;
@@ -2383,8 +2400,7 @@ mod app {
 
             crate::orbit::verlet_step(&mut self.bodies, &mut self.acc, dt);
             // The planet visibly ROTATES at the rate its spin angular momentum implies.
-            self.spin_angle += dt * self.spin_l.length()
-                / crate::tides::moment_of_inertia(self.bodies[1].mass, EARTH_RADIUS_M);
+            self.spin_angle += dt * self.spin_l.length() / self.spin_inertia();
 
             // The integrated endpoints, and which bodies may still collide (a moon already materialised
             // into Earth is no longer a distinct body to detect). The Sun (index 0) never reaches anything
@@ -2923,8 +2939,7 @@ mod app {
             // OBLATE figure: the spin flattens the planet (Radau–Darwin) — equator bulges (+f/3),
             // poles sink (−2f/3), volume-preserving to first order. At today's day it's 1/298
             // (imperceptible); at the post-impact 3.8-h day it's ~13% — a visibly squashed world.
-            let spin_omega_r = self.spin_l.length()
-                / crate::tides::moment_of_inertia(self.bodies[1].mass, EARTH_RADIUS_M);
+            let spin_omega_r = self.spin_l.length() / self.spin_inertia();
             let flat = crate::tides::flattening_from_spin(
                 spin_omega_r, self.bodies[1].mass, EARTH_RADIUS_M,
             );
