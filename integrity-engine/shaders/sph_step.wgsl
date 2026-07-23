@@ -108,9 +108,19 @@ fn sound_speed(e: Eos, rho: f32, u: f32) -> f32 {
 // Gravity of the un-resolved bulk planet (docs/39): monopole G·M/r² outside R_core, Gauss-LINEAR interior
 // (∝r, →0 at the centre). A raw 1/r² singularity-sucks any particle that penetrates R_core (39b lesson 1),
 // so the interior branch is mandatory. `R_core <= 0` ⇒ no bulk (returns 0), the whole-body impact.
+// Bulk modes (docs/39), selected by `bulk_cr.w` so ONE shader serves every scale (Law II): w == 0 ⇒ no bulk;
+// w > 0 ⇒ SPHERICAL (a planet cap, this fn) with centre `bulk_cr.xyz`, R_core `bulk_cr.w`, mass `bulk_vm.w`;
+// w < 0 ⇒ PLANAR (a flat terrestrial ground, meter scale) — a plane through `bulk_cr.xyz` with up-normal
+// `bulk_vm.xyz` and uniform gravity `bulk_vm.w` (a big planet is locally flat, and a patch-local frame keeps
+// f32 precision where the 1 m grains are — the alternative, a huge-R sphere, forms ~6.4e6 f32 coords and
+// loses 0.5 m ULP; docs/39 open-decision #4).
 fn bulk_gravity(pos: vec3<f32>) -> vec3<f32> {
   let R = P.bulk_cr.w;
-  if (R <= 0.0) { return vec3<f32>(0.0); }
+  if (R == 0.0) { return vec3<f32>(0.0); }
+  if (R < 0.0) {
+    // PLANAR: uniform gravity, straight down (−up), magnitude `bulk_vm.w`.
+    return -normalize(P.bulk_vm.xyz) * P.bulk_vm.w;
+  }
   let d = pos - P.bulk_cr.xyz;   // centre → particle
   let r = length(d);
   if (r < 1.0) { return vec3<f32>(0.0); }
@@ -125,7 +135,20 @@ fn bulk_gravity(pos: vec3<f32>) -> vec3<f32> {
 // Rigid bulk (no recoil yet — negligible for a Moon on Earth; the bulk-recoil is docs/39 39c, flagged).
 fn apply_bulk_floor(i: u32) {
   let R = P.bulk_cr.w;
-  if (R <= 0.0) { return; }
+  if (R == 0.0) { return; }
+  if (R < 0.0) {
+    // PLANAR floor: the ground plane through `bulk_cr.xyz` with up-normal `bulk_vm.xyz`. A particle that has
+    // sunk below it is lifted back to the plane and its DOWNWARD (into-floor) velocity removed — the same
+    // non-injecting constraint as the sphere, no bounce. The static ground has no velocity to credit.
+    let up = normalize(P.bulk_vm.xyz);
+    let depth = dot(particles[i].pos - P.bulk_cr.xyz, up);
+    if (depth < 0.0) {
+      particles[i].pos = particles[i].pos - up * depth; // project up onto the plane
+      let vn = dot(particles[i].vel, up);
+      if (vn < 0.0) { particles[i].vel = particles[i].vel - up * vn; }
+    }
+    return;
+  }
   let d = particles[i].pos - P.bulk_cr.xyz;
   let r = length(d);
   if (r >= R || r < 1.0) { return; }

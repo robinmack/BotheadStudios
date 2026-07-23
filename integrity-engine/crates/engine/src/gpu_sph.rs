@@ -947,6 +947,18 @@ impl GpuSph {
         queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
     }
 
+    /// Configure a PLANAR bulk (docs/39 — the terrestrial, meter-scale ground): a flat floor plane through
+    /// `plane_point` with up-normal `up`, and uniform gravity `g` straight down. This is the flat-ground
+    /// analogue of `set_bulk`'s planet sphere — a huge planet is locally flat, and a patch-local frame keeps
+    /// f32 precision where the 1 m grains are (a huge-R sphere would form ~R-magnitude f32 coords and lose
+    /// ~0.5 m ULP; docs/39 open-decision #4). Encoded as `bulk_cr.w = -1` (the planar marker).
+    pub fn set_bulk_planar(&mut self, queue: &wgpu::Queue, plane_point: glam::DVec3, up: glam::DVec3, g: f64) {
+        let n = up.normalize_or(glam::DVec3::Y);
+        self.params.bulk_cr = [plane_point.x as f32, plane_point.y as f32, plane_point.z as f32, -1.0];
+        self.params.bulk_vm = [n.x as f32, n.y as f32, n.z as f32, g as f32];
+        queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
+    }
+
     pub fn count(&self) -> u32 {
         self.store.count()
     }

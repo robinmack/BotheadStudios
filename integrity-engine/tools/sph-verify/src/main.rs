@@ -351,10 +351,37 @@ fn main() {
 
     // ---- docs/39 resolution-on-demand: the un-resolved-bulk boundary (Gauss gravity + non-injecting floor) ----
     let boundary_ok = verify_boundary(&eos, soft);
+    // ---- docs/39: the PLANAR bulk (terrestrial ground) — uniform g + a flat non-injecting floor ----
+    let planar_ok = verify_planar_boundary(&eos, soft);
 
-    let ok = force_ok && step_ok && boundary_ok;
-    println!("{}", if ok { "PASS — GPU force kernel + KDK integrator + bulk boundary all match the CPU physics" } else { "FAIL" });
+    let ok = force_ok && step_ok && boundary_ok && planar_ok;
+    println!("{}", if ok { "PASS — GPU force kernel + KDK integrator + spherical & planar bulk all match the CPU physics" } else { "FAIL" });
     std::process::exit(if ok { 0 } else { 1 });
+}
+
+// docs/39: the PLANAR bulk mode — a flat terrestrial ground (uniform gravity + a flat non-injecting floor),
+// the meter-scale analogue of the planet sphere. A grain released above the plane must FALL under uniform g,
+// REST on the plane (y=0, no leak-through), and NOT launch (a spring floor would fling it). Verifies the
+// `bulk_cr.w < 0` branch of `bulk_gravity`/`apply_bulk_floor` and that the patch-local frame is f32-clean.
+fn verify_planar_boundary(eos: &[Eos], soft: f64) -> bool {
+    let g = 9.8_f64;
+    let start = 100.0_f64; // released 100 m above the ground plane (y=0), at rest — meter scale, local frame
+    let p = Particle { pos: [0.0, start as f32, 0.0], h: 2.0, vel: [0.0; 3], u: 1.0e5, mass: 1.0e3, mat: 0, rho: 2700.0, _pad: 0.0 };
+    // planar bulk: bulk_cr = (plane point = origin, w = -1 marker), bulk_vm = (up = +Y, w = g)
+    let out = run_gpu_steps(&[p], &[eos[0]], soft, 0.01, 3000, [0.0, 0.0, 0.0, -1.0], [0.0, 1.0, 0.0, g as f32]);
+    let f = out[0];
+    let y = f.pos[1] as f64;
+    let speed = ((f.vel[0] as f64).powi(2) + (f.vel[1] as f64).powi(2) + (f.vel[2] as f64).powi(2)).sqrt();
+    let fell = y < start - 1.0;
+    let rests = y.abs() < 0.5 && y >= -0.1; // on the plane, not sunk through
+    let no_launch = speed < 1.0; // a per-step g·dt residual, not a bounce
+    let ok = fell && rests && no_launch && y.is_finite();
+    println!(
+        "planar: {} → y={:.3} m (plane 0), speed {:.3} m/s [fell={} rests={} no_launch={}]",
+        if ok { "PASS — falls, rests on the flat floor, no launch" } else { "FAIL" },
+        y, speed, fell, rests, no_launch
+    );
+    ok
 }
 
 // docs/39 (resolution-on-demand): a particalized cap rests on an un-resolved BULK — a Gauss gravity source
