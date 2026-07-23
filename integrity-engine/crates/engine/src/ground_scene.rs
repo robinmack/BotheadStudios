@@ -326,6 +326,11 @@ pub struct Ground {
     sim: Simulation,
     mats: Vec<materials::Material>,
     camera: Camera,
+    /// The camera's FREE position — a fly camera, not an orbit rig. It walks along its look direction
+    /// (Robin's scheme: left/ctrl forward, +shift back), the same as every other scene; the matter shell
+    /// keeps it above the ground. The old orbit-dolly could only circle the impact origin and hit its
+    /// zoom floor, which felt stuck.
+    cam_eye: Vec3,
     /// Metres of camera altitude above the surface directly beneath it — the scene's framing, declared.
     eye_height_m: f32,
     /// Last frame's resolved eye — the start of the swept camera-shell collision.
@@ -583,6 +588,8 @@ impl Ground {
         let sea_gpu = upload_mesh(&device, "sea", &mesher::build_sea(&sim.world, &mats));
 
         let eye_height_m = sim.eye_height_m();
+        // Bulk ground height at the origin (where meteors land) — the initial eye is placed relative to it.
+        let ground0 = sim.world.bulk_height(0.0, 0.0);
         // The same air the globe scatters, so standing on Earth and orbiting it agree about how wide the
         // twilight is. Derived: sqrt(2H/R) from the declared air's own scale height at this body's gravity.
         // Computed before `mats` moves into the struct.
@@ -601,7 +608,14 @@ impl Ground {
             world_pipeline, world_uni, sky_pipeline, sky_uni,
             particle_pipeline, particle_bind, particle_instances, cube_gpu,
             world_gpu, sea_gpu, sim, mats,
+            // Start high and back, pitched down at the origin where meteors land — so the impact is in
+            // frame from the first moment (Robin: "can see a flicker of a meteor falling but can't see the
+            // actual impact"). Free to fly anywhere from there.
             camera: Camera { yaw: 0.6, pitch: -0.55, zoom: 1.0, base_distance: eye_height_m * 3.0 },
+            cam_eye: {
+                let g = eye_height_m; // a metre or two; used as the scene's length unit
+                Vec3::new(-24.0 * g, ground0 + 18.0 * g, -24.0 * g)
+            },
             eye_height_m,
             last_eye: Vec3::new(0.0, eye_height_m * 3.0, eye_height_m * 3.0),
             atm_tau: crate::atmosphere::rayleigh_tau(
@@ -626,9 +640,13 @@ impl Ground {
         let iron = crate::materials::index_of(&self.mats, "iron");
         let rho = self.mats.get(iron).map(|m| m.density).unwrap_or(7870.0);
         let radius_m = (3.0 * mass_kg / (4.0 * std::f32::consts::PI * rho)).cbrt();
-        // Launched high and inbound at an angle, so it ARRIVES — an impactor that materialises at the
-        // surface is not an impact, it is a hole appearing.
-        let (_, target) = self.eye_and_target();
+        // Launched high and inbound at an angle onto the USER-CHOSEN impact point (where the camera is
+        // aimed at the ground). If the camera is not looking at the ground, fall back to the origin. An
+        // impactor that materialises at the surface is not an impact — it arrives on a trajectory.
+        let target = self.aim_ground_point().unwrap_or_else(|| {
+            let g = self.ground_at(0.0, 0.0);
+            Vec3::new(0.0, g, 0.0)
+        });
         let start = target + Vec3::new(-140.0, 220.0, -90.0);
         let dir = (target - start).normalize_or(Vec3::new(0.0, -1.0, 0.0));
         self.sim.throw_meteor(crate::simulation::Meteor {
@@ -645,11 +663,37 @@ impl Ground {
         self.sim.meteors().len()
     }
 
-    pub fn set_orbit(&mut self, yaw: f32, pitch: f32, zoom: f32) {
+    /// Aim the camera. Pitch is clamped just short of straight up/down so the look never gimbal-flips.
+    pub fn set_orbit(&mut self, yaw: f32, pitch: f32, _zoom: f32) {
         self.camera.yaw = yaw;
-        self.camera.pitch = pitch.clamp(-1.4, 0.4);
-        self.camera.zoom = zoom.clamp(0.15, 6.0);
+        self.camera.pitch = pitch.clamp(-1.5, 1.5);
     }
+
+    /// Walk the camera along its look direction (metres). Positive = forward. The eye is free; the matter
+    /// shell in `eye_and_target` stops it entering the ground, so walking downhill into a dune slides
+    /// along the face instead of tunnelling through it.
+    pub fn walk(&mut self, forward_m: f32) {
+        self.cam_eye += self.look_dir() * forward_m;
+    }
+
+    /// The aim point projected to NORMALISED screen coordinates (`[x, y]`, 0..1, origin top-left) for the
+    /// HUD crosshair — where the camera is aimed at the ground, which is where a meteor will land. Returns
+    /// an EMPTY vec when the camera is not aimed at the ground (looking at the sky) or the point is behind
+    /// the near plane, so the crosshair hides.
+    pub fn aim_screen(&self) -> Vec<f32> {
+        let Some(hit) = self.aim_ground_point() else { return Vec::new() };
+        let (vp, _) = self.view_proj();
+        let clip = vp * glam::Vec4::new(hit.x, hit.y, hit.z, 1.0);
+        if clip.w <= 0.0 {
+            return Vec::new();
+        }
+        let ndc = clip.truncate() / clip.w;
+        if ndc.x.abs() > 1.2 || ndc.y.abs() > 1.2 {
+            return Vec::new();
+        }
+        vec![ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5]
+    }
+
 
     pub fn resize(&mut self, width: u32, height: u32) {
         self.config.width = width.max(1);
@@ -810,31 +854,47 @@ impl Ground {
 impl Ground {
     /// Camera eye + look target. The eye orbits at the DECLARED altitude above the ground beneath it, so
     /// "20 m above the surface" stays true as you orbit over hills rather than only at the centre.
-    fn eye_and_target(&self) -> (Vec3, Vec3) {
-        // The subject is the ground at the origin — where the meteor lands. The eye sits at the DECLARED
-        // altitude ABOVE that point and looks down at it, rather than orbiting at a fixed radius: the
-        // first framing put the camera at ground level behind a dune, so half the frame was foreground
-        // sand and the impact was a distant smudge.
-        let ground = self.ground_at(0.0, 0.0);
-        let target = Vec3::new(0.0, ground, 0.0);
-        // THE RIG decides where the camera tries to be: standing off at the declared altitude above the
-        // ground it is watching. Pitch aims the look; it does not drag the eye into the dirt.
-        let dist = self.camera.base_distance * self.camera.zoom;
-        let desired = Vec3::new(
-            -dist * self.camera.yaw.sin(),
-            ground + self.eye_height_m,
-            -dist * self.camera.yaw.cos(),
-        );
-        // PHYSICS decides where it may actually be. The shell cannot enter matter, so a rig pose that
-        // would put the eye inside a dune is corrected out along the surface normal — it slides, it does
-        // not pop straight up, and the near plane comes with it.
-        let eye = self.camera_shell_resolve(desired);
-        // **Mouse-look pivots from the eye.** The target is a point along the LOOK DIRECTION, not a
-        // fixed spot on the ground: an orbit camera aimed at a fixed target ignores pitch entirely,
-        // which is exactly what a rig check caught (right-drag turned the view, alt-drag did nothing).
+    /// The look DIRECTION from yaw/pitch (unit).
+    fn look_dir(&self) -> Vec3 {
         let cp = self.camera.pitch.cos();
-        let dir = Vec3::new(cp * self.camera.yaw.sin(), self.camera.pitch.sin(), cp * self.camera.yaw.cos());
-        (eye, eye + dir * 100.0)
+        Vec3::new(cp * self.camera.yaw.sin(), self.camera.pitch.sin(), cp * self.camera.yaw.cos())
+    }
+
+    /// **Where the camera is aimed at the ground** — the user-chosen impact point. March the view axis
+    /// from the eye until it crosses the bulk surface, then refine. `None` if it never meets the ground
+    /// (looking at or above the horizon), in which case there is nothing to aim at.
+    fn aim_ground_point(&self) -> Option<Vec3> {
+        let (eye, _) = self.eye_and_target();
+        let dir = self.look_dir();
+        if dir.y > -1.0e-3 {
+            return None; // not looking downward — the axis escapes to the sky
+        }
+        let (mut t, max_t, step) = (0.0f32, 4000.0f32, 0.5f32);
+        let mut above = eye.y - self.sim.world.bulk_height(eye.x, eye.z);
+        while t < max_t {
+            let nt = t + step;
+            let p = eye + dir * nt;
+            let below = p.y - self.sim.world.bulk_height(p.x, p.z);
+            if below <= 0.0 {
+                // Linear refine across the crossing (above > 0 >= below).
+                let f = above / (above - below);
+                let hit = eye + dir * (t + step * f);
+                return Some(Vec3::new(hit.x, self.sim.world.bulk_height(hit.x, hit.z), hit.z));
+            }
+            above = below;
+            t = nt;
+        }
+        None
+    }
+
+
+    fn eye_and_target(&self) -> (Vec3, Vec3) {
+        // A FREE-FLY camera: the eye is wherever the user has walked it, not a point on an orbit around
+        // the impact. PHYSICS still decides where it may actually be — the matter shell cannot enter the
+        // ground, so a pose that would bury the eye is corrected out along the surface normal (it slides,
+        // it does not pop straight up). Mouse-look pivots from the eye; forward/back walk it.
+        let eye = self.camera_shell_resolve(self.cam_eye);
+        (eye, eye + self.look_dir() * 100.0)
     }
 
     /// **The camera is MATTER** — a tiny transparent shell that obeys the SAME universal terrain

@@ -38,22 +38,45 @@ async function main() {
   const g = await Ground.create(canvas, worldJson);
   setStatus("");
 
+  // **The aim crosshair** — the ground point the camera is looking at, which is where a dropped meteor
+  // lands (Robin: "crosshair hud projected on ground; that will be the user-chosen impact point"). A DOM
+  // overlay tracking the engine's projected aim point, so it follows the terrain and perspective and
+  // hides when the camera looks at the sky (no ground to hit).
+  const crosshair = document.createElement("div");
+  Object.assign(crosshair.style, {
+    position: "absolute", left: "0", top: "0", width: "26px", height: "26px",
+    marginLeft: "-13px", marginTop: "-13px", pointerEvents: "none", display: "none",
+    zIndex: "5",
+  });
+  crosshair.innerHTML =
+    '<svg width="26" height="26" viewBox="0 0 26 26">' +
+    '<circle cx="13" cy="13" r="9" fill="none" stroke="rgba(255,90,60,0.9)" stroke-width="1.5"/>' +
+    '<line x1="13" y1="0" x2="13" y2="6" stroke="rgba(255,90,60,0.9)" stroke-width="1.5"/>' +
+    '<line x1="13" y1="20" x2="13" y2="26" stroke="rgba(255,90,60,0.9)" stroke-width="1.5"/>' +
+    '<line x1="0" y1="13" x2="6" y2="13" stroke="rgba(255,90,60,0.9)" stroke-width="1.5"/>' +
+    '<line x1="20" y1="13" x2="26" y2="13" stroke="rgba(255,90,60,0.9)" stroke-width="1.5"/></svg>';
+  (canvas.parentElement ?? document.body).appendChild(crosshair);
+
   window.addEventListener("resize", () => {
     fit();
     g.resize(canvas.width, canvas.height);
   });
 
   // THE shared camera controls (camera-input.ts) — the same gesture grammar as every other scene.
+  // Metres per frame while a move key/button is held. Scaled to the scene's human dimensions (a couple
+  // of metres of eye height), so it crosses the patch in a few seconds rather than crawling or teleporting.
+  const WALK_STEP = 0.8;
   let yaw = 0.6, pitch = -0.25, zoom = 1.0;
   const cam = attachCameraInput(canvas, (dyaw, dpitch) => {
     yaw += dyaw;
     pitch = Math.max(-1.4, Math.min(0.4, pitch + dpitch));
     g.set_orbit(yaw, pitch, zoom);
   });
+  // Wheel dollies the camera along its look direction — the same free movement as dragging forward,
+  // just faster. No zoom clamp to get stuck against.
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
-    zoom = Math.min(6, Math.max(0.15, zoom * (1 + Math.sign(e.deltaY) * 0.12)));
-    g.set_orbit(yaw, pitch, zoom);
+    g.walk(-Math.sign(e.deltaY) * WALK_STEP * 6);
   }, { passive: false });
   g.set_orbit(yaw, pitch, zoom);
 
@@ -77,12 +100,21 @@ async function main() {
     frames++;
     const now = performance.now();
     if (now - last >= 500) { fps = Math.round((frames * 1000) / (now - last)); frames = 0; last = now; }
-    // Forward/back walks the camera in (the scene's rig holds the declared eye height, and the camera
-    // shell stops it entering the ground — the camera is matter).
+    // Forward/back WALKS the camera along its look direction — the same free-fly grammar as every other
+    // scene (left/ctrl forward, +shift back). The matter shell in the engine stops the eye entering the
+    // ground; nothing else constrains where it may go.
     const walk = cam.forward();
-    if (walk !== 0) {
-      zoom = Math.min(6, Math.max(0.15, zoom * (1 - walk * 0.02)));
-      g.set_orbit(yaw, pitch, zoom);
+    if (walk !== 0) g.walk(walk * WALK_STEP);
+
+    // Track the aim point (engine-projected, normalised) with the crosshair — CSS pixels, so it lines up
+    // with the mouse regardless of the canvas's device-pixel scale.
+    const aim = g.aim_screen();
+    if (aim.length === 2) {
+      crosshair.style.display = "block";
+      crosshair.style.left = `${aim[0] * canvas.clientWidth}px`;
+      crosshair.style.top = `${aim[1] * canvas.clientHeight}px`;
+    } else {
+      crosshair.style.display = "none";
     }
     try {
       g.render();
