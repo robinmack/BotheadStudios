@@ -9,6 +9,22 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Resolution-on-demand cap impacts (docs/39) — the moon-drop caps modern Earth instead of melting it.**
+  A small impactor now resolves the impactor(s) whole + a CAP of the target, keeping the target's bulk an
+  abstract gravity source + boundary (`GpuSph::set_bulk`), so a Moon on Earth is a localized surface impact
+  (blue Earth + a bound debris halo), not a whole-planet magma ocean. Comparable-mass impacts (birth) still
+  resolve whole-body. New engine API: `HydroBody::particalize_cap`, `gpu_sph::assemble_from_relaxed_n` cap
+  path, `GpuSph::set_bulk`. Deployed to integrity.bothead.net (one- and two-moon drops verified). The render
+  no longer applies proto-Earth's magma glow to a modern-Earth resolve.
+- **Groundwork for terrestrial (Ground-scene) SPH impacts (docs/39 surface instance), not yet wired.**
+  `sph_step.wgsl` gains a **planar bulk mode** (a flat ground floor + uniform g, `GpuSph::set_bulk_planar`)
+  alongside the planet sphere — one shader, data-selected. `gpu_sph::promote_ground_cap` promotes the voxel
+  terrain under an impact into real SPH matter (following the real hills/strata/water). Regolith EOS is a
+  flagged gap (basalt fallback). These are foundations; the Ground meteor is not yet routed through them.
+- **`tools/sph-verify` now checks the bulk boundaries.** Beyond the force kernel + KDK integrator, it verifies
+  the spherical and planar bulk floors on the real shader (a grain falls and rests, no leak, no launch). Run
+  it for any `sph_step.wgsl` change.
+
 - **The CPU `Aggregate` collision path is retired from the space scene — one SPH engine for every
   collision (docs/58).** Dropping a moon (one- or two-moon world) and braking a moon into a crash now
   resolve through the same GPU SPH machine as the birth scene, via `route_bodies_to_sph`. The moon-drop
