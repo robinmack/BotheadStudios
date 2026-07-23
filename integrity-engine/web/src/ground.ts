@@ -1,5 +1,6 @@
 // The GROUND scene host (docs/55). Thin by design: fetch a world definition, hand it to the engine,
 // drive requestAnimationFrame, and wire two controls. Every number about the world lives in the JSON.
+import "./dev-log"; // FIRST — relay console/errors to the dev terminal before wasm loads
 import init, { Ground } from "./wasm/engine.js";
 import "./scene-nav";
 import { createSimHud } from "./sim-hud";
