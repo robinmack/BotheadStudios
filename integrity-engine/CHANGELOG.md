@@ -9,6 +9,50 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Resolution-on-demand cap impacts (docs/39) — the moon-drop caps modern Earth instead of melting it.**
+  A small impactor now resolves the impactor(s) whole + a CAP of the target, keeping the target's bulk an
+  abstract gravity source + boundary (`GpuSph::set_bulk`), so a Moon on Earth is a localized surface impact
+  (blue Earth + a bound debris halo), not a whole-planet magma ocean. Comparable-mass impacts (birth) still
+  resolve whole-body. New engine API: `HydroBody::particalize_cap`, `gpu_sph::assemble_from_relaxed_n` cap
+  path, `GpuSph::set_bulk`. Deployed to integrity.bothead.net (one- and two-moon drops verified). The render
+  no longer applies proto-Earth's magma glow to a modern-Earth resolve.
+- **Groundwork for terrestrial (Ground-scene) SPH impacts (docs/39 surface instance), not yet wired.**
+  `sph_step.wgsl` gains a **planar bulk mode** (a flat ground floor + uniform g, `GpuSph::set_bulk_planar`)
+  alongside the planet sphere — one shader, data-selected. `gpu_sph::promote_ground_cap` promotes the voxel
+  terrain under an impact into real SPH matter (following the real hills/strata/water). Regolith EOS is a
+  flagged gap (basalt fallback). These are foundations; the Ground meteor is not yet routed through them.
+- **`tools/sph-verify` now checks the bulk boundaries.** Beyond the force kernel + KDK integrator, it verifies
+  the spherical and planar bulk floors on the real shader (a grain falls and rests, no leak, no launch). Run
+  it for any `sph_step.wgsl` change.
+
+- **The CPU `Aggregate` collision path is retired from the space scene — one SPH engine for every
+  collision (docs/58).** Dropping a moon (one- or two-moon world) and braking a moon into a crash now
+  resolve through the same GPU SPH machine as the birth scene, via `route_bodies_to_sph`. The moon-drop
+  used to materialise a CPU `Aggregate` debris cloud at surface contact; a light impactor (the Moon is ~9×
+  lighter than Earth) even resolved *twice* because its tidal-resolution distance falls inside contact, so
+  it reached contact before the SPH handoff and tripped the old detector too. Fixed: the SPH handoff is now
+  `resolution_distance.max(contact)` (matter resolves when tides dominate OR surfaces meet), and detection
+  routes to SPH instead of resolving on the CPU. Removed from the scene: the `moon_debris` field +
+  `build_impact_debris_scaled` call, the O(N²) CPU debris advance/render, `start_birth`, and the CPU
+  crater. **Consumer note:** `OrbitDemo::debris_count()` and `start_birth()` are gone from the JS API; the
+  `IMPACT · N fragments` HUD line is replaced by the live `GPU impact · disk …` line. The
+  `aggregate::Aggregate` solver module remains (general N-body particle solver, still used by the
+  atmosphere and impact tests).
+
+- **Tillotson EOS parameters moved to the material catalogue (docs/04).** The condensed-matter equation
+  of state (`eos::Tillotson`) now reads its parameters from a `tillotson` block in `data/materials.json`
+  instead of constants baked in code — so a world is a world is a world: improving a material improves
+  every scene. Each block carries its own `status` (`verified`/`partial`/`provisional`) and `source`, so
+  provenance moved *with* the numbers and is queryable, not buried in a comment. Byte-identical values →
+  no physics change (full suite green, incl. the giant-impact integration tests). Migrated: granite,
+  basalt (verified), peridotite (dunite analog), iron (compressed branch verified). Any material given a
+  block becomes available automatically via `Tillotson::for_material`.
+- **Sourced the provisional EOS sets — and caught a 10× bug.** Peridotite's Tillotson parameters were a
+  mistranscribed Marinova 2011 olivine fit (`B` 10× too stiff, `E0` 10× too low — the "puffed up" symptom
+  flagged in `eos.rs`); corrected to the genuine set. Added sourced **water ice** (Benz & Asphaug 1999,
+  verified) and **water** (SWIFT/Melosh, provisional). The eos physics tests now iterate the catalogue, so
+  every Tillotson material is validated automatically.
+
 - **New scene: `/ground.html` (docs/55)** — a regolith ground world rendered from
   `/worlds/ground/world.json`. Every world number is in the file (size, relief, strata, camera, gravity,
   grain size); the scene supplies a camera rig, a "Drop meteor" button and three passes. Procedural

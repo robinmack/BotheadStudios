@@ -23,6 +23,8 @@ struct RawMaterial {
     optical: RawOptical,
     #[serde(default)]
     thermal: Option<RawThermal>,
+    #[serde(default)]
+    tillotson: Option<TillotsonBlock>,
 }
 
 #[derive(Deserialize)]
@@ -161,6 +163,55 @@ impl Thermal {
     }
 }
 
+/// The Tillotson equation-of-state parameters for a condensed-matter material (`docs/33`, consumed by
+/// `eos::Tillotson`). SI throughout. **This is the source of truth for the EOS**: the parameters used to
+/// live as constants in `eos.rs`; they now live here so a world is a world is a world — one place to
+/// improve a material improves every scene that uses it.
+///
+/// `status` records provenance honestly, because a physics parameter that quietly lies is worse than one
+/// openly flagged (Law VII): `"verified"` (checked against the primary table), `"partial"` (some params
+/// verified, others provisional), or `"provisional"` (transcribed, not yet confirmed). `source` carries
+/// the citation. Deserialized straight from `data/materials.json`'s `tillotson` block; the literature
+/// symbols A, B, E0, E_iv, E_cv are the JSON keys.
+#[derive(Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct TillotsonBlock {
+    /// Reference (zero-pressure, cold) density ρ₀ (kg/m³).
+    pub rho0: f64,
+    /// Nondimensional Tillotson `a`.
+    pub a: f64,
+    /// Nondimensional Tillotson `b`.
+    pub b: f64,
+    /// Bulk modulus at ρ₀ — the Tillotson `A` (Pa).
+    #[serde(rename = "A")]
+    pub cap_a: f64,
+    /// Second (nonlinear) compression modulus — the Tillotson `B` (Pa).
+    #[serde(rename = "B")]
+    pub cap_b: f64,
+    /// Reference specific internal energy E₀ (J/kg).
+    #[serde(rename = "E0")]
+    pub e0: f64,
+    /// Incipient-vaporization specific energy E_iv (J/kg).
+    #[serde(rename = "E_iv")]
+    pub e_iv: f64,
+    /// Complete-vaporization specific energy E_cv (J/kg).
+    #[serde(rename = "E_cv")]
+    pub e_cv: f64,
+    /// Expansion decay exponent α (nondimensional).
+    pub alpha: f64,
+    /// Expansion decay exponent β (nondimensional).
+    pub beta: f64,
+    /// Provenance: `"verified"` | `"partial"` | `"provisional"`.
+    #[serde(default)]
+    pub status: String,
+    /// Cited source(s) for the parameter set.
+    #[serde(default)]
+    pub source: String,
+    /// Optional per-material caveats.
+    #[serde(default)]
+    pub notes: String,
+}
+
 /// A material as the engine consumes it.
 #[derive(Clone, Debug)]
 pub struct Material {
@@ -218,6 +269,10 @@ pub struct Material {
     /// NOT a licence to invent one. Ask through [`Material::specific_heat`] and friends rather than
     /// `map_or`-ing a number in at the call site (see those methods for what went wrong).
     pub thermal: Option<Thermal>,
+    /// Condensed-matter equation of state (Tillotson) — `None` for materials with no characterized EOS
+    /// (gases use the ideal-gas closure; wood/soils fall back to the contact-penalty stiffness). Read
+    /// through [`tillotson_block`] / `eos::Tillotson`, which treat this as the source of truth.
+    pub tillotson: Option<TillotsonBlock>,
 }
 
 impl Material {
@@ -306,9 +361,24 @@ pub fn load() -> Vec<Material> {
                                     decomposes_k: t.decomposes_k,
                                     decomposition_suppressed_pa: t.decomposition_suppressed_pa,
                 }),
+                tillotson: m.tillotson,
             }
         })
         .collect()
+}
+
+/// The parsed catalogue, cached (the bundled JSON is parsed once). Prefer this over [`load`] for
+/// repeated lookups — the EOS constructors call it, and re-parsing 29 materials per call would be waste.
+pub fn catalogue() -> &'static [Material] {
+    static CACHE: std::sync::OnceLock<Vec<Material>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(load).as_slice()
+}
+
+/// The Tillotson EOS parameters for a material id, or `None` when it has no characterized condensed-matter
+/// EOS. This is the door `eos::Tillotson` reads through, making `data/materials.json` the single source of
+/// truth for the parameters (previously constants in `eos.rs`).
+pub fn tillotson_block(id: &str) -> Option<&'static TillotsonBlock> {
+    catalogue().iter().find(|m| m.id == id).and_then(|m| m.tillotson.as_ref())
 }
 
 /// Find the index of a material by id. Panics if a required material is missing (Phase 1 relies

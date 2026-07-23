@@ -2,38 +2,12 @@
 // this thin host fetches it, hands it to the engine's `Terra` scene, and drives the render loop. Phase 1 uses
 // an orbit camera (drag / wheel-zoom); the continuous fly camera (WASD + zoom + look) lands in Phase 4.
 
+import { report } from "./dev-log"; // FIRST — relay console/errors to the dev terminal before wasm loads
 import init, { Terra, body_surface_urls } from "./wasm/engine.js";
 import "./scene-nav";
 import { createShareView } from "./share-view";
 import { createSimHud } from "./sim-hud";
 import { attachCameraInput, CAMERA_HINT } from "./camera-input";
-
-// --- Log relay: mirror console + errors to the dev server (parity with the other scenes) ---
-function report(level: string, msg: string): void {
-  try {
-    void fetch("/__log", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ level, msg }),
-      keepalive: true,
-    });
-  } catch {
-    /* best-effort */
-  }
-}
-(["log", "warn", "error"] as const).forEach((lvl) => {
-  const orig = console[lvl].bind(console);
-  console[lvl] = (...args: unknown[]) => {
-    orig(...args);
-    report(lvl, args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
-  };
-});
-window.addEventListener("error", (e) =>
-  report("error", `window.onerror: ${e.message} @ ${e.filename}:${e.lineno}:${e.colno}`),
-);
-window.addEventListener("unhandledrejection", (e) =>
-  report("error", `unhandledrejection: ${String((e as PromiseRejectionEvent).reason)}`),
-);
 
 const statusEl = document.getElementById("status");
 function setStatus(html: string, isError = false): void {

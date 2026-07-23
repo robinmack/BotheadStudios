@@ -3,6 +3,169 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-23 — resolution-on-demand: the moon-drop caps modern Earth (deployed); Ground port foundations (docs/39)
+
+**What (shipped + deployed).** After the CPU Aggregate was retired (entry below), routing the moon-drop
+through the *full-body* SPH particalized ALL of modern Earth — melting it to a magma ocean and under-resolving
+the Moon (~50 particles) — a Law-III violation (a Moon on Earth is a SURFACE cratering event, not a whole-body
+giant impact). Fixed by **resolution-on-demand** (docs/39): a small impactor (`route_bodies_to_sph`, mass
+ratio `< CAP_MASS_RATIO=0.1`) resolves the impactor(s) whole + a **CAP** of the target; the target's bulk
+stays an abstract body — a Gauss gravity source + a non-injecting floor the cap rests on
+(`gpu_sph::set_bulk`, a new spherical-bulk mode in `sph_step.wgsl`). Birth (comparable masses) still resolves
+whole-body, unchanged. `HydroBody::particalize_cap` filters a full-body seed to the impact region (real
+materials/mass for free); the cap relaxes **seated on the bulk** before the shock, then `assemble_from_relaxed_n`
+places it (stays) + the impactor(s) at live contact. Render: the cap case draws the target as its FULL solid
+globe (blue modern Earth), and the two "SPH ⟹ proto-Earth magma" branches are gated to whole-body only.
+
+**Why the over-ejection scare mattered.** First cut seeded the cap un-relaxed → straight to dynamics: it
+threw ~everything off (Earth–Moon distance ballooned to 178,000 km) — the docs/39/3a lesson that an
+un-relaxed body dumps startup non-equilibrium into the shock. Relaxing the cap on the bulk first (docs/39 39b
+keystone) made it converge (7,478 → 442 km, a bound debris halo — cratering/fallback). **Deployed** to
+integrity.bothead.net; PR #80.
+
+**Ground port foundations (docs/39 surface instance — a terrestrial meteor is a moon-drop scaled down).** Two
+hardest pieces built + verified, NOT yet wired into the Ground scene (it has no `GpuSph` today):
+1. **Planar bulk mode** in `sph_step.wgsl` — the shared shader now serves a FLAT terrestrial floor (uniform g
+   + non-injecting plane) alongside the planet sphere, data-selected by `bulk_cr.w<0` so it stays ONE shader
+   (Law II). `GpuSph::set_bulk_planar`. This resolves docs/39 open-decision #4 (a patch-local f32 frame keeps
+   precision at 1 m grains; a huge-R sphere loses 0.5 m ULP, a small one fudges curvature).
+2. **`gpu_sph::promote_ground_cap`** — reads the engine's voxel `World` columns near the impact → real SPH
+   particles in a patch-local frame, each carrying its voxel's own material/density/EOS. This IS Robin's
+   "promote visual terrain filters to real matter at impact": it follows the real hills/strata/water, never a
+   flat projection, so ejecta lands matter-on-matter (which is what fixes the docs/55 "crater refills" gap).
+   Regolith (sand/gravel/dirt) has no Tillotson yet → basalt fallback (flagged Law-V IOU).
+
+**Design converged with Robin (captured in memory `integrity-gpu-collision-unification`):** ejecta must land
+on REAL settled matter, never an abstract terrain projection; each ejecta grain's landing is predicted from
+its ballistic trajectory (the moon-drop's `detect_swept`, per grain) so its column promotes just-in-time; the
+engine — not the scene — owns the topography (scene declares a *character* like "glacial plain", engine
+generates the type-appropriate relief/strata/water). REMAINING for Ground: meteor→SPH, wire a `GpuSph` into
+the Ground scene + the cap-impact flow + render + rig; then per-grain JIT + bake-back; and bring
+`world::generate_from` up to the Laws.
+
+**Verified — and the TEST HARNESSES (for the next session):**
+- **`tools/sph-verify`** (`cd tools/sph-verify && cargo run --release`) — runs the REAL `sph_step.wgsl` on the
+  box's RTX 2070 (native Vulkan) vs a CPU f64 reference. **USE IT for any shader change** — native `cargo
+  check` does NOT validate WGSL. It now checks: force kernel + KDK integrator match; the SPHERICAL bulk
+  boundary (a grain falls, rests on R_core, no launch); and the PLANAR bulk boundary (a grain falls under
+  uniform g, rests on the flat plane, no launch). All three port failure modes (wrong-sign gravity, leaky
+  floor, KE-injecting spring) are caught here before wiring.
+- **`scripts/rig.sh <rig>.mjs`** on the GPU Xorg (:2, `MESA_VK_DEVICE_SELECT` for the 5060 Ti) — composited
+  WebGPU screenshots. **`web/rig/moondrop_check.mjs`** (new; `PAGE=orbit.html|twomoons.html`) drives the drop
+  and reads the HUD (asserts SPH resolution, no CPU "fragments"); `birth_check.mjs` for the disk. Poll the rig
+  log for `RESULT:` — do NOT `pgrep -f <rigname>` in a wait loop, it self-matches and hangs. `mod app` /
+  `Ground` are WASM-ONLY — build wasm (`npm run wasm`) + rig; native tests don't cover the scenes.
+- **Native**: `particalize_cap` (hydrostatic.rs), `promote_ground_cap` (gpu_sph.rs), the layout-pin tests
+  (`sph_params_matches_the_shader_field_for_field` — the WGSL parser learned `vec4` this session), full suite
+  331 fast / 336 full.
+- **Research maps** (two `Explore` subagents this session, findings folded into docs/39 + memory): the SPH +
+  boundary machinery (docs/39 was already the CPU-verified design, trapped in `hydrostatic.rs` test module),
+  and the Ground scene (voxel `World`, CPU-only `MatterSim`, the frame/precision wall). **docs/39** carries
+  the GPU-port plan; **docs/58** the generic-body collision unification.
+
+## 2026-07-23 — the CPU Aggregate is retired: every collision resolves on the one SPH engine (docs/58)
+
+**What.** The moon-drop and the two-moon drop now resolve through the SAME GPU SPH engine as the birth
+scene — the CPU `Aggregate` debris path is gone from the `OrbitDemo` scene. "Drop Moon(s)" de-orbits the
+moon(s) and routes the planet + moon(s) through a shared `route_bodies_to_sph` → `begin_sph_relax` → the
+Relaxing→Approaching→Assembling→Dynamics machine (N bodies at once: a two-moon world resolves all three in
+one collision). A collision the cheap orbital phase *detects* — braking a moon until it crashes — routes
+the same way: `step_substep` records the colliding set and `advance` hands it to the SPH engine after the
+substep loop. There is no second resolution path; `step_substep` is now pure ballistics + detection.
+
+**The bug the rig caught (why it wasn't already one engine).** Birth handed off to SPH at the *tidal*
+resolution distance — for Mars-mass Theia ~17,700 km, comfortably outside contact (9,551 km). The Moon is
+~9× lighter, so its 1%-tidal distance is only ~8,600 km — *inside* contact. A dropped Moon therefore
+reached contact *before* the SPH handoff, the still-present CPU swept detector tripped, and the collision
+resolved TWICE — CPU Aggregate debris AND GPU SPH on the same drop (the HUD showed both "1536 fragments …"
+and "GPU impact · disk"). Fixed two ways: (1) the handoff distance is now
+`accretion::resolution_distance(…).max(contact)` — matter resolves when *either* tides dominate *or* the
+surfaces meet, whichever comes first (heavy Theia still resolves early; the light Moon resolves at
+contact); (2) `step_substep` no longer resolves anything itself — while a resolve is live it returns after
+integrating, and otherwise it detects-and-routes.
+
+**Deleted from the scene** (~450 lines): the `moon_debris: Option<Aggregate>` field and its
+`build_impact_debris_scaled` materialisation, the O(N²) CPU debris advance (self-gravity, boundary
+shear/mirror + spin reaction, J2, tidal kicks, drain/demotion), the CPU debris render pass, the
+`FrameSnap` debris arrays, `start_birth`/`birth_mode` (birth uses `start_gpu_impact`),
+`debris_count`/`hole_radius`/`cap_extent`/`crater_heal_m3`/`debris_rate_mul`/`debris_frame_dt`, and the CPU
+crater bowl. The crater-*wall* render (used by the live SPH crater) now sizes from the actual `crater_r`
+rather than the retired healing formula. **Kept:** the `aggregate::Aggregate` *module* — a general
+self-gravitating particle solver still used by `atmosphere.rs` and `impact.rs`'s measurement tests.
+Retiring it from the *scene* is the "one collision engine" goal; the struct has other consumers, so
+`build_impact_debris_scaled` is now test-only rather than deleted.
+
+**Verified.** Full native suite green — **335 passed, 21 skipped**. Headless GPU rigs on the 5060 Ti
+(build 20260723.072150, `scripts/rig.sh moondrop_check.mjs` / `birth_check.mjs`):
+- **one-moon drop** (`orbit.html`) and **two-moon drop** (`twomoons.html`): both resolve as PURE SPH — the
+  HUD shows only "GPU impact · disk …", ZERO "N fragments" (the CPU signature), no panics, no
+  `is not a function`. A radial drop *merges* (disk ≈ 0), which is honest: near-zero impact parameter
+  carries ~no angular momentum, unlike birth's grazing hit.
+- **birth** (`birth.html`): still lofts a proto-lunar disk (→ 0.31 M☾, Earth-fraction → 60%) and accretes a
+  0.06 M☾ moon — the shared advance/snapshot/render code survived the deletion intact.
+
+## 2026-07-22 — collision unification groundwork: the moon-drop is a giant impact, and the EOS moves to the catalogue
+
+**Context — where "one collision path" actually stands.** The goal is one collision-resolution path on the
+GPU at every scale (Theia and a de-orbiting Moon are the same mechanic, Robin's law), retiring the CPU
+`Aggregate`. Measuring the code corrected two stale notes: **collision DETECTION is already unified** —
+`OrbitDemo::step_substep` calls `interaction::detect_swept` and its own swept-CCD loops are gone (landed
+in #75; docs/57 finding #3's "STILL OPEN" was stale). What remains is **resolution**: the moon-drop still
+materialises a CPU `Aggregate` debris cloud at surface contact (`build_impact_debris_scaled`, the O(N²)
+Barnes-Hut bottleneck), while the birth scene resolves deformable SPH bodies on the GPU at the tidal
+distance. Two answers to "a body hit Earth."
+
+**Keystone proven (native TDD).** A Moon striking Earth is a *giant impact*, not a surface crater — the
+same `gpu_sph` assembly builds it with nothing swapped but the two bodies. `a_moon_drop_builds_and_strikes_through_the_same_assembly`:
+an `ImpactDef` naming the real Earth and Moon builds two bodies of the right size/proportion, the assembled
+geometry strikes, and the reduced-mass impact energy is **~28× the Moon's gravitational binding** — the
+`ResolveBodies` regime (docs/46 §1), so routing the moon-drop onto SPH is correct physics, and the CPU
+`Aggregate` is what gets retired. **Flagged IOU pinned as a test:** SPH mass is seeded from Tillotson
+*reference* densities, not the compressed PREM densities, so the initial SPH Earth is ~64% of real mass
+(compression must emerge during relax).
+
+**Tillotson EOS parameters moved to `data/materials.json` (Robin's directive; closes the follow-up flagged
+at `eos.rs:109`).** The condensed-matter EOS parameters lived as constants in `eos.rs`; they now live in a
+`tillotson` block in the catalogue, and `eos::Tillotson` reads them via `materials::tillotson_block` (a
+cached `catalogue()`). A world is a world is a world — one place to improve a material improves every
+scene. Each block carries its own `status` (`verified`/`partial`/`provisional`) and `source`, so the
+provenance moved *with* the numbers and is queryable, not buried in a comment: basalt verified (Benz &
+Asphaug 1999), iron's compressed branch verified (Wissing & Hobbs 2020) with a provisional vapor branch,
+granite and peridotite (a dunite analog) provisional.
+
+**Sourcing then caught a real bug** ("go fetch it", Robin). The provisional peridotite set was a
+mistranscribed Marinova 2011 olivine fit — `B` was 10× too stiff (4.9e11 vs 49 GPa) and `E0` 10× too low
+(5.5e7 vs 550 MJ/kg), which is exactly the "differentiated body puffed up" symptom `eos.rs` had flagged.
+Corrected to the genuine Marinova set. Also added the sourced **water ice** (Benz & Asphaug 1999, verbatim,
+`verified`) and **water** (SWIFT/Melosh planetary-SPH set, cross-checked). The eos tests now iterate the
+catalogue, so **every** Tillotson material — including the new sets — is validated against the same
+bulk-modulus / sound-speed / monotone-compression / vapor-continuity invariants automatically. A material
+given a block becomes available through `Tillotson::for_material`. (Open: the primary Melosh 1989 book was
+not readable online, so granite and the iron vapor branch stay `provisional`/`partial`; the olivine set is
+single-source via the Stewart-group pyKO code. Peridotite is not yet used in body-building — basalt is the
+mantle there — so this is a correctness fix ahead of the layered-Earth SPH work, with no scene changed.)
+
+**Verified.** Values byte-identical to the former constants ⇒ no physics change: full suite **328/328 (+2
+new tests)**, including the slow giant-impact integration tests (`theia`, `birth_scene`,
+`dropped_moon_impact`) that exercise the EOS hardest. A new pin test (`tillotson_parameters_are_read_from_the_material_catalogue`)
+guards against a silent JSON typo. fmt untouched (hand-edited).
+
+**Geometry fork SETTLED** (Robin: *"use the real live trajectory, but inside the engine, never in scene
+definition"*). Birth and a de-orbiting Moon are different scenarios, not one question with two answers: birth
+is a *declared experiment* whose canonical approach (`v_esc 1.15`, grazing `b`, proto-Earth spin) must be
+IMPOSED — free-fall from rest gives the wrong one — while a Moon already in orbit has a real N-body
+trajectory whose live `(offset, relative-velocity, spin)` *is* the geometry; re-synthesizing it would
+overwrite measured state (Law VII) and inject proto-Earth's spin into a modern Earth (Law V). Resolved with
+ONE engine primitive `gpu_sph::assemble_from_relaxed_at(particles, target_spin, impactor_offset,
+impactor_vel, impactor_spin)`; `assemble_from_relaxed_with(def)` now computes the *canonical* geometry from
+the world file and delegates (birth **byte-identical** — the slow `theia`/`birth_scene`/`provenance` tests
+confirm). The geometry is the ENGINE's to compute from the bodies it holds; no scene declares it. A native
+test pins the live-placement path.
+
+**Next.** Wire the moon-drop: when the engine detects an orbiting body crossing its `resolution_distance`,
+enter the SphPhase machine and call `assemble_from_relaxed_at` with the live `(offset, vel, spin)` from
+`self.bodies`, then delete `moon_debris: Aggregate` + `build_impact_debris_scaled` (ledger rows 1/3/10).
+
 ## 2026-07-21 — the ground scene was an abstraction; the physics corrections, and the real target (ledger row 16)
 
 **Robin's review, and it was right on every count.** The ground scene I shipped was *"a cube of ground

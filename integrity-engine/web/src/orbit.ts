@@ -5,41 +5,12 @@
 // is a spectator view of celestial motion. Mirrors main.ts's log relay + status banner so a
 // console-less device (iPad) can still be debugged.
 
+import { report } from "./dev-log"; // FIRST — relay console/errors to the dev terminal before wasm loads
 import init, { OrbitDemo, body_surface_urls } from "./wasm/engine.js";
 import { attachCameraInput, CAMERA_HINT } from "./camera-input";
 import "./scene-nav";
 import { createSimHud } from "./sim-hud";
 import { createShareView } from "./share-view";
-
-// --- Log relay: mirror console + global errors to the dev server ---
-function report(level: string, msg: string): void {
-  try {
-    void fetch("/__log", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ level, msg }),
-      keepalive: true,
-    });
-  } catch {
-    /* best-effort */
-  }
-}
-(["log", "warn", "error"] as const).forEach((lvl) => {
-  const orig = console[lvl].bind(console);
-  console[lvl] = (...args: unknown[]) => {
-    orig(...args);
-    report(
-      lvl,
-      args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "),
-    );
-  };
-});
-window.addEventListener("error", (e) =>
-  report("error", `window.onerror: ${e.message} @ ${e.filename}:${e.lineno}:${e.colno}`),
-);
-window.addEventListener("unhandledrejection", (e) =>
-  report("error", `unhandledrejection: ${String((e as PromiseRejectionEvent).reason)}`),
-);
 
 const statusEl = document.getElementById("status");
 function setStatus(html: string, isError = false): void {
@@ -512,9 +483,10 @@ async function main(): Promise<void> {
       // the shared window's event slot. All the same info as before, just below the universal sim line.
       const events: string[] = [];
       if (demo.has_impacted()) {
+        // The live GPU SPH disk mass is reported on its own line below; the retired CPU Aggregate's
+        // "N fragments" count is gone with it.
         events.push(
-          `<b style="color:#ffd08a">IMPACT</b> · ${demo.debris_count()} fragments · ` +
-            `${(demo.impact_energy_j() / 1e30).toFixed(2)}e30 J`,
+          `<b style="color:#ffd08a">IMPACT</b> · ${(demo.impact_energy_j() / 1e30).toFixed(2)}e30 J`,
         );
       }
       if (tPlus >= 0) {

@@ -118,6 +118,24 @@ impl LayeredBody {
         self.enclosed_mass(self.radius())
     }
 
+    /// Polar/equatorial moment of inertia (kg·m²) about any axis through the centre — a spherically
+    /// symmetric body has an isotropic inertia tensor, so one scalar. **It EMERGES from the body's actual
+    /// mass distribution**, `I = ∫ r² dm = Σ_layers (8π/15)·ρ·(r_o⁵ − r_i⁵)`, NOT the uniform-sphere
+    /// `⅖mr²` (which is itself an Earth-shaped approximation — a differentiated body with a dense core has
+    /// `I/mr² < 0.4`). This is the generic replacement (docs/58) for `tides::moment_of_inertia(mass, radius)`
+    /// wherever a body's real spin dynamics matter: for Earth's declared layers it comes out at the measured
+    /// moment-of-inertia factor ≈ 0.33, which nothing put there — it falls out of the density profile.
+    pub fn moment_of_inertia(&self) -> f64 {
+        const C: f64 = 8.0 / 15.0 * std::f64::consts::PI;
+        let mut i = 0.0;
+        let mut inner_r: f64 = 0.0;
+        for l in &self.layers {
+            i += C * l.density * (l.outer_r.powi(5) - inner_r.powi(5));
+            inner_r = l.outer_r;
+        }
+        i
+    }
+
     /// Gravity g(r) (m/s²), COMPUTED: Gauss's law over the enclosed mass — rises through the mantle,
     /// peaks near the core boundary, falls to zero at the centre. Nothing assumed.
     pub fn gravity_at(&self, r: f64) -> f64 {
@@ -473,6 +491,34 @@ mod tests {
             (mass - 7.342e22).abs() / 7.342e22 < 0.05,
             "lunar layers integrate to the Moon's real mass (got {mass:.3e})"
         );
+    }
+
+    /// **A body's moment of inertia EMERGES from its mass distribution — no `⅖mr²`, no "Earth" (docs/58).**
+    /// The generic body model derives `I` from the layers, so spin dynamics work for any object. The
+    /// uniform case pins the formula; the differentiated bodies pin that it reproduces the MEASURED
+    /// moment-of-inertia factors (Earth 0.3307, Moon 0.393) with nothing put there — Law VII.
+    #[test]
+    fn moment_of_inertia_emerges_from_the_mass_distribution() {
+        // A UNIFORM sphere reduces to exactly the textbook 2/5 M R².
+        let uniform = LayeredBody {
+            layers: vec![Layer { material: "granite".into(), outer_r: 1.0e6, density: 3000.0, t_inner: 300.0, t_outer: 300.0 }],
+            atmosphere_mass: 0.0,
+            surface: None,
+            name: "uniform".into(),
+            _comment: String::new(),
+        };
+        let uf = uniform.moment_of_inertia() / (uniform.total_mass() * uniform.radius().powi(2));
+        assert!((uf - 0.4).abs() < 1e-9, "a uniform sphere is exactly 2/5 M R² (got {uf:.6})");
+
+        // Earth's and the Moon's declared layers reproduce the real factors — an emergent result.
+        let factor = |b: &LayeredBody| b.moment_of_inertia() / (b.total_mass() * b.radius().powi(2));
+        let (ef, mf) = (factor(&earth()), factor(&moon()));
+        println!("emergent MoI factor  Earth {ef:.4} (real 0.3307)  Moon {mf:.4} (real 0.393)");
+        assert!((0.30..0.36).contains(&ef), "Earth's MoI factor emerges near the real 0.3307 (got {ef:.4})");
+        assert!((0.36..0.41).contains(&mf), "the Moon's MoI factor emerges near the real 0.393 (got {mf:.4})");
+        // The Moon is less centrally condensed than Earth, so its factor is higher — an ordering the
+        // density profiles produce on their own.
+        assert!(ef < mf, "Earth is more centrally condensed than the Moon (ef {ef:.4} < mf {mf:.4})");
     }
 }
 

@@ -106,6 +106,47 @@ Earth. It is the skeleton; three upgrades turn it into the real T0↔T3:
 39a–39b are the crux (a partial particalization that holds); 39d is the payoff (the converged number at
 tractable cost); 39e closes birth-of-the-Moon. Only 39a–39b need land before we know the approach is sound.
 
+### The GPU port, driven by the moon-drop (2026-07-23) — planned, not yet built
+
+The CPU cap-on-bulk (39a–39e above) proved the primitive but stayed in `hydrostatic.rs`'s `#[cfg(test)]`
+module and never reached the GPU `sph_step.wgsl` path (open-decision #2 deferred it). The **moon-drop now
+forces it**: after the CPU `Aggregate` was retired (docs/58) and every collision routed onto the GPU SPH,
+dropping the Moon particalizes ALL of *modern* Earth — a Law-III violation (it's a surface cratering event,
+not a whole-body giant impact). Symptoms on the live site: modern Earth renders as a magma ocean, and the
+Moon (~50 particles, since Earth sets the particle mass) is invisible. Robin chose resolution-on-demand.
+
+**Scope narrows nicely: only the SMALL-impactor case needs the cap; birth is unchanged.** 39d found a
+*rigid* bulk plateaus at ~25–33% disk and the full 58% needs a *deformable* bulk. Birth already runs
+full-body SPH — that IS the "cap = whole deformable planet" limit, and it works. So we build the cap path
+only for a small impactor (Moon), where a **rigid** bulk is physically honest (open-decision #1: rigid is
+valid when the cap covers the whole shedding region — a Moon impact doesn't shed Earth's deep interior).
+39b's decision #3 further simplifies it: a **bare non-injecting floor beats a boundary shell**, so no pinned
+particles / boundary-shell are needed — just a floor + Gauss gravity.
+
+**The 5-stage plan (each stage: build → test → the flagship rig):**
+1. **GPU boundary primitive** — `sph_step.wgsl`: add two `vec4` `Params` fields (`bulk_cr` = centre+R_core,
+   `bulk_vm` = velocity+mass), a `bulk_gravity()` (monopole outside R_core, **Gauss-linear ∝r interior** —
+   39b lesson 1: a raw 1/r² singularity-sucks penetrators), and a **non-injecting floor** in `cs_kick_drift`
+   + `cs_relax` (project a penetrator to R_core, remove inward normal velocity relative to `bulk_vm.xyz` —
+   NOT a spring; the terrain-contact KE-launch lesson). Mirror in `gpu_sph.rs::SphParams` (offset 48/64,
+   size 80, %16==0) + a `set_bulk()` setter on `GpuSph` + update the field-for-field layout-pin test
+   (`sph_params_matches_the_shader_field_for_field`, and the parser-len/tail checks — verify `wgsl_offsets`
+   handles `vec4`). Ports `hydrostatic.rs::bulk_floor` (645-660) + `Bulk::accel_at` (620-628).
+2. **`particalize_cap`** (`hydrostatic.rs`, beside `particalize:199`) — the whole impactor + a cap of the
+   planet near the impact site (real per-layer ρ/u/geotherm, restricted to a shell/cone), resting on the
+   bulk floor. Base: `build_mantle_cap` (749) + the per-layer loop (206-232). Native test (cap holds
+   hydrostatic on the bulk — the GPU analog of 39b's keystone).
+3. **Cap-vs-whole decision** in `route_bodies_to_sph` (`lib.rs:1473`) — sized by the affected zone
+   (energy/necessity, docs/44; the `impact.rs:483` `(2·r_imp).min(0.55·R)` clamp is the precedent), NOT a
+   scene dial. Small impactor → cap + rigid bulk; comparable masses → whole-body (birth path, unchanged).
+   The Moon gets its OWN full particle budget (fixes "invisible").
+4. **Render** (`lib.rs`) — the bulk is the solid blue globe (its real surface); SPH particles only at the
+   impact site. Fix the two magma bugs so a *modern*-Earth resolve isn't proto-Earth: globe glow (`2609`,
+   currently `glow_of(impact_def.target)` when sph_active — its own comment 2604-2608 warns this sets the
+   present-day Earth on fire) and the interior magma (`2708`) must read the LIVE planet's matter.
+5. **Rig-verify** — moon-drop: blue Earth + a localised crater/splash + shattered Moon (NOT a magma ocean);
+   birth: still lofts a disk. `mod app` is WASM-ONLY — build wasm + rig, native tests don't catch scene bugs.
+
 ### Status — 39a + 39b DONE, the keystone is proven (2026-07-18)
 
 - **39a DONE.** `LayeredBody::acceleration_at` (positioned Gauss gravity) — verified (`planet.rs` test).

@@ -22,7 +22,7 @@ function install(): void {
   nav.setAttribute("aria-label", "scene picker");
   Object.assign(nav.style, {
     position: "fixed",
-    top: "10px",
+    top: "30px", // clear the top-left "Integrity · … · build …" version line (was 10px, overlapped it)
     left: "50%",
     transform: "translateX(-50%)",
     zIndex: "20",

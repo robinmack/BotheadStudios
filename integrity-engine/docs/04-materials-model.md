@@ -51,6 +51,30 @@ and gravity all compose correctly). Grouped by consumer:
 `melting_point` (K), `specific_heat` (J/kg·K), `thermal_conductivity` (W/m·K),
 `ignition_point` (K). Included in the schema now so save files don't break later.
 
+### Tillotson (condensed-matter equation of state)
+The `tillotson` block gives `P(ρ, u)` for shock physics — the pressure a material develops as it is
+compressed, decompressed and vaporized in an impact (`eos.rs`, docs/33). **This block is the source of
+truth for the EOS**: `eos::Tillotson` reads it, so improving a material here improves every scene that
+uses it. `None` for materials with no characterized condensed-matter EOS (gases use the ideal-gas
+closure; wood/soils fall back to the contact-penalty stiffness) — an honest gap, never an invented set.
+
+| Field | Unit | Meaning |
+|---|---|---|
+| `rho0` | kg/m³ | reference (zero-pressure, cold) density ρ₀ |
+| `a`, `b` | – | Tillotson thermal-pressure coefficients |
+| `A` | Pa | bulk modulus at ρ₀ (cold compression stiffness) |
+| `B` | Pa | second-order (nonlinear) compression modulus |
+| `E0` | J/kg | reference specific internal energy |
+| `E_iv`, `E_cv` | J/kg | incipient / complete vaporization specific energies |
+| `alpha`, `beta` | – | expansion-branch decay exponents |
+| `status` | – | provenance: `verified` \| `partial` \| `provisional` |
+| `source` | – | citation for the parameter set |
+
+**`status` is load-bearing (Law VII).** A physics parameter that quietly lies is worse than one openly
+flagged: `verified` = checked against the primary table (basalt, Benz & Asphaug 1999); `partial` = some
+params verified, others provisional (iron — compressed branch Wissing & Hobbs 2020, vapor branch
+provisional); `provisional` = transcribed, not yet confirmed (granite; peridotite, a dunite analog).
+
 ### Metadata
 `id` (stable string key), `display_name`, `category` (rock/soil/organic/liquid/metal/…),
 and **`sources`** — every numeric value carries a citation (see data plan). A `notes` field for

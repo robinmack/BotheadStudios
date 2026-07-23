@@ -34,13 +34,20 @@ pub fn moment_of_inertia(mass: f64, radius: f64) -> f64 {
     EARTH_MOI_FACTOR * mass * radius * radius
 }
 
-/// Spin period (seconds) from spin angular momentum. The HUD's "length of day".
-pub fn spin_period_s(spin_l: DVec3, mass: f64, radius: f64) -> f64 {
+/// Spin period (seconds) from spin angular momentum and a GIVEN moment of inertia — the generic form
+/// (docs/58), so a body's EMERGENT `LayeredBody::moment_of_inertia()` sets its day length rather than the
+/// uniform-sphere `⅖mr²`. INFINITY for a non-spinning body.
+pub fn spin_period_from_inertia(spin_l: DVec3, inertia: f64) -> f64 {
     let l = spin_l.length();
     if l <= 0.0 {
         return f64::INFINITY;
     }
-    2.0 * std::f64::consts::PI * moment_of_inertia(mass, radius) / l
+    2.0 * std::f64::consts::PI * inertia / l
+}
+
+/// Spin period (seconds) from spin angular momentum. The HUD's "length of day".
+pub fn spin_period_s(spin_l: DVec3, mass: f64, radius: f64) -> f64 {
+    spin_period_from_inertia(spin_l, moment_of_inertia(mass, radius))
 }
 
 /// Total angular momentum of a particle cloud about `center` moving at `v_center`.
@@ -403,5 +410,23 @@ mod tests {
             "orbit gains exactly what the spin loses"
         );
         assert!(kick.dot(sat.vel) > 0.0, "prograde fast spin accelerates the orbit (outward)");
+    }
+
+    /// **A DECLARED day length survives the emergent-inertia round-trip (docs/58).** A scene declares a
+    /// day; the engine sets `L = I·ω` and reads it back with `spin_period_from_inertia`. As long as the
+    /// SAME inertia is used at both ends — which the scene's `spin_inertia()` guarantees — the declared
+    /// period reproduces, for ANY body's inertia (no uniform-sphere ⅖mr², no "Earth"). This is the
+    /// consistency the per-body-spin migration must preserve.
+    #[test]
+    fn a_declared_day_length_survives_the_emergent_inertia_round_trip() {
+        let period = 86_164.0; // a declared sidereal day
+        for body in [crate::planet::earth(), crate::planet::moon()] {
+            let i = body.moment_of_inertia();
+            let l = DVec3::new(0.0, 0.0, 1.0) * (i * 2.0 * std::f64::consts::PI / period);
+            let read_back = spin_period_from_inertia(l, i);
+            assert!((read_back - period).abs() < 1e-3, "{}: declared day {period} reproduced (got {read_back})", body.name);
+        }
+        // A non-spinning body has no day (guards the zero-L branch).
+        assert!(spin_period_from_inertia(DVec3::ZERO, 1.0e37).is_infinite(), "no spin ⇒ no day");
     }
 }
