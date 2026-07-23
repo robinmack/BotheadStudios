@@ -714,14 +714,9 @@ mod app {
     /// interpolates between snapshots at (now − RENDER_LAG_S); it never reads live physics state.
     struct FrameSnap {
         t: f64,                   // physics wall-clock (s) when taken
-        bodies: Vec<glam::DVec3>, // positions of [Sun, Earth, Moon(s)]
-        debris: Vec<glam::DVec3>, // impact-cloud particle positions (empty before the shatter)
-        temps: Vec<f32>,          // impact-cloud temperatures (glow)
-        sizes: Vec<f32>,          // display radius factor ∝ (mass/initial fragment mass)^⅓ — accretion grows moonlets
-        mats: Vec<usize>,         // per-fragment material index — snapshotted so tints track the SAME lagged
-        //                           order as positions (a live read desynced after drain's swap_remove)
-        srcs: Vec<u8>,            // per-fragment provenance (Earth vs Theia) — same lagged order (docs/28 step 1)
-        shattered: bool,
+        bodies: Vec<glam::DVec3>, // positions of [Sun, Earth, Moon(s)] — the only thing the render lags.
+        // (The live GPU SPH particle field is drawn straight from `sph_snapshot`, not lagged through here;
+        // a struck moon hides on its own `materialized` flag, so no per-snapshot debris state is needed.)
     }
 
     /// Setup phase of the GPU SPH impact (docs/35): relax the two bodies on the GPU (placed far apart so each
@@ -801,18 +796,6 @@ mod app {
         /// excavation scale, and which layered profile materializes at the strike.
         impactor_radius: f64,
         impactor_mass: f64,
-        birth_mode: bool,
-        /// Sim-seconds per frame for the post-impact debris (time-LOD): 3 s for the moon-drop close-up;
-        /// larger for the birth scene, whose disk evolves over hours.
-        debris_frame_dt: f64,
-        /// Aftermath speed multiplier (1..64): scales how much SIM time each real second covers after
-        /// the impact. The integration substep stays FIXED (stability is physics); only the substep
-        /// count grows — under overload the observable clock dilates rather than corrupting the model.
-        debris_rate_mul: f64,
-        /// Volume (m³) of settled matter demoted back into Earth — the crater HEALS by exactly this
-        /// much (docs/27): the excavated bowl refills with the matter that fell back, and when the
-        /// carved volume is repaid the planet is whole again. Nothing re-solidifies by decree.
-        crater_heal_m3: f64,
         /// SIM seconds elapsed since the impact — the honest answer to "what timeframe are we watching
         /// this over?" (the aftermath runs under time-LOD, so real seconds ≠ sim seconds).
         sim_since_impact: f64,
@@ -845,10 +828,6 @@ mod app {
         /// Accumulated rotation angle (rad) about the spin axis — the VISIBLE rotation of the shell
         /// (and its landmask) at the real rate implied by spin_l.
         spin_angle: f64,
-        moon_debris: Option<crate::aggregate::Aggregate>,
-        /// Impact site relative to Earth's centre (set at the shatter) — masks the shell over the
-        /// materialized region so the excavated crater is visible, and moves with the orbiting Earth.
-        impact_site_rel: Option<glam::DVec3>,
         shell_unis: Vec<UniformSlot>,
         /// The bulk interior sphere (the un-materialized deep Earth): visible only through the crater —
         /// the top of the outer core at cap depth, glowing at its REAL temperature ("hollow earth" fix).
@@ -864,8 +843,7 @@ mod app {
         snaps: std::collections::VecDeque<FrameSnap>,
         phys_clock: f64,
         real_accum: f64,
-        debris_acc: Vec<glam::DVec3>,
-        /// A pool of sphere-render slots for the fragments (one draw each, like `moon_unis`).
+        /// A pool of sphere-render slots for the geologic moonlet balls (one draw each, like `moon_unis`).
         debris_unis: Vec<UniformSlot>,
         // --- GPU SPH deformable-Earth impact in the browser (docs/33 stage 4c.4) ---
         /// The GPU SPH particle system (built + relaxed on the CPU at `start_gpu_impact`, then stepped on the
@@ -879,6 +857,16 @@ mod app {
         /// The material EOS TABLE the current SPH collision indexes (`SphParticle.mat` → `sph_eos[mat]`),
         /// built once from the bodies' matter (docs/58 #7). Was a fixed `[basalt, iron]` pair; now N materials.
         sph_eos: Vec<crate::gpu_sph::SphEos>,
+        /// SPH source index (`prov`) → `self.bodies` index. The `Assembling` phase reads each source body's
+        /// LIVE pos/vel/spin from the body it maps to — the ONE geometry source for EVERY collision (docs/58,
+        /// Robin): `prov 0` is the planet. Birth places fresh bodies on a designed approach and the moon-drop
+        /// keeps its orbiting ones, but both resolve identically from these live states — no flag, no branch.
+        sph_prov_to_body: Vec<usize>,
+        /// A collision the ballistic `step_substep` DETECTED but must not resolve itself (docs/58 — the ONE
+        /// collision engine). Holds the colliding set (`[planet, impactors…]`, planet first = prov 0);
+        /// `advance` executes it via `route_bodies_to_sph` after the substep loop unwinds, because
+        /// `begin_sph_relax` rebuilds the whole scene. `None` when no contact is pending.
+        pending_sph_route: Option<Vec<usize>>,
         /// docs/42 browser-parity — SCHEDULED shock-dt: WebGPU forbids the per-step adaptive read-back, so the
         /// dt is stepped by SIM TIME instead — the small shock dt (`sph_dt`) resolves the collision, then after
         /// `SPH_SHOCK_WINDOW_S` we switch to the larger `sph_dt_aftermath` for the slow disk evolution (restores
@@ -919,9 +907,6 @@ mod app {
     /// The intact Moon renders as a grain shell too — every solid object in the universe is composed of
     /// matter (Robin); a smooth sphere is the same representation lie we removed from Earth.
     const MOON_SHELL_N: usize = 128;
-    const DEBRIS_DT: f64 = 3.0; // s per frame for the shatter — a FIXED observable rate (time-LOD: the
-                                // fine impact event plays out at human speed, not the celestial fast-forward)
-    const MOON_DEBRIS_SUBSTEPS: u32 = 4;
 
     #[wasm_bindgen]
     impl OrbitDemo {
@@ -1187,10 +1172,6 @@ mod app {
                 mats,
                 impactor_radius: MOON_RADIUS_M,
                 impactor_mass: MOON_MASS,
-                birth_mode: false,
-                debris_frame_dt: DEBRIS_DT,
-                debris_rate_mul: 1.0,
-                crater_heal_m3: 0.0,
                 sim_since_impact: 0.0,
                 spin_l,
                 initial_spin_l: spin_l,
@@ -1198,8 +1179,6 @@ mod app {
                 geologic: false,
                 geo_moonlets: Vec::new(),
                 geo_rate_yr_s: 1_000.0,
-                moon_debris: None,
-                impact_site_rel: None,
                 shell_unis,
                 interior_uni,
                 sun_uni,
@@ -1217,7 +1196,6 @@ mod app {
                 snaps: std::collections::VecDeque::new(),
                 phys_clock: 0.0,
                 real_accum: 0.0,
-                debris_acc: Vec::new(),
                 debris_unis,
                 gpu_sph: None,
                 sph_pipeline,
@@ -1230,6 +1208,8 @@ mod app {
                 sph_substeps: 6,
                 sph_snapshot: Vec::new(),
                 sph_eos: Vec::new(),
+                sph_prov_to_body: Vec::new(),
+                pending_sph_route: None,
                 sph_phase: SphPhase::Dynamics,
                 render_blend: 0.0, // pretty by default (docs/42)
                 gpu_impact_site: None,
@@ -1484,13 +1464,65 @@ mod app {
             }
         }
 
-        /// Cancel every moon's velocity relative to the Earth — they drop straight in and crash. The
-        /// dramatic version (both moons at once).
-        pub fn drop_moon(&mut self) {
-            let earth_vel = self.bodies[1].vel;
-            for i in 2..self.bodies.len() {
-                self.bodies[i].vel = earth_vel;
+        /// Route a set of live bodies (by `self.bodies` index) through the ONE SPH engine (docs/58) — the
+        /// SOLE collision path, shared by the explicit Drop and by a collision the orbital phase detected.
+        /// `bodies[0]` is the planet (becomes `prov 0`); the rest are the impactor(s). Each is particalised
+        /// from its OWN matter, relaxed far apart, then resolved on the GPU at the LIVE geometry — the same
+        /// machine birth uses, N bodies at once (a two-moon world resolves all three in one collision). A
+        /// body with no matter (a bare point mass) is skipped; fewer than two with matter ⇒ nothing to do.
+        fn route_bodies_to_sph(&mut self, bodies: &[usize]) {
+            if self.sph_active {
+                return; // a collision is already resolving
             }
+            // Clone the matter off `self` first so we can then borrow `&mut self`; map each SPH source
+            // (`prov`) to its `self.bodies` index (`prov 0` = the planet, `bodies[0]`). The Approaching
+            // phase then integrates the fall and hands off at the tidal/contact distance.
+            let mut mats: Vec<crate::planet::LayeredBody> = Vec::new();
+            let mut prov_to_body: Vec<usize> = Vec::new();
+            for &idx in bodies {
+                if let Some(m) = self.body_meta.get(idx).and_then(|b| b.matter.clone()) {
+                    mats.push(m);
+                    prov_to_body.push(idx);
+                }
+            }
+            if mats.len() < 2 {
+                return; // need a planet + at least one impactor with matter
+            }
+            // The impactors ARE particles from here on: mark them materialised so their point-mass shells
+            // stop being drawn (during the resolve `sph_active` hides everything; after a geologic hand-off
+            // this keeps them retired). `prov_to_body[0]` is the planet — it stays a body.
+            for &idx in &prov_to_body[1..] {
+                if let Some(m) = self.body_meta.get_mut(idx) {
+                    m.materialized = true;
+                }
+            }
+            // Equal particle mass across the bodies (the planet, prov 0, sets it), so none biases the dynamics.
+            let m_i = mats[0].total_mass() / 2400.0;
+            let list: Vec<(&crate::planet::LayeredBody, usize)> = mats
+                .iter()
+                .map(|m| (m, (m.total_mass() / m_i).round().max(50.0) as usize))
+                .collect();
+            self.begin_sph_relax(&list, 40.0);
+            self.sph_prov_to_body = prov_to_body;
+            self.focus = bodies[0];
+            self.camera.zoom = 0.4;
+        }
+
+        /// Cancel every moon's velocity relative to the planet — they drop straight in and crash — then
+        /// route the planet + moon(s) through the ONE SPH engine (docs/58). The dramatic version (every
+        /// moon at once): a two-moon world resolves all three bodies in a single N-body SPH collision.
+        pub fn drop_moon(&mut self) {
+            let planet = self.planet_idx();
+            let planet_vel = self.bodies[planet].vel;
+            for i in 2..self.bodies.len() {
+                if i != planet {
+                    self.bodies[i].vel = planet_vel; // de-orbit: fall straight in
+                }
+            }
+            let set: Vec<usize> = std::iter::once(planet)
+                .chain((2..self.bodies.len()).filter(|&i| i != planet))
+                .collect();
+            self.route_bodies_to_sph(&set);
         }
 
         /// Restore the original Sun–Earth–Moon(s) state (undo braking / the crash).
@@ -1502,10 +1534,16 @@ mod app {
             for hit in &mut self.moon_hit {
                 *hit = false;
             }
-            // Un-shatter: clear the debris cloud and the crater mask so Reset restores an intact world.
-            self.moon_debris = None;
-            self.debris_acc.clear();
-            self.impact_site_rel = None;
+            // Restore an intact world: un-materialise every moon (a resolved one becomes a body again on
+            // Reset), stop any live GPU resolve, and clear the aftermath clock.
+            for m in self.body_meta.iter_mut() {
+                m.materialized = false;
+            }
+            self.sph_active = false;
+            self.gpu_sph = None;
+            self.sph_snapshot.clear();
+            self.sph_prov_to_body.clear();
+            self.pending_sph_route = None;
             self.sim_since_impact = 0.0;
             self.geologic = false;
             self.geo_moonlets.clear();
@@ -1513,7 +1551,6 @@ mod app {
             // conjuring angular momentum from the previous run (render-truth bug, docs/28).
             self.spin_l = self.initial_spin_l;
             self.spin_angle = 0.0;
-            self.crater_heal_m3 = 0.0;
             // Drop the snapshot history — the renderer must not interpolate across the reset.
             self.snaps.clear();
             self.real_accum = 0.0;
@@ -1561,12 +1598,6 @@ mod app {
         /// Whether the Moon has struck the planet (HUD).
         pub fn has_impacted(&self) -> bool {
             self.impacted
-        }
-
-        /// Number of materialized debris fragments (0 until the Moon shatters) — a HUD diagnostic so we
-        /// can see, on-device, whether the Stage-A shatter actually fired.
-        pub fn debris_count(&self) -> u32 {
-            self.moon_debris.as_ref().map_or(0, |a| a.particles.len() as u32)
         }
 
         /// Energy (J) the impact released — what would become heat, fracture, and ejecta.
@@ -1644,71 +1675,6 @@ mod app {
             self.depth_view = create_depth_view(&self.device, width, height);
         }
 
-        /// Excavation scale of the current impactor (matches impact.rs: hemispheric clamp for giants).
-        fn cap_extent(&self) -> f64 {
-            (2.0 * self.impactor_radius).min(0.55 * EARTH_RADIUS_M)
-        }
-
-        /// The crater's CURRENT radius: the carved half-ball minus the volume repaid by settled matter
-        /// (`crater_heal_m3`). Reaches zero ⇒ healed: hole gone, shell restored, interior covered.
-        fn hole_radius(&self) -> f64 {
-            let r0 = self.cap_extent();
-            let vol0 = (2.0 / 3.0) * std::f64::consts::PI * r0.powi(3);
-            let rem = (vol0 - self.crater_heal_m3).max(0.0);
-            (rem * 3.0 / (2.0 * std::f64::consts::PI)).cbrt()
-        }
-
-        /// Configure the BIRTH OF THE MOON scenario (docs/27): body 2 becomes THEIA — Mars-sized,
-        /// differentiated — inbound with a real IMPACT PARAMETER, so the ~45° obliquity of the
-        /// giant-impact hypothesis EMERGES from geometry + gravity (recovered at contact by the
-        /// conservation laws), never assigned. The approach distance and time scale are chosen so the
-        /// strike lands ~5 real seconds after the scene starts (the HUD counts it down).
-        pub fn start_birth(&mut self) {
-            let theia = crate::planet::theia();
-            self.impactor_radius = theia.radius();
-            self.impactor_mass = theia.total_mass();
-            self.birth_mode = true;
-            self.debris_frame_dt = 8.0; // disk-formation time-LOD (the aftermath spans hours)
-            let contact = EARTH_RADIUS_M + self.impactor_radius;
-            // Inbound geometry (relative to Earth, in the orbital plane): approach from +x at 6 km/s
-            // with an impact parameter of 1.30·contact — gravity does the rest. At contact this yields
-            // ~10.8 km/s at ~46° obliquity (perigee 5.6e6 m — a solid hit): the giant-impact
-            // hypothesis's geometry, EMERGENT from b, never aimed. (0.87·contact gave only 29° — too
-            // steep; the ejecta buried instead of lofting. Robin caught it on-screen.)
-            // Near-PARABOLIC approach (canonical Theia: v∞ ≈ 0–4 km/s; our 4 km/s at this range gives
-            // v∞ ≈ 2.6). The previous 6 km/s arrived ~1.3 km/s hot over escape speed and ejected far
-            // too much. Wider aim keeps the ~45° obliquity at the slower closing rate.
-            // Proto-Earth spin: UNKNOWN, declared zero (flagged) — the post-impact day must EMERGE.
-            self.spin_l = glam::DVec3::ZERO;
-            self.initial_spin_l = glam::DVec3::ZERO; // Reset in birth mode restores the non-spinning proto-Earth.
-            self.spin_angle = 0.0;
-            let d0 = 9.6e7; // ≈ 25% of lunar distance — the scene's opening framing
-            let v_in = 5_000.0;
-            let b = 1.46 * contact;
-            let earth = self.bodies[1];
-            self.bodies.truncate(2);
-            self.bodies.push(crate::orbit::Body {
-                pos: earth.pos + glam::DVec3::new(d0, b, 0.0),
-                vel: earth.vel + glam::DVec3::new(-v_in, 0.0, 0.0),
-                mass: self.impactor_mass,
-            });
-            self.acc = crate::orbit::accelerations(&self.bodies);
-            self.initial_bodies = self.bodies.clone();
-            self.moon_hit = vec![false];
-            self.impacted = false;
-            self.impact_energy_j = 0.0;
-            self.moon_debris = None;
-            self.debris_acc.clear();
-            self.impact_site_rel = None;
-            self.sim_since_impact = 0.0;
-            self.crater_heal_m3 = 0.0;
-            self.snaps.clear();
-            self.real_accum = 0.0;
-            // ~5 real seconds to impact: sim time-to-contact / 5.
-            let t_sim = (d0 - contact) / v_in;
-            self.time_scale = (t_sim / 5.0).max(1.0);
-        }
-
         /// Double/halve the aftermath speed (the ⏩/⏪ controls after an impact). Returns the multiplier.
         pub fn nudge_aftermath_rate(&mut self, faster: bool) -> f64 {
             if self.geologic {
@@ -1716,12 +1682,9 @@ mod app {
                     (self.geo_rate_yr_s * if faster { 2.0 } else { 0.5 }).clamp(100.0, 1.0e6);
                 return self.geo_rate_yr_s;
             }
-            self.debris_rate_mul = if faster {
-                (self.debris_rate_mul * 2.0).min(64.0)
-            } else {
-                (self.debris_rate_mul / 2.0).max(1.0)
-            };
-            self.debris_rate_mul
+            // The retired CPU aftermath cloud had a speed multiplier here; the GPU SPH schedules its own
+            // shock/aftermath dt (docs/42), so there is nothing to nudge during a live resolve.
+            1.0
         }
 
         /// Live disk statistics — the HUD's answer to "did we achieve orbit?": JSON
@@ -1741,64 +1704,10 @@ mod app {
                     self.geo_moonlets.len()
                 );
             }
-            let Some(agg) = self.moon_debris.as_ref() else {
-                return String::from("null");
-            };
-            let earth = self.bodies[1];
-            let mu = crate::orbit::G * earth.mass; // live mass — the books moved with the matter
-            let touch = agg.contact.map_or(1.0e6, |c| 2.2 * c.radius);
-            let mut aloft: Vec<usize> = Vec::new();
-            let (mut bound_m, mut escaped_m) = (0.0f64, 0.0f64);
-            // Provenance of the BOUND disk (docs/28 step 1): how much of the aloft, bound material is
-            // Earth-derived vs Theia-derived. The real Moon is Earth-like; today this reads ~0 Earth —
-            // the measurable deficit progressive excavation must close.
-            let mut bound_earth_m = 0.0f64;
-            for (i, p) in agg.particles.iter().enumerate() {
-                let r = (p.pos - earth.pos).length();
-                let eps = 0.5 * (p.vel - earth.vel).length_squared() - mu / r;
-                if eps >= 0.0 {
-                    escaped_m += p.mass;
-                } else if r > 1.1 * EARTH_RADIUS_M {
-                    bound_m += p.mass;
-                    if agg.source.get(i).copied() == Some(crate::aggregate::SOURCE_TARGET) {
-                        bound_earth_m += p.mass;
-                    }
-                    aloft.push(i);
-                }
-            }
-            // Union-find over touching aloft pairs → moonlet clumps.
-            let mut parent: Vec<usize> = (0..aloft.len()).collect();
-            fn find(p: &mut Vec<usize>, i: usize) -> usize {
-                if p[i] != i {
-                    let r = find(p, p[i]);
-                    p[i] = r;
-                }
-                p[i]
-            }
-            for a in 0..aloft.len() {
-                for b in (a + 1)..aloft.len() {
-                    if (agg.particles[aloft[a]].pos - agg.particles[aloft[b]].pos).length() < touch {
-                        let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
-                        if ra != rb {
-                            parent[ra] = rb;
-                        }
-                    }
-                }
-            }
-            let mut clump: std::collections::HashMap<usize, f64> = std::collections::HashMap::new();
-            for a in 0..aloft.len() {
-                let root = find(&mut parent, a);
-                *clump.entry(root).or_insert(0.0) += agg.particles[aloft[a]].mass;
-            }
-            let biggest = clump.values().cloned().fold(0.0f64, f64::max);
-            format!(
-                "{{\"bound\":{:.3},\"escaped\":{:.3},\"biggest\":{:.3},\"clumps\":{},\"earth\":{:.3}}}",
-                bound_m / M_MOON,
-                escaped_m / M_MOON,
-                biggest / M_MOON,
-                clump.len(),
-                bound_earth_m / M_MOON
-            )
+            // The geologic branch above handles the settled moonlets; a LIVE GPU SPH impact reports
+            // through `gpu_disk_stats_json`. There is no CPU particle disk any more (the Aggregate is
+            // retired), so nothing else has stats to report here.
+            String::from("null")
         }
 
         /// Enter GEOLOGIC time (docs/27): promote each aloft bound clump to ONE body on the
@@ -1822,79 +1731,9 @@ mod app {
                 self.geologic = true;
                 return;
             }
-            let Some(agg) = self.moon_debris.as_ref() else { return };
-            let earth = self.bodies[1];
-            let mu = crate::orbit::G * earth.mass;
-            // Cluster aloft bound fragments (same union-find as the disk stats).
-            let touch = agg.contact.map_or(1.0e6, |c| 2.2 * c.radius);
-            let aloft: Vec<usize> = (0..agg.particles.len())
-                .filter(|&i| {
-                    let p = &agg.particles[i];
-                    let r = (p.pos - earth.pos).length();
-                    0.5 * (p.vel - earth.vel).length_squared() - mu / r < 0.0
-                        && r > 1.1 * EARTH_RADIUS_M
-                })
-                .collect();
-            let mut parent: Vec<usize> = (0..aloft.len()).collect();
-            fn find(p: &mut Vec<usize>, i: usize) -> usize {
-                if p[i] != i {
-                    let r = find(p, p[i]);
-                    p[i] = r;
-                }
-                p[i]
-            }
-            for a in 0..aloft.len() {
-                for b in (a + 1)..aloft.len() {
-                    if (agg.particles[aloft[a]].pos - agg.particles[aloft[b]].pos).length() < touch {
-                        let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
-                        if ra != rb {
-                            parent[ra] = rb;
-                        }
-                    }
-                }
-            }
-            // Clump state: mass, L, and mass-weighted position/velocity (for the perigee test).
-            let mut clumps: std::collections::HashMap<usize, (f64, glam::DVec3, glam::DVec3, glam::DVec3)> =
-                std::collections::HashMap::new();
-            for a in 0..aloft.len() {
-                let root = find(&mut parent, a);
-                let p = &agg.particles[aloft[a]];
-                let e = clumps
-                    .entry(root)
-                    .or_insert((0.0, glam::DVec3::ZERO, glam::DVec3::ZERO, glam::DVec3::ZERO));
-                e.0 += p.mass;
-                e.1 += (p.pos - earth.pos).cross((p.vel - earth.vel) * p.mass);
-                e.2 += (p.pos - earth.pos) * p.mass;
-                e.3 += (p.vel - earth.vel) * p.mass;
-            }
-            // Promote ONLY clumps whose centre-of-mass PERIGEE clears the surface — a lofted blanket
-            // with little angular momentum is fall-back material, not a moon (watched: "moonlets"
-            // sitting ON the planet at the a-floor; sub-synchronous orbits spiral IN, Phobos' fate).
-            self.geo_moonlets = clumps
-                .values()
-                .filter(|(m, _, rp, rv)| {
-                    crate::orbit::perigee(*rp / *m, *rv / *m, mu)
-                        .is_some_and(|p| p > 1.05 * EARTH_RADIUS_M)
-                })
-                .map(|(m, l, _, _)| crate::tides::Moonlet {
-                    a: ((l.length() / m) * (l.length() / m) / mu).max(1.2 * EARTH_RADIUS_M),
-                    mass: *m,
-                })
-                .collect();
-            // Everything not promoted has landed or will: its mass and angular momentum go home.
-            let promoted: f64 = self.geo_moonlets.iter().map(|m| m.mass).sum();
-            let cloud_mass: f64 = agg.particles.iter().map(|p| p.mass).sum();
-            let l_rest: glam::DVec3 = agg
-                .particles
-                .iter()
-                .map(|p| (p.pos - earth.pos).cross((p.vel - earth.vel) * p.mass))
-                .sum::<glam::DVec3>()
-                - clumps.values().map(|(_, l, _, _)| *l).sum::<glam::DVec3>();
-            self.bodies[1].mass += cloud_mass - promoted;
-            self.spin_l += l_rest;
-            self.moon_debris = None;
-            self.debris_acc.clear();
-            self.geologic = true;
+            // Without a live SPH disk there is nothing to promote: geologic time is entered FROM the
+            // resolved GPU disk (the branch above). The retired CPU Aggregate used to hand off its own
+            // particle cloud here.
         }
 
         /// Earth's day length (hours) from its live spin state — ∞ (0.0 returned as -1) if not spinning.
@@ -1911,7 +1750,7 @@ mod app {
 
         /// SIM seconds since the impact (−1 before it) — for the HUD's T+ aftermath clock.
         pub fn sim_since_impact_s(&self) -> f64 {
-            if self.moon_debris.is_some() || self.geologic {
+            if self.geologic {
                 self.sim_since_impact
             } else {
                 -1.0
@@ -1942,19 +1781,9 @@ mod app {
             if self.geologic {
                 return self.geo_moonlets.iter().map(|m| m.a).fold(0.0, f64::max) / 1000.0;
             }
-            let earth = self.bodies[1];
-            let mu = crate::orbit::G * earth.mass;
-            self.moon_debris.as_ref().map_or(0.0, |agg| {
-                agg.particles
-                    .iter()
-                    .filter_map(|p| {
-                        let r = (p.pos - earth.pos).length();
-                        let eps = 0.5 * (p.vel - earth.vel).length_squared() - mu / r;
-                        (eps < 0.0).then_some(r)
-                    })
-                    .fold(0.0, f64::max)
-                    / 1000.0
-            })
+            // The retired CPU debris cloud reported its farthest bound fragment here to ride the camera
+            // outward; the live GPU disk is framed by `focus`/zoom directly, so there is no CPU extent.
+            0.0
         }
 
         pub fn set_time_scale(&mut self, scale: f32) {
@@ -2084,24 +1913,13 @@ mod app {
             Ok(())
         }
 
-        pub fn start_gpu_impact(&mut self) {
-            // Build the two bodies UNRELAXED and FAR APART, and RELAX them on the GPU (`cs_relax`, fast — the
-            // measured cure for the dispersal was proper relaxation, docs/35). `advance` runs the relax steps,
-            // reads back, assembles the collision, then steps the dynamics. N is higher than the old CPU-relax
-            // path could afford (GPU relax + stepping is cheap).
-            // Build the bodies from their MATTER (docs/58 #7 — the ONE collision engine): particalize each
-            // and relax on the GPU. Equal particle mass across the bodies (the target sets it), so neither
-            // body's resolution biases the shared dynamics. The material EOS TABLE is kept for the assemble +
-            // dynamics uploads — the particles carry their own material as `mat`, no more [basalt, iron] pair.
-            let t_def = self.impact_def.target.definition();
-            let i_def = self.impact_def.impactor.definition();
-            let n_target = 2400usize;
-            let m_i = t_def.total_mass() / n_target as f64;
-            let n_impactor = (i_def.total_mass() / m_i).round().max(50.0) as usize;
-            let (particles, eos, softening, relax_dt) = crate::gpu_sph::build_far_apart_n(
-                &[(&t_def, n_target), (&i_def, n_impactor)],
-                self.impact_def.relax_separation,
-            );
+        /// Set up the GPU SPH relaxation for a collision of the given bodies (docs/58 #7 — the ONE engine).
+        /// Each is particalized from its MATTER (real mass, per-material EOS from the catalogue) and relaxed
+        /// far apart; the material EOS table is kept (`sph_eos`) for the assemble + dynamics uploads. `live`
+        /// selects the assembly geometry when the relax completes — the LIVE N-body trajectory (a moon-drop)
+        /// or the declared canonical giant impact (birth). Shared by `start_gpu_impact` and `drop_moon`.
+        fn begin_sph_relax(&mut self, bodies: &[(&crate::planet::LayeredBody, usize)], separation: f64) {
+            let (particles, eos, softening, relax_dt) = crate::gpu_sph::build_far_apart_n(bodies, separation);
             self.sph_eos = eos;
             self.sph_soft = softening as f64;
             let cap = particles.len() as u32;
@@ -2113,6 +1931,26 @@ mod app {
             self.sph_dt = relax_dt;
             self.sph_active = true;
             self.sph_snapshot.clear();
+            self.sph_phase = SphPhase::Relaxing(0);
+            self.gpu_impact_site = None; // no crater until contact (docs/42 Phase 2)
+            self.gpu_crater_frac = 0.0;
+            self.sph_substeps = 6; // start conservative; the frame-budget controller adapts up (docs/42)
+        }
+
+        pub fn start_gpu_impact(&mut self) {
+            // Particalize the two declared bodies (proto-Earth + Theia) and relax them; equal particle mass
+            // across both (the target sets it), so neither body's resolution biases the shared dynamics.
+            let t_def = self.impact_def.target.definition();
+            let i_def = self.impact_def.impactor.definition();
+            let n_target = 2400usize;
+            let m_i = t_def.total_mass() / n_target as f64;
+            let n_impactor = (i_def.total_mass() / m_i).round().max(50.0) as usize;
+            // The proto-Earth's DECLARED spin becomes the target's live spin (spin_l = ω·I about +z), so the
+            // ONE assembly path — which reads spin from self.spin_l — flings the rotationally-sustained disk
+            // (docs/41 spin IOU) with no birth-only branch.
+            self.spin_l = glam::DVec3::new(0.0, 0.0, self.impact_def.target_spin_rad_s * self.spin_inertia());
+            self.begin_sph_relax(&[(&t_def, n_target), (&i_def, n_impactor)], self.impact_def.relax_separation);
+            self.sph_prov_to_body = vec![1, 2]; // planet at bodies[1], impactor at bodies[2] (placed just below)
             // **Put the two bodies on their approach, AS BODIES.** The scene declares what they are and
             // how they meet (which bodies, the approach speed as a multiple of mutual escape, the impact
             // parameter); the engine turns that into a trajectory and integrates it. No particle exists
@@ -2259,14 +2097,36 @@ mod app {
                         // they sat at arm's length while the analytical "IMPACT IN T−N" countdown promised
                         // a collision that could not arrive. They are whole bodies on an inbound
                         // trajectory; integrate them under gravity at the scene's fast-forward rate.
-                        let target = self.impact_def.target.definition();
-                        let impactor = self.impact_def.impactor.definition();
+                        // resolution_distance from the LIVE bodies the engine holds (docs/58 — ONE geometry
+                        // source): the planet is `prov 0`, the impactor the CLOSEST of the other source bodies.
+                        let planet_i = self.sph_prov_to_body.first().copied().unwrap_or(1);
+                        let planet_pos = self.bodies[planet_i].pos;
+                        let imp_i = self.sph_prov_to_body[1..]
+                            .iter()
+                            .copied()
+                            .min_by(|&x, &y| {
+                                (self.bodies[x].pos - planet_pos)
+                                    .length()
+                                    .total_cmp(&(self.bodies[y].pos - planet_pos).length())
+                            })
+                            .unwrap_or(2);
+                        let r_t = self.body_meta.get(planet_i).map_or(EARTH_RADIUS_M, |m| m.radius_m);
+                        let r_imp = self.body_meta.get(imp_i).map_or(self.impactor_radius, |m| m.radius_m);
+                        // Matter resolves when EITHER tides start to dominate OR the surfaces meet —
+                        // whichever comes first. For a heavy impactor (Theia) the tidal distance is well
+                        // outside contact, so it resolves early; for a LIGHT one (the Moon, ~9× lighter
+                        // than Earth) the 1%-tidal distance falls INSIDE contact (8,600 km < 9,551 km), so
+                        // contact is the honest trigger. Without the `.max`, a light body reaches contact
+                        // while still "two point masses", the CPU swept detector trips, and the collision
+                        // resolves twice. `.max(contact)` guarantees the ONE SPH engine takes over first.
+                        let contact = r_t + r_imp;
                         let resolve_at = crate::accretion::resolution_distance(
-                            target.total_mass(),
-                            target.radius(),
-                            impactor.total_mass(),
+                            self.bodies[planet_i].mass,
+                            r_t,
+                            self.bodies[imp_i].mass,
                             crate::accretion::RESOLVE_TIDAL_FRACTION,
-                        );
+                        )
+                        .max(contact);
                         self.real_accum += real_dt;
                         let real_per_sub = 1.0 / 960.0;
                         let dt_sub = self.time_scale / 960.0;
@@ -2275,7 +2135,7 @@ mod app {
                             // Hand off to the resolved SPH the moment tides make "two point masses" a lie
                             // — which is above contact, so `step_substep` never detects an N-body collision
                             // here and never materialises the wrong kind of debris.
-                            let sep = (self.bodies[2].pos - self.bodies[1].pos).length();
+                            let sep = (self.bodies[imp_i].pos - self.bodies[planet_i].pos).length();
                             if sep <= resolve_at {
                                 self.sph_phase = SphPhase::Assembling;
                                 break;
@@ -2292,9 +2152,25 @@ mod app {
                     SphPhase::Assembling => {
                         let relaxed = self.gpu_sph.as_mut().and_then(|s| s.take_readback());
                         if let Some(relaxed) = relaxed {
-                            // Reposition on the collision geometry; the material EOS table is unchanged from
-                            // the build (each particle carries its own `mat`), so ignore the legacy pair here.
-                            let (particles, _eos, softening, dt) = crate::gpu_sph::assemble_from_relaxed_with(&self.impact_def, &relaxed);
+                            // ONE geometry source (docs/58): each SPH source (`prov k`) is
+                            // self.bodies[sph_prov_to_body[k]] — place it at its LIVE offset/velocity relative
+                            // to the planet (`prov 0`), which spins at its own live rate (ω = spin_l / I, a
+                            // VECTOR). Birth's live bodies ARE its designed approach; the moon-drop's are its
+                            // real orbit — same code, no branch, no flag.
+                            let planet_b = self.bodies[self.sph_prov_to_body.first().copied().unwrap_or(1)];
+                            let inertia = self.spin_inertia();
+                            let omega = if inertia > 0.0 { self.spin_l / inertia } else { glam::DVec3::ZERO };
+                            let placements: Vec<crate::gpu_sph::BodyPlacement> = self
+                                .sph_prov_to_body
+                                .iter()
+                                .enumerate()
+                                .map(|(k, &bi)| crate::gpu_sph::BodyPlacement {
+                                    offset: self.bodies[bi].pos - planet_b.pos,
+                                    vel: self.bodies[bi].vel - planet_b.vel,
+                                    spin: if k == 0 { omega } else { glam::DVec3::ZERO },
+                                })
+                                .collect();
+                            let (particles, softening, dt) = crate::gpu_sph::assemble_from_relaxed_n(&relaxed, &placements);
                             self.sph_soft = softening as f64;
                             self.sph_dt = dt; // the SMALL shock dt (resolves the collision)
                             self.sph_dt_aftermath = dt * 5.0; // switch to this once the shock has passed
@@ -2367,49 +2243,40 @@ mod app {
                 return;
             }
             self.real_accum += real_dt;
-            // Substep budget per advance: generous for the cheap orbital phase; TIGHT once the O(n²)
-            // debris cloud exists — a single slow frame used to trigger a death spiral (0.25 s of
-            // backlog ⇒ 128 heavy substeps ⇒ an even slower frame, pinned at ~1 fps forever, watched
-            // via the rig). Under load the observable clock dilates; the frame stays interactive.
-            let max_substeps: u32 = if self.moon_debris.is_some() { 12 } else { 128 };
+            // Cheap orbital phase: fast-forward the N-body system in fixed sub-steps whose COUNT tracks the
+            // wall clock, so the physics rate is display-independent (a 30 fps and a 120 fps client simulate
+            // the same world). A single substep may DETECT an imminent collision; the loop then stops and
+            // the colliding set is routed through the ONE SPH engine below (docs/58) — there is no CPU
+            // debris path to fall into. Under overload the observable clock dilates, keeping the frame
+            // interactive without corrupting the physics with an oversized step.
+            const MAX_SUBSTEPS: u32 = 128;
+            let (dt_sub, real_per_sub) = (self.time_scale / 960.0, 1.0 / 960.0);
             let mut steps = 0u32;
-            loop {
-                // Per-mode fixed sim timestep: celestial fast-forward until the shatter, then the fixed
-                // observable debris rate (time-LOD, docs/13). The mode can flip mid-advance (the shatter
-                // substep itself) — the next iteration picks up the new rate immediately, so nothing
-                // ever advances past the collision at the old rate.
-                let (dt_sub, real_per_sub) = if self.moon_debris.is_some() {
-                    let d = self.debris_frame_dt / MOON_DEBRIS_SUBSTEPS as f64;
-                    (d, d / (self.debris_frame_dt * 60.0 * self.debris_rate_mul))
-                } else {
-                    (self.time_scale / 960.0, 1.0 / 960.0)
-                };
-                if self.real_accum < real_per_sub || steps >= max_substeps {
-                    if steps >= max_substeps {
-                        self.real_accum = 0.0; // overloaded: dilate observable time, keep physics true
-                    }
-                    break;
-                }
+            while self.real_accum >= real_per_sub && steps < MAX_SUBSTEPS {
                 self.real_accum -= real_per_sub;
                 steps += 1;
                 self.step_substep(dt_sub);
+                if self.pending_sph_route.is_some() {
+                    break; // a contact was detected — stop integrating and hand it to the SPH engine
+                }
+            }
+            if steps >= MAX_SUBSTEPS {
+                self.real_accum = 0.0;
+            }
+            // Execute a detected collision AFTER the loop: `begin_sph_relax` rebuilds the whole scene, so it
+            // cannot run mid-substep. This is the sole path from a detected orbital collision to resolution.
+            if let Some(set) = self.pending_sph_route.take() {
+                self.route_bodies_to_sph(&set);
             }
             self.push_snapshot();
         }
 
-        /// One physics substep: N-body verlet + swept CCD (conservation-law contact state) + the
-        /// mutual-impact materialization + the debris cloud. Pure physics — no rendering state.
+        /// One physics substep of the cheap orbital phase: N-body verlet + swept collision DETECTION.
+        /// Pure ballistics — no collision RESPONSE lives here. **Detection is the ENGINE's job** (Robin:
+        /// "it must be the sole owner of collisions"): when the swept test finds an imminent contact, the
+        /// engine routes the whole colliding set through the ONE SPH engine (docs/58) and the GPU resolves
+        /// the touch. The legacy CPU Aggregate that used to materialise debris here is retired.
         fn step_substep(&mut self, dt: f64) {
-            // Surfaces touch here — used by the parking pass below (the detector reads each body's own
-            // radius, so it does not need this).
-            let contact = EARTH_RADIUS_M + self.impactor_radius;
-
-            // **Detection is the ENGINE's job, not the scene's** (Robin: "the engine should detect an
-            // imminent collision and prepare everything on its own... It must be the sole owner of
-            // collisions"). This scene used to run its own two swept-CCD loops — Earth-vs-moon and
-            // moon-vs-moon — each re-deriving the contact state by hand. That is the render reaching into
-            // physics. It now hands the engine the bodies it holds and reads back the collisions the
-            // engine found; the scene only EXECUTES the responses, using its own materialisation.
             let strength = self.mats[materials::index_of(&self.mats, "basalt")].fracture_strength as f64;
             // Each body's radius comes from its OWN metadata — no shared `impactor_radius`, so two moons
             // of different sizes would collide at their own contact distances.
@@ -2431,6 +2298,15 @@ mod app {
             // The planet visibly ROTATES at the rate its spin angular momentum implies.
             self.spin_angle += dt * self.spin_l.length() / self.spin_inertia();
 
+            // ONE collision engine (docs/58): while a live SPH resolve owns the frame — the Approaching
+            // phase integrates the infall through this very function — the GPU SPH engine is the sole
+            // owner of contact. The legacy CPU swept-detection + Aggregate materialization below must NOT
+            // run, or a collision resolves twice (a light impactor reaching contact trips both). During a
+            // resolve, `step_substep` is pure ballistics; the SPH engine handles the touch.
+            if self.sph_active {
+                return;
+            }
+
             // The integrated endpoints, and which bodies may still collide (a moon already materialised
             // into Earth is no longer a distinct body to detect). The Sun (index 0) never reaches anything
             // — it is checked and correctly finds nothing, which is more honest than special-casing it out.
@@ -2440,259 +2316,30 @@ mod app {
                 .collect();
             let collisions = crate::interaction::detect_swept(&before, &after_pos, &active);
 
-            // EVERY impactor that lands materialises — the per-impactor debris the multi-body fix added.
-            let mut shatters: Vec<(glam::DVec3, glam::DVec3, f64, f64, usize)> = Vec::new(); // (site, v, E, mass, index)
+            // Route the colliding cluster through the ONE SPH engine (docs/58 — the single collision
+            // engine): the most-massive struck body is the planet (prov 0); every impactor that struck
+            // joins it. `begin_sph_relax` rebuilds the whole scene, so record the set here and let
+            // `advance` execute the route after the substep loop unwinds. The legacy CPU Aggregate that
+            // used to materialise debris here is RETIRED — there is no second contact path.
+            let planet = self.planet_idx();
+            let mut set: Vec<usize> = vec![planet];
             for c in &collisions {
                 self.impacted = true;
                 self.impact_energy_j += c.energy_j;
-                if c.struck == 1 {
-                    // Earth was struck: the impactor becomes matter at the interface. The engine already
-                    // recovered the true contact site and velocity; the scene only materialises them.
-                    let k = c.striker - 2;
-                    self.moon_hit[k] = true;
-                    if let Some(m) = self.body_meta.get_mut(c.striker) {
-                        m.materialized = true; // it is particles now — stop drawing it as a body
-                    }
-                    shatters.push((c.site, c.contact_velocity, c.energy_j, before[c.striker].mass_kg, c.striker));
-                    // Park the point mass at the impact point, co-moving with Earth.
-                    self.bodies[c.striker].pos = c.site;
-                    self.bodies[c.striker].vel = self.bodies[1].vel;
-                } else if c.struck >= 2 && c.striker >= 2 {
-                    // Moon-vs-moon: an inelastic momentum-conserving merge at the contact configuration.
-                    // (Materialising this cloud with the target's layered profile is the flagged next
-                    // step; detection no longer special-cases which pair it is.)
-                    let (i, j) = (c.struck, c.striker);
-                    let (a, b) = (self.bodies[i], self.bodies[j]);
-                    let m = a.mass + b.mass;
-                    let n_hat = (self.bodies[j].pos - self.bodies[i].pos).normalize_or_zero();
-                    let mm_contact = before[i].radius_m + before[j].radius_m;
-                    let v_com = (a.vel * a.mass + b.vel * b.mass) / m;
-                    let mid = (a.pos * a.mass + b.pos * b.mass) / m;
-                    self.bodies[i].pos = mid + n_hat * (mm_contact * a.mass / m);
-                    self.bodies[j].pos = mid - n_hat * (mm_contact * b.mass / m);
-                    self.bodies[i].vel = v_com;
-                    self.bodies[j].vel = v_com;
-                }
-            }
-
-            // Keep already-hit / overlapping bodies parked at the surface (the slow-approach case and
-            // the ongoing merge — the heavier Earth barely moves; momentum conserved).
-            let (head, tail) = self.bodies.split_at_mut(2);
-            let earth = &mut head[1];
-            for moon in tail.iter_mut() {
-                crate::orbit::resolve_contact(earth, moon, contact);
-            }
-
-            // The substep the Moon first strikes: MATERIALIZE both bodies at the interface (docs/24,
-            // docs/25) — layered composition, real internal temperatures, one contact law.
-            for (site, v_contact, _energy, impactor_mass, body_idx) in std::mem::take(&mut shatters) {
-                {
-                    let moon_mass = impactor_mass;
-                    let (earth_pos, earth_vel) = (self.bodies[1].pos, self.bodies[1].vel);
-                    // Which matter arrives depends on the scenario: the Moon, or Theia (docs/27).
-                    let impactor_profile = if self.birth_mode {
-                        crate::planet::theia()
-                    } else {
-                        crate::planet::moon()
-                    };
-                    // Proto-Earth's pre-impact spin (docs/31): its excavated mantle is born co-rotating,
-                    // so a fast primordial spin flings Earth material into the disk (the isotopic-crisis
-                    // lever). `self.spin_l` is the ANGULAR MOMENTUM; convert to angular velocity ω = L/I
-                    // with the solid-sphere I = 2/5 M R² before the cap materialises (the impact then
-                    // adds its own spin to Earth on top).
-                    let earth_i = 0.4 * self.bodies[1].mass * EARTH_RADIUS_M * EARTH_RADIUS_M;
-                    let earth_omega =
-                        if earth_i > 0.0 { self.spin_l / earth_i } else { glam::DVec3::ZERO };
-                    let (agg, acc0) = crate::impact::build_impact_debris_scaled(
-                        &self.mats, site, earth_pos, earth_vel, moon_mass, v_contact,
-                        &impactor_profile, &crate::planet::earth(), EARTH_MASS, EARTH_RADIUS_M,
-                        SCENE_DEBRIS_N, SCENE_CAP_N, earth_omega,
-                    );
-                    self.debris_acc = acc0;
-                    self.impact_site_rel = Some(site - earth_pos); // crater mask, in Earth's frame
-                    // The materialized cap LEFT Earth's bulk: move its mass from the summary body to the
-                    // particles (else double-counted). Use the ACTUAL materialized target mass — summing the
-                    // SOURCE_TARGET grains — now that the cap is physical ρ·V (docs/28 item 4); the old
-                    // moon_mass·CAP_N/DEBRIS_N formula assumed the fudged 2×-impactor cap and over-subtracts
-                    // ~6.5×, under-massing Earth on screen.
-                    let cap_mass: f64 = agg
-                        .particles
-                        .iter()
-                        .zip(agg.source.iter())
-                        .filter(|(_, &s)| s == crate::aggregate::SOURCE_TARGET)
-                        .map(|(p, _)| p.mass)
-                        .sum();
-                    // Guard the subtraction: it now runs ONCE PER IMPACT, and an unguarded repeat drove
-                    // the target's mass toward zero (and its gravity to NaN) on the second strike.
-                    self.bodies[1].mass = (self.bodies[1].mass - cap_mass).max(1.0);
-                    // ABSORB, never replace: two impacts on one planet make ONE debris field, whose
-                    // fragments share a gravity field and are stepped together. Replacing would have made
-                    // the second impact delete the first one's matter.
-                    match self.moon_debris.as_mut() {
-                        Some(existing) => existing.absorb(agg),
-                        None => self.moon_debris = Some(agg),
-                    }
-                    // The impactor IS the debris now — its matter exists exactly once. Reduce THIS
-                    // impactor's parked point mass to nothing (a 1 kg marker keeps the body-array shape)
-                    // so it isn't counted twice in the N-body. Hardcoding index 2 here zeroed the first
-                    // moon twice and left the second's mass double-counted.
-                    self.bodies[body_idx].mass = 1.0;
-                }
-            }
-
-            // The debris cloud: everything it does — colliding with itself, ploughing into the ground,
-            // resting, raining back — emerges from the forces inside `accelerations()` (the canonical
-            // contact law + the conservative Earth boundary + Gauss-interior gravity).
-            if let Some(agg) = self.moon_debris.as_mut() {
-                let earth_pos = self.bodies[1].pos;
-                // EVERY massive body pulls the debris with its LIVE mass — Earth (which shrank by the
-                // materialized cap and regrows by demotion) and the Sun (declared matter). The static
-                // build-time source is retired here so nothing is counted twice.
-                agg.gravity_source = None;
-                agg.set_gravity_bodies(vec![
-                    (earth_pos, self.bodies[1].mass, EARTH_RADIUS_M),
-                    (self.bodies[0].pos, self.bodies[0].mass, 6.96e8),
-                ]);
-                agg.set_boundary_center(earth_pos);
-                agg.boundary_vel = self.bodies[1].vel; // the ground shears at Earth's velocity (no spin yet)
-                if let Some(rel) = self.impact_site_rel {
-                    agg.set_boundary_hole_center(earth_pos + rel); // the crater orbits with its planet
-                }
-                // TWO-WAY coupling, momentum-EXACT (Newton's third law): Earth's impulse is the
-                // mirror of what the cloud actually received through this step. An independent
-                // first-order estimate (evaluated at different positions/times than the cloud's own
-                // integration) is non-symplectic — it PUMPED energy into the Earth–cloud orbit until
-                // the debris unbound (Robin watched Earth shudder, then the moonlets escape). Here we
-                // measure the cloud's true momentum change, subtract the Sun's share (that reaction
-                // belongs to the Sun), and hand Earth the equal-and-opposite rest — which also carries
-                // the boundary/shear reaction. Total momentum conserves to roundoff.
-                let p_before: glam::DVec3 =
-                    agg.particles.iter().map(|p| p.vel * p.mass).sum();
-                let earth_vel_now = self.bodies[1].vel;
-                let sun_pos = self.bodies[0].pos;
-                let sun_mass = self.bodies[0].mass;
-                let j_sun: glam::DVec3 = agg
-                    .particles
-                    .iter()
-                    .map(|p| {
-                        let d = sun_pos - p.pos;
-                        let r2 = d.length_squared().max(1.0);
-                        d * (crate::orbit::G * sun_mass * p.mass * (1.0 / (r2 * r2.sqrt()))) * dt
-                    })
-                    .sum();
-                // BLOCK-TIMESTEP advance (docs/30 stage 3): the quiescent orbiting disk coasts at the base
-                // dt while the violent shocked/vapor core sub-steps internally — so the high-N debris swarm
-                // evolves faster (the win grows with the base dt the time-LOD hands us under load). Verified
-                // to reproduce the global-dt disk (impact::birth_impact_with_step_block_reproduces_the_disk)
-                // and conserve energy; the per-substep force/heat physics is identical, just scheduled.
-                agg.step_block(dt, 0.1);
-                let p_after: glam::DVec3 =
-                    agg.particles.iter().map(|p| p.vel * p.mass).sum();
-                let m_e = self.bodies[1].mass;
-                self.bodies[1].vel -= (p_after - p_before - j_sun) / m_e;
-                // ANGULAR reaction (docs/27), measured DIRECTLY at the boundary: the shear torque the
-                // cloud received about Earth's centre mirrors into SPIN — this is how the impact sets
-                // the day. (The earlier ΔL-differencing about a moving centre FABRICATED angular
-                // momentum: a 0.9-h day from an impactor carrying a quarter of that — caught on the
-                // HUD by its own physics being impossible.)
-                self.spin_l -= agg.boundary_torque_sum * dt;
-                // TIDAL torque: the spinning Earth's bulge exchanges angular momentum with every aloft
-                // bound moonlet (outward migration for a fast prograde spin) — the 4.5 Gyr mechanism,
-                // validated against the Moon's measured 3.8 cm/yr recession (tides.rs).
-                let mu_e = crate::orbit::G * m_e;
-                let spin_omega = self.spin_l.length()
-                    / crate::tides::moment_of_inertia(m_e, EARTH_RADIUS_M);
-                let j2 = crate::tides::j2_from_spin(spin_omega, m_e, EARTH_RADIUS_M);
-                let s_hat = self.spin_l.try_normalize().unwrap_or(glam::DVec3::Z);
-                for p in agg.particles.iter_mut() {
-                    let r = (p.pos - earth_pos).length();
-                    // The oblate figure's gravity (J2): close orbits around the squashed post-impact
-                    // Earth precess. EXTERIOR multipole ONLY — the expansion is invalid inside the
-                    // body, and applying it to crater-pile particles (r ≈ 0.5 R⊕, where 1/r⁴ blows up
-                    // 16×) pumped the pile against the boundary until EVERYTHING ejected past escape
-                    // (Robin: "an explosion of fudge" — it was: an equation used outside its domain).
-                    if r > 1.05 * EARTH_RADIUS_M {
-                        p.vel +=
-                            crate::tides::j2_accel(p.pos - earth_pos, mu_e, EARTH_RADIUS_M, j2, s_hat)
-                                * dt;
-                    }
-                    let eps = 0.5 * (p.vel - earth_vel_now).length_squared() - mu_e / r;
-                    if eps < 0.0 && r > 1.1 * EARTH_RADIUS_M {
-                        let (kick, d_spin) = crate::tides::tidal_kick(
-                            crate::tides::EARTH_K2_OVER_Q,
-                            p,
-                            earth_pos,
-                            earth_vel_now,
-                            m_e,
-                            EARTH_RADIUS_M,
-                            self.spin_l,
-                            dt,
-                        );
-                        p.vel += kick;
-                        self.spin_l += d_spin;
+                for idx in [c.struck, c.striker] {
+                    if idx >= 2 && !set.contains(&idx) {
+                        set.push(idx);
                     }
                 }
-                self.sim_since_impact += dt; // the aftermath clock (sim time, not wall time)
-                // DEMOTION (docs/27): settled matter IS Earth again — drain it back into the bulk
-                // summary (mass to the planet, particle removed). Fidelity ∝ observability (docs/13);
-                // FPS follows from honesty — we stop simulating what has stopped happening. r_tol spans
-                // the pile depth; the drained heat is dropped (flagged). Earth's gravity-source mass for
-                // the remaining debris still reads the original EARTH_MASS (≤2% low — flagged).
-                let frag_r = agg.contact.map_or(5.0e5, |c| c.radius);
-                let (n_drained, m_drained, l_drained) = agg.drain_settled(
-                    earth_pos,
-                    EARTH_RADIUS_M,
-                    self.bodies[1].vel,
-                    30.0,
-                    4.0 * frag_r,
-                );
-                if n_drained > 0 {
-                    self.bodies[1].mass += m_drained; // Earth grows by what it swallowed
-                    self.spin_l += l_drained; // ...and spins up by the angular momentum it swallowed
-                    // The returned matter refills the bowl: heal by its solid volume (bulk density).
-                    // (hole_radius() inlined via field reads — `agg` holds the moon_debris borrow.)
-                    let rho = self.mats[agg.material].density.max(1.0) as f64;
-                    self.crater_heal_m3 += m_drained / rho;
-                    let r0 = (2.0 * self.impactor_radius).min(0.55 * EARTH_RADIUS_M);
-                    let vol0 = (2.0 / 3.0) * std::f64::consts::PI * r0.powi(3);
-                    let rem = (vol0 - self.crater_heal_m3).max(0.0);
-                    agg.set_boundary_hole_radius((rem * 3.0 / (2.0 * std::f64::consts::PI)).cbrt());
-                    self.debris_acc = agg.accelerations(); // particle count changed
-                }
-                // NO merge closure: a pairwise bound-in-contact merge welded disk material to
-                // falling-back material mid-curtain and destroyed the disk (measured: 0.55 → 0.00
-                // M_moon lofted). Accretion is REAL physics here — inelastic contact + self-gravity
-                // clump fragments into rubble-pile moonlets without any rule (Robin: "drive this with
-                // real particle physics").
             }
+            self.pending_sph_route = Some(set);
         }
 
         /// Record the observable state at the current physics clock (the renderer's source of truth).
         fn push_snapshot(&mut self) {
-            let frag0 = (self.impactor_mass / SCENE_DEBRIS_N as f64).max(1.0);
-            let (debris, temps, sizes, mats, srcs) = match self.moon_debris.as_ref() {
-                Some(agg) => (
-                    agg.particles.iter().map(|p| p.pos).collect(),
-                    agg.temps.clone(),
-                    agg.particles.iter().map(|p| (p.mass / frag0).cbrt() as f32).collect(),
-                    agg.mat_ids.clone(),
-                    agg.source.clone(),
-                ),
-                None => (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()),
-            };
             self.snaps.push_back(FrameSnap {
                 t: self.phys_clock,
                 bodies: self.bodies.iter().map(|b| b.pos).collect(),
-                debris,
-                temps,
-                sizes,
-                mats,
-                srcs,
-                // Shattered is FOREVER (until Replay): keying this off moon_debris alone RESURRECTED
-                // the parked impactor's grain shell when geologic mode retired the cloud — a
-                // Theia-sized ghost sitting on Earth with no orbit ("pure fudge" — a render-state bug
-                // conjuring mass, and I had rationalized it in my own screenshot instead of chasing it).
-                shattered: self.moon_debris.is_some() || self.geologic,
             });
             // Keep a little more history than the lag needs; drop the rest.
             let horizon = self.phys_clock - (RENDER_LAG_S + 0.5);
@@ -2701,33 +2348,12 @@ mod app {
             }
         }
 
-        /// The state the RENDERER sees: snapshots interpolated at (now − RENDER_LAG_S). Falls back to
-        /// the live state before the first snapshot exists.
-        #[allow(clippy::type_complexity)]
-        fn sampled_state(
-            &self,
-        ) -> (Vec<glam::DVec3>, Vec<glam::DVec3>, Vec<f32>, Vec<f32>, Vec<usize>, Vec<u8>, bool) {
+        /// The state the RENDERER sees: body positions interpolated at (now − RENDER_LAG_S). Falls back to
+        /// the live state before the first snapshot exists. (The GPU SPH particle field is NOT lagged
+        /// through here — the render reads `sph_snapshot` directly.)
+        fn sampled_state(&self) -> Vec<glam::DVec3> {
             if self.snaps.is_empty() {
-                let frag0 = (self.impactor_mass / SCENE_DEBRIS_N as f64).max(1.0);
-                let (d, t, sz, mt, sc) = match self.moon_debris.as_ref() {
-                    Some(a) => (
-                        a.particles.iter().map(|p| p.pos).collect(),
-                        a.temps.clone(),
-                        a.particles.iter().map(|p| (p.mass / frag0).cbrt() as f32).collect(),
-                        a.mat_ids.clone(),
-                        a.source.clone(),
-                    ),
-                    None => (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()),
-                };
-                return (
-                    self.bodies.iter().map(|b| b.pos).collect(),
-                    d,
-                    t,
-                    sz,
-                    mt,
-                    sc,
-                    self.moon_debris.is_some(),
-                );
+                return self.bodies.iter().map(|b| b.pos).collect();
             }
             let target = self.phys_clock - RENDER_LAG_S;
             // Bracket the target time (snaps are time-ordered).
@@ -2745,45 +2371,18 @@ mod app {
             } else {
                 1.0
             };
-            let bodies: Vec<glam::DVec3> = s0
-                .bodies
+            s0.bodies
                 .iter()
                 .zip(s1.bodies.iter())
                 .map(|(a, b)| *a + (*b - *a) * f)
-                .collect();
-            // Debris lerps only when both snapshots carry it (across the shatter/merge boundary, take
-            // s1's — counts change when moonlets accrete).
-            // mats travels with whichever snapshot supplies temps/sizes, so tints stay aligned to the
-            // fragment order those came from.
-            let (debris, temps, sizes, mats, srcs) =
-                if !s0.debris.is_empty() && s0.debris.len() == s1.debris.len() {
-                    (
-                        s0.debris
-                            .iter()
-                            .zip(s1.debris.iter())
-                            .map(|(a, b)| *a + (*b - *a) * f)
-                            .collect(),
-                        s0.temps.clone(),
-                        s0.sizes.clone(),
-                        s0.mats.clone(),
-                        s0.srcs.clone(),
-                    )
-                } else if s1.shattered {
-                    (s1.debris.clone(), s1.temps.clone(), s1.sizes.clone(), s1.mats.clone(), s1.srcs.clone())
-                } else {
-                    (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
-                };
-            let shattered = if f < 1.0 { s0.shattered } else { s1.shattered };
-            let any_debris = !debris.is_empty();
-            (bodies, debris, temps, sizes, mats, srcs, shattered || any_debris)
+                .collect()
         }
 
         pub fn render(&mut self) -> Result<(), JsValue> {
             // NO physics here (docs/13): the renderer samples the physics snapshots RENDER_LAG_S behind
             // the live state — every event it draws is already fully resolved. The physics is advanced
             // by `advance(real_dt)`, on wall-clock time, independent of this function's call rate.
-            let (r_bodies, r_debris, r_temps, r_sizes, r_mats, r_srcs, r_shattered) =
-                self.sampled_state();
+            let r_bodies = self.sampled_state();
 
             let view_proj = self.view_proj();
 
@@ -2960,9 +2559,8 @@ mod app {
                     Some(dir) => (Some(earth_center + dir * pretty_r_surf), self.gpu_crater_frac * 0.72 * pretty_r_surf),
                     None => (None, 0.0),
                 }
-            } else if r_shattered {
-                (self.impact_site_rel.map(|rel| earth_center + spin_rot * rel), 1.1 * self.hole_radius())
             } else {
+                // No CPU crater: the retired Aggregate used to carve one here from `impact_site_rel`.
                 (None, 0.0)
             };
             // OBLATE figure: the spin flattens the planet (Radau–Darwin) — equator bulges (+f/3),
@@ -3132,7 +2730,9 @@ mod app {
             // floor. The gradient from dark rim to white-hot depth is the honest incandescence read.
             {
                 let profile = crate::planet::earth();
-                let hole_r = self.hole_radius();
+                // The bowl radius is the crater the render is actually opening (the GPU-SPH crater when a
+                // resolve is live, 0 otherwise) — the retired CPU `hole_radius()` healing formula is gone.
+                let hole_r = crater_r;
                 let wall_grain_r =
                     ((hole_r * (4.0 * std::f64::consts::PI / WALL_N as f64).sqrt() * 0.62)
                         * DISPLAY_SCALE) as f32;
@@ -3231,59 +2831,11 @@ mod app {
                     NO_GLOW,
                 );
             }
-            // The shattered Moon: each surviving fragment is drawn as a small basalt sphere at its real
-            // position — the debris cloud (some flying out, some falling back) IS the crater ejecta at
-            // planetary scale, emergent from the aggregate physics, not a scripted animation.
+            // Render slots for the moonlet balls filled below. The retired CPU debris cloud used to draw
+            // its fragments here; the live GPU SPH impact draws its particle field straight from
+            // `sph_snapshot` in its own pass (docs/58), so nothing debris-shaped is rendered from the CPU
+            // side any more — only the geologic moonlets reuse these slots.
             let mut debris_count = 0usize;
-            if !r_debris.is_empty() {
-                let frag_r = moon_r / (SCENE_DEBRIS_N as f32).cbrt(); // N fragments ≈ the Moon's volume
-                // Composition rides the SAME lagged snapshot as positions/temps (r_mats): a live read of
-                // moon_debris.mat_ids desynced after drain's swap_remove reordered the live array.
-                for (i, pos) in r_debris.iter().enumerate() {
-                    if i >= self.debris_unis.len() {
-                        break;
-                    }
-                    let fpos = ((*pos - focus) * DISPLAY_SCALE).as_vec3();
-                    let flight = (sun - *pos).as_vec3().normalize();
-                    // Incandescence comes free from the fragment's real temperature — its layer's
-                    // internal heat plus whatever contact dissipation added (docs/20, docs/25).
-                    let glow = incandescence(r_temps.get(i).copied().unwrap_or(0.0));
-                    // Each fragment wears ITS material's reflectance: basalt crust, peridotite mantle,
-                    // iron core — the excavated composition is visible, not a uniform gray.
-                    let _m = &self.mats[r_mats.get(i).copied().unwrap_or(0)];
-                    // PROVENANCE overlay (docs/28 step 1): a DIAGNOSTIC categorical reflectance, not the
-                    // real material albedo — Earth-derived matter reads blue, Theia-derived warm/orange,
-                    // so the disk's origin split is visible AT A GLANCE. The discriminating channel is
-                    // kept low (blue≈0 for Theia, red low for Earth) so the hue survives the strong-sun
-                    // Reinhard tone-map instead of washing to cream. Today the disk is ~100% Theia (all
-                    // orange); Earth-blue specks appearing is how progressive excavation (step 3) proves
-                    // itself on screen. Incandescence (temperature) still glows on top for hot fragments.
-                    let src = r_srcs.get(i).copied().unwrap_or(crate::aggregate::SOURCE_IMPACTOR);
-                    // Low reflectances: under SUN_GAIN×Reinhard, the dominant channel must land ~1–2 in
-                    // radiance to read as a SATURATED hue (higher just washes to cream). Discriminating
-                    // channel near zero so the tone-map can't wash it out.
-                    let tint = if src == crate::aggregate::SOURCE_TARGET {
-                        [0.010f32, 0.045, 0.135, 1.0] // Earth: blue
-                    } else {
-                        [0.110f32, 0.028, 0.006, 1.0] // Theia: warm orange
-                    };
-                    // Display radius grows with the ⅓ power of accreted mass — you can SEE the Moon
-                    // winning: one fragment swells while the count falls.
-                    let size = r_sizes.get(i).copied().unwrap_or(1.0);
-                    write_space_uniform(
-                        &self.queue,
-                        &self.debris_unis[i],
-                        view_proj,
-                        Mat4::from_translation(fpos) * Mat4::from_scale(Vec3::splat(frag_r * size)),
-                        flight,
-                        tint,
-                        glow,
-                        AIRLESS,
-                        NO_GLOW,
-                    );
-                    debris_count += 1;
-                }
-            }
             // GEOLOGIC moonlets: one grain ball per body at its true orbital radius. Orbital PHASE is
             // unresolvable at millennia-per-second (a moonlet completes ~10⁶ orbits per frame), so the
             // drawn angle is a slow golden-spaced drift — a liveliness cue, honestly not a phase.

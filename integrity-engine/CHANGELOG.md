@@ -9,6 +9,20 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The CPU `Aggregate` collision path is retired from the space scene — one SPH engine for every
+  collision (docs/58).** Dropping a moon (one- or two-moon world) and braking a moon into a crash now
+  resolve through the same GPU SPH machine as the birth scene, via `route_bodies_to_sph`. The moon-drop
+  used to materialise a CPU `Aggregate` debris cloud at surface contact; a light impactor (the Moon is ~9×
+  lighter than Earth) even resolved *twice* because its tidal-resolution distance falls inside contact, so
+  it reached contact before the SPH handoff and tripped the old detector too. Fixed: the SPH handoff is now
+  `resolution_distance.max(contact)` (matter resolves when tides dominate OR surfaces meet), and detection
+  routes to SPH instead of resolving on the CPU. Removed from the scene: the `moon_debris` field +
+  `build_impact_debris_scaled` call, the O(N²) CPU debris advance/render, `start_birth`, and the CPU
+  crater. **Consumer note:** `OrbitDemo::debris_count()` and `start_birth()` are gone from the JS API; the
+  `IMPACT · N fragments` HUD line is replaced by the live `GPU impact · disk …` line. The
+  `aggregate::Aggregate` solver module remains (general N-body particle solver, still used by the
+  atmosphere and impact tests).
+
 - **Tillotson EOS parameters moved to the material catalogue (docs/04).** The condensed-matter equation
   of state (`eos::Tillotson`) now reads its parameters from a `tillotson` block in `data/materials.json`
   instead of constants baked in code — so a world is a world is a world: improving a material improves

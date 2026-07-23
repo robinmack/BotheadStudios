@@ -3,6 +3,47 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-23 — the CPU Aggregate is retired: every collision resolves on the one SPH engine (docs/58)
+
+**What.** The moon-drop and the two-moon drop now resolve through the SAME GPU SPH engine as the birth
+scene — the CPU `Aggregate` debris path is gone from the `OrbitDemo` scene. "Drop Moon(s)" de-orbits the
+moon(s) and routes the planet + moon(s) through a shared `route_bodies_to_sph` → `begin_sph_relax` → the
+Relaxing→Approaching→Assembling→Dynamics machine (N bodies at once: a two-moon world resolves all three in
+one collision). A collision the cheap orbital phase *detects* — braking a moon until it crashes — routes
+the same way: `step_substep` records the colliding set and `advance` hands it to the SPH engine after the
+substep loop. There is no second resolution path; `step_substep` is now pure ballistics + detection.
+
+**The bug the rig caught (why it wasn't already one engine).** Birth handed off to SPH at the *tidal*
+resolution distance — for Mars-mass Theia ~17,700 km, comfortably outside contact (9,551 km). The Moon is
+~9× lighter, so its 1%-tidal distance is only ~8,600 km — *inside* contact. A dropped Moon therefore
+reached contact *before* the SPH handoff, the still-present CPU swept detector tripped, and the collision
+resolved TWICE — CPU Aggregate debris AND GPU SPH on the same drop (the HUD showed both "1536 fragments …"
+and "GPU impact · disk"). Fixed two ways: (1) the handoff distance is now
+`accretion::resolution_distance(…).max(contact)` — matter resolves when *either* tides dominate *or* the
+surfaces meet, whichever comes first (heavy Theia still resolves early; the light Moon resolves at
+contact); (2) `step_substep` no longer resolves anything itself — while a resolve is live it returns after
+integrating, and otherwise it detects-and-routes.
+
+**Deleted from the scene** (~450 lines): the `moon_debris: Option<Aggregate>` field and its
+`build_impact_debris_scaled` materialisation, the O(N²) CPU debris advance (self-gravity, boundary
+shear/mirror + spin reaction, J2, tidal kicks, drain/demotion), the CPU debris render pass, the
+`FrameSnap` debris arrays, `start_birth`/`birth_mode` (birth uses `start_gpu_impact`),
+`debris_count`/`hole_radius`/`cap_extent`/`crater_heal_m3`/`debris_rate_mul`/`debris_frame_dt`, and the CPU
+crater bowl. The crater-*wall* render (used by the live SPH crater) now sizes from the actual `crater_r`
+rather than the retired healing formula. **Kept:** the `aggregate::Aggregate` *module* — a general
+self-gravitating particle solver still used by `atmosphere.rs` and `impact.rs`'s measurement tests.
+Retiring it from the *scene* is the "one collision engine" goal; the struct has other consumers, so
+`build_impact_debris_scaled` is now test-only rather than deleted.
+
+**Verified.** Full native suite green — **335 passed, 21 skipped**. Headless GPU rigs on the 5060 Ti
+(build 20260723.072150, `scripts/rig.sh moondrop_check.mjs` / `birth_check.mjs`):
+- **one-moon drop** (`orbit.html`) and **two-moon drop** (`twomoons.html`): both resolve as PURE SPH — the
+  HUD shows only "GPU impact · disk …", ZERO "N fragments" (the CPU signature), no panics, no
+  `is not a function`. A radial drop *merges* (disk ≈ 0), which is honest: near-zero impact parameter
+  carries ~no angular momentum, unlike birth's grazing hit.
+- **birth** (`birth.html`): still lofts a proto-lunar disk (→ 0.31 M☾, Earth-fraction → 60%) and accretes a
+  0.06 M☾ moon — the shared advance/snapshot/render code survived the deletion intact.
+
 ## 2026-07-22 — collision unification groundwork: the moon-drop is a giant impact, and the EOS moves to the catalogue
 
 **Context — where "one collision path" actually stands.** The goal is one collision-resolution path on the

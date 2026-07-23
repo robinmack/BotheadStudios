@@ -483,9 +483,10 @@ async function main(): Promise<void> {
       // the shared window's event slot. All the same info as before, just below the universal sim line.
       const events: string[] = [];
       if (demo.has_impacted()) {
+        // The live GPU SPH disk mass is reported on its own line below; the retired CPU Aggregate's
+        // "N fragments" count is gone with it.
         events.push(
-          `<b style="color:#ffd08a">IMPACT</b> · ${demo.debris_count()} fragments · ` +
-            `${(demo.impact_energy_j() / 1e30).toFixed(2)}e30 J`,
+          `<b style="color:#ffd08a">IMPACT</b> · ${(demo.impact_energy_j() / 1e30).toFixed(2)}e30 J`,
         );
       }
       if (tPlus >= 0) {
