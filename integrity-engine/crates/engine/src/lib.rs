@@ -724,10 +724,10 @@ mod app {
     /// approach as solid bodies; the `Assembling` phase reads it to particalize the cap at the LIVE impact
     /// site(s) and configure the GPU bulk. `None` ⇒ a whole-body collision (birth), which resolves everything.
     struct CapPlan {
-        planet: usize,                            // self.bodies index of the target (the bulk)
-        planet_matter: crate::planet::LayeredBody, // to particalize the cap at the impact site
-        impactors: Vec<usize>,                    // self.bodies indices of the impactor(s), whole-resolved
-        cap_resolution: usize,                    // ~particles per cap
+        planet: usize,          // self.bodies index of the target (the bulk)
+        impactors: Vec<usize>,  // self.bodies indices of the impactor(s), whole-resolved (prov 1.. in the relax)
+        r_core: f64,            // the bulk floor radius (the cap's inner edge) — the cap relaxes seated here
+        bulk_mass: f64,         // the un-resolved remainder (planet − cap): the Gauss gravity source
     }
 
     /// Setup phase of the GPU SPH impact (docs/35): relax the two bodies on the GPU (placed far apart so each
@@ -1527,19 +1527,41 @@ mod app {
             // cap, not the whole planet (Law III). A COMPARABLE-mass impactor is a giant impact and still
             // resolves everything (the whole-body branch below — birth's regime, unchanged).
             if max_ratio < CAP_MASS_RATIO && mats.len() >= 2 {
-                // Relax ONLY the impactor(s); the planet becomes the bulk, particalized as a cap at Assembling.
+                // Particalize a CAP of the target at each impact site NOW — the site is the impactor's current
+                // direction, and a de-orbited moon falls radially, so it doesn't change. One dome per site,
+                // unioned. The cap relaxes SEATED on the bulk (below) so it holds hydrostatic before the shock.
+                let planet_r = mats[0].radius();
+                let planet_mass = mats[0].total_mass();
+                let mut cap_body: Option<crate::hydrostatic::HydroBody> = None;
+                let mut r_core = planet_r;
+                let mut cap_mass = 0.0f64;
+                for &bi in &prov_to_body[1..] {
+                    let site_dir = (self.bodies[bi].pos - self.bodies[planet].pos).normalize_or_zero();
+                    let imp_r = self.body_meta.get(bi).map_or(self.impactor_radius, |m| m.radius_m);
+                    let cap_radius = (2.0 * imp_r).min(0.55 * planet_r);
+                    let c = crate::hydrostatic::HydroBody::particalize_cap(&mats[0], site_dir, cap_radius, 2000);
+                    r_core = r_core.min(c.r_core);
+                    cap_mass += c.body.mass.iter().sum::<f64>();
+                    match &mut cap_body {
+                        Some(cb) => cb.append(c.body),
+                        None => cap_body = Some(c.body),
+                    }
+                }
+                let cap_body = cap_body.expect("≥1 impactor with matter");
+                let bulk_mass = (planet_mass - cap_mass).max(0.0);
+                // Relax the impactor(s) as free bodies (whole) alongside the cap, all seated on the bulk.
                 let m_i = mats[1].total_mass() / 1500.0;
                 let list: Vec<(&crate::planet::LayeredBody, usize)> = mats[1..]
                     .iter()
                     .map(|m| (m, (m.total_mass() / m_i).round().max(200.0) as usize))
                     .collect();
-                self.begin_sph_relax(&list, 40.0);
-                self.sph_prov_to_body = prov_to_body[1..].to_vec(); // prov k → impactor body (no planet prov)
+                self.begin_cap_relax(&cap_body, &list, 40.0, r_core, bulk_mass);
+                self.sph_prov_to_body = prov_to_body[1..].to_vec(); // prov 1.. → impactor body (prov 0 = the cap)
                 self.sph_cap = Some(CapPlan {
                     planet,
-                    planet_matter: mats[0].clone(),
                     impactors: prov_to_body[1..].to_vec(),
-                    cap_resolution: 2000,
+                    r_core,
+                    bulk_mass,
                 });
                 self.focus = planet;
                 self.camera.zoom = 0.4;
@@ -1989,6 +2011,39 @@ mod app {
             self.sph_substeps = 6; // start conservative; the frame-budget controller adapts up (docs/42)
         }
 
+        /// Begin a resolution-on-demand CAP relaxation (docs/39): the target's `cap` + the impactor(s), relaxed
+        /// SEATED on the bulk (Gauss gravity + non-injecting floor at `r_core`). The cap settles to hydrostatic
+        /// on the floor BEFORE the impact — an un-relaxed cap over-ejects (the 3a lesson). Mirrors
+        /// `begin_sph_relax` but with the bulk configured and the pre-built cap-relax field.
+        fn begin_cap_relax(
+            &mut self,
+            cap: &crate::hydrostatic::HydroBody,
+            impactors: &[(&crate::planet::LayeredBody, usize)],
+            separation: f64,
+            r_core: f64,
+            bulk_mass: f64,
+        ) {
+            let (particles, eos, softening, relax_dt) =
+                crate::gpu_sph::build_cap_relax(cap, impactors, separation);
+            self.sph_eos = eos;
+            self.sph_soft = softening as f64;
+            let n = particles.len() as u32;
+            let mut sph = crate::gpu_sph::GpuSph::new(&self.device, n);
+            sph.upload(&self.queue, &particles, &self.sph_eos, softening);
+            sph.set_dt(&self.queue, relax_dt, 0.94);
+            sph.set_av(&self.queue, 0.0, 0.0);
+            // The un-resolved planet bulk the cap relaxes on (docs/39 39b — a bare floor beats a boundary shell).
+            sph.set_bulk(&self.queue, glam::DVec3::ZERO, r_core, glam::DVec3::ZERO, bulk_mass);
+            self.gpu_sph = Some(sph);
+            self.sph_dt = relax_dt;
+            self.sph_active = true;
+            self.sph_snapshot.clear();
+            self.sph_phase = SphPhase::Relaxing(0);
+            self.gpu_impact_site = None;
+            self.gpu_crater_frac = 0.0;
+            self.sph_substeps = 6;
+        }
+
         pub fn start_gpu_impact(&mut self) {
             // Particalize the two declared bodies (proto-Earth + Theia) and relax them; equal particle mass
             // across both (the target sets it), so neither body's resolution biases the shared dynamics.
@@ -2214,48 +2269,30 @@ mod app {
                     SphPhase::Assembling => {
                         let relaxed = self.gpu_sph.as_mut().and_then(|s| s.take_readback());
                         if let Some(relaxed) = relaxed {
-                            if self.sph_cap.is_some() {
-                                // CAP impact (docs/39 — resolution-on-demand): the target is the abstract BULK,
-                                // and only a cap of it is resolved. Place the relaxed impactor(s) on their live
-                                // approach + particalize a cap at each live impact site; configure the GPU bulk.
-                                let (planet, impactors, planet_matter, cap_res) = {
-                                    let c = self.sph_cap.as_ref().unwrap();
-                                    (c.planet, c.impactors.clone(), c.planet_matter.clone(), c.cap_resolution)
-                                };
+                            if let Some(cap) = self.sph_cap.as_ref() {
+                                // CAP impact (docs/39): the target is the abstract BULK. The cap (prov 0) was
+                                // already relaxed SEATED on the bulk, so it STAYS where it settled (offset = its
+                                // own relaxed COM ⇒ `local + offset = pos`, not recentred to the origin); each
+                                // impactor (prov k≥1) goes to its LIVE contact geometry. The bulk (Gauss gravity
+                                // + floor) persists from the relax.
+                                let (planet, impactors, r_core, bulk_mass) =
+                                    (cap.planet, cap.impactors.clone(), cap.r_core, cap.bulk_mass);
                                 let planet_b = self.bodies[planet];
-                                let planet_r = self.body_meta.get(planet).map_or(EARTH_RADIUS_M, |m| m.radius_m);
-                                let placements: Vec<crate::gpu_sph::BodyPlacement> = impactors
-                                    .iter()
-                                    .map(|&bi| crate::gpu_sph::BodyPlacement {
+                                let cap_com = crate::gpu_sph::body_bulk(&relaxed, 0).0;
+                                let mut placements = vec![crate::gpu_sph::BodyPlacement {
+                                    offset: cap_com,
+                                    vel: glam::DVec3::ZERO,
+                                    spin: glam::DVec3::ZERO,
+                                }];
+                                for &bi in &impactors {
+                                    placements.push(crate::gpu_sph::BodyPlacement {
                                         offset: self.bodies[bi].pos - planet_b.pos,
                                         vel: self.bodies[bi].vel - planet_b.vel,
                                         spin: glam::DVec3::ZERO,
-                                    })
-                                    .collect();
-                                // One dome per impact site, at the impactor's LIVE direction; unioned into one cap.
-                                let mut cap_body: Option<crate::hydrostatic::HydroBody> = None;
-                                let mut r_core = planet_r;
-                                let mut cap_mass = 0.0f64;
-                                for &bi in &impactors {
-                                    let site_dir = (self.bodies[bi].pos - planet_b.pos).normalize_or_zero();
-                                    let imp_r = self.body_meta.get(bi).map_or(self.impactor_radius, |m| m.radius_m);
-                                    let cap_radius = (2.0 * imp_r).min(0.55 * planet_r);
-                                    let c = crate::hydrostatic::HydroBody::particalize_cap(
-                                        &planet_matter, site_dir, cap_radius, cap_res,
-                                    );
-                                    r_core = r_core.min(c.r_core);
-                                    cap_mass += c.body.mass.iter().sum::<f64>();
-                                    match &mut cap_body {
-                                        Some(cb) => cb.append(c.body),
-                                        None => cap_body = Some(c.body),
-                                    }
+                                    });
                                 }
-                                let cap_body = cap_body.expect("cap plan has ≥1 impactor");
-                                let bulk_mass = (planet_matter.total_mass() - cap_mass).max(0.0);
-                                let (particles, eos, softening, dt) = crate::gpu_sph::assemble_cap_impact(
-                                    &relaxed, &placements, &self.sph_eos, &cap_body,
-                                );
-                                self.sph_eos = eos;
+                                let (particles, softening, dt) =
+                                    crate::gpu_sph::assemble_from_relaxed_n(&relaxed, &placements);
                                 self.sph_soft = softening as f64;
                                 self.sph_dt = dt;
                                 self.sph_dt_aftermath = dt * 5.0;
@@ -2265,8 +2302,6 @@ mod app {
                                     sph.upload(&self.queue, &particles, &self.sph_eos, softening);
                                     sph.set_dt(&self.queue, dt, 1.0);
                                     sph.set_av(&self.queue, 1.0, 2.0);
-                                    // The un-resolved planet: a Gauss gravity source + the floor the cap rests
-                                    // on, at the origin (the SPH runs in the planet-centred frame).
                                     sph.set_bulk(&self.queue, glam::DVec3::ZERO, r_core, glam::DVec3::ZERO, bulk_mass);
                                 }
                                 self.sph_phase = SphPhase::Dynamics;

@@ -224,6 +224,40 @@ pub fn build_far_apart_n(
     (asm.particles, asm.eos, softening, relax_dt)
 }
 
+/// Build the relax-input SPH field for a CAP impact (docs/39 resolution-on-demand): the target's `cap`
+/// (already positioned on the bulk at the impact site) as `prov 0`, plus each impactor placed FAR APART to
+/// relax as a free body (`prov 1..`). The caller relaxes this WITH the bulk (`GpuSph::set_bulk`) so the cap
+/// settles seated on the floor before the impact — an UN-relaxed cap dumps startup non-equilibrium into the
+/// shock (the 3a lesson) and over-ejects. Returns (particles, EOS table, softening, relaxation Courant dt).
+pub fn build_cap_relax(
+    cap: &crate::hydrostatic::HydroBody,
+    impactors: &[(&crate::planet::LayeredBody, usize)],
+    separation: f64,
+) -> (Vec<SphParticle>, Vec<SphEos>, f32, f32) {
+    let mut asm = SphAssembly::default();
+    asm.add_body(cap, 0, glam::DVec3::ZERO, glam::DVec3::ZERO); // cap at its site positions (prov 0, on the bulk)
+    let hbs: Vec<crate::hydrostatic::HydroBody> = impactors
+        .iter()
+        .map(|(m, res)| crate::hydrostatic::HydroBody::particalize(m, *res))
+        .collect();
+    // Place each impactor far from the cap (which sits near the target surface) and from the previous one.
+    let cap_r = cap.pos.iter().map(|p| p.length()).fold(0.0_f64, f64::max);
+    let mut x = cap_r;
+    for (k, hb) in hbs.iter().enumerate() {
+        let r = hb.pos.iter().map(|p| p.length()).fold(0.0_f64, f64::max);
+        x += separation * 2.0 * r + r;
+        asm.add_body(hb, (k + 1) as u32, glam::DVec3::new(x, 0.0, 0.0), glam::DVec3::ZERO);
+        x += r;
+    }
+    let softening = std::iter::once(cap.softening)
+        .chain(hbs.iter().map(|hb| hb.softening))
+        .fold(f64::INFINITY, f64::min) as f32;
+    let relax_dt = std::iter::once(cap.relax_dt(0.2))
+        .chain(hbs.iter().map(|hb| hb.relax_dt(0.2)))
+        .fold(f64::INFINITY, f64::min) as f32;
+    (asm.particles, asm.eos, softening, relax_dt)
+}
+
 pub fn build_far_apart_from(def: &crate::terra::world_def::ImpactDef, n_earth: usize, n_theia: usize) -> (Vec<SphParticle>, f32, f32) {
     let (earth, theia) = build_impact_bodies_from(def, n_earth);
     let far = def.relax_separation * (def.target.radius_m() + def.impactor.radius_m());
@@ -248,7 +282,7 @@ pub fn build_far_apart_from(def: &crate::terra::world_def::ImpactDef, n_earth: u
 /// clip: find the bulk, re-centre on it, and measure from there. Live proof it mattered: with the naive
 /// centre the scene opened at ~96,000 km and passed Earth at 39,338 km against a 9,551 km contact -- a clean
 /// hit turned into a fourfold miss, and every correct downstream piece waited for an impact that never came.
-fn body_bulk(particles: &[SphParticle], prov: u32) -> (glam::DVec3, f64, f64) {
+pub fn body_bulk(particles: &[SphParticle], prov: u32) -> (glam::DVec3, f64, f64) {
     use glam::DVec3;
     let pos = |p: &SphParticle| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
     let ps: Vec<&SphParticle> = particles.iter().filter(|p| p.prov == prov).collect();
