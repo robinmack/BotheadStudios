@@ -329,6 +329,44 @@ pub fn assemble_from_relaxed_n(
     (out, softening, dt)
 }
 
+/// Assemble a **resolution-on-demand CAP impact** (docs/39): the relaxed IMPACTOR(s) placed on their live
+/// approach + a freshly-particalized CAP of the target, sharing one EOS table. For a small impactor whose
+/// target stays an abstract BULK (`GpuSph::set_bulk`) instead of being resolved whole — so a Moon on modern
+/// Earth resolves a crater's cap, not all 10²⁴ kg (Law III). The impactor keeps its relaxed structure; the
+/// cap is the target's OWN near-surface matter at the impact site (`HydroBody::particalize_cap`), already
+/// positioned in the target-centred frame. Provenance: the cap is `prov 0` (target/Earth material), every
+/// impactor particle `prov 1`, so the disk stats read the Earth-vs-impactor split. Returns (particles, the
+/// MERGED EOS table, softening, shock-safe dt).
+pub fn assemble_cap_impact(
+    relaxed_impactors: &[SphParticle],
+    placements: &[BodyPlacement],
+    impactor_eos: &[SphEos],
+    cap: &crate::hydrostatic::HydroBody,
+) -> (Vec<SphParticle>, Vec<SphEos>, f32, f32) {
+    // Place the relaxed impactor(s) on their live geometry — keeps each particle's `mat` (→ impactor_eos).
+    let (mut imp, _soft, dt) = assemble_from_relaxed_n(relaxed_impactors, placements);
+    // The cap: the target's own near-surface matter, already centred on the target frame (origin).
+    let mut asm = SphAssembly::default();
+    asm.add_body(cap, 0, glam::DVec3::ZERO, glam::DVec3::ZERO); // prov 0 = target/Earth material
+    // Merge the tables: cap materials first, then the impactor's (shifted). Both were deduped within
+    // themselves; a duplicate across the two is a harmless extra slot (well within MAX_MATERIALS).
+    let cap_mats = asm.eos.len() as u32;
+    let mut eos = asm.eos;
+    for e in impactor_eos {
+        if eos.len() < MAX_MATERIALS {
+            eos.push(*e);
+        }
+    }
+    for p in &mut imp {
+        p.mat = (p.mat + cap_mats).min(MAX_MATERIALS as u32 - 1);
+        p.prov = 1; // every impactor particle reads as the impactor, whatever source body it came from
+    }
+    let mut out = asm.particles;
+    out.extend(imp);
+    let min_h = out.iter().map(|p| p.h).fold(f32::INFINITY, f32::min);
+    (out, eos, 0.25 * min_h, dt)
+}
+
 /// **Place the two relaxed bodies on a GIVEN collision geometry -- the engine's geometry-agnostic assembly
 /// primitive.** In the target-relative frame: the target (prov 0) recentred at the origin and spun at
 /// `target_spin` (rad/s about +z), the impactor (prov 1) recentred then placed at `impactor_offset` moving at

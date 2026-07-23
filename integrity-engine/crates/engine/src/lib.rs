@@ -719,6 +719,17 @@ mod app {
         // a struck moon hides on its own `materialized` flag, so no per-snapshot debris state is needed.)
     }
 
+    /// Resolution-on-demand plan for a small-impactor collision (docs/39): the target stays an abstract
+    /// BULK and only a CAP of it is resolved, alongside the whole impactor(s). Held while the impactor(s)
+    /// approach as solid bodies; the `Assembling` phase reads it to particalize the cap at the LIVE impact
+    /// site(s) and configure the GPU bulk. `None` ⇒ a whole-body collision (birth), which resolves everything.
+    struct CapPlan {
+        planet: usize,                            // self.bodies index of the target (the bulk)
+        planet_matter: crate::planet::LayeredBody, // to particalize the cap at the impact site
+        impactors: Vec<usize>,                    // self.bodies indices of the impactor(s), whole-resolved
+        cap_resolution: usize,                    // ~particles per cap
+    }
+
     /// Setup phase of the GPU SPH impact (docs/35): relax the two bodies on the GPU (placed far apart so each
     /// settles under its own gravity), read them back, assemble the collision, then step the dynamics.
     #[derive(Clone, Copy)]
@@ -867,6 +878,9 @@ mod app {
         /// `advance` executes it via `route_bodies_to_sph` after the substep loop unwinds, because
         /// `begin_sph_relax` rebuilds the whole scene. `None` when no contact is pending.
         pending_sph_route: Option<Vec<usize>>,
+        /// A live resolution-on-demand CAP collision (docs/39): the target is a bulk, only a cap is resolved.
+        /// `None` ⇒ whole-body (birth). Set by `route_bodies_to_sph`, consumed by the `Assembling` phase.
+        sph_cap: Option<CapPlan>,
         /// docs/42 browser-parity — SCHEDULED shock-dt: WebGPU forbids the per-step adaptive read-back, so the
         /// dt is stepped by SIM TIME instead — the small shock dt (`sph_dt`) resolves the collision, then after
         /// `SPH_SHOCK_WINDOW_S` we switch to the larger `sph_dt_aftermath` for the slow disk evolution (restores
@@ -907,6 +921,11 @@ mod app {
     /// The intact Moon renders as a grain shell too — every solid object in the universe is composed of
     /// matter (Robin); a smooth sphere is the same representation lie we removed from Earth.
     const MOON_SHELL_N: usize = 128;
+    /// Impactor/target mass ratio below which a collision resolves ON-DEMAND — the impactor(s) whole + a
+    /// CAP of the target, the rest of the target an abstract bulk (docs/39). Above it, the impact is a giant
+    /// impact and resolves every body whole (birth's regime). The Moon is 1.2% of Earth ⇒ a cap; a Theia-
+    /// class body (~12%) ⇒ whole-body. A flagged first-cut threshold (energy-sizing, docs/44, is the refinement).
+    const CAP_MASS_RATIO: f64 = 0.1;
 
     #[wasm_bindgen]
     impl OrbitDemo {
@@ -1210,6 +1229,7 @@ mod app {
                 sph_eos: Vec::new(),
                 sph_prov_to_body: Vec::new(),
                 pending_sph_route: None,
+                sph_cap: None,
                 sph_phase: SphPhase::Dynamics,
                 render_blend: 0.0, // pretty by default (docs/42)
                 gpu_impact_site: None,
@@ -1496,7 +1516,37 @@ mod app {
                     m.materialized = true;
                 }
             }
-            // Equal particle mass across the bodies (the planet, prov 0, sets it), so none biases the dynamics.
+            let planet = prov_to_body[0];
+            let planet_m = self.bodies[planet].mass.max(1.0);
+            let max_ratio = prov_to_body[1..]
+                .iter()
+                .map(|&i| self.bodies[i].mass / planet_m)
+                .fold(0.0, f64::max);
+            // RESOLUTION-ON-DEMAND (docs/39): a SMALL impactor shocks only a CAP of the target — its deep
+            // interior stays an abstract BULK (configured at Assembling). Resolve the impactor(s) whole + the
+            // cap, not the whole planet (Law III). A COMPARABLE-mass impactor is a giant impact and still
+            // resolves everything (the whole-body branch below — birth's regime, unchanged).
+            if max_ratio < CAP_MASS_RATIO && mats.len() >= 2 {
+                // Relax ONLY the impactor(s); the planet becomes the bulk, particalized as a cap at Assembling.
+                let m_i = mats[1].total_mass() / 1500.0;
+                let list: Vec<(&crate::planet::LayeredBody, usize)> = mats[1..]
+                    .iter()
+                    .map(|m| (m, (m.total_mass() / m_i).round().max(200.0) as usize))
+                    .collect();
+                self.begin_sph_relax(&list, 40.0);
+                self.sph_prov_to_body = prov_to_body[1..].to_vec(); // prov k → impactor body (no planet prov)
+                self.sph_cap = Some(CapPlan {
+                    planet,
+                    planet_matter: mats[0].clone(),
+                    impactors: prov_to_body[1..].to_vec(),
+                    cap_resolution: 2000,
+                });
+                self.focus = planet;
+                self.camera.zoom = 0.4;
+                return;
+            }
+            // WHOLE-BODY (comparable masses — a giant impact): equal particle mass across every body (the
+            // planet, prov 0, sets it), so none biases the dynamics.
             let m_i = mats[0].total_mass() / 2400.0;
             let list: Vec<(&crate::planet::LayeredBody, usize)> = mats
                 .iter()
@@ -1504,6 +1554,7 @@ mod app {
                 .collect();
             self.begin_sph_relax(&list, 40.0);
             self.sph_prov_to_body = prov_to_body;
+            self.sph_cap = None;
             self.focus = bodies[0];
             self.camera.zoom = 0.4;
         }
@@ -1544,6 +1595,7 @@ mod app {
             self.sph_snapshot.clear();
             self.sph_prov_to_body.clear();
             self.pending_sph_route = None;
+            self.sph_cap = None;
             self.sim_since_impact = 0.0;
             self.geologic = false;
             self.geo_moonlets.clear();
@@ -1951,6 +2003,7 @@ mod app {
             self.spin_l = glam::DVec3::new(0.0, 0.0, self.impact_def.target_spin_rad_s * self.spin_inertia());
             self.begin_sph_relax(&[(&t_def, n_target), (&i_def, n_impactor)], self.impact_def.relax_separation);
             self.sph_prov_to_body = vec![1, 2]; // planet at bodies[1], impactor at bodies[2] (placed just below)
+            self.sph_cap = None; // birth is a WHOLE-BODY giant impact — resolve both bodies, no bulk
             // **Put the two bodies on their approach, AS BODIES.** The scene declares what they are and
             // how they meet (which bodies, the approach speed as a multiple of mutual escape, the impact
             // parameter); the engine turns that into a trajectory and integrates it. No particle exists
@@ -2099,9 +2152,18 @@ mod app {
                         // trajectory; integrate them under gravity at the scene's fast-forward rate.
                         // resolution_distance from the LIVE bodies the engine holds (docs/58 — ONE geometry
                         // source): the planet is `prov 0`, the impactor the CLOSEST of the other source bodies.
-                        let planet_i = self.sph_prov_to_body.first().copied().unwrap_or(1);
+                        // For a CAP collision the target is the BULK (no planet prov) — its index comes from the
+                        // cap plan and EVERY prov is an impactor; for a whole-body impact prov 0 is the planet
+                        // and prov 1.. are the impactors.
+                        let (planet_i, imp_candidates): (usize, Vec<usize>) = match &self.sph_cap {
+                            Some(c) => (c.planet, c.impactors.clone()),
+                            None => (
+                                self.sph_prov_to_body.first().copied().unwrap_or(1),
+                                self.sph_prov_to_body.get(1..).map(<[usize]>::to_vec).unwrap_or_default(),
+                            ),
+                        };
                         let planet_pos = self.bodies[planet_i].pos;
-                        let imp_i = self.sph_prov_to_body[1..]
+                        let imp_i = imp_candidates
                             .iter()
                             .copied()
                             .min_by(|&x, &y| {
@@ -2152,6 +2214,64 @@ mod app {
                     SphPhase::Assembling => {
                         let relaxed = self.gpu_sph.as_mut().and_then(|s| s.take_readback());
                         if let Some(relaxed) = relaxed {
+                            if self.sph_cap.is_some() {
+                                // CAP impact (docs/39 — resolution-on-demand): the target is the abstract BULK,
+                                // and only a cap of it is resolved. Place the relaxed impactor(s) on their live
+                                // approach + particalize a cap at each live impact site; configure the GPU bulk.
+                                let (planet, impactors, planet_matter, cap_res) = {
+                                    let c = self.sph_cap.as_ref().unwrap();
+                                    (c.planet, c.impactors.clone(), c.planet_matter.clone(), c.cap_resolution)
+                                };
+                                let planet_b = self.bodies[planet];
+                                let planet_r = self.body_meta.get(planet).map_or(EARTH_RADIUS_M, |m| m.radius_m);
+                                let placements: Vec<crate::gpu_sph::BodyPlacement> = impactors
+                                    .iter()
+                                    .map(|&bi| crate::gpu_sph::BodyPlacement {
+                                        offset: self.bodies[bi].pos - planet_b.pos,
+                                        vel: self.bodies[bi].vel - planet_b.vel,
+                                        spin: glam::DVec3::ZERO,
+                                    })
+                                    .collect();
+                                // One dome per impact site, at the impactor's LIVE direction; unioned into one cap.
+                                let mut cap_body: Option<crate::hydrostatic::HydroBody> = None;
+                                let mut r_core = planet_r;
+                                let mut cap_mass = 0.0f64;
+                                for &bi in &impactors {
+                                    let site_dir = (self.bodies[bi].pos - planet_b.pos).normalize_or_zero();
+                                    let imp_r = self.body_meta.get(bi).map_or(self.impactor_radius, |m| m.radius_m);
+                                    let cap_radius = (2.0 * imp_r).min(0.55 * planet_r);
+                                    let c = crate::hydrostatic::HydroBody::particalize_cap(
+                                        &planet_matter, site_dir, cap_radius, cap_res,
+                                    );
+                                    r_core = r_core.min(c.r_core);
+                                    cap_mass += c.body.mass.iter().sum::<f64>();
+                                    match &mut cap_body {
+                                        Some(cb) => cb.append(c.body),
+                                        None => cap_body = Some(c.body),
+                                    }
+                                }
+                                let cap_body = cap_body.expect("cap plan has ≥1 impactor");
+                                let bulk_mass = (planet_matter.total_mass() - cap_mass).max(0.0);
+                                let (particles, eos, softening, dt) = crate::gpu_sph::assemble_cap_impact(
+                                    &relaxed, &placements, &self.sph_eos, &cap_body,
+                                );
+                                self.sph_eos = eos;
+                                self.sph_soft = softening as f64;
+                                self.sph_dt = dt;
+                                self.sph_dt_aftermath = dt * 5.0;
+                                self.sph_sim_t = 0.0;
+                                self.sph_snapshot.clear();
+                                if let Some(sph) = self.gpu_sph.as_mut() {
+                                    sph.upload(&self.queue, &particles, &self.sph_eos, softening);
+                                    sph.set_dt(&self.queue, dt, 1.0);
+                                    sph.set_av(&self.queue, 1.0, 2.0);
+                                    // The un-resolved planet: a Gauss gravity source + the floor the cap rests
+                                    // on, at the origin (the SPH runs in the planet-centred frame).
+                                    sph.set_bulk(&self.queue, glam::DVec3::ZERO, r_core, glam::DVec3::ZERO, bulk_mass);
+                                }
+                                self.sph_phase = SphPhase::Dynamics;
+                                return;
+                            }
                             // ONE geometry source (docs/58): each SPH source (`prov k`) is
                             // self.bodies[sph_prov_to_body[k]] — place it at its LIVE offset/velocity relative
                             // to the planet (`prov 0`), which spins at its own live rate (ω = spin_l / I, a
@@ -2440,6 +2560,19 @@ mod app {
                     crate::accretion::Representation::Particles => None,
                 }
             };
+            // A CAP impact (docs/39 resolution-on-demand) leaves the target a WHOLE solid globe — only a cap
+            // of it became particles — so draw it at its FULL radius and centre, not the tiny cap centroid
+            // that `body_particles(0)` (now the cap material) would give. The SPH cap + impactor still draw as
+            // particles at the impact site, overlaid on the intact planet.
+            let target = if let Some(c) = self.sph_cap.as_ref() {
+                let r = self
+                    .body_meta
+                    .get(c.planet)
+                    .map_or_else(|| crate::planet::body("earth").radius(), |m| m.radius_m);
+                Some((earth_center, r, 1.0))
+            } else {
+                target
+            };
             let (pretty_scale, pretty_r_surf) = match (&target, self.sph_active) {
                 (Some((_, r, _)), _) => (SPH_VIS_SCALE, *r),
                 (None, true) => (SPH_VIS_SCALE, self.impact_def.target.radius_m()),
@@ -2601,12 +2734,12 @@ mod app {
                     [1.0, 1.0, 1.0, pretty_fade],
                     [eye_disp.x as f32, eye_disp.y as f32, eye_disp.z as f32, 0.0],
                     self.air(),
-                    // The heat of whichever body this scene actually PLACED. Only the birth scene goes
-                    // back in time: it targets proto-Earth, a magma ocean, which glows rather than being
-                    // lit. Space and Two Moons are the modern era and their Earth is cool rock, so they
-                    // must not inherit the impact scene's target — reading `impact_def` unconditionally
-                    // would have set the present-day Earth on fire.
-                    if self.sph_active {
+                    // The heat of whichever body this scene actually PLACED. Only the WHOLE-BODY birth impact
+                    // goes back in time: it targets proto-Earth, a magma ocean, which glows rather than being
+                    // lit. A CAP impact (docs/39) resolves modern Earth — cool rock whose bulk stays a solid
+                    // globe — so it must NOT inherit the proto-Earth glow (that is what set the present-day
+                    // Earth on fire); only the impact-site cap particles are hot, and they draw themselves.
+                    if self.sph_active && self.sph_cap.is_none() {
                         glow_of(&self.impact_def.target.definition())
                     } else {
                         glow_of(&crate::planet::body("earth"))
@@ -2702,10 +2835,11 @@ mod app {
                 let ir_eq = (ir * (1.0 + flat / 3.0)) as f32;
                 let ir_pol = (ir * (1.0 - 2.0 * flat / 3.0)) as f32;
                 let align = glam::DQuat::from_rotation_arc(glam::DVec3::Z, spin_axis);
-                // During the GPU giant impact the exposed interior is a MAGMA ocean (docs/42 Phase 2): a hot
-                // self-lit orange, ramping up as the crater opens — so the crater (and the melt showing between
-                // crust grains) reads as a molten post-impact Earth rather than the CPU scene's cool interior.
-                let (itint, iglow) = if self.sph_active {
+                // During a WHOLE-BODY giant impact the exposed interior is a MAGMA ocean (docs/42 Phase 2): a
+                // hot self-lit orange ramping up as the crater opens, so the crater reads as a molten
+                // post-impact Earth. A CAP impact (docs/39) leaves modern Earth's bulk intact and un-exposed —
+                // its cool declared interior, not a global magma ocean (only the cap particles are hot).
+                let (itint, iglow) = if self.sph_active && self.sph_cap.is_none() {
                     let g = 0.6 + 2.4 * self.gpu_crater_frac as f32; // brighter as the shock excavates
                     ([0.20, 0.09, 0.05, 1.0], [1.0, 0.42, 0.12, g])
                 } else {

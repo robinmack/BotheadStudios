@@ -248,6 +248,19 @@ impl HydroBody {
         HydroBody { vel: vec![DVec3::ZERO; n], mass, u, eos, h, softening, rho, pos }
     }
 
+    /// Concatenate another body's particles into this one (used to union multiple impact-site caps into one
+    /// SPH field). Softening becomes the finer of the two.
+    pub fn append(&mut self, other: HydroBody) {
+        self.pos.extend(other.pos);
+        self.vel.extend(other.vel);
+        self.mass.extend(other.mass);
+        self.u.extend(other.u);
+        self.eos.extend(other.eos);
+        self.h.extend(other.h);
+        self.rho.extend(other.rho);
+        self.softening = self.softening.min(other.softening);
+    }
+
     /// A localized CAP of a planet — the shock-affected region within `cap_radius` of the surface impact
     /// point `site_dir·R_surf` — particalized to SPH-EOS particles (docs/39 resolution-on-demand). ONLY this
     /// region becomes particles; the rest of the planet stays an abstract BULK: a Gauss gravity source + the
