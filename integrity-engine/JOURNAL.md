@@ -49,10 +49,21 @@ new tests)**, including the slow giant-impact integration tests (`theia`, `birth
 `dropped_moon_impact`) that exercise the EOS hardest. A new pin test (`tillotson_parameters_are_read_from_the_material_catalogue`)
 guards against a silent JSON typo. fmt untouched (hand-edited).
 
-**Next.** Route the engine-detected moon-drop through the `gpu_sph` machine and retire `moon_debris:
-Aggregate` (ledger rows 1/3/10). One design fork to settle first: the SPH assembly currently *synthesizes*
-impact geometry from proto-Earth constants (`v_esc 1.15`, spin `4e-4`); a de-orbiting Moon has a real live
-trajectory, which is the more honest geometry to place it on.
+**Geometry fork SETTLED** (Robin: *"use the real live trajectory, but inside the engine, never in scene
+definition"*). Birth and a de-orbiting Moon are different scenarios, not one question with two answers: birth
+is a *declared experiment* whose canonical approach (`v_esc 1.15`, grazing `b`, proto-Earth spin) must be
+IMPOSED — free-fall from rest gives the wrong one — while a Moon already in orbit has a real N-body
+trajectory whose live `(offset, relative-velocity, spin)` *is* the geometry; re-synthesizing it would
+overwrite measured state (Law VII) and inject proto-Earth's spin into a modern Earth (Law V). Resolved with
+ONE engine primitive `gpu_sph::assemble_from_relaxed_at(particles, target_spin, impactor_offset,
+impactor_vel, impactor_spin)`; `assemble_from_relaxed_with(def)` now computes the *canonical* geometry from
+the world file and delegates (birth **byte-identical** — the slow `theia`/`birth_scene`/`provenance` tests
+confirm). The geometry is the ENGINE's to compute from the bodies it holds; no scene declares it. A native
+test pins the live-placement path.
+
+**Next.** Wire the moon-drop: when the engine detects an orbiting body crossing its `resolution_distance`,
+enter the SphPhase machine and call `assemble_from_relaxed_at` with the live `(offset, vel, spin)` from
+`self.bodies`, then delete `moon_debris: Aggregate` + `build_impact_debris_scaled` (ledger rows 1/3/10).
 
 ## 2026-07-21 — the ground scene was an abstraction; the physics corrections, and the real target (ledger row 16)
 

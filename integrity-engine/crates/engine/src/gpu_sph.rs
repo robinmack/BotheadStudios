@@ -185,96 +185,126 @@ pub fn build_far_apart_from(def: &crate::terra::world_def::ImpactDef, n_earth: u
     (out, softening, relax_dt)
 }
 
-/// After GPU relaxation of the far-apart bodies (from [`build_far_apart`]), read back the particles and place
-/// them on the oblique giant-impact geometry: Earth (prov 0) recentred at the origin at rest; Theia (prov 1)
-/// recentred then offset by 1.6·contact with impact parameter b≈R_e and the inbound velocity 1.15·v_esc — the
-/// contact radius and v_esc computed from the ACTUAL relaxed radii. Returns (particles, [basalt, iron],
-/// softening, the shock-safe impact dt).
-pub fn assemble_from_relaxed_with(def: &crate::terra::world_def::ImpactDef, particles: &[SphParticle]) -> (Vec<SphParticle>, [SphEos; 2], f32, f32) {
+/// Robustly find a relaxed body's bulk COM, mass and radius for provenance `prov`, surviving the few stray
+/// particles a relax always leaves. This pair sets the whole collision geometry -- the radius feeds the
+/// contact distance and the aim, the centre is what every radius is measured from -- so a straggler must not
+/// drag it. The first cut took the FARTHEST particle (one stray ruins it); a mass-weighted MEAN is not robust
+/// either (a single 0.7%-mass particle flung twenty radii out drags the centre a quarter of a radius). So
+/// clip: find the bulk, re-centre on it, and measure from there. Live proof it mattered: with the naive
+/// centre the scene opened at ~96,000 km and passed Earth at 39,338 km against a 9,551 km contact -- a clean
+/// hit turned into a fourfold miss, and every correct downstream piece waited for an impact that never came.
+fn body_bulk(particles: &[SphParticle], prov: u32) -> (glam::DVec3, f64, f64) {
     use glam::DVec3;
     let pos = |p: &SphParticle| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
-    let subset = |prov: u32| -> (Vec<&SphParticle>, DVec3, f64, f64) {
-        let ps: Vec<&SphParticle> = particles.iter().filter(|p| p.prov == prov).collect();
-        let m: f64 = ps.iter().map(|p| p.mass as f64).sum();
-        // **Both the centre and the radius must survive a few loose particles**, because the relaxed field
-        // always has some, and this pair sets the entire collision: the radius feeds the contact distance
-        // (start = 1.6·contact) AND the aim (b = impact_parameter·r_target). Get it wrong and the impact
-        // misses — which it did. Measured live, the scene opened at ~96,000 km and passed Earth with a
-        // closest approach of 39,338 km against a true contact of 9,551 km. No collision, so no disk and
-        // no Moon, and every correct piece of machinery downstream sat waiting for an event that never came.
-        //
-        // The first cut here took the radius of the FARTHEST particle, which one stray obviously ruins.
-        // Taking a mass percentile fixed that and still failed, for a subtler reason: a mass-weighted MEAN
-        // is not robust either. A single particle carrying 0.7% of the mass, flung twenty radii out, drags
-        // the centre by nearly a quarter of the body's radius — and every radius is measured from that
-        // centre. So clip: find the bulk, re-centre on the bulk, and measure from there.
-        let com = |sel: &[&SphParticle]| -> DVec3 {
-            let mm: f64 = sel.iter().map(|p| p.mass as f64).sum();
-            if mm <= 0.0 { return DVec3::ZERO; }
-            sel.iter().map(|p| pos(p) * p.mass as f64).sum::<DVec3>() / mm
-        };
-        // Radius enclosing 98% of the mass about `centre`. 98 and not 99 because the impactor is seeded
-        // with far fewer particles than the target, so one stray there is already ~1% of its mass — a
-        // threshold a single particle can cross is not a threshold.
-        let bulk_radius = |sel: &[&SphParticle], centre: DVec3| -> f64 {
-            let mm: f64 = sel.iter().map(|p| p.mass as f64).sum();
-            let mut rr: Vec<(f64, f64)> = sel.iter().map(|p| ((pos(p) - centre).length(), p.mass as f64)).collect();
-            rr.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-            let (mut cum, mut r) = (0.0, 0.0);
-            for &(rad, mass) in &rr {
-                cum += mass;
-                r = rad;
-                if cum >= 0.98 * mm { break; }
-            }
-            r
-        };
-        // Two clipping passes: re-centre on what is inside 1.5× the bulk radius, then re-measure. Converges
-        // immediately for a body with a few escapees, and is a no-op for a clean one.
-        let mut c = com(&ps);
-        let mut r = bulk_radius(&ps, c);
-        for _ in 0..2 {
-            let keep: Vec<&SphParticle> =
-                ps.iter().copied().filter(|p| (pos(p) - c).length() <= 1.5 * r).collect();
-            if keep.is_empty() { break; }
-            c = com(&keep);
-            r = bulk_radius(&keep, c);
-        }
-        (ps, c, m, r)
+    let ps: Vec<&SphParticle> = particles.iter().filter(|p| p.prov == prov).collect();
+    let m: f64 = ps.iter().map(|p| p.mass as f64).sum();
+    let com = |sel: &[&SphParticle]| -> DVec3 {
+        let mm: f64 = sel.iter().map(|p| p.mass as f64).sum();
+        if mm <= 0.0 { return DVec3::ZERO; }
+        sel.iter().map(|p| pos(p) * p.mass as f64).sum::<DVec3>() / mm
     };
-    let (earth, ec, m_earth, r_e) = subset(0);
-    let (theia, tc, m_theia, r_t) = subset(1);
-    let contact = r_e + r_t;
-    let v_esc = def.v_esc_multiple * (2.0 * crate::orbit::G * (m_earth + m_theia) / contact).sqrt();
-    let (d0, b_param) = (def.start_separation * contact, def.impact_parameter * r_e);
-    let emit = |out: &mut Vec<SphParticle>, ps: &[&SphParticle], off: DVec3, vel: DVec3| {
-        for p in ps {
-            let q = pos(p) + off;
-            out.push(SphParticle { pos: [q.x as f32, q.y as f32, q.z as f32], vel: [vel.x as f32, vel.y as f32, vel.z as f32], ..**p });
+    // Radius enclosing 98% of the mass about `centre` (98 not 99: the impactor has few particles, so one
+    // stray there is already ~1% of its mass -- a threshold a single particle can cross is not a threshold).
+    let bulk_radius = |sel: &[&SphParticle], centre: DVec3| -> f64 {
+        let mm: f64 = sel.iter().map(|p| p.mass as f64).sum();
+        let mut rr: Vec<(f64, f64)> = sel.iter().map(|p| ((pos(p) - centre).length(), p.mass as f64)).collect();
+        rr.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let (mut cum, mut r) = (0.0, 0.0);
+        for &(rad, mass) in &rr {
+            cum += mass;
+            r = rad;
+            if cum >= 0.98 * mm { break; }
         }
+        r
     };
-    // Proto-Earth SPIN about +z (docs/41 spin IOU): a spinning target flings its OWN mantle into a
-    // rotationally-SUSTAINED disk (it plateaus instead of re-accreting) and recovers the Earth-rich ~58% disk
-    // that a non-spinning impact never reaches. Applied here at assembly — after the (spherical) relax, prompt
-    // impact — so no rotational-equilibrium relaxation is needed (ω is near breakup only over a long settle).
-    // v = ω ẑ × r, with r measured from Earth's recentred origin. ω≈7e-4 rad/s ≈ a 2.5 h primordial day.
-    let emit_spun = |out: &mut Vec<SphParticle>, ps: &[&SphParticle], off: DVec3, omega: f64| {
-        for p in ps {
-            let q = pos(p) + off;
-            let v = DVec3::new(-omega * q.y, omega * q.x, 0.0);
-            out.push(SphParticle { pos: [q.x as f32, q.y as f32, q.z as f32], vel: [v.x as f32, v.y as f32, v.z as f32], ..**p });
+    // Two clipping passes: re-centre on what is inside 1.5x the bulk radius, then re-measure. Converges
+    // immediately for a body with a few escapees, and is a no-op for a clean one.
+    let mut c = com(&ps);
+    let mut r = bulk_radius(&ps, c);
+    for _ in 0..2 {
+        let keep: Vec<&SphParticle> =
+            ps.iter().copied().filter(|p| (pos(p) - c).length() <= 1.5 * r).collect();
+        if keep.is_empty() { break; }
+        c = com(&keep);
+        r = bulk_radius(&keep, c);
+    }
+    (c, m, r)
+}
+
+/// **Place the two relaxed bodies on a GIVEN collision geometry -- the engine's geometry-agnostic assembly
+/// primitive.** In the target-relative frame: the target (prov 0) recentred at the origin and spun at
+/// `target_spin` (rad/s about +z), the impactor (prov 1) recentred then placed at `impactor_offset` moving at
+/// `impactor_vel` (relative to the target) and spun at `impactor_spin`. Returns (particles, [basalt, iron],
+/// softening, shock-safe dt).
+///
+/// The caller decides WHERE and how fast, and there are exactly two honest sources -- both computed by the
+/// ENGINE, never declared by a scene: the declared canonical giant impact ([`assemble_from_relaxed_with`],
+/// the birth experiment, whose approach must be imposed because free-fall from rest gives the wrong one), or
+/// the LIVE N-body trajectory of a body already in orbit (a de-orbiting moon, whose real approach must not be
+/// overwritten by a synthesized v_esc, and whose spin is the planet's own, not proto-Earth's). A scene
+/// supplies bodies and initial orbits; the engine forecasts the collision and computes this geometry from the
+/// state it already holds.
+pub fn assemble_from_relaxed_at(
+    particles: &[SphParticle],
+    target_spin: f64,
+    impactor_offset: glam::DVec3,
+    impactor_vel: glam::DVec3,
+    impactor_spin: f64,
+) -> (Vec<SphParticle>, [SphEos; 2], f32, f32) {
+    use glam::DVec3;
+    let pos = |p: &SphParticle| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
+    let (target_com, ..) = body_bulk(particles, 0);
+    let (impactor_com, ..) = body_bulk(particles, 1);
+    // Emit a body recentred (-com) to its own origin, translated to `place`, moving at `bulk_vel` with rigid
+    // spin `spin` (rad/s) about +z through its own centre: v = bulk_vel + spin * z_hat x local, local = pos-com.
+    let emit = |out: &mut Vec<SphParticle>, prov: u32, com: DVec3, place: DVec3, bulk_vel: DVec3, spin: f64| {
+        for p in particles.iter().filter(|p| p.prov == prov) {
+            let local = pos(p) - com;
+            let q = local + place;
+            let v = bulk_vel + DVec3::new(-spin * local.y, spin * local.x, 0.0);
+            out.push(SphParticle {
+                pos: [q.x as f32, q.y as f32, q.z as f32],
+                vel: [v.x as f32, v.y as f32, v.z as f32],
+                ..*p
+            });
         }
     };
     let mut out = Vec::with_capacity(particles.len());
-    emit_spun(&mut out, &earth, -ec, def.target_spin_rad_s);
-    emit(&mut out, &theia, -tc + DVec3::new(d0, b_param, 0.0), DVec3::new(-v_esc, 0.0, 0.0));
-    // softening = the finest (iron) spacing = min_h/4 (h = 2·(m/ρ)^⅓, softening = ½·(m/ρ)^⅓); dt is shock-safe.
+    // The target's SPIN is applied here at assembly (docs/41 spin IOU): a spinning target flings its own
+    // mantle into a rotationally-sustained disk, recovering the Earth-rich disk a non-spinning impact never
+    // reaches -- and after a spherical relax, so no rotational-equilibrium relaxation is needed.
+    emit(&mut out, 0, target_com, DVec3::ZERO, DVec3::ZERO, target_spin); // target at the frame origin
+    emit(&mut out, 1, impactor_com, impactor_offset, impactor_vel, impactor_spin); // impactor on the geometry
+    // softening = finest (iron) spacing = min_h/4. Shock-safe dt: the fixed-dt browser path (WebGPU forbids
+    // the adaptive read-back) must resolve the impact shock or the impactor interpenetrates and hit-and-runs
+    // (docs/41). The speed term is the ACTUAL approach speed, so a slow de-orbit and a fast giant impact each
+    // get the dt their own shock needs.
     let min_h = out.iter().map(|p| p.h).fold(f32::INFINITY, f32::min);
     let softening = 0.25 * min_h;
-    // Shock-safe dt. The fixed-dt browser path (WebGPU forbids the adaptive read-back) must be small enough to
-    // resolve the impact shock, or Theia interpenetrates Earth and hit-and-runs (docs/41 browser debug): a 5×
-    // reduction from the original lets Earth shed into a disk. Paired with more substeps/frame to hold playback.
-    let dt = (0.01 * min_h as f64 / (20_000.0 + v_esc)) as f32;
+    let dt = (0.01 * min_h as f64 / (20_000.0 + impactor_vel.length())) as f32;
     (out, [SphEos::basalt(), SphEos::iron()], softening, dt)
+}
+
+/// After GPU relaxation of the far-apart bodies (from [`build_far_apart`]), place them on the DECLARED
+/// canonical oblique giant impact (the birth experiment): the contact radius and v_esc are computed from the
+/// ACTUAL relaxed radii, then the impactor starts at `start_separation`*contact, aim `impact_parameter`*r_e,
+/// inbound at `v_esc_multiple`*v_esc. This is the imposed-IC caller of [`assemble_from_relaxed_at`]; a body
+/// already in orbit uses its LIVE trajectory through the same primitive instead. Returns (particles,
+/// [basalt, iron], softening, the shock-safe impact dt).
+pub fn assemble_from_relaxed_with(def: &crate::terra::world_def::ImpactDef, particles: &[SphParticle]) -> (Vec<SphParticle>, [SphEos; 2], f32, f32) {
+    use glam::DVec3;
+    let (_ec, m_earth, r_e) = body_bulk(particles, 0);
+    let (_tc, m_theia, r_t) = body_bulk(particles, 1);
+    let contact = r_e + r_t;
+    let v_esc = def.v_esc_multiple * (2.0 * crate::orbit::G * (m_earth + m_theia) / contact).sqrt();
+    let (d0, b_param) = (def.start_separation * contact, def.impact_parameter * r_e);
+    assemble_from_relaxed_at(
+        particles,
+        def.target_spin_rad_s,
+        DVec3::new(d0, b_param, 0.0),
+        DVec3::new(-v_esc, 0.0, 0.0),
+        0.0,
+    )
 }
 
 /// Measure the orbiting disk of a read-back SPH particle set (docs/33 stage 5, mirrors
@@ -966,5 +996,45 @@ mod impact_geometry_tests {
         let e_impact = 0.5 * (me * mm / (me + mm)) * v_rel * v_rel;
         let e_bind = 0.6 * crate::orbit::G * mm * mm / body_radius(&moon);
         assert!(e_impact > 10.0 * e_bind, "a moon-drop is a giant impact, not a crater: E {e_impact:.2e} J vs Moon binding {e_bind:.2e} J");
+    }
+
+    /// **The engine can place a moon-drop on its LIVE trajectory — settling the geometry fork (Robin).** A
+    /// body already in orbit hands the SPH its real (offset, relative velocity), computed by the ENGINE from
+    /// the state it holds — never a scene-declared v_esc. `assemble_from_relaxed_at` must honour that geometry
+    /// exactly: it is the seam the moon-drop uses instead of birth's imposed canonical approach.
+    #[test]
+    fn assemble_at_honours_a_given_live_geometry() {
+        use crate::terra::world_def::{ImpactBody, ImpactDef};
+        let def = ImpactDef {
+            target: ImpactBody { body: "earth".into() },
+            impactor: ImpactBody { body: "moon".into() },
+            ..ImpactDef::default()
+        };
+        let (earth, moon) = build_impact_bodies_from(&def, 800);
+        let mut field: Vec<SphParticle> = Vec::new();
+        push_body(&mut field, &earth, 0, DVec3::ZERO, DVec3::ZERO);
+        push_body(&mut field, &moon, 1, DVec3::new(4.0e7, 0.0, 0.0), DVec3::ZERO);
+
+        // A live approach the N-body integrator might hand over — NOT the canonical b / d0 / v_esc.
+        let offset = DVec3::new(1.5e7, 3.0e6, 0.0);
+        let rel_vel = DVec3::new(-9000.0, 500.0, 0.0);
+        let (out, ..) = assemble_from_relaxed_at(&field, 0.0, offset, rel_vel, 0.0);
+
+        let com_vel = |prov: u32| -> (DVec3, DVec3) {
+            let ps: Vec<&SphParticle> = out.iter().filter(|p| p.prov == prov).collect();
+            let m: f64 = ps.iter().map(|p| p.mass as f64).sum();
+            let c: DVec3 = ps.iter().map(|p| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64) * p.mass as f64).sum::<DVec3>() / m;
+            let v: DVec3 = ps.iter().map(|p| DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64) * p.mass as f64).sum::<DVec3>() / m;
+            (c, v)
+        };
+        let (ec, ev) = com_vel(0);
+        let (mc, mv) = com_vel(1);
+        let r_e = def.target.radius_m();
+        // Target sits at the frame origin, at rest (spin 0 ⇒ zero COM velocity).
+        assert!(ec.length() < 0.02 * r_e, "target recentred to the origin (got {:.3e})", ec.length());
+        assert!(ev.length() < 1.0, "target at rest in the frame (got {:.3e} m/s)", ev.length());
+        // Impactor carries EXACTLY the requested live offset and relative velocity — no synthesized approach.
+        assert!((mc - ec - offset).length() < 0.02 * r_e, "impactor on the live offset ({:.3e} off)", (mc - ec - offset).length());
+        assert!((mv - ev - rel_vel).length() < 1.0, "impactor carries the live relative velocity");
     }
 }
