@@ -29,7 +29,8 @@ pub(crate) fn wgsl_typed(src: &str, name: &str) -> Vec<(String, &'static str)> {
         .filter_map(|chunk| {
             let (field, ty) = chunk.split_once(':')?;
             let field = field.trim();
-            let ty = if ty.trim().starts_with("vec3") { "vec3" } else { "scalar" };
+            let t = ty.trim();
+            let ty = if t.starts_with("vec4") { "vec4" } else if t.starts_with("vec3") { "vec3" } else { "scalar" };
             (!field.is_empty()).then(|| (field.to_string(), ty))
         })
         .collect()
@@ -41,7 +42,11 @@ pub(crate) fn wgsl_offsets(fields: &[(String, &'static str)]) -> Vec<(String, us
     let mut off = 0usize;
     let mut out = Vec::new();
     for (name, ty) in fields {
-        let (size, align) = if ty.starts_with("vec3") { (12, 16) } else { (4, 4) };
+        let (size, align) = match *ty {
+            "vec4" => (16, 16),
+            "vec3" => (12, 16),
+            _ => (4, 4),
+        };
         off = off.div_ceil(align) * align;
         out.push((name.clone(), off));
         off += size;

@@ -33,6 +33,12 @@ struct Params {
   omega: f32,       // cs_relax ONLY: rigid-rotation rate (rad/s) about +z for a ROTATING-frame relaxation
                     // (adds centrifugal ω²·(x,y,0) so the body settles to its oblate equilibrium). 0 elsewhere.
   _p1: f32, _p2: f32,
+  // The un-resolved BULK planet a particalized CAP rests on (docs/39 — resolution-on-demand). A small
+  // impactor resolves only a cap of the planet; its 10²⁴ kg interior stays this abstract sphere — a Gauss
+  // gravity source + a non-injecting floor. `bulk_cr.w` (R_core) <= 0 DISABLES the bulk (a whole-body
+  // impact, e.g. birth, resolves every body and needs none). Centre/vel are in the SPH's working frame.
+  bulk_cr: vec4<f32>,  // xyz = centre, w = core radius R_core
+  bulk_vm: vec4<f32>,  // xyz = velocity, w = mass
 }
 
 struct Particle {
@@ -97,6 +103,36 @@ fn sound_speed(e: Eos, rho: f32, u: f32) -> f32 {
   let dp = (pressure(e, r + dr, u) - pressure(e, r - dr, u)) / (2.0 * dr);
   let p = pressure(e, r, u);
   return sqrt(max(dp + p / (r * r) * dfdu(e, r, u), 0.0));
+}
+
+// Gravity of the un-resolved bulk planet (docs/39): monopole G·M/r² outside R_core, Gauss-LINEAR interior
+// (∝r, →0 at the centre). A raw 1/r² singularity-sucks any particle that penetrates R_core (39b lesson 1),
+// so the interior branch is mandatory. `R_core <= 0` ⇒ no bulk (returns 0), the whole-body impact.
+fn bulk_gravity(pos: vec3<f32>) -> vec3<f32> {
+  let R = P.bulk_cr.w;
+  if (R <= 0.0) { return vec3<f32>(0.0); }
+  let d = pos - P.bulk_cr.xyz;   // centre → particle
+  let r = length(d);
+  if (r < 1.0) { return vec3<f32>(0.0); }
+  let M = P.bulk_vm.w;
+  let gg = select(G * M * r / (R * R * R), G * M / (r * r), r >= R);
+  return -(d / r) * gg;          // toward the centre
+}
+
+// The bulk's hard surface (docs/39 39b): a particle cannot sink into the rigid bulk. A penetrator is
+// projected to R_core and its INWARD velocity RELATIVE to the bulk removed — a non-injecting position
+// constraint, NOT a penalty spring (a spring releases ½k·pen² as launch KE: the terrain-contact lesson).
+// Rigid bulk (no recoil yet — negligible for a Moon on Earth; the bulk-recoil is docs/39 39c, flagged).
+fn apply_bulk_floor(i: u32) {
+  let R = P.bulk_cr.w;
+  if (R <= 0.0) { return; }
+  let d = particles[i].pos - P.bulk_cr.xyz;
+  let r = length(d);
+  if (r >= R || r < 1.0) { return; }
+  let n = d / r;
+  particles[i].pos = P.bulk_cr.xyz + n * R;
+  let vn = dot(particles[i].vel - P.bulk_vm.xyz, n);
+  if (vn < 0.0) { particles[i].vel = particles[i].vel - n * vn; }
 }
 
 // --- grid build ---
@@ -167,6 +203,8 @@ fn cs_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
     let r2 = dot(d, d);
     a += d * (G * particles[j].mass / pow(r2 + s2, 1.5));
   }
+  // + the un-resolved bulk planet's gravity (docs/39 — no-op when no bulk is set)
+  a += bulk_gravity(pi.pos);
   // short-range SPH pressure + AV: the 27 neighbouring cells (exact)
   let ci = cell_of(pi.pos);
   for (var dx: i32 = -1; dx <= 1; dx++) {
@@ -225,6 +263,7 @@ fn cs_kick_drift(@builtin(global_invocation_id) gid: vec3<u32>) {
   particles[i].vel = v;
   particles[i].u = max(particles[i].u + dudt[i] * (0.5 * P.dt), 0.0);
   particles[i].pos = particles[i].pos + v * P.dt;
+  apply_bulk_floor(i); // rest the cap on the un-resolved bulk (no-op when no bulk is set)
 }
 
 // Final half-kick (v, u). Reads acc/dudt from the SECOND force eval of the step.
@@ -254,6 +293,7 @@ fn cs_relax(@builtin(global_invocation_id) gid: vec3<u32>) {
   let v = (particles[i].vel + (acc[i] + a_cf) * P.dt) * P.damp;
   particles[i].vel = v;
   particles[i].pos = p + v * P.dt;
+  apply_bulk_floor(i); // a cap relaxes seated on the bulk (no-op when no bulk is set)
 }
 
 // Per-particle Courant signal speed h_i/(c_i+|v_i|); the CPU reduces min·cfl → the adaptive dt (stage 4c.2).

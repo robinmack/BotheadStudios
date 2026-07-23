@@ -76,6 +76,12 @@ pub struct SphParams {
     pub omega: f32,
     pub _p1: f32,
     pub _p2: f32,
+    /// The un-resolved BULK planet a particalized CAP rests on (docs/39 — resolution-on-demand). Mirrors
+    /// `sph_step.wgsl`'s two `vec4` tail fields: `bulk_cr` = xyz centre + w R_core (`<= 0` disables the
+    /// bulk, the whole-body impact), `bulk_vm` = xyz velocity + w mass. Landed at offset 48/64 (both
+    /// 16-aligned), size 80 (`% 16 == 0`). Set via `GpuSph::set_bulk`.
+    pub bulk_cr: [f32; 4],
+    pub bulk_vm: [f32; 4],
 }
 
 impl SphEos {
@@ -814,7 +820,7 @@ impl GpuSph {
             clear: mk("cs_grid_clear"), insert: mk("cs_grid_insert"), density: mk("cs_density"), forces: mk("cs_forces"),
             kick_drift: mk("cs_kick_drift"), kick: mk("cs_kick"), relax_k: mk("cs_relax"),
             store, params_buf, eos_buf, acc, dudt, signal, grid_count, grid_bucket, bind,
-            params: SphParams { n: 0, softening: 0.0, av_alpha: 1.0, av_beta: 2.0, cell_size: 1.0, table_mask: SPH_TABLE_SIZE - 1, bucket_k: SPH_BUCKET_K, dt: 0.0, damp: 1.0, omega: 0.0, _p1: 0.0, _p2: 0.0 },
+            params: SphParams { n: 0, softening: 0.0, av_alpha: 1.0, av_beta: 2.0, cell_size: 1.0, table_mask: SPH_TABLE_SIZE - 1, bucket_k: SPH_BUCKET_K, dt: 0.0, damp: 1.0, omega: 0.0, _p1: 0.0, _p2: 0.0, bulk_cr: [0.0; 4], bulk_vm: [0.0; 4] },
         }
     }
 
@@ -848,6 +854,24 @@ impl GpuSph {
     pub fn set_av(&mut self, queue: &wgpu::Queue, alpha: f32, beta: f32) {
         self.params.av_alpha = alpha;
         self.params.av_beta = beta;
+        queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
+    }
+
+    /// Configure the abstract BULK a particalized cap rests on (docs/39 — resolution-on-demand): a Gauss
+    /// gravity source (monopole outside `r_core`, linear interior) + a non-injecting spherical floor at
+    /// `r_core`. `r_core <= 0` DISABLES it — a whole-body impact (birth) resolves every body and needs no
+    /// bulk, which is the default (`bulk_cr = [0;4]`). `center`/`vel` are in the SPH's working frame; for
+    /// the rigid first cut the bulk does not recoil (negligible for a Moon on Earth; docs/39 39c refinement).
+    pub fn set_bulk(
+        &mut self,
+        queue: &wgpu::Queue,
+        center: glam::DVec3,
+        r_core: f64,
+        vel: glam::DVec3,
+        mass: f64,
+    ) {
+        self.params.bulk_cr = [center.x as f32, center.y as f32, center.z as f32, r_core as f32];
+        self.params.bulk_vm = [vel.x as f32, vel.y as f32, vel.z as f32, mass as f32];
         queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
     }
 
@@ -951,7 +975,7 @@ mod tests {
     fn sph_params_matches_the_shader_field_for_field() {
         let rust = offsets!(
             SphParams, n, softening, av_alpha, av_beta, cell_size, table_mask, bucket_k, dt, damp,
-            omega, _p1, _p2,
+            omega, _p1, _p2, bulk_cr, bulk_vm,
         );
         assert_eq!(
             rust,
@@ -974,10 +998,15 @@ mod tests {
         assert_eq!(wgsl_typed(SHADER, "Particle").len(), 8);
         assert_eq!(wgsl_typed(SHADER, "Eos").len(), 12);
         let p = wgsl_typed(SHADER, "Params");
-        assert_eq!(p.len(), 12);
-        // The two-line-comment case: `omega` is followed by a wrapped comment, then a shared line.
-        let tail: Vec<&str> = p[p.len() - 3..].iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(tail, ["omega", "_p1", "_p2"], "the wrapped-comment tail must all be seen");
+        assert_eq!(p.len(), 14);
+        // Two wrapped multi-line comments precede fields here: `omega` (a shared line + a 2-line comment)
+        // and `bulk_cr` (a 4-line comment). A comma-splitting parser must see every field past them.
+        let names: Vec<&str> = p.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            &names[9..],
+            ["omega", "_p1", "_p2", "bulk_cr", "bulk_vm"],
+            "the wrapped-comment tail must all be seen"
+        );
     }
 }
 
