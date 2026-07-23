@@ -258,6 +258,70 @@ pub fn build_cap_relax(
     (asm.particles, asm.eos, softening, relax_dt)
 }
 
+/// PROMOTE a patch of the visual terrain into real SPH matter for a surface impact (docs/39 — the meter-scale
+/// instance of the primitive: a terrestrial meteor is a moon-drop scaled down). Read the engine's voxel
+/// `World` columns within `cap_radius` (m) of the impact point, from each column's surface down `cap_depth` m,
+/// and emit one SPH particle per solid/water voxel — in a PATCH-LOCAL frame (origin at `site`, +Y up) so f32
+/// stays clean at 1 m grains (docs/39 open-decision #4). Each particle carries its voxel's OWN material
+/// density + Tillotson EOS (regolith sand/gravel/dirt → basalt fallback, a flagged Law-V IOU) and specific
+/// heat — so the promoted matter IS the terrain the user sees: hills, strata and water table included, never a
+/// flat projection (Robin: "promote visual terrain filters to real matter at impact"). Ejecta then lands on
+/// THIS matter, matter-on-matter. Returns (particles, the deduped EOS table, floor_y): the planar bulk floor
+/// (`GpuSph::set_bulk_planar`) sits `cap_depth` below the impact surface point, in the same local frame.
+pub fn promote_ground_cap(
+    world: &crate::world::World,
+    mats: &[crate::materials::Material],
+    site: glam::Vec3,
+    cap_radius: f64,
+    cap_depth: f64,
+) -> (Vec<SphParticle>, Vec<SphEos>, f64) {
+    let c = world.center();
+    let (vx0, vz0) = ((site.x + c.x).round() as i32, (site.z + c.z).round() as i32);
+    let y0 = world.surface_top_voxel(vx0, vz0).unwrap_or(0) as f32 - c.y; // world Y of the impact surface
+    let floor_y = y0 as f64 - cap_depth;
+    let r = cap_radius.ceil() as i32;
+    let depth = cap_depth.ceil() as i32;
+    let (mut out, mut eos): (Vec<SphParticle>, Vec<SphEos>) = (Vec::new(), Vec::new());
+    for dx in -r..=r {
+        for dz in -r..=r {
+            if ((dx * dx + dz * dz) as f64) > cap_radius * cap_radius {
+                continue;
+            }
+            let (x, z) = (vx0 + dx, vz0 + dz);
+            let Some(top) = world.surface_top_voxel(x, z) else { continue };
+            for y in (top - depth).max(0)..=top {
+                let Some(mi) = world.material_at(x, y, z) else { continue };
+                let m = &mats[mi];
+                let density = (m.density as f64).max(1.0);
+                let t = crate::eos::Tillotson::for_material(&m.id).unwrap_or_else(crate::eos::Tillotson::basalt);
+                let se = SphEos::from_tillotson(&t);
+                // Dedup this material into the shared table (by reference density, its identity).
+                let mat = match eos.iter().position(|e| e.rho0 == se.rho0) {
+                    Some(k) => k as u32,
+                    None if eos.len() < MAX_MATERIALS => {
+                        eos.push(se);
+                        (eos.len() - 1) as u32
+                    }
+                    None => (MAX_MATERIALS - 1) as u32,
+                };
+                let sh = m.specific_heat().unwrap_or(1000.0);
+                let local = glam::Vec3::new(x as f32 - c.x, y as f32 - c.y, z as f32 - c.z) - site;
+                out.push(SphParticle {
+                    pos: [local.x, local.y, local.z],
+                    h: 2.0, // ~2× the 1 m grain spacing
+                    vel: [0.0; 3],
+                    u: (sh * 288.0) as f32, // ground temperature (flagged; a geotherm is the refinement)
+                    mass: density as f32, // 1 m³ voxel
+                    mat,
+                    rho: density as f32,
+                    prov: 0, // the ground is the target material
+                });
+            }
+        }
+    }
+    (out, eos, floor_y)
+}
+
 pub fn build_far_apart_from(def: &crate::terra::world_def::ImpactDef, n_earth: usize, n_theia: usize) -> (Vec<SphParticle>, f32, f32) {
     let (earth, theia) = build_impact_bodies_from(def, n_earth);
     let far = def.relax_separation * (def.target.radius_m() + def.impactor.radius_m());
@@ -1091,6 +1155,50 @@ mod tests {
             ["omega", "_p1", "_p2", "bulk_cr", "bulk_vm"],
             "the wrapped-comment tail must all be seen"
         );
+    }
+}
+
+#[cfg(test)]
+mod ground_cap_tests {
+    use super::*;
+
+    /// docs/39 surface instance: a meteor PROMOTES a patch of the visual terrain into real SPH matter — the
+    /// promoted cap must be the terrain's OWN columns (real material, follows the surface), localized, and in
+    /// a meter-scale patch-local frame (NOT planet-scale f32).
+    #[test]
+    fn promote_ground_cap_reads_the_real_terrain_columns() {
+        // A tiny flat world: 8³ voxels, bottom 4 solid basalt, top air (1 voxel = 1 m).
+        let mats = crate::materials::catalogue().to_vec();
+        let basalt = crate::materials::index_of(&mats, "basalt");
+        let (w, h, d) = (8usize, 8usize, 8usize);
+        let mut voxels = vec![0u16; w * h * d];
+        let vidx = |x: usize, y: usize, z: usize| (y * d + z) * w + x;
+        for x in 0..w {
+            for z in 0..d {
+                for y in 0..4 {
+                    voxels[vidx(x, y, z)] = basalt as u16 + 1; // stored as index+1 (0 = air)
+                }
+            }
+        }
+        let world = crate::world::World::from_voxels(w, h, d, voxels, h, None);
+
+        let site = glam::Vec3::new(0.0, 0.0, 0.0); // impact at the patch centre (world origin)
+        let (parts, eos, floor_y) = promote_ground_cap(&world, &mats, site, 3.0, 2.0);
+
+        assert!(!parts.is_empty(), "the impact region promotes to real particles");
+        // LOCALIZED to the impact region (a patch, not the whole world).
+        assert!(
+            parts.iter().all(|p| (p.pos[0] * p.pos[0] + p.pos[2] * p.pos[2]).sqrt() <= 3.5),
+            "the promoted cap is localized to the impact region"
+        );
+        // PATCH-LOCAL frame: meter-scale coordinates, f32-clean (NOT planet-scale 6.4e6).
+        assert!(parts.iter().all(|p| p.pos[1].abs() < 10.0), "the frame is patch-local (meter scale)");
+        // The terrain's OWN material — basalt's density + a single EOS, not a defaulted rock.
+        assert_eq!(eos.len(), 1, "one material in the flat basalt patch");
+        let density = mats[basalt].density;
+        assert!(parts.iter().all(|p| (p.mass - density).abs() < 1.0), "mass = voxel density × 1 m³");
+        // The planar floor sits BELOW the impact surface (it's the un-seen base the cap rests on).
+        assert!(floor_y < 0.5, "the planar floor is below the surface, got {floor_y}");
     }
 }
 
