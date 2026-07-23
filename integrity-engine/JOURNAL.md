@@ -30,9 +30,19 @@ cached `catalogue()`). A world is a world is a world — one place to improve a 
 scene. Each block carries its own `status` (`verified`/`partial`/`provisional`) and `source`, so the
 provenance moved *with* the numbers and is queryable, not buried in a comment: basalt verified (Benz &
 Asphaug 1999), iron's compressed branch verified (Wissing & Hobbs 2020) with a provisional vapor branch,
-granite and peridotite (a dunite analog) provisional. **Sourcing the provisional sets against the primary
-tables is now a data edit**, and that research is in flight. A material given a block becomes available
-automatically through `Tillotson::for_material`.
+granite and peridotite (a dunite analog) provisional.
+
+**Sourcing then caught a real bug** ("go fetch it", Robin). The provisional peridotite set was a
+mistranscribed Marinova 2011 olivine fit — `B` was 10× too stiff (4.9e11 vs 49 GPa) and `E0` 10× too low
+(5.5e7 vs 550 MJ/kg), which is exactly the "differentiated body puffed up" symptom `eos.rs` had flagged.
+Corrected to the genuine Marinova set. Also added the sourced **water ice** (Benz & Asphaug 1999, verbatim,
+`verified`) and **water** (SWIFT/Melosh planetary-SPH set, cross-checked). The eos tests now iterate the
+catalogue, so **every** Tillotson material — including the new sets — is validated against the same
+bulk-modulus / sound-speed / monotone-compression / vapor-continuity invariants automatically. A material
+given a block becomes available through `Tillotson::for_material`. (Open: the primary Melosh 1989 book was
+not readable online, so granite and the iron vapor branch stay `provisional`/`partial`; the olivine set is
+single-source via the Stewart-group pyKO code. Peridotite is not yet used in body-building — basalt is the
+mantle there — so this is a correctness fix ahead of the layered-Earth SPH work, with no scene changed.)
 
 **Verified.** Values byte-identical to the former constants ⇒ no physics change: full suite **328/328 (+2
 new tests)**, including the slow giant-impact integration tests (`theia`, `birth_scene`,

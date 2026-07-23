@@ -221,19 +221,22 @@ impl From<Tillotson> for Eos {
 mod tests {
     use super::*;
 
-    const MATS: &[(&str, fn() -> Tillotson)] = &[
-        ("granite", Tillotson::granite),
-        ("basalt", Tillotson::basalt),
-        ("peridotite", Tillotson::peridotite),
-        ("iron", Tillotson::iron),
-    ];
+    /// Every material in the catalogue that carries a Tillotson block — so the physics checks below
+    /// validate ALL of them (and any sourced later) automatically, not a hand-maintained subset. This is
+    /// what exercises the newly-sourced water/ice sets against the same bulk-modulus / sound-speed /
+    /// monotone-compression / vapor-continuity invariants the rock/metal sets must satisfy.
+    fn all_tillotson() -> Vec<(String, Tillotson)> {
+        crate::materials::catalogue()
+            .iter()
+            .filter_map(|m| Tillotson::for_material(&m.id).map(|t| (m.id.clone(), t)))
+            .collect()
+    }
 
     #[test]
     fn cold_reference_state_has_zero_pressure() {
         // At ρ=ρ₀, u=0: μ=0 so the A·μ + B·μ² terms vanish, and the ρu thermal term is 0 → P=0. The
         // zero-pressure cold reference state is the definition of ρ₀; a nonzero P here is a sign error.
-        for (name, mk) in MATS {
-            let t = mk();
+        for (name, t) in all_tillotson() {
             let p = t.pressure(t.rho0, 0.0);
             assert!(p.abs() < 1.0, "{name}: cold reference P must be ~0, got {p:.3e} Pa");
         }
@@ -244,8 +247,7 @@ mod tests {
         // The whole point of an EOS over a contact spring: cold compression develops a REAL bulk modulus.
         // K = ρ·dP/dρ at ρ₀ (u≈0) must equal the material's A within a few percent (higher-order B·μ² and
         // the tiny thermal term are the residual). This is the physical anchor of the parameter set.
-        for (name, mk) in MATS {
-            let t = mk();
+        for (name, t) in all_tillotson() {
             let u = 1.0; // ~cold
             let dr = t.rho0 * 1.0e-4;
             let dp_drho = (t.pressure(t.rho0 + dr, u) - t.pressure(t.rho0 - dr, u)) / (2.0 * dr);
@@ -259,8 +261,7 @@ mod tests {
     fn compression_monotonically_raises_pressure() {
         // Compressing cold matter past ρ₀ must raise P monotonically (a stiffening solid), and to hundreds
         // of GPa at strong compression — the regime a giant impact reaches.
-        for (name, mk) in MATS {
-            let t = mk();
+        for (name, t) in all_tillotson() {
             let u = 1.0;
             let p10 = t.pressure(t.rho0 * 1.10, u); // 10% compression
             let p30 = t.pressure(t.rho0 * 1.30, u); // 30% compression
@@ -276,8 +277,7 @@ mod tests {
         // A parcel decompressed well below ρ₀ AND fully vaporized (u > E_cv) is on the hot branch, where the
         // condensed terms have decayed away: P → a·ρu (small, gas-like), and far below the cold-compressed
         // pressure at the same density. This is the vapor the disk expands into.
-        for (name, mk) in MATS {
-            let t = mk();
+        for (name, t) in all_tillotson() {
             let rho = t.rho0 * 0.3; // strongly expanded
             let u_hot = t.e_cv * 3.0;
             let p_hot = t.pressure(rho, u_hot);
@@ -295,8 +295,7 @@ mod tests {
         // The piecewise closure must be continuous in u at E_iv and E_cv for an expanded parcel (η<1) — a
         // jump would be a spurious pressure discontinuity (numerical shock). Continuity holds by
         // construction (the blend → p_compressed at E_iv, → p_expanded at E_cv); this guards the wiring.
-        for (name, mk) in MATS {
-            let t = mk();
+        for (name, t) in all_tillotson() {
             let rho = t.rho0 * 0.7;
             // Tiny straddle so the finite slope contributes negligibly (the function is continuous, so the
             // jump → 0 as δ → 0). The scale floor is tied to the bulk modulus A so it does NOT collapse where
@@ -318,8 +317,7 @@ mod tests {
     fn sound_speed_is_real_and_of_the_expected_order() {
         // At the cold reference state c² ≈ A/ρ₀ (the bulk-modulus sound speed), giving km/s — the right
         // order for rock/iron (basalt ~3 km/s bar, iron ~4 km/s). Confirms sound_speed_sq is wired to P.
-        for (name, mk) in MATS {
-            let t = mk();
+        for (name, t) in all_tillotson() {
             let c = t.sound_speed_sq(t.rho0, 1.0).sqrt();
             let c_bulk = (t.cap_a / t.rho0).sqrt();
             assert!(c > 1.0e3 && c < 1.5e4, "{name}: bar sound speed {c:.0} m/s out of range");
@@ -362,15 +360,19 @@ mod tests {
         let fe = Tillotson::iron();
         assert_eq!((fe.rho0, fe.cap_a, fe.cap_b), (7850.0, 1.28e11, 1.815e11), "iron rho0/A/B");
         let per = Tillotson::peridotite();
-        assert_eq!((per.rho0, per.cap_b), (3320.0, 4.9e11), "peridotite rho0/B (dunite analog)");
+        assert_eq!(
+            (per.rho0, per.cap_b, per.e0),
+            (3500.0, 4.9e10, 5.5e8),
+            "peridotite = Marinova olivine (B=49 GPa, E0=550 MJ/kg) — the corrected 10x transcription bug"
+        );
 
-        // The four characterized materials resolve through `for_material`; an uncharacterized one is
-        // honestly `None` (no invented EOS), which is the fallback signal the callers rely on.
-        for id in ["granite", "basalt", "peridotite", "iron"] {
+        // Characterized materials resolve through `for_material`; an uncharacterized one is honestly
+        // `None` (no invented EOS), the fallback signal the callers rely on.
+        for id in ["granite", "basalt", "peridotite", "iron", "water", "ice"] {
             assert!(Tillotson::for_material(id).is_some(), "{id} has a catalogue EOS block");
         }
-        assert!(Tillotson::for_material("water").is_none(), "water has no EOS block yet");
         assert!(Tillotson::for_material("air").is_none(), "gases use the ideal-gas closure, not Tillotson");
+        assert!(Tillotson::for_material("oak").is_none(), "wood has no condensed-matter EOS");
         assert!(Tillotson::for_material("not_a_material").is_none(), "an unknown id is None, not a panic");
     }
 }

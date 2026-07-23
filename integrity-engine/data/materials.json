@@ -78,7 +78,7 @@
         "alpha": 5.0,
         "beta": 5.0,
         "status": "provisional",
-        "source": "Melosh 1989, Impact Cratering, Appendix II (transcribed; UNVERIFIED against the primary table)"
+        "source": "Melosh 1989 App. II (via SWIFT/WoMa) & Benz et al. 1986 (via Meier/Reinhardt & Stadel 2021); three code reproductions agree. rho0=2680 is Melosh's (Benz uses 2700). Not read from the primary book."
       },
       "ranges": {
         "density": [
@@ -164,7 +164,7 @@
         "alpha": 5.0,
         "beta": 5.0,
         "status": "verified",
-        "source": "Benz & Asphaug 1999, Icarus 142, Table 2 (A=B=26.7 GPa, E0=487 MJ/kg, E_iv=4.72, E_cv=18.2 MJ/kg, alpha=beta=5)"
+        "source": "Benz & Asphaug 1999, Icarus 142, Table 2 (CONFIRMED verbatim; params for lunar gabbroic anorthosite per O'Keefe & Ahrens 1982a, with basalt rho0 & bulk modulus). A=B=26.7 GPa, E0=487, E_iv=4.72, E_cv=18.2 MJ/kg, alpha=beta=5"
       },
       "ranges": {
         "density": [
@@ -235,19 +235,19 @@
         "decomposition_suppressed_pa": 0.0
       },
       "tillotson": {
-        "rho0": 3320.0,
+        "rho0": 3500.0,
         "a": 0.5,
         "b": 1.4,
         "A": 1.31e11,
-        "B": 4.9e11,
-        "E0": 5.5e7,
+        "B": 4.9e10,
+        "E0": 5.5e8,
         "E_iv": 4.5e6,
-        "E_cv": 1.4e7,
+        "E_cv": 1.45e7,
         "alpha": 5.0,
         "beta": 5.0,
         "status": "provisional",
-        "source": "dunite/olivine analog; rho0 Chau et al. 2018; moduli/energies transcribed (Melosh-family) & UNVERIFIED against the primary table",
-        "notes": "Peridotite is modeled with dunite (olivine) Tillotson params, the standard giant-impact mantle material. B (nonlinear modulus) is flagged suspect: a differentiated body using it puffed up."
+        "source": "olivine/dunite Tillotson set, Marinova et al. 2011 (via the Stewart-group pyKO EOS table; single-source, not read from Marinova directly)",
+        "notes": "Peridotite modeled with the olivine (dunite) Tillotson set, the standard giant-impact mantle material. CORRECTED 2026-07-22 by sourcing: B was 4.9e11 (10x too stiff) and E0 was 5.5e7 (10x too low) -- transcription errors that made a differentiated body puff up. Marinova's values are B=49 GPa, E0=550 MJ/kg. Alternative: Chau et al. 2018 substitute rho0=3320 into basalt's moduli (a density hack, not an independent fit)."
       },
       "ranges": {
         "density": [
@@ -529,7 +529,7 @@
         "alpha": 5.0,
         "beta": 5.0,
         "status": "partial",
-        "source": "compressed branch (rho0, a, b, A, B, E0): Wissing & Hobbs 2020, A&A 635 A21, Table 2 (refit to Brown et al. 2000 shock data); vapor branch (E_iv, E_cv, alpha, beta): Melosh-family PROVISIONAL",
+        "source": "compressed branch (rho0, a, b, A, B, E0): Wissing & Hobbs 2020, A&A 635 A21, Table 2 (refit to Brown et al. 2000, CONFIRMED verbatim); vapor branch (E_iv, E_cv, alpha, beta): Melosh 1989 iron (W&H did not refit these)",
         "notes": "Planetary core iron. Compressed branch verified; vapor branch (E_iv/E_cv/alpha/beta) provisional and only bites at impact energies."
       },
       "ranges": {
@@ -1277,6 +1277,20 @@
         "molar_mass": 0.018015,
         "decomposition_suppressed_pa": 0.0
       },
+      "tillotson": {
+        "rho0": 998.0,
+        "a": 0.7,
+        "b": 0.15,
+        "A": 2.18e9,
+        "B": 1.325e10,
+        "E0": 7.0e6,
+        "E_iv": 4.19e5,
+        "E_cv": 2.69e6,
+        "alpha": 10.0,
+        "beta": 5.0,
+        "status": "provisional",
+        "source": "SWIFT/WoMa 'Melosh 1989' planetary-SPH water set (cross-checked across code reproductions; a competing Woolfson 2007 set also exists). A=2.18 GPa matches water's real bulk modulus."
+      },
       "ranges": {
         "density": [
           992,
@@ -1615,6 +1629,20 @@
         "molar_mass": 0.018015,
         "decomposes_k": 0.0,
         "decomposition_suppressed_pa": 0.0
+      },
+      "tillotson": {
+        "rho0": 917.0,
+        "a": 0.3,
+        "b": 0.1,
+        "A": 9.47e9,
+        "B": 9.47e9,
+        "E0": 1.0e7,
+        "E_iv": 7.73e5,
+        "E_cv": 3.04e6,
+        "alpha": 10.0,
+        "beta": 5.0,
+        "status": "verified",
+        "source": "Benz & Asphaug 1999, Icarus 142, Table 2 (CONFIRMED verbatim; ice params O'Keefe & Ahrens 1982b, rho0/bulk-modulus Lange & Ahrens 1983). alpha=10, beta=5 -- NOT the switched 5/10 some code copies carry."
       }
     },
     {
