@@ -1954,3 +1954,137 @@ mod multi_impact_tests {
         assert!(spread > 4000.0, "the two impact sites remain distinct ({spread:.0} m apart)");
     }
 }
+
+#[cfg(test)]
+mod scaling_bench {
+    use super::*;
+    use std::time::Instant;
+
+    /// **The moon-drop bottleneck, measured at production scale.** After a collision the orbital scene
+    /// falls to ~1 fps (3,000 fragments) / ~5 fps (1,500). This times a full `step_block` at both counts
+    /// with the real debris configuration (self-gravity + a planet source + granular contact), reports
+    /// per-particle cost, and — the diagnostic that matters — whether that per-particle cost is FLAT
+    /// (O(N log N), as the Barnes-Hut + neighbour-grid claim) or RISING (a hidden O(N²)).
+    ///
+    /// Run: `cargo test --lib debris_step_scaling -- --ignored --nocapture`
+    ///
+    /// BASELINE (this box, native, before any GPU move), N=3000 debris fragments:
+    ///   step_block          276 ms/frame  (≈3.6 fps for the physics alone; the observed ~1 fps also
+    ///                                       pays render + up to 4 step_blocks/frame)
+    ///   accel pass, both     53 ms
+    ///     Barnes-Hut eval    34 ms  ← 64% of the accel, and THE bottleneck (build is only ~1 ms)
+    ///     contact grid        7 ms
+    ///   θ sensitivity (BH eval): θ0.5 32ms · θ0.7 16ms · θ1.0 8ms · θ1.5 3ms
+    ///   brute O(N²) 1-thread 48 ms  ← what a GPU does in microseconds, in parallel, and EXACTLY.
+    /// Conclusion: self-gravity is a per-particle N-body force that belongs on the GPU (as birth's SPH
+    /// already is); the CPU tree traversal is the whole cost. Recorded so the GPU move can be *shown* to
+    /// improve on this, not merely asserted.
+    #[test]
+    #[ignore = "perf bench — run explicitly with --ignored --nocapture"]
+    fn debris_step_scaling() {
+        let mut s = 0x1234_5678u64;
+        let mut rng = || {
+            s ^= s << 13; s ^= s >> 7; s ^= s << 17;
+            (s >> 40) as f64 / (1u64 << 24) as f64 - 0.5
+        };
+        let build = |n: usize, rng: &mut dyn FnMut() -> f64| -> Aggregate {
+            // A disrupted-moon cloud near Earth: fragments in a ~lunar-radius ball, real masses.
+            let mut ps = Vec::with_capacity(n);
+            for _ in 0..n {
+                let dir = DVec3::new(rng(), rng(), rng()).normalize_or_zero();
+                let r = 1.7e6 * (0.2 + rng().abs());
+                ps.push(Body { pos: dir * r + DVec3::new(6.4e6 + 1.0e7, 0.0, 0.0), vel: DVec3::ZERO, mass: 5.0e19 });
+            }
+            let frag_r = 5.0e4;
+            let frag_mass = 5.0e19;
+            let contact = crate::granular::contact_from_material(
+                &crate::materials::load()[crate::materials::index_of(&crate::materials::load(), "basalt")],
+                frag_r, frag_mass,
+            );
+            Aggregate::new(ps, 2.5e4)
+                .with_gravity_source(DVec3::ZERO, 5.972e24, 6.371e6)
+                .with_contact(contact, frag_mass)
+        };
+
+        println!("\n  N     step_block   per-particle   accel×1   evals/step");
+        let mut prev_per = 0.0f64;
+        // Attribution: at N=3000, time one accel pass with each stage isolated.
+        {
+            let mk = |grav: bool, contact: bool, rng: &mut dyn FnMut() -> f64| -> Aggregate {
+                let mut a = build(3000, rng);
+                a.self_gravity = grav;
+                if !contact { a.contact = None; }
+                a
+            };
+            let time_accel = |a: &mut Aggregate| -> f64 {
+                let _ = a.accelerations();
+                let t = Instant::now();
+                for _ in 0..8 { let _ = a.accelerations(); }
+                t.elapsed().as_secs_f64() * 1e3 / 8.0
+            };
+            let both = time_accel(&mut mk(true, true, &mut rng));
+            let grav = time_accel(&mut mk(true, false, &mut rng));
+            let cont = time_accel(&mut mk(false, true, &mut rng));
+            let neither = time_accel(&mut mk(false, false, &mut rng));
+            println!("  accel attribution @N=3000 (ms/pass):");
+            println!("    both stages:        {both:6.2}");
+            println!("    Barnes-Hut only:    {grav:6.2}   (contact off)");
+            println!("    contact grid only:  {cont:6.2}   (gravity off)");
+            println!("    neither (source+bookkeeping): {neither:6.2}");
+            // Barnes-Hut: split BUILD (allocates a tree) from EVAL (traverses it).
+            let a = build(3000, &mut rng);
+            let sr_pos: Vec<DVec3> = a.particles.iter().map(|b| b.pos).collect();
+            let masses: Vec<f64> = a.particles.iter().map(|b| b.mass).collect();
+            let t = Instant::now();
+            let mut bh = crate::bhtree::BarnesHut::build(&sr_pos, &masses, 0.5, a.softening);
+            for _ in 0..7 { bh = crate::bhtree::BarnesHut::build(&sr_pos, &masses, 0.5, a.softening); }
+            let build_ms = t.elapsed().as_secs_f64() * 1e3 / 8.0;
+            let t = Instant::now();
+            for _ in 0..8 { let _ = bh.accelerations(&sr_pos, &masses); }
+            let eval_ms = t.elapsed().as_secs_f64() * 1e3 / 8.0;
+            println!("    BH build: {build_ms:6.2} ms   BH eval: {eval_ms:6.2} ms");
+            // θ sensitivity: a wider opening angle approximates more aggressively → far fewer traversals.
+            for theta in [0.5, 0.7, 1.0, 1.5] {
+                let bh = crate::bhtree::BarnesHut::build(&sr_pos, &masses, theta, a.softening);
+                let t = Instant::now();
+                for _ in 0..8 { let _ = bh.accelerations(&sr_pos, &masses); }
+                let ev = t.elapsed().as_secs_f64() * 1e3 / 8.0;
+                println!("    θ={theta:.1}: eval {ev:6.2} ms");
+            }
+            // Brute-force direct sum, for reference — what a GPU would do trivially, and the accuracy floor.
+            let t = Instant::now();
+            let mut acc = vec![DVec3::ZERO; sr_pos.len()];
+            for i in 0..sr_pos.len() {
+                for j in 0..sr_pos.len() {
+                    if i == j { continue; }
+                    let d = sr_pos[j] - sr_pos[i];
+                    let r2 = d.length_squared() + a.softening * a.softening;
+                    acc[i] += d * (crate::orbit::G * masses[j] / (r2 * r2.sqrt()));
+                }
+            }
+            println!("    brute O(N²) direct sum (1 pass, CPU): {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+        }
+        for &n in &[1500usize, 3000usize] {
+            let mut agg = build(n, &mut rng);
+            // Warm up (allocations, first tree build).
+            let _ = agg.accelerations();
+            // One acceleration pass alone.
+            let t = Instant::now();
+            for _ in 0..5 { let _ = agg.accelerations(); }
+            let accel_ms = t.elapsed().as_secs_f64() * 1e3 / 5.0;
+            // A full frame's block step (dt matched to the debris frame rate).
+            let t = Instant::now();
+            agg.step_block(8.0, 0.05);
+            let block_ms = t.elapsed().as_secs_f64() * 1e3;
+            let per = block_ms / n as f64;
+            let evals = block_ms / accel_ms.max(1e-6);
+            println!("  {n:<5} {block_ms:8.1} ms  {per:9.4} ms   {accel_ms:6.2}ms  {evals:6.1}");
+            if prev_per > 0.0 {
+                let ratio = per / prev_per;
+                println!("  → per-particle cost ×{ratio:.2} for 2× N  ({})",
+                    if ratio > 1.5 { "RISING → O(N²) somewhere" } else { "flat → O(N log N), good" });
+            }
+            prev_per = per;
+        }
+    }
+}
