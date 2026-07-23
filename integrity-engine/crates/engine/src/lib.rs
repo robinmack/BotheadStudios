@@ -132,6 +132,71 @@ pub fn body_surface_urls(id: &str) -> String {
     serde_json::to_string(&urls).unwrap_or_else(|_| "[]".into())
 }
 
+/// **How a scene body maps to a DEFINED body** — the "instance of Luna / Terra" rule, and where the
+/// engine's refusal to override a scene lives. A scene declares WHICH body (its `profile`) and WHERE and
+/// how fast; the body's mass, radius and composition come from `assets/bodies/<id>.json`. These are free
+/// (not inside the wasm-only `mod app`) so they can be TESTED natively — a rule nobody can run is a rule
+/// nobody keeps.
+
+#[cfg(test)]
+mod body_spec_tests {
+    use crate::terra::world_def::BodyDef;
+
+    /// **An instance of Luna weighs what Luna weighs — even if a scene tried to say otherwise.** The parse
+    /// test forbids the override in the data; this proves the ENGINE would ignore one anyway, so the two
+    /// guards agree: a defined body's mass and radius come from its definition, full stop.
+    #[test]
+    fn a_defined_body_takes_its_definition_not_a_declared_override() {
+        // A "moon" body carrying a bogus mass/radius — the engine must ignore both.
+        let mut d = BodyDef::default();
+        d.profile = Some("moon".into());
+        d.mass_kg = Some(1.0); // absurd override
+        d.radius_m = Some(1.0);
+        let m = super::declared_body_mass(&d);
+        let r = super::declared_body_radius(&d);
+        assert!((m - crate::planet::body("moon").total_mass()).abs() < 1.0, "mass is Luna's, not 1 kg");
+        assert!((r - 1.737e6).abs() < 1.0e4, "radius is Luna's, not 1 m (got {r})");
+
+        // Earth likewise.
+        let mut e = BodyDef::default();
+        e.profile = Some("earth".into());
+        assert!((super::declared_body_radius(&e) - 6.371e6).abs() < 1e3, "Terra's radius from the definition");
+
+        // A BARE point mass (no profile) keeps its declared mass — a scene may still place one.
+        let mut point = BodyDef::default();
+        point.mass_kg = Some(5.0e20);
+        assert_eq!(super::declared_body_mass(&point), 5.0e20, "an undefined body keeps its declared mass");
+    }
+}
+
+/// The defined body a scene body refers to, or `None` for a bare point mass with no definition.
+fn body_definition(profile: Option<&str>) -> Option<crate::planet::LayeredBody> {
+    match profile {
+        Some("sun") | Some("earth") | Some("moon") | Some("theia") | Some("proto-earth") => {
+            Some(crate::planet::body(profile.unwrap()))
+        }
+        _ => None,
+    }
+}
+
+/// A declared body's mass (kg). An instance of a defined body takes the DEFINITION's mass; an explicit
+/// `mass_kg` is honoured only for a body with no definition — so a scene can place a generic point mass,
+/// but can never OVERRIDE what Luna weighs.
+fn declared_body_mass(d: &crate::terra::world_def::BodyDef) -> f64 {
+    if let Some(def) = body_definition(d.profile.as_deref()) {
+        return def.total_mass();
+    }
+    d.mass_kg.unwrap_or(0.0)
+}
+
+/// A declared body's radius (m), from its definition, or an explicit `radius_m` for an undefined body.
+fn declared_body_radius(d: &crate::terra::world_def::BodyDef) -> f64 {
+    if let Some(def) = body_definition(d.profile.as_deref()) {
+        return def.radius();
+    }
+    d.radius_m.unwrap_or(0.0)
+}
+
 #[cfg(target_arch = "wasm32")]
 mod app {
     use crate::mesher::{self, Mesh, Vertex};
@@ -574,6 +639,26 @@ mod app {
     const MOON_MASS: f64 = 7.342e22; // kg
     const EARTH_RADIUS_M: f64 = 6.371e6; // m
     const MOON_RADIUS_M: f64 = 1.737e6; // m
+
+    /// What kind of body this is, for the generic render (a star lights, a planet is the globe, a moon is
+    /// a sphere). Declared by the scene's `role`; the engine decides everything downstream.
+    #[derive(Clone, Copy, PartialEq)]
+    enum BodyRole {
+        Star,
+        Planet,
+        Moon,
+    }
+
+    /// Per-body metadata the engine renders and collides from. Indexed identically to `OrbitDemo::bodies`.
+    #[derive(Clone, Copy)]
+    struct BodyMeta {
+        radius_m: f64,
+        tint: [f32; 4],
+        role: BodyRole,
+        /// The engine has resolved this body into the debris field — its matter is particles now, so it
+        /// is no longer drawn as an intact body. Set by collision detection, never by the scene.
+        materialized: bool,
+    }
     const MOON_DIST_M: f64 = 3.844e8; // m (semi-major axis)
     const MOON_SPEED: f64 = 1022.0; // m/s (mean orbital speed)
     const SUN_MASS: f64 = 1.989e30; // kg — holds and lights the system
@@ -674,6 +759,15 @@ mod app {
         // brightness (illumination × reflectance), so a dark-but-lit body still reads bright.
         earth_tint: [f32; 4],
         moon_tint: [f32; 4],
+        /// **Per-body render/collision metadata, one entry per `self.bodies`.** A scene declares bodies
+        /// (position, velocity, mass, radius); this holds the rest the ENGINE needs to render and collide
+        /// each one — its radius, its tint, and whether it has been resolved into the debris field.
+        ///
+        /// This replaces the single-value `impactor_radius` / `moon_tint` / `impactor_mass`, which were
+        /// OVERWRITTEN on each moon in the load loop — so with two moons they held only the LAST moon's
+        /// values, and both moons shared one radius, one tint, one mass. That is why one moon fragmented
+        /// and the other did not, and why the tints were wrong.
+        body_meta: Vec<BodyMeta>,
         /// Snapshot of the initial [Sun, Earth, Moon] state, for the "reset" control.
         initial_bodies: Vec<crate::orbit::Body>,
         /// Snapshot of the initial spin angular momentum, restored on Reset alongside `initial_bodies`.
@@ -1074,6 +1168,7 @@ mod app {
                 focus: 1, // start on the planet
                 earth_tint,
                 moon_tint,
+                body_meta: Vec::new(),
                 initial_bodies,
                 impacted: false,
                 moon_hit: vec![false; num_moons],
@@ -1238,25 +1333,13 @@ mod app {
 
             // Mass/radius resolve from an explicit field or a named profile (declared, not fudged). The Sun's mass
             // EMERGES from its composition (`planet::sun`), like the current hardcoded path.
-            let body_mass = |d: &BodyDef| -> f64 {
-                d.mass_kg.unwrap_or_else(|| match d.profile.as_deref() {
-                    Some("sun") => crate::planet::sun().total_mass(),
-                    Some("earth") => EARTH_MASS,
-                    Some("moon") => MOON_MASS,
-                    _ => 0.0,
-                })
-            };
-            let body_radius = |d: &BodyDef| -> f64 {
-                d.radius_m.unwrap_or_else(|| match d.profile.as_deref() {
-                    Some("earth") => EARTH_RADIUS_M,
-                    Some("moon") => MOON_RADIUS_M,
-                    _ => 0.0,
-                })
-            };
+            let body_mass = |d: &BodyDef| -> f64 { crate::declared_body_mass(d) };
+            let body_radius = |d: &BodyDef| -> f64 { crate::declared_body_radius(d) };
 
             let mut bodies = Vec::with_capacity(defs.len());
             let mut planet_idx = 1usize;
             let mut moon_count = 0usize;
+            self.body_meta.clear();
             for (i, d) in defs.iter().enumerate() {
                 bodies.push(crate::orbit::Body {
                     pos: glam::DVec3::from_array(d.pos_m),
@@ -1281,10 +1364,24 @@ mod app {
                     let a = materials::aggregate_albedo(&comp, mats);
                     [a[0], a[1], a[2], 1.0]
                 };
+                let this_tint = tint(d.profile.as_deref(), &self.mats);
+                let role = match d.role.as_str() {
+                    "star" => BodyRole::Star,
+                    "planet" => BodyRole::Planet,
+                    _ => BodyRole::Moon,
+                };
+                // ONE metadata entry per declared body — no overwriting. This is where the single-value
+                // collapse is fixed: each moon keeps its OWN radius and tint.
+                self.body_meta.push(BodyMeta {
+                    radius_m: body_radius(d),
+                    tint: this_tint,
+                    role,
+                    materialized: false,
+                });
                 match d.role.as_str() {
                     "planet" => {
                         planet_idx = i;
-                        self.earth_tint = tint(d.profile.as_deref(), &self.mats);
+                        self.earth_tint = this_tint;
                         if let Some(p) = d.spin_period_s {
                             self.spin_l = glam::DVec3::new(0.0, 0.0, 1.0)
                                 * (crate::tides::moment_of_inertia(body_mass(d), body_radius(d))
@@ -1294,7 +1391,10 @@ mod app {
                     }
                     "moon" => {
                         moon_count += 1;
-                        self.moon_tint = tint(d.profile.as_deref(), &self.mats);
+                        // Kept for the birth path and back-compat; the orbital render/collision now reads
+                        // `body_meta`. With multiple moons these hold the last one, which is exactly the
+                        // bug body_meta replaces — so nothing new should come to depend on them.
+                        self.moon_tint = this_tint;
                         self.impactor_radius = body_radius(d);
                         self.impactor_mass = body_mass(d);
                     }
@@ -2256,8 +2356,11 @@ mod app {
             // physics. It now hands the engine the bodies it holds and reads back the collisions the
             // engine found; the scene only EXECUTES the responses, using its own materialisation.
             let strength = self.mats[materials::index_of(&self.mats, "basalt")].fracture_strength as f64;
+            // Each body's radius comes from its OWN metadata — no shared `impactor_radius`, so two moons
+            // of different sizes would collide at their own contact distances.
+            let meta = self.body_meta.clone();
             let body_state = |i: usize| {
-                let r = if i == 1 { EARTH_RADIUS_M } else { self.impactor_radius };
+                let r = meta.get(i).map(|m| m.radius_m).unwrap_or(EARTH_RADIUS_M);
                 crate::interaction::BodyState {
                     pos: self.bodies[i].pos,
                     vel: self.bodies[i].vel,
@@ -2279,7 +2382,7 @@ mod app {
             // — it is checked and correctly finds nothing, which is more honest than special-casing it out.
             let after_pos: Vec<glam::DVec3> = self.bodies.iter().map(|b| b.pos).collect();
             let active: Vec<bool> = (0..self.bodies.len())
-                .map(|i| i < 2 || !self.moon_hit[i - 2])
+                .map(|i| self.body_meta.get(i).map_or(true, |m| !m.materialized))
                 .collect();
             let collisions = crate::interaction::detect_swept(&before, &after_pos, &active);
 
@@ -2293,6 +2396,9 @@ mod app {
                     // recovered the true contact site and velocity; the scene only materialises them.
                     let k = c.striker - 2;
                     self.moon_hit[k] = true;
+                    if let Some(m) = self.body_meta.get_mut(c.striker) {
+                        m.materialized = true; // it is particles now — stop drawing it as a body
+                    }
                     shatters.push((c.site, c.contact_velocity, c.energy_j, before[c.striker].mass_kg, c.striker));
                     // Park the point mass at the impact point, co-moving with Earth.
                     self.bodies[c.striker].pos = c.site;
@@ -3034,37 +3140,40 @@ mod app {
             } else {
                 0
             };
-            // MOONS AS MATTER: each intact moon is a grain shell (like Earth) — its basalt crust at
-            // its real reflectance, no smooth-sphere summary. A shattered moon is its debris instead.
-            let mshell_spacing =
-                self.impactor_radius * (4.0 * std::f64::consts::PI / MOON_SHELL_N as f64).sqrt();
-            let mshell_grain_r = ((0.62 * mshell_spacing) * DISPLAY_SCALE) as f32;
+            // **MOONS ARE SOLID BODIES.** Each intact moon is ONE sphere at its position, and it stops
+            // being drawn the moment it has struck Earth (`moon_hit[k]`) — because its matter is the
+            // debris cloud then, not a shell. What stood here drew each moon as 128 grain billboards, so a
+            // moon "dropped as particles, not a sphere"; and the shatter-hide only ever caught moon 0
+            // (`k == 0 && r_shattered`), so a second moon left an empty shell hanging on Earth while only
+            // the first appeared to fragment. One rule, every moon.
+            // Each moon is drawn from ITS OWN metadata — its own radius, its own tint, its own
+            // materialised state. One sphere per moon (the first pool slot); the rest of the pool is
+            // zeroed. A moon that has struck is not drawn at all: its matter is the debris field now.
             for (idx, uni) in self.moon_unis.iter().enumerate() {
                 let k = idx / MOON_SHELL_N;
-                let i = idx % MOON_SHELL_N;
-                if k == 0 && r_shattered {
-                    // moon 0 has SHATTERED — drawn as its debris fragments below
+                let bi = 2 + k; // body index of this moon
+                let meta = self.body_meta.get(bi);
+                let visible = idx % MOON_SHELL_N == 0
+                    && meta.map_or(false, |m| m.role == BodyRole::Moon && !m.materialized);
+                if !visible {
                     write_space_uniform(
                         &self.queue, uni, view_proj, Mat4::from_scale(Vec3::ZERO),
-                        earth_light, [0.0; 4], [0.0; 4],
-                        AIRLESS,
-                        NO_GLOW,
+                        earth_light, [0.0; 4], [0.0; 4], AIRLESS, NO_GLOW,
                     );
                     continue;
                 }
-                let bi = 2 + k; // body index of this moon
-                let dir = crate::impact::fib_dir(i, MOON_SHELL_N);
-                let pos_w = r_bodies[bi] + dir * (self.impactor_radius - 0.62 * mshell_spacing);
-                let mpos = ((pos_w - focus) * DISPLAY_SCALE).as_vec3();
+                let m = meta.unwrap();
+                let mpos = ((r_bodies[bi] - focus) * DISPLAY_SCALE).as_vec3();
+                let mr = (m.radius_m * DISPLAY_SCALE) as f32;
                 let mlight = (sun - r_bodies[bi]).as_vec3().normalize();
                 write_space_uniform(
                     &self.queue,
                     uni,
                     view_proj,
-                    Mat4::from_translation(mpos) * Mat4::from_scale(Vec3::splat(mshell_grain_r)),
+                    Mat4::from_translation(mpos) * Mat4::from_scale(Vec3::splat(mr)),
                     mlight,
-                    self.moon_tint, // aggregate albedo of basalt (docs/17); dark, lit bright by the sun
-                    [0.0; 4],       // intact moon: reflected light only (its hot core is buried),
+                    m.tint,   // this moon's own reflectance
+                    [0.0; 4], // intact body: reflected light only (its hot core is buried)
                     AIRLESS,
                     NO_GLOW,
                 );
@@ -3216,10 +3325,9 @@ mod app {
                     for uni in self.wall_unis.iter() {
                         draw(&mut pass, uni, &self.sphere_gpu); // crater bowl wall (zero-scale when intact)
                     }
-                    for (idx, uni) in self.moon_unis.iter().enumerate() {
-                        if idx / MOON_SHELL_N == 0 && r_shattered {
-                            continue; // shattered — drawn as debris
-                        }
+                    // Every moon's sphere slot; the write pass above zero-scaled the ones that have
+                    // struck (invisible) and the unused pool entries, so no per-moon special case here.
+                    for uni in self.moon_unis.iter() {
                         draw(&mut pass, uni, &self.sphere_gpu);
                     }
                     for uni in self.debris_unis.iter().take(debris_count) {
