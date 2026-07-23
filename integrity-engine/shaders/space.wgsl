@@ -8,6 +8,8 @@ struct U {
     light_dir : vec4<f32>, // xyz = direction TO the sun, normalized
     tint      : vec4<f32>, // body color
     emissive  : vec4<f32>, // rgb = incandescent glow colour, w = intensity (self-lit, e.g. hot ejecta)
+    atm       : vec4<f32>, // xyz = Rayleigh optical depth per band, w = the display exposure (SUN_GAIN)
+    glow      : vec4<f32>, // rgb = Planck colour of the body's own temperature, w = its radiance gain
 };
 
 @group(0) @binding(0) var<uniform> u : U;
@@ -48,7 +50,10 @@ fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     // Reflected sunlight + self-emission. Incandescence is added BEFORE the sun term so hot ejecta glows
     // on its own — visible on the night side, exactly like real shock-heated rock. The colour/intensity
     // are a blackbody ramp of the fragment's actual temperature (matter physics → light, nothing scripted).
-    let radiance = u.emissive.rgb * u.emissive.w + u.tint.rgb * (AMBIENT + ndl * SUN_GAIN);
+    // Reflected sunlight + the material's declared incandescence + the body's own blackbody heat (the
+    // shared thermal glow: colour from Planck, brightness from Stefan-Boltzmann; zero for a cold body).
+    var radiance = u.emissive.rgb * u.emissive.w + u.tint.rgb * (AMBIENT + ndl * SUN_GAIN);
+    radiance += u.glow.rgb * (u.glow.w * SUN_GAIN);
     let mapped = tonemap(radiance); // the shared display law — compresses brightness, keeps hue
     return vec4<f32>(mapped, 1.0);
 }
