@@ -55,6 +55,18 @@ pub struct HydroBody {
     pub rho: Vec<f64>,
 }
 
+/// A particalized CAP + the abstract BULK it rests on (docs/39 resolution-on-demand). See
+/// [`HydroBody::particalize_cap`]. The `body` is the shock-affected region of the planet as SPH particles;
+/// `r_core` + `bulk_mass` describe the un-resolved remainder that the GPU treats as a Gauss gravity source
+/// and a non-injecting floor (`gpu_sph::set_bulk`).
+pub struct Cap {
+    pub body: HydroBody,
+    /// The bulk floor radius (m): the cap's inner edge — cap particles rest on the un-resolved interior here.
+    pub r_core: f64,
+    /// Mass (kg) of the un-resolved remainder (planet − cap): the Gauss gravity source for cap + impactor.
+    pub bulk_mass: f64,
+}
+
 /// Smoothing length for a particle of mass `m` in material of reference density `rho0`: ≈ 2 mean spacings.
 fn smoothing_for(m: f64, rho0: f64) -> f64 {
     2.0 * (m / rho0).cbrt()
@@ -234,6 +246,59 @@ impl HydroBody {
         // Softening = half the finest particle spacing (the densest layer's). h = 2·spacing ⇒ ¼h = ½ spacing.
         let softening = 0.25 * h.iter().cloned().fold(f64::INFINITY, f64::min);
         HydroBody { vel: vec![DVec3::ZERO; n], mass, u, eos, h, softening, rho, pos }
+    }
+
+    /// A localized CAP of a planet — the shock-affected region within `cap_radius` of the surface impact
+    /// point `site_dir·R_surf` — particalized to SPH-EOS particles (docs/39 resolution-on-demand). ONLY this
+    /// region becomes particles; the rest of the planet stays an abstract BULK: a Gauss gravity source + the
+    /// non-injecting floor the cap rests on (`gpu_sph::set_bulk`). So a small impactor on a big planet
+    /// resolves a crater's worth of matter, not the planet's whole 10²⁴ kg interior (Law III — resolve only
+    /// what necessity requires). The cap is FILTERED from a full-body [`Self::particalize`] seed, so its
+    /// materials, densities, geotherm and mass are the planet's own — no separate seeder to disagree.
+    ///
+    /// FIRST CUT (flagged): the floor is a hole-less sphere at `r_core` (excavation is the cap particles
+    /// moving, not a bowl carved in the boundary — a bowl is the refinement), the bulk is rigid (no recoil,
+    /// docs/39 39c), and the bulk gravity approximates the un-capped surface shell as part of the `r_core`
+    /// sphere (fine while the cap is a small fraction of the planet).
+    pub fn particalize_cap(
+        matter: &crate::planet::LayeredBody,
+        site_dir: DVec3,
+        cap_radius: f64,
+        resolution: usize,
+    ) -> Cap {
+        let r_surf = matter.radius();
+        let site = site_dir.normalize_or_zero() * r_surf;
+        // Seed the WHOLE body finely enough that the cap region keeps ~`resolution` particles, then keep only
+        // the cap. A ball centred ON the surface is ~half inside the planet, so v_cap ≈ ⅔π·cap_radius³.
+        let v_planet = FOUR_THIRDS_PI * r_surf.powi(3);
+        let v_cap = (2.0 / 3.0) * std::f64::consts::PI * cap_radius.powi(3);
+        let full_n = ((resolution as f64) * (v_planet / v_cap.max(1.0)))
+            .ceil()
+            .clamp(resolution as f64, 400_000.0) as usize;
+        let full = Self::particalize(matter, full_n);
+        let keep: Vec<usize> = (0..full.pos.len())
+            .filter(|&i| (full.pos[i] - site).length() < cap_radius)
+            .collect();
+        let body = HydroBody {
+            pos: keep.iter().map(|&i| full.pos[i]).collect(),
+            vel: vec![DVec3::ZERO; keep.len()],
+            mass: keep.iter().map(|&i| full.mass[i]).collect(),
+            u: keep.iter().map(|&i| full.u[i]).collect(),
+            eos: keep.iter().map(|&i| full.eos[i].clone()).collect(),
+            h: keep.iter().map(|&i| full.h[i]).collect(),
+            softening: full.softening,
+            rho: keep.iter().map(|&i| full.rho[i]).collect(),
+        };
+        let cap_mass: f64 = body.mass.iter().sum();
+        // The floor sits at the cap's inner edge (its deepest particle); the cap rests on the un-resolved
+        // interior there. `bulk_mass` is the planet minus the cap so the cap's own gravity isn't double-counted
+        // (the SPH direct-sum already carries it).
+        let r_core = body.pos.iter().map(|p| p.length()).fold(f64::INFINITY, f64::min);
+        Cap {
+            r_core: if r_core.is_finite() { r_core } else { r_surf },
+            bulk_mass: (matter.total_mass() - cap_mass).max(0.0),
+            body,
+        }
     }
 
     /// SPH density ρ_i = Σ_j m_j W(r_ij, h_ij) + self, with a symmetric per-pair smoothing length
@@ -1437,5 +1502,49 @@ mod tests {
         let mi: f64 = hi.mass.iter().sum();
         let real = 917.0 * 4.0 / 3.0 * std::f64::consts::PI * 1.0e6_f64.powi(3);
         assert!((mi - real).abs() / real < 0.03, "ice body mass conserved (got {mi:.3e} vs {real:.3e})");
+    }
+
+    /// docs/39 resolution-on-demand: a localized CAP is a crater's worth of the PLANET'S OWN matter near the
+    /// impact site — NOT the whole 10²⁴ kg (Law III). Only the shock region is resolved; the rest is the bulk.
+    #[test]
+    fn particalize_cap_resolves_only_the_impact_region_of_the_real_planet() {
+        let earth = crate::planet::earth();
+        let r_surf = earth.radius();
+        let cap_radius = 0.35 * r_surf; // a modest surface patch (~2,200 km)
+        let site = DVec3::X;
+        let cap = HydroBody::particalize_cap(&earth, site, cap_radius, 800);
+
+        // 1) EVERY cap particle is within cap_radius of the surface impact point — it IS localized (the far
+        //    side of the planet stays the abstract bulk, so the render can keep it a solid globe).
+        let site_pt = site * r_surf;
+        assert!(
+            cap.body.pos.iter().all(|p| (*p - site_pt).length() <= cap_radius + 1.0),
+            "the cap is localized to the impact region"
+        );
+        // 2) It's a small FRACTION of the planet — not all of Earth melted for a surface impact.
+        let cap_mass: f64 = cap.body.mass.iter().sum();
+        assert!(
+            cap_mass < 0.2 * earth.total_mass(),
+            "the cap is a fraction of the planet, got {:.3}",
+            cap_mass / earth.total_mass()
+        );
+        // 3) MASS CONSERVED across the split: cap + bulk = the whole planet exactly.
+        assert!(
+            ((cap_mass + cap.bulk_mass) - earth.total_mass()).abs() / earth.total_mass() < 1e-9,
+            "cap + bulk = the whole planet"
+        );
+        // 4) The floor sits at the cap's inner edge (~r_surf − cap_radius) and the cap reaches the surface.
+        assert!(
+            cap.r_core < r_surf && cap.r_core > r_surf - cap_radius - 0.1 * r_surf,
+            "floor at the cap's inner edge, got r_core={:.3e} (r_surf {:.3e})",
+            cap.r_core,
+            r_surf
+        );
+        let r_max = cap.body.pos.iter().map(|p| p.length()).fold(0.0, f64::max);
+        assert!(r_max > r_surf - 0.05 * r_surf, "the cap reaches the surface");
+        // 5) The planet's OWN near-surface material (crust/mantle, ρ₀ < 3,500) — filtered from the real
+        //    layered seed, not a defaulted rock — and a workable particle count for a cap.
+        assert!(cap.body.pos.len() > 200, "the cap keeps a workable particle count, got {}", cap.body.pos.len());
+        assert!(cap.body.eos.iter().any(|e| e.rho0() < 3500.0), "the near-surface crust/mantle material is present");
     }
 }
