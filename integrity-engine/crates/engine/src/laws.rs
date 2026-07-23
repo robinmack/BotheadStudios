@@ -306,3 +306,66 @@ mod scene_purity_tests {
         }
     }
 }
+
+/// A scene body that NAMES a defined body (Luna, Terra, the Sun) may declare only its IDENTITY and
+/// INITIAL CONDITIONS. These keys are the body's PHYSICS and belong to the definition — a scene that sets
+/// them is overriding what Luna weighs or how big Terra is, which is the thing the engine must never let a
+/// scene do.
+pub(crate) const SCENE_BODY_OVERRIDE_KEYS: &[&str] = &["mass_kg", "radius_m", "tint"];
+
+/// The body ids that HAVE a definition in `assets/bodies`. A scene body whose `profile`/`body` is one of
+/// these is an instance of that definition.
+pub(crate) const DEFINED_BODY_IDS: &[&str] = &["sun", "earth", "moon", "theia", "proto-earth"];
+
+#[cfg(test)]
+mod scene_declares_not_overrides_tests {
+    /// **A scene declares objects and trajectories; it never overrides the engine's physics.**
+    ///
+    /// Robin: "the scene should be set up as: Sun in position, Earth in position/rotation/velocity/mass,
+    /// Moon: position/velocity/mass... NOTHING about how to collide, particles, etc.", "each moon should
+    /// be an instance of pre-defined object Luna", and "add a test to ensure scenes don't get run with
+    /// engine overrides ever again... the scene test should be a parse of the scene's definition."
+    ///
+    /// So this parses every world file and asserts: a body that NAMES a defined body (an instance of Luna
+    /// or Terra) carries only its identity and initial conditions — position, velocity, spin — and NOT
+    /// mass, radius or tint, which are the definition's. A scene may still place a bare point mass (a body
+    /// with no `profile`) and give it a mass; what it may not do is redefine Luna.
+    #[test]
+    fn no_scene_body_overrides_the_physics_of_the_body_it_names() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/public/worlds");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(dir).expect("worlds directory exists").flatten() {
+            let world = entry.path().join("world.json");
+            let Ok(text) = std::fs::read_to_string(&world) else { continue };
+            let json: serde_json::Value =
+                serde_json::from_str(&text).unwrap_or_else(|e| panic!("{world:?} is malformed: {e}"));
+            let scene = entry.file_name().to_string_lossy().to_string();
+
+            let Some(bodies) = json.get("bodies").and_then(|b| b.as_array()) else { continue };
+            for b in bodies {
+                let profile = b
+                    .get("profile")
+                    .or_else(|| b.get("body"))
+                    .and_then(|p| p.as_str());
+                // Only bodies that NAME a definition are instances; a bare point mass is free to declare
+                // its own mass.
+                if !profile.is_some_and(|p| super::DEFINED_BODY_IDS.contains(&p)) {
+                    continue;
+                }
+                for &key in super::SCENE_BODY_OVERRIDE_KEYS {
+                    assert!(
+                        b.get(key).is_none(),
+                        "{scene}: body {:?} names the defined body {:?} yet declares `{key}` — that is \
+                         the definition's physics, not the scene's. A scene says WHICH body and WHERE; \
+                         mass, radius and composition come from assets/bodies/{}.json.",
+                        b.get("name").and_then(|n| n.as_str()).unwrap_or("?"),
+                        profile.unwrap(),
+                        profile.unwrap(),
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0, "expected to check some defined-body instances across the worlds");
+    }
+}

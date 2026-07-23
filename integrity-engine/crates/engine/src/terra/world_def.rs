@@ -322,8 +322,11 @@ impl Default for ImpactDef {
 
 /// One body in a `"system"` world — the declared initial conditions the N-body integrator (`orbit`) evolves.
 /// Mass/radius/tint may come from a named `profile` ("sun"/"earth"/"moon" → `planet::` + composition) so the
-/// bodies stay *declared, not fudged*; explicit `mass_kg`/`radius_m`/`tint` override.
-#[derive(Debug, Clone, Deserialize)]
+/// A body a scene PLACES: its identity (`profile` → a defined body), its initial conditions (position,
+/// velocity, spin), and — only for a body with NO definition — an explicit mass/radius/tint. An instance
+/// of a defined body (Luna, Terra) may NOT carry those: its physics comes from `assets/bodies/<id>.json`,
+/// and both a world-file parse test and the engine's `declared_body_mass`/`_radius` enforce it.
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct BodyDef {
     pub name: String,
     /// "star" (holds + lights the system, not drawn) | "planet" (the focus / impact target) | "moon" (deorbits).
