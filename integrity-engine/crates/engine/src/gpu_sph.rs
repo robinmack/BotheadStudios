@@ -891,4 +891,80 @@ mod impact_geometry_tests {
             "the start distance must be robust to strays ({d_stray:.3e} vs {d_clean:.3e})"
         );
     }
+
+    /// **A de-orbiting Moon is a giant impact, and the SAME assembly builds it.**
+    ///
+    /// Robin's law (docs/23, docs/28): Theia striking proto-Earth and the Moon striking Earth are ONE
+    /// mechanic at two scales — so the deformable-SPH assembly that builds the birth impact must build
+    /// the moon-drop with nothing swapped but the two bodies. This pins that precondition for routing
+    /// the moon-drop onto `gpu_sph` and retiring the CPU `Aggregate` (docs/46 ledger rows 1/3/10): an
+    /// `ImpactDef` naming the REAL Earth and the REAL Moon (`assets/bodies/{earth,moon}.json`) builds
+    /// two bodies of the right size and proportion, and the assembled geometry actually collides.
+    ///
+    /// The geometry MULTIPLES here are still the birth defaults (v_esc 1.15, b = R_target). The
+    /// moon-drop's real approach speed and offset come from the live de-orbit trajectory the N-body
+    /// integrator already holds — that is a wiring decision, not baked here. What this proves is that
+    /// the assembly MACHINERY is body-agnostic.
+    #[test]
+    fn a_moon_drop_builds_and_strikes_through_the_same_assembly() {
+        use crate::terra::world_def::{ImpactBody, ImpactDef};
+        let def = ImpactDef {
+            target: ImpactBody { body: "earth".into() },
+            impactor: ImpactBody { body: "moon".into() },
+            ..ImpactDef::default()
+        };
+
+        // The build reads the REAL bodies — the built body's outer particle tracks the definition
+        // radius (a lattice spacing inside it, ~7% at this count), so this is the sharpest check that
+        // "earth" and "moon" were loaded and not proto-Earth/Theia.
+        let (earth, moon) = build_impact_bodies_from(&def, 1200);
+        let (r_e, r_m) = (def.target.radius_m(), def.impactor.radius_m());
+        assert!((0.85 * r_e..=1.02 * r_e).contains(&body_radius(&earth)), "target is Earth-sized (built {:.3e} vs def {:.3e})", body_radius(&earth), r_e);
+        assert!((0.85 * r_m..=1.02 * r_m).contains(&body_radius(&moon)), "impactor is Moon-sized (built {:.3e} vs def {:.3e})", body_radius(&moon), r_m);
+
+        // **Seeded mass is UNCOMPRESSED (EOS reference density), a flagged fidelity IOU.**
+        // `build_impact_bodies_from` seeds from the Tillotson reference densities (basalt 2700, iron
+        // 7850), NOT the compressed PREM densities in the body file (Earth's inner core is ~12,900).
+        // Compression is meant to EMERGE during the GPU relax under the EOS pressure; the seeded state
+        // is the low-density start. So the initial SPH Earth is ~3.8e24 kg ≈ 64% of the real 5.97e24.
+        // This is masked in birth (proto-Earth is deliberately a coarse sub-Earth) but is real for a
+        // full Earth+Moon drop, and it is pinned here so a change to the seeding trips this test rather
+        // than silently shifting the planet's mass. Whether the relax recovers the compressed profile
+        // at a full Earth's resolution is unverified — tracked as the fidelity question for the wiring.
+        let m_earth: f64 = earth.mass.iter().sum();
+        let m_moon: f64 = moon.mass.iter().sum();
+        assert!((3.0e24..4.5e24).contains(&m_earth), "uncompressed seeded Earth mass (got {m_earth:.3e})");
+        assert!((4.0e22..8.0e22).contains(&m_moon), "uncompressed seeded Moon mass (got {m_moon:.3e})");
+        assert!((40.0..120.0).contains(&(m_earth / m_moon)), "and the real Earth:Moon proportion (got {:.0})", m_earth / m_moon);
+
+        // Assemble as an (unrelaxed) field and confirm the geometry strikes — same helper the birth
+        // geometry test uses, now driven by the Earth+Moon def.
+        let mut field: Vec<SphParticle> = Vec::new();
+        push_body(&mut field, &earth, 0, DVec3::ZERO, DVec3::ZERO);
+        push_body(&mut field, &moon, 1, DVec3::new(4.0e7, 0.0, 0.0), DVec3::ZERO);
+        let (assembled, ..) = assemble_from_relaxed_with(&def, &field);
+        let body = |prov: u32| {
+            let ps: Vec<&SphParticle> = assembled.iter().filter(|p| p.prov == prov).collect();
+            let m: f64 = ps.iter().map(|p| p.mass as f64).sum();
+            let c: DVec3 = ps.iter().map(|p| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64) * p.mass as f64).sum::<DVec3>() / m;
+            let v: DVec3 = ps.iter().map(|p| DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64) * p.mass as f64).sum::<DVec3>() / m;
+            (c, v, m)
+        };
+        let (ec, ev, me) = body(0);
+        let (mc, mv, mm) = body(1);
+        let contact = def.target.radius_m() + def.impactor.radius_m();
+        let q = crate::orbit::perigee(mc - ec, mv - ev, crate::orbit::G * (me + mm)).unwrap_or(0.0);
+        assert!(q < contact, "the moon-drop assembles into a real strike: perigee {q:.3e} vs contact {contact:.3e}");
+
+        // **WHY this belongs on the deformable-SPH path and not surface cratering.** The reduced-mass
+        // impact energy dwarfs the Moon's own gravitational binding, so the impactor cannot survive as
+        // a body — it must resolve into matter (docs/46 §1, the ResolveBodies regime), exactly like
+        // Theia. A crater-into-rigid-Earth treatment (`ResolveMatter`) would be the wrong physics at
+        // this scale. (Uniform-sphere binding 3GM²/5R — an order-of-magnitude estimate, which is all
+        // the argument needs.)
+        let v_rel = (mv - ev).length();
+        let e_impact = 0.5 * (me * mm / (me + mm)) * v_rel * v_rel;
+        let e_bind = 0.6 * crate::orbit::G * mm * mm / body_radius(&moon);
+        assert!(e_impact > 10.0 * e_bind, "a moon-drop is a giant impact, not a crater: E {e_impact:.2e} J vs Moon binding {e_bind:.2e} J");
+    }
 }
