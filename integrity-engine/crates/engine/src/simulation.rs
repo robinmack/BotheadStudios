@@ -41,6 +41,10 @@ pub struct Simulation {
     planet_mass: f64,
     planet_radius: f64,
     surface_g: f32,
+    /// Surface air pressure (Pa) — EMERGENT from the planet's declared atmosphere mass
+    /// (`LayeredBody::surface_pressure`), the same value the sky's Rayleigh optics use. Feeds the drag a
+    /// meteor feels flying through this air (docs/48). Zero for an airless world ⇒ flight in real vacuum.
+    surface_pressure: f64,
     /// Grains ever created (impact excavation + effect materialisation).
     created_total: usize,
     /// Meteors in flight. The engine flies and lands them; the caller only throws.
@@ -100,6 +104,7 @@ impl Simulation {
             planet_mass,
             planet_radius,
             surface_g,
+            surface_pressure: planet.surface_pressure(),
             created_total: 0,
             meteors: Vec::new(),
         };
@@ -232,9 +237,34 @@ impl Simulation {
     /// Returns grains created this step.
     fn fly_meteors(&mut self, dt: f32) -> usize {
         let g = Vec3::new(0.0, -self.surface_g, 0.0);
+        // The air this meteor flies through (docs/48). The density is the SAME emergent exponential
+        // atmosphere the sky is drawn from, so the picture and the physics cannot disagree about the air.
+        let air = self.materials.iter().find(|mm| mm.id == "air");
+        // c_d for a sphere. FLAGGED (Law V): a DECLARED shape factor, not a tuned dial — 0.47 is the
+        // measured incompressible-sphere drag coefficient. Its resolved counterpart is the pressure field
+        // of `AirField` parcels flowing around the body (the IOU `drag_accel`'s own doc names), and its
+        // near-term refinement is c_d(Mach): a meteor at these speeds is supersonic, where a sphere's c_d
+        // rises toward ~1, so this UNDER-drags the hypersonic phase. Same primitive, finer resolution.
+        const SPHERE_DRAG_CD: f64 = 0.47;
         let mut landed: Vec<Meteor> = Vec::new();
         let mut still: Vec<Meteor> = Vec::with_capacity(self.meteors.len());
         for mut m in self.meteors.drain(..) {
+            // Atmospheric drag, opposing the meteor's motion. The kinetic energy it removes is dissipated
+            // to the air and the meteor (real re-entry heating; the meteor's own glow/ablation is the
+            // unbuilt visible follow-on) — and because the impact energy is ½mv² of the speed that ACTUALLY
+            // arrives, a meteor braked by air correctly delivers a smaller crater. Nothing is lost: the KE
+            // becomes atmospheric heat instead of excavation.
+            if let Some(air) = air {
+                let altitude = (m.pos.y - self.world.ground_height(m.pos.x, m.pos.z)).max(0.0) as f64;
+                let rho = crate::atmosphere::air_density_at(
+                    self.surface_pressure, air, 288.0, self.surface_g as f64, altitude,
+                );
+                let area = std::f64::consts::PI * (m.radius_m as f64).powi(2);
+                let a_drag = crate::atmosphere::drag_accel(
+                    rho, m.vel.as_dvec3(), area, m.mass_kg as f64, SPHERE_DRAG_CD,
+                );
+                m.vel += a_drag.as_vec3() * dt;
+            }
             m.vel += g * dt;
             m.pos += m.vel * dt;
             // THE shared ground height (`World::ground_height`). This asked `surface_top_voxel` — an
@@ -433,6 +463,46 @@ mod tests {
         assert!(small > 0, "a thrown meteor must actually excavate; got {small}");
         assert!(heavy > small, "8x the MASS must dig more: {heavy} vs {small}");
         assert!(fast > small, "4x the SPEED must dig more (v is squared): {fast} vs {small}");
+    }
+
+    /// A meteor flies through AIR, not vacuum (docs/48). Before this the flight loop was pure ballistics —
+    /// a silent Law-V gap (the atmosphere the sky is derived from did not act on anything falling through
+    /// it). Thrown HORIZONTALLY, gravity leaves the horizontal speed untouched, so any drop in it is drag
+    /// alone — which a vacuum forbids. This is `atmosphere::drag_accel` fed by the already-emergent air
+    /// density, and it is the analytic rung of the same primitive `AirField` resolves (the c_d IOU).
+    #[test]
+    fn a_meteor_feels_atmospheric_drag_as_it_flies() {
+        let world = r#"{"name":"g","type":"ground","ground":{"camera_m":[0,30,0],"view_radius_m":2000}}"#;
+        let iron = crate::materials::index_of(&mats(), "iron");
+        // Horizontal flight, high enough that it does not land during the few steps we watch.
+        let fly = |radius_m: f32| -> f32 {
+            let mut sim = Simulation::from_json(world, mats()).expect("builds");
+            let c = sim.world.center();
+            let ground = sim.world.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
+            sim.throw_meteor(Meteor {
+                pos: Vec3::new(-40.0, ground + 40.0, 0.0),
+                vel: Vec3::new(900.0, 0.0, 0.0), // supersonic, purely horizontal
+                mass_kg: 1000.0,
+                material: iron,
+                radius_m,
+            });
+            let v0 = sim.meteors()[0].vel.x;
+            for _ in 0..4 {
+                sim.step(1.0 / 60.0);
+                if sim.meteors().is_empty() { break; }
+            }
+            // Horizontal speed lost over the flight — gravity cannot touch it, so this is pure drag.
+            v0 - sim.meteors().first().map_or(v0, |m| m.vel.x)
+        };
+
+        let compact = fly(0.3); // small cross-section
+        let broad = fly(1.0); // ~11x the frontal area, same mass ⇒ much higher drag
+        assert!(compact > 0.0, "a meteor in atmosphere must lose horizontal speed to drag; lost {compact}");
+        assert!(
+            broad > compact * 3.0,
+            "drag scales with frontal area: the broad meteor ({broad} m/s) must shed far more than the \
+             compact one ({compact} m/s)"
+        );
     }
 
     /// The engine flies the meteor. A caller that throws one and steps must see it in flight, then gone.
