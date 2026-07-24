@@ -437,6 +437,21 @@ fn verify_merge(eos: &[Eos], soft: f64) -> bool {
         n0, n1, dm, dmom, de
     );
 
+    // NO NaN MAY SURVIVE A MERGE. A retired particle keeps its position but loses its mass, and if it is
+    // still INTEGRATED its SPH density collapses toward zero and the pressure term p/rho^2 divides by it —
+    // producing a NaN position. That escaped into the scene on 2026-07-23 and panicked the disk statistic's
+    // sort (`gpu_sph.rs:584`). Retired particles must be inert, not merely massless.
+    let finite = out.iter().all(|p| {
+        p.pos.iter().all(|c| c.is_finite())
+            && p.vel.iter().all(|c| c.is_finite())
+            && p.u.is_finite()
+            && p.mass.is_finite()
+    });
+    println!(
+        "merge-finite: {} → every particle finite after merging (retired ones included)",
+        if finite { "PASS — a retired particle is inert, not NaN" } else { "FAIL" }
+    );
+
     // MATERIALS MUST NOT BLEND. The same lattice, but each site's pair is iron + basalt instead of two of
     // the same rock. Every other condition for merging is identical — inside the merge radius, mutually
     // subsonic, over budget — so if anything coalesces here it can only be because the material test is
@@ -467,7 +482,7 @@ fn verify_merge(eos: &[Eos], soft: f64) -> bool {
         if gate_ok { "PASS — no budget pressure, no coarsening" } else { "FAIL" },
         n_idle, n0
     );
-    ok && gate_ok && mixed_ok
+    ok && gate_ok && mixed_ok && finite
 }
 
 fn verify_external_mass(eos: &[Eos], soft: f64) -> bool {

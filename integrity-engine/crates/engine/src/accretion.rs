@@ -370,7 +370,7 @@ pub fn sample_layers(
     let com: DVec3 = (0..n).map(|i| pos[i] * mass[i]).sum::<DVec3>() / m_total;
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&a, &b| {
-        (pos[a] - com).length_squared().partial_cmp(&(pos[b] - com).length_squared()).unwrap()
+        (pos[a] - com).length_squared().total_cmp(&(pos[b] - com).length_squared())
     });
 
     // Walk outward, closing a shell each time it has accumulated its share of the mass. Layers accumulate
@@ -406,7 +406,7 @@ pub fn sample_layers(
         // the same IOU the shader merge carries, and the resolved form is a mixture EOS.
         let (dom, dom_m) = by_mat
             .iter()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .max_by(|a, b| a.1.total_cmp(b.1))
             .map(|(k, v)| (*k, *v))
             .unwrap_or((0, 0.0));
         // Dominance must exceed SAMPLING NOISE to count as evidence: a one-particle imbalance in a 50/50

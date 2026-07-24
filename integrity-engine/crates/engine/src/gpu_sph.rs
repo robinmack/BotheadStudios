@@ -573,15 +573,31 @@ impl DiskView {
         }
         let pos = |p: &SphParticle| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
         let vel = |p: &SphParticle| DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64);
-        let m_total: f64 = particles.iter().map(|p| p.mass as f64).sum();
+        // Retired particles (mass 0, left behind by a merge) and any non-finite state are excluded from
+        // the measurement outright — a dead particle is not matter, and a NaN must never reach a sort.
+        let live: Vec<&SphParticle> = particles
+            .iter()
+            .filter(|p| {
+                p.mass > 0.0
+                    && p.mass.is_finite()
+                    && p.pos.iter().all(|c| c.is_finite())
+                    && p.vel.iter().all(|c| c.is_finite())
+            })
+            .collect();
+        if live.len() < 2 {
+            return None;
+        }
+        let m_total: f64 = live.iter().map(|p| p.mass as f64).sum();
         if m_total <= 0.0 {
             return None;
         }
-        let com: DVec3 = particles.iter().map(|p| pos(p) * p.mass as f64).sum::<DVec3>() / m_total;
-        let v_com: DVec3 = particles.iter().map(|p| vel(p) * p.mass as f64).sum::<DVec3>() / m_total;
+        let com: DVec3 = live.iter().map(|p| pos(p) * p.mass as f64).sum::<DVec3>() / m_total;
+        let v_com: DVec3 = live.iter().map(|p| vel(p) * p.mass as f64).sum::<DVec3>() / m_total;
         // Remnant radius = smallest radius about the COM enclosing 85% of the mass.
-        let mut radii: Vec<(f64, f64)> = particles.iter().map(|p| ((pos(p) - com).length(), p.mass as f64)).collect();
-        radii.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let mut radii: Vec<(f64, f64)> = live.iter().map(|p| ((pos(p) - com).length(), p.mass as f64)).collect();
+        // `total_cmp` is a TOTAL order, so it cannot panic the way `partial_cmp(..).unwrap()` did when a
+        // NaN reached it (rig, 2026-07-23: a retired particle's position went NaN and took the scene down).
+        radii.sort_by(|a, b| a.0.total_cmp(&b.0));
         let (mut cum, mut r_remnant, mut m_remnant) = (0.0, radii.last().map_or(0.0, |x| x.0), m_total);
         for &(r, m) in &radii {
             cum += m;
@@ -596,6 +612,9 @@ impl DiskView {
         let mut idx: Vec<usize> = Vec::new();
         let (mut disk_prov0, mut disk_other, mut escaped) = (0.0f64, 0.0f64, 0.0f64);
         for (pi, pt) in particles.iter().enumerate() {
+            if !(pt.mass > 0.0 && pt.mass.is_finite() && pt.pos.iter().all(|c| c.is_finite()) && pt.vel.iter().all(|c| c.is_finite())) {
+                continue;
+            }
             let m = pt.mass as f64;
             let (rel_p, rel_v) = (pos(pt) - com, vel(pt) - v_com);
             // BOUND first, then geometry. Asking `perigee` for boundedness was safe only while it refused
@@ -613,7 +632,7 @@ impl DiskView {
                 idx.push(pi);
             }
         }
-        let mean_h: f64 = particles.iter().map(|p| p.h as f64).sum::<f64>() / n as f64;
+        let mean_h: f64 = live.iter().map(|p| p.h as f64).sum::<f64>() / live.len() as f64;
         Some(DiskView { com, v_com, r_remnant, m_remnant, mu, dp, dv, dm, dr, idx, disk_prov0, disk_other, escaped, mean_h })
     }
 
@@ -684,7 +703,7 @@ pub fn largest_moonlet_orbit(particles: &[SphParticle]) -> Option<(f64, f64, f64
         return None;
     }
     let d = DiskView::of(particles)?;
-    let biggest = d.moonlets(3).into_iter().max_by(|a, b| a.mass.partial_cmp(&b.mass).unwrap())?;
+    let biggest = d.moonlets(3).into_iter().max_by(|a, b| a.mass.total_cmp(&b.mass))?;
     // Its orbit about the remnant (COM-relative).
     let rel_p = biggest.com_pos - d.com;
     let rel_v = biggest.com_vel - d.v_com;

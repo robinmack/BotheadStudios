@@ -182,6 +182,11 @@ fn cs_grid_insert(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn cs_density(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
   if (i >= P.n) { return; }
+  // RETIRED by a merge (docs/44): mass 0. It must not EVOLVE — with no mass of its own its SPH density
+  // collapses toward zero and the pressure term p/rho^2 divides by it, producing a NaN position that then
+  // poisons every consumer downstream. It stays harmless as a NEIGHBOUR (each contribution is scaled by
+  // its mass), so it only has to stop being integrated.
+  if (particles[i].mass <= 0.0) { return; }
   let pi = particles[i];
   var rho = pi.mass * sph_w(0.0, pi.h);
   let ci = cell_of(pi.pos);
@@ -215,6 +220,11 @@ fn cs_density(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn cs_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
   if (i >= P.n) { return; }
+  // RETIRED by a merge (docs/44): mass 0. It must not EVOLVE — with no mass of its own its SPH density
+  // collapses toward zero and the pressure term p/rho^2 divides by it, producing a NaN position that then
+  // poisons every consumer downstream. It stays harmless as a NEIGHBOUR (each contribution is scaled by
+  // its mass), so it only has to stop being integrated.
+  if (particles[i].mass <= 0.0) { return; }
   let pi = particles[i];
   let ei = eos[pi.mat];
   let p_i = pressure(ei, pi.rho, pi.u);
@@ -296,6 +306,11 @@ fn cs_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn cs_kick_drift(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
   if (i >= P.n) { return; }
+  // RETIRED by a merge (docs/44): mass 0. It must not EVOLVE — with no mass of its own its SPH density
+  // collapses toward zero and the pressure term p/rho^2 divides by it, producing a NaN position that then
+  // poisons every consumer downstream. It stays harmless as a NEIGHBOUR (each contribution is scaled by
+  // its mass), so it only has to stop being integrated.
+  if (particles[i].mass <= 0.0) { return; }
   let v = particles[i].vel + acc[i] * (0.5 * P.dt);
   particles[i].vel = v;
   particles[i].u = max(particles[i].u + dudt[i] * (0.5 * P.dt), 0.0);
@@ -308,6 +323,11 @@ fn cs_kick_drift(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn cs_kick(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
   if (i >= P.n) { return; }
+  // RETIRED by a merge (docs/44): mass 0. It must not EVOLVE — with no mass of its own its SPH density
+  // collapses toward zero and the pressure term p/rho^2 divides by it, producing a NaN position that then
+  // poisons every consumer downstream. It stays harmless as a NEIGHBOUR (each contribution is scaled by
+  // its mass), so it only has to stop being integrated.
+  if (particles[i].mass <= 0.0) { return; }
   particles[i].vel = particles[i].vel + acc[i] * (0.5 * P.dt);
   particles[i].u = max(particles[i].u + dudt[i] * (0.5 * P.dt), 0.0);
 }
@@ -321,6 +341,11 @@ fn cs_kick(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn cs_relax(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
   if (i >= P.n) { return; }
+  // RETIRED by a merge (docs/44): mass 0. It must not EVOLVE — with no mass of its own its SPH density
+  // collapses toward zero and the pressure term p/rho^2 divides by it, producing a NaN position that then
+  // poisons every consumer downstream. It stays harmless as a NEIGHBOUR (each contribution is scaled by
+  // its mass), so it only has to stop being integrated.
+  if (particles[i].mass <= 0.0) { return; }
   // Rotating-frame relaxation: add the centrifugal acceleration ω²·(x,y,0) so a spinning body settles to its
   // OBLATE equilibrium (Coriolis −2ω×v_frame → 0 as the damped frame velocity → 0, so it's omitted). ω=0
   // (the default for every non-spin caller) recovers the exact hydrostatic relaxation. The body is centred at
