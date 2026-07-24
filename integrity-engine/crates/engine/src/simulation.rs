@@ -253,6 +253,71 @@ impl Simulation {
         &self.trail
     }
 
+    /// **Everything this simulation is holding that is matter.** Bodies in flight, the vapour they have
+    /// shed, and the grains on the ground — one list, in one form (`crate::Drawn`), each item carrying
+    /// only physical facts.
+    ///
+    /// A scene draws THIS. It does not ask what a meteor is, or a trail, and so it does not need to be
+    /// taught about either — matter the engine starts holding tomorrow appears without the scene
+    /// changing. That is what lets an engine capability like the meteor swarm (docs/59) work in a scene
+    /// that knows nothing about meteors: the scene declares initial conditions and presents the result,
+    /// and never decides what the result is made of.
+    ///
+    /// **Matter in flight comes first, and that ordering is load-bearing.** A caller has a finite
+    /// instance buffer and must cut the list somewhere; settled grains are both the most numerous and the
+    /// least informative, so they are what a budget should lose. This also closes a real hole: the ground
+    /// scene used to cap the GRAINS at its instance capacity and then push meteors on top, so a full
+    /// grain buffer plus a meteor in flight wrote past the end of the buffer. Capping one list cannot
+    /// overrun it. Nothing here decides EXISTENCE — every grain is simulated whether or not it is drawn
+    /// (Law IV); this is representation under a budget, and routing that choice through
+    /// `ResolutionController` (necessity and camera distance, rather than list order) is the refinement.
+    pub fn drawn(&self) -> Vec<crate::Drawn> {
+        let mut out: Vec<crate::Drawn> = Vec::new();
+        out.extend(self.meteors.iter().map(|m| crate::Drawn {
+            pos: m.pos,
+            vel: m.vel,
+            radius_m: m.radius_m,
+            material: m.material,
+            temp_k: m.temp_k,
+            resting: false,
+        }));
+        // What a body has shed is its own matter, drawn by the same rule at the temperature its ablation
+        // left it at — never a decal, and never a second render path. Its SIZE is the expansion of that
+        // mass into the air where it actually is (`VaporParcel::radius_in`), which this simulation can
+        // answer because it owns the air: a puff shed high, into thin air, is genuinely bigger.
+        let air = self.materials.iter().find(|mm| mm.id == "air");
+        out.extend(self.trail.parcels().iter().map(|p| {
+            let radius_m = air.map_or(0.0, |a| {
+                let h = (p.pos.y - self.world.ground_height(p.pos.x as f32, p.pos.z as f32) as f64).max(0.0);
+                let rho = crate::atmosphere::air_density_at(
+                    self.surface_pressure, a, AMBIENT_TEMP_K as f64, self.surface_g as f64, h,
+                );
+                p.radius_in(rho) as f32
+            });
+            crate::Drawn {
+                pos: p.pos.as_vec3(),
+                vel: p.vel.as_vec3(),
+                radius_m,
+                material: p.material,
+                temp_k: p.temp_k as f32,
+                resting: false,
+            }
+        }));
+        let grain_r = 0.5 * self.grain_size_m();
+        out.extend(self.matter.particles.iter().map(|p| crate::Drawn {
+            pos: p.pos,
+            vel: p.vel,
+            radius_m: grain_r,
+            material: p.material,
+            temp_k: p.temp_k,
+            // `resting` is the SOLVER's settle bookkeeping (`matter::Particle::resting_seconds`, private)
+            // and the grain path never fed it to the renderer — it uploaded 0.0. Kept faithful rather
+            // than quietly changed: this is a consolidation, not a behaviour edit.
+            resting: false,
+        }));
+        out
+    }
+
     /// Advance every meteor in flight under the planet's gravity and impact the ones that arrive.
     /// Returns grains created this step.
     fn fly_meteors(&mut self, dt: f32) -> usize {
@@ -286,7 +351,7 @@ impl Simulation {
                 // both the conservation fix and the thing you actually see behind a meteor (docs/59).
                 if step.ablated_mass > 0.0 {
                     self.trail.shed(
-                        step.ablated_mass, m.pos.as_dvec3(), m.vel.as_dvec3(), step.temp_k,
+                        step.ablated_mass, m.material, m.pos.as_dvec3(), m.vel.as_dvec3(), step.temp_k,
                     );
                 }
                 m.mass_kg = (m.mass_kg as f64 - step.ablated_mass).max(0.0) as f32;
@@ -319,11 +384,7 @@ impl Simulation {
                 let h = (at.y - world.ground_height(at.x as f32, at.z as f32) as f64).max(0.0);
                 (crate::atmosphere::air_density_at(p0, air, AMBIENT_TEMP_K as f64, g, h), AMBIENT_TEMP_K as f64)
             };
-            // The trail is made of what the meteors were made of; with one meteor material in flight this
-            // is that material, and a per-parcel material is the refinement when several fly at once.
-            let mat_idx = self.meteors.first().map_or(0, |m| m.material);
-            let mat = self.materials[mat_idx].clone();
-            self.trail.step(&mat, dt as f64, ambient);
+            self.trail.step(&self.materials, dt as f64, ambient);
         }
         let mut created = 0;
         for m in landed {
@@ -582,6 +643,70 @@ mod tests {
         }
         let hot = sim.meteors().first().map_or(AMBIENT_TEMP_K, |m| m.temp_k);
         assert!(hot > AMBIENT_TEMP_K + 5.0, "the meteor's surface must heat from entry, got {hot} K");
+    }
+
+    /// **A scene never learns what a meteor is.** The engine reports everything it holds as `Drawn` —
+    /// physical facts only — so a body in flight and the vapour it sheds reach the screen through the
+    /// same one mapping the grains do. This is the property that lets an engine capability (docs/59's
+    /// meteor swarm) appear in a scene that knows nothing about meteors: the scene declares initial
+    /// conditions and presents the result, and never decides what the result looks like.
+    #[test]
+    fn the_engine_reports_every_kind_of_matter_it_holds_as_one_list() {
+        let world = r#"{"name":"g","type":"ground","ground":{"camera_m":[0,30,0],"view_radius_m":2000}}"#;
+        let iron = crate::materials::index_of(&mats(), "iron");
+        let mut sim = Simulation::from_json(world, mats()).expect("builds");
+        let c = sim.world.center();
+        let ground = sim.world.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
+
+        assert!(sim.drawn().is_empty(), "an untouched patch is holding nothing to draw");
+
+        // A grain-sized iron body at true meteor speed, high up and horizontal so it stays aloft and
+        // ablates rather than landing — the regime `atmospheric_step` is honest in (a body thinner than
+        // its own thermal skin depth).
+        let r = (3.0 * 0.03 / (4.0 * std::f32::consts::PI * 7870.0)).cbrt();
+        sim.throw_meteor(Meteor {
+            pos: Vec3::new(-400.0, ground + 400.0, 0.0),
+            vel: Vec3::new(20_000.0, 0.0, 0.0),
+            mass_kg: 0.03,
+            material: iron,
+            radius_m: r,
+            temp_k: 288.0,
+        });
+        // The body in flight is matter, and is reported as such the moment it exists.
+        let flying = sim.drawn();
+        assert_eq!(flying.len(), 1, "the meteor is drawn as matter, not as an effect");
+        assert_eq!(flying[0].material, iron, "drawn as what it IS — iron");
+
+        for _ in 0..40 {
+            sim.step(1.0 / 240.0);
+            if sim.trail().parcels().len() > 1 {
+                break;
+            }
+        }
+
+        let drawn = sim.drawn();
+        let parcels = sim.trail().parcels().len();
+        assert!(parcels > 0, "the meteor ablated: {parcels} parcels, {:.3e} kg", sim.trail().mass());
+        assert!(
+            drawn.len() >= parcels,
+            "every shed parcel is in the draw list ({} drawn, {parcels} parcels)", drawn.len()
+        );
+        // The trail is drawn HOT and at a real size — both derived, neither assigned.
+        let hot: Vec<&crate::Drawn> = drawn.iter().filter(|d| d.temp_k > AMBIENT_TEMP_K + 100.0).collect();
+        assert!(!hot.is_empty(), "shed vapour glows because it IS hot, not because a trail is drawn glowing");
+        for d in &hot {
+            assert!(d.radius_m > 0.0, "a parcel has a real size (its expansion into the local air)");
+            assert_eq!(d.material, iron, "iron vapour is still iron");
+        }
+        // Settled grains are the TAIL, so a caller truncating to its instance budget loses those rather
+        // than the body that is actually doing something.
+        let grains = sim.particle_count();
+        if grains > 0 {
+            assert!(
+                drawn[drawn.len() - grains..].iter().all(|d| d.radius_m == 0.5 * sim.grain_size_m()),
+                "the {grains} grains are the tail of the list"
+            );
+        }
     }
 
     /// The engine flies the meteor. A caller that throws one and steps must see it in flight, then gone.

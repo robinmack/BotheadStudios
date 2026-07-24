@@ -332,6 +332,9 @@ pub fn atmospheric_step(
 #[derive(Clone, Copy, Debug)]
 pub struct VaporParcel {
     pub mass_kg: f64,
+    /// What it is vapour OF (index into the material catalogue). Vapour keeps the identity of the body it
+    /// left: iron vapour cools like iron, glows like iron, and is drawn in iron's own albedo.
+    pub material: usize,
     pub pos: glam::DVec3,
     /// Shed at the body's velocity — it leaves with the momentum it had.
     pub vel: glam::DVec3,
@@ -435,9 +438,11 @@ pub struct Trail {
 
 impl Trail {
     /// The body shed this much mass, here, at this velocity and temperature.
-    pub fn shed(&mut self, mass_kg: f64, pos: glam::DVec3, vel: glam::DVec3, temp_k: f64) {
+    pub fn shed(
+        &mut self, mass_kg: f64, material: usize, pos: glam::DVec3, vel: glam::DVec3, temp_k: f64,
+    ) {
         if mass_kg > 0.0 {
-            self.parcels.push(VaporParcel { mass_kg, pos, vel, temp_k });
+            self.parcels.push(VaporParcel { mass_kg, material, pos, vel, temp_k });
         }
     }
 
@@ -470,10 +475,14 @@ impl Trail {
     /// density and temperature at a parcel's position, which only the scene knows the geometry for.
     /// Parcels that reach ambient are retired into `merged_kg` — mass moves between representations, never
     /// out of the books.
-    pub fn step(&mut self, mat: &Material, dt: f64, ambient: impl Fn(glam::DVec3) -> (f64, f64)) {
+    /// `mats` is the catalogue, not one material: several bodies of different materials can be ablating
+    /// at once, and each parcel cools as what it actually is. (It took a `&Material` first, which quietly
+    /// cooled everything as whatever the first body in flight happened to be made of.)
+    pub fn step(&mut self, mats: &[Material], dt: f64, ambient: impl Fn(glam::DVec3) -> (f64, f64)) {
         let mut merged = 0.0;
         self.parcels.retain_mut(|p| {
             let (rho, t_amb) = ambient(p.pos);
+            let Some(mat) = mats.get(p.material) else { return true };
             *p = vapor_step(*p, rho, t_amb, mat, dt);
             if p.merged_into_air(t_amb) {
                 merged += p.mass_kg;
@@ -875,7 +884,10 @@ mod tests {
             let s = atmospheric_step(rho, vel, mass, radius, temp, air.ambient_temp_k, iron, dt);
             if s.ablated_mass > 0.0 {
                 // The vapour leaves the body carrying the body's own velocity and temperature.
-                trail.shed(s.ablated_mass, DVec3::new(0.0, alt, 0.0), vel, s.temp_k);
+                trail.shed(
+                    s.ablated_mass, materials::index_of(&mats, "iron"),
+                    DVec3::new(0.0, alt, 0.0), vel, s.temp_k,
+                );
                 if s.temp_k > air.ambient_temp_k {
                     shed_hot += 1;
                 }
@@ -885,7 +897,7 @@ mod tests {
             temp = s.temp_k;
             vel += (s.drag_accel + DVec3::new(0.0, -g, 0.0)) * dt;
             alt += vel.y * dt;
-            trail.step(iron, dt, |at| (air.density_at(at.y.max(0.0)), air.ambient_temp_k));
+            trail.step(&mats, dt, |at| (air.density_at(at.y.max(0.0)), air.ambient_temp_k));
 
             // THE INVARIANT, every single step: nothing has left the books.
             let booked = mass + trail.mass();
@@ -914,7 +926,7 @@ mod tests {
         let mut booked = Trail::default();
         for i in 0..10 {
             let m = 0.5 * (i + 1) as f64;
-            resolved.shed(m, DVec3::new(0.0, 60_000.0, 0.0), DVec3::new(0.0, -1.0e4, 0.0), 3134.0);
+            resolved.shed(m, 0, DVec3::new(0.0, 60_000.0, 0.0), DVec3::new(0.0, -1.0e4, 0.0), 3134.0);
             booked.book(m);
         }
         assert_eq!(resolved.mass(), booked.mass(), "one mass, two representations");
@@ -931,6 +943,7 @@ mod tests {
         let iron = &mats[materials::index_of(&mats, "iron")];
         let p = VaporParcel {
             mass_kg: 1.0,
+            material: materials::index_of(&mats, "iron"),
             pos: DVec3::ZERO,
             vel: DVec3::new(0.0, -1.0e4, 0.0),
             temp_k: 3134.0, // iron's boiling point: the temperature ablation sheds it at

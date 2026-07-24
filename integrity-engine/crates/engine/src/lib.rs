@@ -66,6 +66,8 @@ mod planet;
 /// their helpers). Lifted out of `#[cfg(wasm32)] mod app`: all three scenes use these identically, so
 /// they were never scene code, and living there kept them out of every native build.
 mod render;
+/// What the engine is holding, as it must be drawn — the one physics→picture mapping (docs/50).
+pub use render::Drawn;
 pub mod resolution; // docs/44 — resolution by necessity: the quasi-static admission test
 /// docs/49 — surface detail that follows the camera CONTINUOUSLY. The consumer
 /// `ResolutionController::camera_grain_radius` never had.

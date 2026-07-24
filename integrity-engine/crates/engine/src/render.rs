@@ -20,6 +20,7 @@
 
 #![allow(dead_code)] // each scene uses a different subset; wasm-only consumers are invisible natively
 
+use crate::gpu_layout::GpuParticle;
 use crate::mesher::{Mesh, Vertex};
 
 pub(crate) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -324,5 +325,62 @@ impl StarField {
         pass.set_bind_group(0, &self.bind, &[]);
         pass.set_vertex_buffer(0, self.instances.slice(..));
         pass.draw(0..6, 0..self.count);
+    }
+}
+
+/// **One piece of matter the engine is holding, as it must be drawn** — and nothing more.
+///
+/// Every field is PHYSICAL: where it is, how fast, how big, what it is made of, how hot. There is no
+/// colour here, no brightness, no "effect type". The picture is DERIVED from these (Law VI: physics
+/// drives the render), which is why the derivation belongs to the engine and not to whoever is holding
+/// a canvas.
+///
+/// The reason this type exists: a scene was deciding what a meteor looks like. `ground_scene` built
+/// `GpuParticle`s twice — once for grains, once for meteors in flight — reading albedo out of the
+/// material table and calling the incandescence law itself, and a third copy would have been needed for
+/// the entry trail, and a fourth for a swarm. Each copy is a place a scene can quietly disagree with the
+/// physics about what is real. Now the engine answers "what am I holding?" and a scene's only job is to
+/// put it on the screen — so a scene that can draw ANY of the engine's matter can draw ALL of it, which
+/// is what makes a capability like the meteor swarm (docs/59) work in a scene that knows nothing about
+/// meteors.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Drawn {
+    /// Position, in the scene's own frame (centred world coords).
+    pub pos: glam::Vec3,
+    pub vel: glam::Vec3,
+    /// Its real radius (m) — a grain's contact radius, a body's radius, a vapour parcel's expansion into
+    /// the local air. Size is matter, not a sprite scale.
+    pub radius_m: f32,
+    /// Index into the material catalogue — what it IS. Its colour is that material's own measured albedo.
+    pub material: usize,
+    /// Temperature (K). What it glows AT; nothing glows because it was designated glowing.
+    pub temp_k: f32,
+    /// Settled matter, as opposed to matter in flight. Physical state, carried for the solver's use.
+    pub resting: bool,
+}
+
+impl GpuParticle {
+    /// The ONE physics→instance mapping. Colour is the material's own measured albedo, from the same
+    /// catalogue row the physics reads, and emission is the incandescence of its real temperature — so a
+    /// grain, a meteor, and the vapour it shed are drawn by one rule rather than three.
+    ///
+    /// (Incandescence still goes through `emission::incandescence`, the ramp the scenes already used, NOT
+    /// `blackbody::blackbody_srgb`. Collapsing those two curves is docs/46 row 13 and changes how every
+    /// hot thing looks, so it needs its own rig evidence — this is a consolidation, not a repaint.)
+    pub(crate) fn of_matter(d: &Drawn, mats: &[crate::materials::Material]) -> Self {
+        GpuParticle {
+            offset: d.pos.to_array(),
+            u: 0.0,
+            vel: d.vel.to_array(),
+            resting: if d.resting { 1.0 } else { 0.0 },
+            color: mats.get(d.material).map(|m| m.albedo).unwrap_or([0.5, 0.5, 0.5]),
+            material: d.material as f32,
+            emission: crate::emission::incandescence(d.temp_k),
+            rho: 0.0,
+            radius: d.radius_m,
+            _p0: 0.0,
+            _p1: 0.0,
+            _p2: 0.0,
+        }
     }
 }
