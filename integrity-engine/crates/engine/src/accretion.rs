@@ -74,6 +74,63 @@ pub struct Body {
     pub thermal_j: f64,
 }
 
+impl Body {
+    /// Uniform-sphere moment of inertia about the body's own centre — isotropic, so `E_rot = |L|²/2I`
+    /// holds for rotation about ANY axis (no principal-axis assumption needed).
+    fn inertia(&self) -> f64 {
+        0.4 * self.mass * self.radius * self.radius
+    }
+
+    /// Does this straggler STRIKE the body and stay? Robin's rule: a meteor that impacts the moon becomes
+    /// part of the moon unless it reaches escape velocity on the rebound. Contact is `r <= radius`; staying
+    /// is `|v_rel| < sqrt(2GM/r)` — the body's OWN escape speed at the contact point. There is no dial
+    /// here: both terms are the body's real mass and radius, and a fast enough impactor is correctly
+    /// refused and stays a particle.
+    pub fn absorbs(&self, g: f64, pos: DVec3, vel: DVec3) -> bool {
+        let r = (pos - self.pos).length();
+        if r > self.radius {
+            return false;
+        }
+        let v_esc = (2.0 * g * self.mass / r.max(self.radius * 1.0e-6)).sqrt();
+        (vel - self.vel).length() < v_esc
+    }
+
+    /// Absorb a straggler, conserving mass, linear momentum, the centre of mass and TOTAL angular momentum
+    /// exactly, and keeping the energy budget closed: the relative kinetic energy the inelastic merge
+    /// destroys becomes heat, except the share the merged body's new spin carries away.
+    pub fn absorb(&mut self, pos: DVec3, vel: DVec3, mass: f64, rho: f64) {
+        let m_new = self.mass + mass;
+        let x_new = (self.pos * self.mass + pos * mass) / m_new;
+        let v_new = (self.vel * self.mass + vel * mass) / m_new;
+        // Angular momentum about the NEW centre of mass: the spin already held, plus the orbital moment
+        // each piece had about that new centre. This is what makes an off-centre strike spin the body up.
+        let l_new = self.ang_mom
+            + self.mass * (self.pos - x_new).cross(self.vel - v_new)
+            + mass * (pos - x_new).cross(vel - v_new);
+        // Internal energy in the COM frame BEFORE the merge...
+        let i_old = self.inertia();
+        let e_rot_old = if i_old > 0.0 { self.ang_mom.length_squared() / (2.0 * i_old) } else { 0.0 };
+        let ke_internal = self.thermal_j
+            + e_rot_old
+            + 0.5 * self.mass * (self.vel - v_new).length_squared()
+            + 0.5 * mass * (vel - v_new).length_squared();
+        // ...and after: volume-additive density (as `find_clumps` computes it), radius from mass at that
+        // density, and whatever the new spin does not carry is heat.
+        let vol = self.mass / self.rho.max(1.0e-9) + mass / rho.max(1.0e-9);
+        let rho_new = if vol > 0.0 { m_new / vol } else { self.rho };
+        let radius_new = (m_new / (FOUR_THIRDS_PI * rho_new)).cbrt();
+        let i_new = 0.4 * m_new * radius_new * radius_new;
+        let e_rot_new = if i_new > 0.0 { l_new.length_squared() / (2.0 * i_new) } else { 0.0 };
+        self.pos = x_new;
+        self.vel = v_new;
+        self.mass = m_new;
+        self.rho = rho_new;
+        self.radius = radius_new;
+        self.ang_mom = l_new;
+        self.thermal_j = (ke_internal - e_rot_new).max(0.0);
+    }
+}
+
 /// Result of one accretion pass: the promoted bodies and the indices they consumed.
 #[derive(Clone, Debug, Default)]
 pub struct Accreted {
@@ -310,6 +367,51 @@ mod tests {
         assert!((com1 - com0).length() / com0.length() < 1e-12, "COM not conserved: {com0} → {com1}");
         // Residual = the 5 singletons.
         assert_eq!(fp.len(), 2 + 5, "2 bodies + 5 residual singletons");
+    }
+
+    // STRAGGLERS (Robin, 2026-07-23): "a meteor that impacts the moon becomes part of the moon unless it
+    // hits escape velocity on the rebound." Absorbing one must conserve mass, momentum, COM and TOTAL
+    // angular momentum — an off-centre strike has to spin the body up, not vanish into it.
+    #[test]
+    fn a_straggler_is_absorbed_conserving_momentum_and_spin() {
+        let g = G;
+        let mut b = Body {
+            pos: DVec3::new(1.0e7, 0.0, 0.0),
+            vel: DVec3::new(0.0, 1000.0, 0.0),
+            mass: 7.0e22,
+            rho: 3300.0,
+            radius: 1.7e6,
+            ang_mom: DVec3::new(0.0, 0.0, 1.0e29),
+            thermal_j: 5.0e24,
+        };
+        // An OFF-CENTRE strike: offset in y so it carries angular momentum about the body's centre.
+        let (p_pos, p_vel, p_m, p_rho) =
+            (b.pos + DVec3::new(0.0, 1.2e6, 0.0), DVec3::new(-400.0, 900.0, 0.0), 3.0e19, 3000.0);
+        assert!(b.absorbs(g, p_pos, p_vel), "a slow strike well inside the radius must be absorbed");
+
+        // Totals about a FIXED origin, treating the body as mass + spin.
+        let l0 = b.mass * b.pos.cross(b.vel) + b.ang_mom + p_m * p_pos.cross(p_vel);
+        let mom0 = b.mass * b.vel + p_m * p_vel;
+        let m0 = b.mass + p_m;
+        let com0 = (b.pos * b.mass + p_pos * p_m) / m0;
+        let spin_before = b.ang_mom;
+
+        b.absorb(p_pos, p_vel, p_m, p_rho);
+
+        let l1 = b.mass * b.pos.cross(b.vel) + b.ang_mom;
+        assert!((b.mass - m0).abs() / m0 < 1e-12, "mass not conserved");
+        assert!((b.mass * b.vel - mom0).length() / mom0.length() < 1e-12, "momentum not conserved");
+        assert!((b.pos - com0).length() / com0.length() < 1e-12, "COM not conserved");
+        assert!((l1 - l0).length() / l0.length() < 1e-10, "angular momentum not conserved: {l0} → {l1}");
+        assert!(b.ang_mom != spin_before, "an off-centre strike must change the body's spin");
+        assert!(b.radius > 1.7e6, "absorbing mass grows the body at its own density");
+
+        // And the gate is real: the SAME strike at well above escape speed is refused.
+        let v_esc = (2.0 * g * b.mass / 1.2e6_f64).sqrt();
+        assert!(
+            !b.absorbs(g, p_pos, b.vel + DVec3::new(0.0, 10.0 * v_esc, 0.0)),
+            "a strike above escape velocity must NOT be absorbed"
+        );
     }
 
     // MEASUREMENT (docs/44). `self_pe` is an O(k²) all-pairs sum whose comment reads "fine (clumps small)".
