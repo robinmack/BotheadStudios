@@ -119,10 +119,37 @@ Grounded against the code 2026-07-24:
    before it becomes full SPH. The fudge is only an UNDECLARED sprite/decal that traces to nothing and
    converges to nothing. Every declared stand-in names its resolved counterpart.
 
-## Stage A progress (2026-07-24) — the engine half is built
+## Stage A progress (2026-07-24) — the engine owns it, end to end
 
-The three engine capabilities Stage A needs exist and are natively tested. What remains for Stage A is
-the Terra half: giving Terra a body list and a step loop, and rendering the trails.
+**Robin corrected the framing mid-build, and the correction is the important part of this section.** An
+earlier draft of this plan ended with "the Terra half: give Terra a body list and a step loop." That is a
+scene feature wearing an engine's clothes, and it is the failure this doc opens by naming — *if it only
+works in Terra, the design has failed*. Robin: the swarm should be *"a natural operation of the engine
+receiving these materializations and rendering them naturally"*, and the only legitimate scene-side part
+is *"the mass/trajectory introduction with button press"* — because that is an INITIAL CONDITION, which
+is exactly what a scene is for.
+
+So there is no Terra half. There is an engine that flies matter and reports what it is holding, and a
+scene that declares ICs and presents the result.
+
+- **`flight::Flight`** — the operation. `introduce(FlyingBody)` is the one door; `introduce_swarm` is
+  `damage::disrupt` fed into it, so the swarm is a composition of things the engine already had rather
+  than a feature. `step` runs the air, the trail, gravity and arrival at hard matter.
+- **`flight::FlightEnvironment`** — the entire seam between one flight law and every world it runs in:
+  gravity here, air here, has the path met hard matter. A ground patch answers from a heightfield; a
+  planet from its own layered mass and its `AirShell`. The physics between them is the same code.
+- **`Drawn`** + `GpuParticle::of_matter` — the engine says what its matter looks like, from real albedo
+  and real temperature, once. A scene that can draw ANY of the engine's matter can draw ALL of it,
+  including matter the engine starts holding later.
+
+The operation was not invented here: it was `Simulation::fly_meteors`, already correct and already
+generic in everything but its ADDRESS — inside a 96 m voxel patch, in f32, unreachable from planetary
+scale. The ground scene now delegates to it, which is what makes "one law" a fact rather than a claim.
+
+**What is left to SEE it:** a scene presenting `Flight::drawn()` from orbit. That is small and it is the
+sanctioned scene-side part — but Terra draws globes and meshes and has no instanced particle path today,
+so it needs the docs/50 render-path increment ("the render path is still two") to reach it. Nothing
+visual has been claimed or rig-verified yet.
 
 - ✅ **Feature 1, the atmosphere-collision dispatch.** `interaction::detect_atmospheric` — the engine
   sweeping every (body-with-air, body) pair and reporting who is flying through what, alongside the solid
