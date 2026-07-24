@@ -71,6 +71,13 @@ pub enum Phase {
 const G: f64 = 6.674e-11;
 
 impl LayeredBody {
+    /// Build a body from MEASURED layers (docs/58 promote-to-body). The private `_comment` field means a
+    /// struct literal cannot be written outside this module, and a promoted body has no catalogue entry to
+    /// deserialize from — it is matter the simulation produced, so it needs a constructor.
+    pub fn from_layers(layers: Vec<Layer>) -> Self {
+        LayeredBody { layers, atmosphere_mass: 0.0, surface: None, name: String::new(), _comment: String::new() }
+    }
+
     pub fn radius(&self) -> f64 {
         self.layers.last().map_or(0.0, |l| l.outer_r)
     }

@@ -13,17 +13,26 @@
 //!      of the remnant (same law as `tides::secular_step`). A clump inside Roche should tidally SHRED, not
 //!      accrete, so it is left as particles for the sim to disrupt.
 //!
-//! **Conservation.** Promotion to a point body at the clump COM conserves **mass, linear momentum, and the
-//! centre of mass EXACTLY** (the body carries `Σm`, `Σmv/Σm`, `Σmx/Σm`). It cannot conserve everything: the
-//! clump's internal random kinetic energy is absorbed as heat (physical for inelastic accretion) and its
-//! internal spin angular momentum is folded into the body — both are REPORTED (`internal_ke`, and the
-//! orbital vs total-L split is recoverable from the members), never silently dropped. This is the "conserve
-//! mass + momentum, and energy + angular momentum as far as possible" the stage-4c spec asks for.
+//! **Conservation.** Promotion to a point body at the clump COM conserves **mass, linear momentum, the
+//! centre of mass, and total angular momentum EXACTLY** (the body carries `Σm`, `Σmv/Σm`, `Σmx/Σm`, and
+//! `Σmᵢ(rᵢ−com)×(vᵢ−v_com)`). The clump's internal random kinetic energy is absorbed as heat — physical for
+//! inelastic accretion — and is carried on the body as `thermal_j` rather than discarded.
+//!
+//! Angular momentum is a FIELD (`Body::ang_mom`), not a remark. Until 2026-07-23 this doc claimed the spin
+//! was "folded into the body … recoverable from the members", but `Body` had nowhere to put it and the
+//! members are precisely what a de-resolution pass deletes — so any caller that actually consumed
+//! `Accreted::consumed` would have destroyed the spin of every clump it promoted, and a mass/momentum check
+//! would still have passed. A rotating disk is the case where that term dominates. The rule this encodes:
+//! **a demotion may only drop a quantity it can name and hand back** (docs/44 §7 — promotion and demotion
+//! must not inject energy; the inverse must be able to restore what the forward pass absorbed).
 
 use crate::neighbors::NeighborGrid;
 use glam::DVec3;
 
 const FOUR_THIRDS_PI: f64 = 4.0 / 3.0 * std::f64::consts::PI;
+/// Barnes-Hut opening angle for the clump binding energy — the same 0.5 the gravity path uses, so one
+/// accuracy/speed trade-off governs both. theta -> 0 recovers the exact all-pairs sum (pinned in `bhtree`).
+const BH_THETA: f64 = 0.5;
 
 /// A candidate accreted body found in the particle field.
 #[derive(Clone, Debug)]
@@ -36,6 +45,8 @@ pub struct Clump {
     pub radius: f64,       // sphere of that density and mass: (3·mass / 4πρ)^⅓
     pub internal_ke: f64,  // Σ ½ mᵢ |vᵢ − v_com|²  (random motion; absorbed as heat on merge)
     pub self_pe: f64,      // −Σ_{i<j} G mᵢ mⱼ / |rᵢⱼ|  (softened) — the clump's own binding energy
+    pub ang_mom: DVec3,    // Σ mᵢ (rᵢ−com) × (vᵢ−v_com) — the clump's SPIN about its own COM
+    pub thermal_ke: f64,   // internal_ke MINUS the coherent-rotation share ½ω·L — the part that becomes heat
     pub bound: bool,       // internal_ke + self_pe < 0
     pub outside_roche: bool,
 }
@@ -48,6 +59,11 @@ impl Clump {
 }
 
 /// A body promoted from an accreted clump — mass at the clump COM with the clump's bulk velocity.
+///
+/// `ang_mom` and `thermal_j` are what make the promotion REVERSIBLE: re-particalizing this body must be
+/// able to hand back the spin and the heat it arrived with. Without them a rotating clump would come back
+/// as a still one, and the merge's inelastic heat would have vanished — both invisible to a mass/momentum
+/// check, which is why they are fields and not a comment (docs/44 §7: demotion must not inject energy).
 #[derive(Clone, Copy, Debug)]
 pub struct Body {
     pub pos: DVec3,
@@ -55,6 +71,67 @@ pub struct Body {
     pub mass: f64,
     pub rho: f64,
     pub radius: f64,
+    /// Σ mᵢ (rᵢ−com) × (vᵢ−v_com) — the clump's spin, in the frame of the body itself.
+    pub ang_mom: DVec3,
+    /// The internal random KE an inelastic merge thermalises (J). Carried, not discarded.
+    pub thermal_j: f64,
+}
+
+impl Body {
+    /// Uniform-sphere moment of inertia about the body's own centre — isotropic, so `E_rot = |L|²/2I`
+    /// holds for rotation about ANY axis (no principal-axis assumption needed).
+    fn inertia(&self) -> f64 {
+        0.4 * self.mass * self.radius * self.radius
+    }
+
+    /// Does this straggler STRIKE the body and stay? Robin's rule: a meteor that impacts the moon becomes
+    /// part of the moon unless it reaches escape velocity on the rebound. Contact is `r <= radius`; staying
+    /// is `|v_rel| < sqrt(2GM/r)` — the body's OWN escape speed at the contact point. There is no dial
+    /// here: both terms are the body's real mass and radius, and a fast enough impactor is correctly
+    /// refused and stays a particle.
+    pub fn absorbs(&self, g: f64, pos: DVec3, vel: DVec3) -> bool {
+        let r = (pos - self.pos).length();
+        if r > self.radius {
+            return false;
+        }
+        let v_esc = (2.0 * g * self.mass / r.max(self.radius * 1.0e-6)).sqrt();
+        (vel - self.vel).length() < v_esc
+    }
+
+    /// Absorb a straggler, conserving mass, linear momentum, the centre of mass and TOTAL angular momentum
+    /// exactly, and keeping the energy budget closed: the relative kinetic energy the inelastic merge
+    /// destroys becomes heat, except the share the merged body's new spin carries away.
+    pub fn absorb(&mut self, pos: DVec3, vel: DVec3, mass: f64, rho: f64) {
+        let m_new = self.mass + mass;
+        let x_new = (self.pos * self.mass + pos * mass) / m_new;
+        let v_new = (self.vel * self.mass + vel * mass) / m_new;
+        // Angular momentum about the NEW centre of mass: the spin already held, plus the orbital moment
+        // each piece had about that new centre. This is what makes an off-centre strike spin the body up.
+        let l_new = self.ang_mom
+            + self.mass * (self.pos - x_new).cross(self.vel - v_new)
+            + mass * (pos - x_new).cross(vel - v_new);
+        // Internal energy in the COM frame BEFORE the merge...
+        let i_old = self.inertia();
+        let e_rot_old = if i_old > 0.0 { self.ang_mom.length_squared() / (2.0 * i_old) } else { 0.0 };
+        let ke_internal = self.thermal_j
+            + e_rot_old
+            + 0.5 * self.mass * (self.vel - v_new).length_squared()
+            + 0.5 * mass * (vel - v_new).length_squared();
+        // ...and after: volume-additive density (as `find_clumps` computes it), radius from mass at that
+        // density, and whatever the new spin does not carry is heat.
+        let vol = self.mass / self.rho.max(1.0e-9) + mass / rho.max(1.0e-9);
+        let rho_new = if vol > 0.0 { m_new / vol } else { self.rho };
+        let radius_new = (m_new / (FOUR_THIRDS_PI * rho_new)).cbrt();
+        let i_new = 0.4 * m_new * radius_new * radius_new;
+        let e_rot_new = if i_new > 0.0 { l_new.length_squared() / (2.0 * i_new) } else { 0.0 };
+        self.pos = x_new;
+        self.vel = v_new;
+        self.mass = m_new;
+        self.rho = rho_new;
+        self.radius = radius_new;
+        self.ang_mom = l_new;
+        self.thermal_j = (ke_internal - e_rot_new).max(0.0);
+    }
 }
 
 /// Result of one accretion pass: the promoted bodies and the indices they consumed.
@@ -120,7 +197,6 @@ pub fn find_clumps(
     }
 
     // --- classify each clump ---
-    let s2 = softening * softening;
     let mut clumps = Vec::with_capacity(groups.len());
     for members in groups.into_values() {
         let m: f64 = members.iter().map(|&i| mass[i]).sum();
@@ -137,20 +213,60 @@ pub fn find_clumps(
             .iter()
             .map(|&i| 0.5 * mass[i] * (vel[i] - com_vel).length_squared())
             .sum();
-        // self gravitational PE (softened, matching the sim) — O(k²) in the clump size, fine (clumps small)
-        let mut self_pe = 0.0;
-        for a in 0..members.len() {
-            for b in (a + 1)..members.len() {
-                let (ia, ib) = (members[a], members[b]);
-                let r = ((pos[ia] - pos[ib]).length_squared() + s2).sqrt();
-                self_pe -= g * mass[ia] * mass[ib] / r;
-            }
+        // SPIN about the clump's own COM. A point body at the COM already carries the clump's ORBITAL
+        // angular momentum (through com_pos × com_vel); this is the remainder, and it is the piece that
+        // silently vanishes if the members are deleted without it. A rotating disk is exactly the case
+        // where it dominates, so it is carried on the body rather than left "recoverable from members".
+        let ang_mom: DVec3 = members
+            .iter()
+            .map(|&i| mass[i] * (pos[i] - com_pos).cross(vel[i] - com_vel))
+            .sum();
+        // Split `internal_ke` into the part carried by COHERENT rotation — which the promoted body keeps as
+        // spin — and the RANDOM residual, which an inelastic merge genuinely thermalises. Counting the
+        // rotational share as heat AND as spin would inject energy through a mere change of representation
+        // (docs/44 §7 forbids exactly that). E_rot = ½ ω·L with ω = I⁻¹L about the clump's own COM.
+        let mut inertia = glam::DMat3::ZERO;
+        for &i in &members {
+            let r = pos[i] - com_pos;
+            let m = mass[i];
+            inertia += glam::DMat3::from_diagonal(DVec3::splat(m * r.length_squared()))
+                - glam::DMat3::from_cols(r * (m * r.x), r * (m * r.y), r * (m * r.z));
         }
+        // A clump of <3 members, or one whose points are collinear/coincident, has no invertible inertia
+        // tensor and no well-defined ω. FLAGGED: those fall back to thermalising the whole internal KE,
+        // which over-reports heat for a degenerate rotator. Real clumps are 3-D and well-conditioned; the
+        // spin itself (`ang_mom`) is carried regardless, so nothing is lost, only mis-labelled as heat.
+        let det = inertia.determinant();
+        let e_rot = if members.len() >= 3 && det.is_finite() && det > 0.0 {
+            0.5 * (inertia.inverse() * ang_mom).dot(ang_mom)
+        } else {
+            0.0
+        };
+        let thermal_ke = (internal_ke - e_rot).max(0.0);
+        // Self gravitational binding energy, softened to match the sim, via Barnes-Hut (docs/30).
+        //
+        // This was an exact O(k²) all-pairs sum with the comment "fine (clumps small)". A clump only stops
+        // being small when it UNITES — which is the exact case de-resolution exists to catch — so the test
+        // became catastrophically expensive at the moment it started succeeding: measured 1.9 ms at 500
+        // members but 492 ms at 8,000, and a real 20-35k disk extrapolates to seconds
+        // (`find_clumps_cost_against_clump_size`). `BarnesHut::build` brute-forces below `BRUTE_BELOW`, so
+        // small clumps stay EXACT and only large ones take the θ-bounded approximation — pinned to the
+        // direct sum in `bhtree`'s tests, and θ→0 converges onto it.
+        let self_pe = if members.len() < 2 {
+            0.0
+        } else {
+            let mpos: Vec<DVec3> = members.iter().map(|&i| pos[i]).collect();
+            let mmass: Vec<f64> = members.iter().map(|&i| mass[i]).collect();
+            let bh = crate::bhtree::BarnesHut::build(&mpos, &mmass, BH_THETA, softening);
+            // `bhtree` uses the engine's own G while `find_clumps` takes `g` as a parameter. PE scales
+            // linearly in G, so rescale rather than let the two quietly disagree about gravity.
+            bh.self_potential_energy(&mpos, &mmass) * (g / crate::orbit::G)
+        };
         let bound = internal_ke + self_pe < 0.0;
         // Fluid Roche limit of the remnant for THIS clump's density.
         let d_roche = 2.44 * central_radius * (central_density(central_mass, central_radius) / clump_rho).cbrt();
         let outside_roche = (com_pos - central_pos).length() > d_roche;
-        clumps.push(Clump { members, mass: m, com_pos, com_vel, rho: clump_rho, radius, internal_ke, self_pe, bound, outside_roche });
+        clumps.push(Clump { members, mass: m, com_pos, com_vel, rho: clump_rho, radius, internal_ke, self_pe, ang_mom, thermal_ke, bound, outside_roche });
     }
     clumps
 }
@@ -178,11 +294,191 @@ pub fn accrete(
     let clumps = find_clumps(pos, vel, mass, rho, linking_length, g, softening, central_pos, central_mass, central_radius);
     let mut out = Accreted::default();
     for c in clumps.iter().filter(|c| c.accretes()) {
-        out.bodies.push(Body { pos: c.com_pos, vel: c.com_vel, mass: c.mass, rho: c.rho, radius: c.radius });
+        out.bodies.push(Body {
+            pos: c.com_pos,
+            vel: c.com_vel,
+            mass: c.mass,
+            rho: c.rho,
+            radius: c.radius,
+            ang_mom: c.ang_mom,
+            thermal_j: c.thermal_ke,
+        });
         out.consumed.extend_from_slice(&c.members);
     }
     out.consumed.sort_unstable();
     out
+}
+
+
+
+
+/// The bowl a measured excavation carves — depth AND radius from one excavated volume (docs/46 row 18).
+///
+/// The render used to size the bowl's radius from a dial (`0.72·R_surface`) while measuring only its depth,
+/// which produced a saucer far too wide for its depth (d/r ~ 0.06) that read as flat and "never showed" —
+/// the regression Robin reported repeatedly. Both dimensions now come from the SAME excavated volume plus
+/// ONE sourced shape fact: a simple crater's depth is ~0.4 of its radius (Melosh, *Impact Cratering*). For
+/// a paraboloid V = ½πR²d = 0.2πR³, so R = (V/0.2π)^⅓ and d = 0.4R. Returns (radius_m, depth_m).
+pub fn crater_bowl(excavated_volume_m3: f64) -> (f64, f64) {
+    const DEPTH_PER_RADIUS: f64 = 0.4;
+    if excavated_volume_m3 <= 0.0 {
+        return (0.0, 0.0);
+    }
+    // V = ½πr²d and d = k·r  ⇒  V = ½πk·r³  ⇒  r = (2V / (πk))^⅓.
+    let r = (2.0 * excavated_volume_m3 / (std::f64::consts::PI * DEPTH_PER_RADIUS)).cbrt();
+    (r, DEPTH_PER_RADIUS * r)
+}
+
+/// The mass above which a body's own gravity overcomes its material strength — the physical boundary
+/// between a ROCK and a BODY.
+///
+/// Below it matter keeps whatever irregular shape it was left in; above it self-gravity crushes it into
+/// hydrostatic equilibrium and it is round. That is the honest trigger for promoting a coalesced particle
+/// into a layered body: **not a particle count** — merging systematically destroys the count, so a
+/// count-based gate becomes unsatisfiable exactly when coalescence succeeds — and not a chosen mass.
+///
+/// A self-gravitating sphere's central pressure is ~(2π/3)·G·ρ²·R², so it rounds once that exceeds the
+/// material's strength σ:  R = sqrt(3σ / (2π·G·ρ²)),  M = (4/3)·π·ρ·R³.
+///
+/// For rock (σ ~ 10⁸ Pa, ρ ~ 3000) this lands near 300 km — the observed "potato radius" where asteroids
+/// stop being lumpy and start being round, which is the check that this is physics and not a fitted number.
+pub fn rounding_mass(strength_pa: f64, density: f64) -> f64 {
+    let rho = density.max(1.0);
+    let r = (3.0 * strength_pa.max(0.0) / (2.0 * std::f64::consts::PI * G_CONST * rho * rho)).sqrt();
+    FOUR_THIRDS_PI * rho * r.powi(3)
+}
+
+/// Gravitational constant for [`rounding_mass`] — the engine's one value (`orbit::G`).
+const G_CONST: f64 = crate::orbit::G;
+
+/// Sample a settled particle set's RADIAL composition into layers — the promote-to-body step (docs/58).
+///
+/// Robin: *"heavier materials naturally migrate toward the middle when settling, making a sampling of the
+/// materials involved easily transferable into a layered particle."* That is the mechanism, and it is
+/// precisely why this MEASURES instead of declaring. Under self-gravity denser matter really does sink, so
+/// by the time a blob is quiescent its radial material profile IS its layer structure, and reading that
+/// profile reports the differentiation the simulation actually performed.
+///
+/// The alternative — sorting the materials by density and stacking them — would manufacture layers the sim
+/// never made, and would look identical for a body that had differentiated and one that had not. Here a
+/// body that has NOT differentiated samples as a near-uniform mixture and collapses to ONE layer, which is
+/// the honest answer. **The layer COUNT emerges**: adjacent shells with the same dominant material merge,
+/// so a well-separated body yields core/mantle/crust and a stirred one yields a single layer.
+///
+/// Shells are equal-MASS rather than equal-radius, so each carries the same statistical weight instead of
+/// the outermost (largest volume, fewest particles) dominating.
+#[allow(clippy::too_many_arguments)]
+pub fn sample_layers(
+    pos: &[DVec3],
+    mass: &[f64],
+    rho: &[f64],
+    material: &[usize],
+    names: &[String],
+    temp_k: &[f64],
+    shells: usize,
+) -> Vec<crate::planet::Layer> {
+    let n = pos.len();
+    if n == 0 || shells == 0 {
+        return Vec::new();
+    }
+    let m_total: f64 = mass.iter().sum();
+    if m_total <= 0.0 {
+        return Vec::new();
+    }
+    let com: DVec3 = (0..n).map(|i| pos[i] * mass[i]).sum::<DVec3>() / m_total;
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| {
+        (pos[a] - com).length_squared().total_cmp(&(pos[b] - com).length_squared())
+    });
+
+    // Walk outward, closing a shell each time it has accumulated its share of the mass. Layers accumulate
+    // MASS and VOLUME (not averaged densities), so a layer spanning several shells reports its true bulk
+    // density rather than a weighted guess.
+    struct Acc { name: String, outer_r: f64, mass: f64, vol: f64, t_inner: f64, t_outer: f64 }
+    let share = m_total / shells as f64;
+    let mut layers: Vec<Acc> = Vec::new();
+    let (mut acc, mut vol, mut t_sum) = (0.0f64, 0.0f64, 0.0f64);
+    let mut cnt = 0usize;
+    let mut inner_t: Option<f64> = None;
+    let mut by_mat: std::collections::HashMap<usize, f64> = std::collections::HashMap::new();
+    for (k, &i) in order.iter().enumerate() {
+        let m = mass[i];
+        acc += m;
+        cnt += 1;
+        vol += m / rho[i].max(1.0);
+        t_sum += m * temp_k[i];
+        let r_out = (pos[i] - com).length();
+        *by_mat.entry(material[i]).or_insert(0.0) += m;
+        if inner_t.is_none() {
+            inner_t = Some(temp_k[i]);
+        }
+        let last = k + 1 == n;
+        if acc < share && !last {
+            continue;
+        }
+        // A shell's identity is the material holding a MAJORITY of its mass. A near-tie is a MIXTURE, and
+        // a mixture is not evidence of a new layer — with 50/50 shells the "winner" is decided by noise and
+        // would fabricate a boundary every time it flipped. So an unresolved shell CONTINUES the layer below
+        // it; only a genuine majority can open a new one. (>50% is the definition of dominance, not a tuned
+        // threshold.) FLAGGED: `Layer` names ONE material, so a true mixture cannot be represented faithfully —
+        // the same IOU the shader merge carries, and the resolved form is a mixture EOS.
+        let (dom, dom_m) = by_mat
+            .iter()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .map(|(k, v)| (*k, *v))
+            .unwrap_or((0, 0.0));
+        // Dominance must exceed SAMPLING NOISE to count as evidence: a one-particle imbalance in a 50/50
+        // shell is not a layer boundary, or a perfectly stirred body sprouts a spurious boundary wherever a
+        // shell held an odd number of particles. The bound is the BINOMIAL standard error of the mass
+        // fraction, `sqrt(p(1−p)/cnt)`, at the conventional 2σ significance.
+        //
+        // The standard error is the right statistic and a flat `1/sqrt(cnt)` was not: it vanishes when
+        // `p == 1`, so a PURE shell is unambiguous however few particles it holds. That matters now that
+        // merging is same-material — a coalesced body arrives as a handful of pure, massive particles, and
+        // a threshold that ignored certainty would have declared every one of them a "mixture" and
+        // collapsed a differentiated planet into a single layer.
+        let p_dom = dom_m / acc.max(1.0);
+        let se = (p_dom * (1.0 - p_dom) / (cnt.max(1) as f64)).sqrt();
+        let majority = cnt > 0 && (p_dom - 0.5) > 2.0 * se;
+        let name = match (majority, layers.last()) {
+            (false, Some(prev)) => prev.name.clone(), // mixture: continue the layer below
+            _ => names.get(dom).cloned().unwrap_or_else(|| "basalt".to_string()),
+        };
+        let t_mean = t_sum / acc.max(1.0);
+        match layers.last_mut() {
+            // Same material as the shell below ⇒ the SAME layer, still being described. Extend it.
+            Some(prev) if prev.name == name => {
+                prev.outer_r = r_out;
+                prev.mass += acc;
+                prev.vol += vol;
+                prev.t_outer = t_mean;
+            }
+            _ => layers.push(Acc {
+                name,
+                outer_r: r_out,
+                mass: acc,
+                vol,
+                t_inner: inner_t.unwrap_or(t_mean),
+                t_outer: t_mean,
+            }),
+        }
+        acc = 0.0;
+        vol = 0.0;
+        t_sum = 0.0;
+        cnt = 0;
+        inner_t = None;
+        by_mat.clear();
+    }
+    layers
+        .into_iter()
+        .map(|a| crate::planet::Layer {
+            material: a.name,
+            outer_r: a.outer_r,
+            density: if a.vol > 0.0 { a.mass / a.vol } else { 0.0 },
+            t_inner: a.t_inner,
+            t_outer: a.t_outer,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -255,6 +551,301 @@ mod tests {
         assert!((com1 - com0).length() / com0.length() < 1e-12, "COM not conserved: {com0} → {com1}");
         // Residual = the 5 singletons.
         assert_eq!(fp.len(), 2 + 5, "2 bodies + 5 residual singletons");
+    }
+
+
+    // docs/58 promote-to-body. Robin: "heavier materials naturally migrate toward the middle when settling,
+    // making a sampling of the materials involved easily transferable into a layered particle." So a
+    // DIFFERENTIATED blob must sample as core + mantle, and — the half that keeps it honest — a STIRRED one
+    // must sample as a single layer rather than being sorted into layers it never formed.
+    #[test]
+    fn sampling_reads_the_differentiation_the_sim_actually_made() {
+        let names = vec!["iron".to_string(), "basalt".to_string()];
+        let (r_core, r_surf) = (2.0e6f64, 6.0e6f64);
+        let (mut pos, mut mass, mut rho, mut mat, mut temp) = (vec![], vec![], vec![], vec![], vec![]);
+        // Settled: iron inside r_core, basalt outside. Equal-volume radii so the shells are well sampled.
+        let n = 4000;
+        for i in 0..n {
+            let rr = r_surf * ((i as f64 + 0.5) / n as f64).cbrt();
+            let dir = {
+                let y = 1.0 - 2.0 * (i as f64 + 0.5) / n as f64;
+                let rad = (1.0 - y * y).max(0.0).sqrt();
+                let th = std::f64::consts::PI * (3.0 - 5.0_f64.sqrt()) * i as f64;
+                DVec3::new(th.cos() * rad, y, th.sin() * rad)
+            };
+            let core = rr < r_core;
+            pos.push(dir * rr);
+            mass.push(if core { 1.0e19 } else { 4.0e18 });
+            rho.push(if core { 7850.0 } else { 3000.0 });
+            mat.push(if core { 0 } else { 1 });
+            temp.push(if core { 4000.0 } else { 1600.0 });
+        }
+        let layers = sample_layers(&pos, &mass, &rho, &mat, &names, &temp, 12);
+        assert_eq!(layers.len(), 2, "a differentiated body samples as core + mantle, got {layers:?}");
+        assert_eq!(layers[0].material, "iron", "the dense material is the INNER layer");
+        assert_eq!(layers[1].material, "basalt");
+        assert!(layers[0].outer_r > 0.5 * r_core && layers[0].outer_r < 1.6 * r_core,
+            "core boundary should land near r_core, got {}", layers[0].outer_r);
+        assert!(layers[1].outer_r > 0.9 * r_surf, "the outer layer reaches the surface");
+        assert!(layers[0].density > layers[1].density, "the core must sample denser than the mantle");
+        assert!(layers[0].t_inner > layers[1].t_outer, "the measured geotherm falls outward");
+
+        // STIRRED: same materials, but interleaved so nothing has separated. One layer is the honest read.
+        let mut smat = mat.clone();
+        for (i, m) in smat.iter_mut().enumerate() { *m = i % 2; }
+        let mut srho = rho.clone();
+        for (i, r) in srho.iter_mut().enumerate() { *r = if i % 2 == 0 { 7850.0 } else { 3000.0 }; }
+        let stirred = sample_layers(&pos, &mass, &srho, &smat, &names, &temp, 12);
+        assert_eq!(stirred.len(), 1,
+            "an undifferentiated body must NOT be sorted into layers it never formed, got {stirred:?}");
+    }
+
+
+    // The regime same-material merging actually produces. Once the shader merges only like with like, a
+    // coalesced body does NOT arrive as thousands of particles — it arrives as a HANDFUL of pure, massive
+    // ones, each still at its own radius because the dense material sank before it coalesced. Sampling must
+    // still read that as layers; if it collapsed them to one, promotion would hand back a homogeneous
+    // planet, which is worse than not promoting at all.
+    #[test]
+    fn a_coalesced_body_of_a_few_pure_particles_still_samples_as_layers() {
+        let names = vec!["iron".to_string(), "basalt".to_string()];
+        // Four particles: two iron deep, two basalt shallow — the shape a merged, differentiated blob has.
+        let pos = vec![
+            DVec3::new(3.0e5, 0.0, 0.0),
+            DVec3::new(-3.0e5, 2.0e5, 0.0),
+            DVec3::new(4.0e6, 0.0, 0.0),
+            DVec3::new(-3.5e6, 1.0e6, 0.0),
+        ];
+        let mass = vec![9.0e22, 8.0e22, 5.0e22, 4.0e22];
+        let rho = vec![7850.0, 7850.0, 3000.0, 3000.0];
+        let mat = vec![0, 0, 1, 1];
+        let temp = vec![5000.0, 4800.0, 1800.0, 1600.0];
+
+        let layers = sample_layers(&pos, &mass, &rho, &mat, &names, &temp, 4);
+        assert_eq!(layers.len(), 2, "a few PURE particles must still resolve two layers, got {layers:?}");
+        assert_eq!(layers[0].material, "iron", "the dense material is inner");
+        assert_eq!(layers[1].material, "basalt");
+        assert!(layers[0].density > layers[1].density, "the core samples denser");
+        assert!(layers[1].outer_r > layers[0].outer_r, "layers are ordered outward");
+        // A pure shell is unambiguous however few particles it holds — this is what the flat 1/sqrt(cnt)
+        // threshold got wrong, and it is exactly the case merging now creates.
+    }
+
+
+
+    // docs/46 row 18: the bowl must keep a crater's SHAPE (depth ~ 0.4 radius), not a dial's. The old code
+    // sized radius from 0.72*R_surface and depth from volume, giving d/r ~ 0.06 — a saucer that rendered
+    // flat. Both now come from the same excavated volume.
+    #[test]
+    fn a_crater_bowl_keeps_its_shape_at_every_size() {
+        for &v in &[1.0e15, 1.0e18, 3.0e19] {
+            let (r, d) = crater_bowl(v);
+            assert!(r > 0.0 && d > 0.0, "a real excavation makes a real bowl");
+            assert!((d / r - 0.4).abs() < 1.0e-9, "depth must stay ~0.4 of radius, got {:.3}", d / r);
+            // The paraboloid must actually hold the volume it was built from.
+            let v_bowl = 0.5 * std::f64::consts::PI * r * r * d;
+            assert!((v_bowl - v).abs() / v < 1.0e-9, "the bowl must contain the excavated volume");
+        }
+        // A bigger excavation is a bigger crater in BOTH dimensions, never a flatter one.
+        let (r1, d1) = crater_bowl(1.0e15);
+        let (r2, d2) = crater_bowl(1.0e18);
+        assert!(r2 > r1 && d2 > d1, "more excavation digs wider AND deeper");
+        assert_eq!(crater_bowl(0.0), (0.0, 0.0), "no excavation, no crater");
+    }
+
+    // The rock/body boundary must reproduce the OBSERVED potato radius, or it is a formula rather than
+    // physics. Asteroids stop being lumpy and start being round somewhere near 200-300 km.
+    #[test]
+    fn the_rounding_mass_reproduces_the_observed_potato_radius() {
+        let (sigma, rho) = (1.0e8, 3000.0); // rock
+        let m = rounding_mass(sigma, rho);
+        let r = (m / (FOUR_THIRDS_PI * rho)).cbrt();
+        assert!((1.5e5..5.0e5).contains(&r), "rock should round near 200-300 km, got {:.0} km", r / 1e3);
+
+        // A STRONGER material has to grow bigger before gravity wins; a weaker one rounds sooner.
+        assert!(rounding_mass(4.0e8, rho) > m, "stronger material resists rounding to a larger mass");
+        assert!(rounding_mass(2.5e7, rho) < m, "weaker material rounds at a smaller mass");
+        // Strengthless matter (a liquid) is round at any size.
+        assert_eq!(rounding_mass(0.0, rho), 0.0, "a liquid has no shape of its own");
+    }
+
+    // STRAGGLERS (Robin, 2026-07-23): "a meteor that impacts the moon becomes part of the moon unless it
+    // hits escape velocity on the rebound." Absorbing one must conserve mass, momentum, COM and TOTAL
+    // angular momentum — an off-centre strike has to spin the body up, not vanish into it.
+    #[test]
+    fn a_straggler_is_absorbed_conserving_momentum_and_spin() {
+        let g = G;
+        let mut b = Body {
+            pos: DVec3::new(1.0e7, 0.0, 0.0),
+            vel: DVec3::new(0.0, 1000.0, 0.0),
+            mass: 7.0e22,
+            rho: 3300.0,
+            radius: 1.7e6,
+            ang_mom: DVec3::new(0.0, 0.0, 1.0e29),
+            thermal_j: 5.0e24,
+        };
+        // An OFF-CENTRE strike: offset in y so it carries angular momentum about the body's centre.
+        let (p_pos, p_vel, p_m, p_rho) =
+            (b.pos + DVec3::new(0.0, 1.2e6, 0.0), DVec3::new(-400.0, 900.0, 0.0), 3.0e19, 3000.0);
+        assert!(b.absorbs(g, p_pos, p_vel), "a slow strike well inside the radius must be absorbed");
+
+        // Totals about a FIXED origin, treating the body as mass + spin.
+        let l0 = b.mass * b.pos.cross(b.vel) + b.ang_mom + p_m * p_pos.cross(p_vel);
+        let mom0 = b.mass * b.vel + p_m * p_vel;
+        let m0 = b.mass + p_m;
+        let com0 = (b.pos * b.mass + p_pos * p_m) / m0;
+        let spin_before = b.ang_mom;
+
+        b.absorb(p_pos, p_vel, p_m, p_rho);
+
+        let l1 = b.mass * b.pos.cross(b.vel) + b.ang_mom;
+        assert!((b.mass - m0).abs() / m0 < 1e-12, "mass not conserved");
+        assert!((b.mass * b.vel - mom0).length() / mom0.length() < 1e-12, "momentum not conserved");
+        assert!((b.pos - com0).length() / com0.length() < 1e-12, "COM not conserved");
+        assert!((l1 - l0).length() / l0.length() < 1e-10, "angular momentum not conserved: {l0} → {l1}");
+        assert!(b.ang_mom != spin_before, "an off-centre strike must change the body's spin");
+        assert!(b.radius > 1.7e6, "absorbing mass grows the body at its own density");
+
+        // And the gate is real: the SAME strike at well above escape speed is refused.
+        let v_esc = (2.0 * g * b.mass / 1.2e6_f64).sqrt();
+        assert!(
+            !b.absorbs(g, p_pos, b.vel + DVec3::new(0.0, 10.0 * v_esc, 0.0)),
+            "a strike above escape velocity must NOT be absorbed"
+        );
+    }
+
+    // MEASUREMENT (docs/44) — WHERE the clump cost actually is, phase by phase.
+    //
+    // The first cut of this test used a linking length (5e5) LARGER than the blob it measured (radius 3e5),
+    // so every particle landed in one neighbour-grid cell and the friends-of-friends pair loop degenerated
+    // to O(N^2). It therefore measured FoF, not the binding sum, and wrongly indicted `self_pe`. Real disks
+    // link at ~4x the interparticle spacing, which is what this uses now.
+    //
+    // Run with `--ignored`; it reports, it does not gate.
+    #[test]
+    #[ignore]
+    fn find_clumps_cost_against_clump_size() {
+        let (m_i, rho) = (1.0e19, 3000.0);
+        let radius = 3.0e5;
+        eprintln!("  members   spacing   link      FoF+all   selfPE(exact)   selfPE(BH)");
+        for &n in &[500usize, 1000, 2000, 4000, 8000, 16000] {
+            let (pos, vel, mass, r) = cold_blob(DVec3::new(2.0e7, 0.0, 0.0), DVec3::ZERO, radius, n, m_i, rho);
+            // Realistic link: ~4x the interparticle spacing, as `2.0 * mean_h` gives in the live path.
+            let spacing = (FOUR_THIRDS_PI * radius.powi(3) / n as f64).cbrt();
+            let link = 4.0 * spacing;
+
+            let t0 = std::time::Instant::now();
+            let clumps = find_clumps(&pos, &vel, &mass, &r, link, G, 1.0e4, DVec3::ZERO, 5.0e24, 6.0e6);
+            let ms_all = t0.elapsed().as_secs_f64() * 1e3;
+            let biggest = clumps.iter().map(|c| c.members.len()).max().unwrap_or(0);
+
+            // The binding sum in isolation, both ways, over the WHOLE set.
+            let t1 = std::time::Instant::now();
+            let mut exact = 0.0f64;
+            for a in 0..n {
+                for b in (a + 1)..n {
+                    let rr = ((pos[a] - pos[b]).length_squared() + 1.0e4f64 * 1.0e4).sqrt();
+                    exact -= G * mass[a] * mass[b] / rr;
+                }
+            }
+            let ms_exact = t1.elapsed().as_secs_f64() * 1e3;
+
+            let t2 = std::time::Instant::now();
+            let bh = crate::bhtree::BarnesHut::build(&pos, &mass, BH_THETA, 1.0e4);
+            let approx = bh.self_potential_energy(&pos, &mass);
+            let ms_bh = t2.elapsed().as_secs_f64() * 1e3;
+
+            let rel = ((approx - exact) / exact).abs();
+            eprintln!(
+                "  {:7} {:9.0} {:9.0} {:9.1} {:15.1} {:12.1}   (rel {:.1e}, biggest clump {})",
+                n, spacing, link, ms_all, ms_exact, ms_bh, rel, biggest
+            );
+        }
+    }
+
+    // A self-bound blob that also SPINS rigidly about `omega` — a rotating disk in miniature, and the case
+    // that separates a body which carries its spin from one that quietly drops it.
+    fn spinning_blob(
+        center: DVec3, bulk: DVec3, omega: DVec3, radius: f64, n: usize, m_i: f64, rho: f64,
+    ) -> (Vec<DVec3>, Vec<DVec3>, Vec<f64>, Vec<f64>) {
+        let (p, _, m, r) = cold_blob(center, bulk, radius, n, m_i, rho);
+        let v = p.iter().map(|&q| bulk + omega.cross(q - center)).collect();
+        (p, v, m, r)
+    }
+
+    // TOTAL angular momentum about a fixed origin must survive promotion: the body carries its ORBITAL L
+    // through pos×vel and its SPIN L in `ang_mom`. Delete the spin field and this fails by the whole spin
+    // share for a rotating clump — while mass, momentum and COM all still balance exactly. That is
+    // precisely how the missing term stayed invisible for as long as it did.
+    #[test]
+    fn accretion_conserves_angular_momentum_of_a_spinning_clump() {
+        let (m_i, rho) = (1.0e19, 3000.0);
+        let omega = DVec3::new(0.0, 0.0, 1.0e-4); // slow enough that the blob stays self-bound
+        let (pos, vel, mass, r) =
+            spinning_blob(DVec3::new(2.0e7, 0.0, 0.0), DVec3::new(0.0, 1500.0, 0.0), omega, 3.0e5, 60, m_i, rho);
+
+        let l_before: DVec3 = (0..pos.len()).map(|i| mass[i] * pos[i].cross(vel[i])).sum();
+        let out = accrete(&pos, &vel, &mass, &r, 5.0e5, G, 1.0e4, DVec3::ZERO, 5.0e24, 6.0e6);
+        assert_eq!(out.bodies.len(), 1, "the spinning blob should accrete as one body");
+
+        let b = out.bodies[0];
+        let l_after = b.mass * b.pos.cross(b.vel) + b.ang_mom;
+        assert!(
+            (l_after - l_before).length() / l_before.length() < 1.0e-10,
+            "angular momentum not conserved: {l_before} → {l_after}"
+        );
+        // ...and the spin is a term worth carrying, not round-off dressed up as physics.
+        assert!(
+            b.ang_mom.length() / l_before.length() > 1.0e-9,
+            "spin should be a measurable share of L, else this test proves nothing"
+        );
+        // The BODY (not just the clump) must also report this rigid rotator's heat as ~zero: the promoted
+        // record is what a caller keeps after the members are deleted, so it is the one that has to be right.
+        assert!(
+            b.thermal_j < 1.0e-9 * (0.5 * b.mass * b.vel.length_squared()).max(1.0),
+            "a rigid rotator thermalises nothing, but the body reports {} J",
+            b.thermal_j
+        );
+    }
+
+    // The energy split. A RIGID rotator converts NONE of its internal KE to heat — it is all coherent spin,
+    // which the body keeps. Incoherent motion converts nearly all of it. Counting rotation as both spin and
+    // heat would inject energy through a change of representation alone (docs/44 §7).
+    #[test]
+    fn rigid_rotation_is_carried_as_spin_not_as_heat() {
+        let (m_i, rho) = (1.0e19, 3000.0);
+        let omega = DVec3::new(0.0, 0.0, 1.0e-4);
+        let (pos, vel, mass, r) =
+            spinning_blob(DVec3::new(2.0e7, 0.0, 0.0), DVec3::ZERO, omega, 3.0e5, 60, m_i, rho);
+        let clumps = find_clumps(&pos, &vel, &mass, &r, 5.0e5, G, 1.0e4, DVec3::ZERO, 5.0e24, 6.0e6);
+        assert_eq!(clumps.len(), 1, "the blob is one clump at this linking length");
+        let c = &clumps[0];
+        assert!(c.internal_ke > 0.0, "a rotating clump has internal KE about its COM");
+        assert!(
+            c.thermal_ke / c.internal_ke < 1.0e-9,
+            "rigid rotation must be carried as spin, not thermalised: {} of {}",
+            c.thermal_ke,
+            c.internal_ke
+        );
+
+        // Now add INCOHERENT jitter on top of the same rotation: that part must show up as heat.
+        let vel2: Vec<DVec3> = (0..pos.len())
+            .map(|i| {
+                let h = ((i as f64 * 12.9898).sin() * 43758.5453).fract();
+                let k = ((i as f64 * 78.233).sin() * 27183.2818).fract();
+                vel[i] + DVec3::new(h - 0.5, k - 0.5, (h + k).fract() - 0.5) * 20.0
+            })
+            .collect();
+        let c2 = &find_clumps(&pos, &vel2, &mass, &r, 5.0e5, G, 1.0e4, DVec3::ZERO, 5.0e24, 6.0e6)[0];
+        assert!(
+            c2.thermal_ke / c2.internal_ke > 0.1,
+            "incoherent motion must thermalise: {} of {}",
+            c2.thermal_ke,
+            c2.internal_ke
+        );
+        // Bookkeeping closes: internal KE is exactly spin-energy + heat, nothing created or lost.
+        let e_rot = c2.internal_ke - c2.thermal_ke;
+        assert!(e_rot >= -1.0e-6 * c2.internal_ke, "rotational share must not go negative");
     }
 
     // A clump INSIDE the Roche limit must NOT accrete (it should shred); the SAME clump outside Roche must.

@@ -524,7 +524,13 @@ async function main(): Promise<void> {
         physics.push(`Earth day <b>${demo.earth_day_hours().toFixed(1)} h</b>`);
       }
       // GPU SPH impact (docs/33 stage 5): live disk provenance from the read-back particle field.
-      const gpuDisk = demo.gpu_disk_stats_json();
+      // Same cost shape as the CPU disk stats above — friends-of-friends plus an O(k²) self-binding sum
+      // over the disk — so it gets the same treatment: ~1 Hz, and ?nostats disables it for profiling.
+      // It ran EVERY FRAME until 2026-07-23. Measured (accretion::find_clumps_cost_against_clump_size):
+      // 1.9 ms at 500 members, 492 ms at 8,000 — and k is largest precisely when the disk UNITES, so the
+      // HUD got slowest exactly when the thing it reports on became most interesting.
+      if (!statsSkip) gpuDiskCache ??= demo.gpu_disk_stats_json();
+      const gpuDisk = gpuDiskCache ?? "null";
       if (gpuDisk !== "null") {
         const g = JSON.parse(gpuDisk) as { disk: number; earth_pct: number; moon: number };
         physics.push(
@@ -544,7 +550,8 @@ async function main(): Promise<void> {
 
     const statsSkip = new URLSearchParams(location.search).has("nostats");
     let diskCache: string | null = null;
-    setInterval(() => { diskCache = null; }, 1000); // refresh the disk stats at 1 Hz
+    let gpuDiskCache: string | null = null;
+    setInterval(() => { diskCache = null; gpuDiskCache = null; }, 1000); // refresh the disk stats at 1 Hz
     let firstFrame = true;
     let lastFrameT = performance.now();
     const frame = () => {

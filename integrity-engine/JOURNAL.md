@@ -3,6 +3,73 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-23 — de-resolution: a united clump can become one gravitating body (docs/44)
+
+**What.** Robin: *"an essential efficiency/optimization component MUST be resolving debris (clumping) when
+particles that are sticky (gravity/liquid/etc) unify in trajectory... we have a large, cohesive disk of magma
+that has united; this should become a single body"*, and *"stragglers ... should be absorbed too. A meteor
+that impacts the moon becomes part of the moon unless it hits escape velocity on the rebound."*
+
+The operator already existed. `accretion::accrete` found self-bound clumps (`internal_ke + self_pe < 0` plus
+a Roche gate) and returned the promoted bodies AND the particle indices they consumed — fully tested, with
+**zero production call sites**. The four live callers of `find_clumps` only MEASURE. Nothing has ever removed
+an SPH particle at runtime. So the criterion existed and the collapse never ran (docs/48's pattern again).
+
+Four things had to be true before it could be wired, and each is now:
+
+1. **It stopped losing physics.** `Body` was `{pos, vel, mass, rho, radius}` — no angular momentum. The module
+   doc claimed the spin was *"folded into the body ... recoverable from the members"*, but there was no field
+   for it and the members are exactly what a de-resolution pass deletes. Any caller consuming
+   `Accreted::consumed` would have destroyed the spin of every clump it promoted **while mass, momentum and
+   COM still balanced exactly**. A rotating disk is where that term dominates. Added `ang_mom` and
+   `thermal_ke`/`thermal_j` — the heat deliberately NOT the whole internal KE, since a coherent rotator keeps
+   that as spin and counting it twice injects energy through a change of representation (docs/44 §7). Split
+   via `E_rot = ½ω·L`, `ω = I⁻¹L`. FLAGGED: <3 members or collinear geometry has no invertible inertia
+   tensor and over-reports heat; the spin is carried regardless.
+2. **A de-resolved body still gravitates.** `sph_step.wgsl` sums gravity over the particle set plus one
+   optional bulk, so a clump leaving that set would stop acting on the survivors — changing what is TRUE, not
+   just how it is stored (Law IV). Added `@binding(8) ext_mass` + `Params.n_ext` (which took the `_p1` padding
+   slot, so all offsets and the 80-byte size are unchanged) and `GpuSph::set_external_masses`.
+3. **Stragglers rejoin.** `Body::absorbs` gates on the body's OWN escape speed at the contact point
+   (`r <= radius`, `|v_rel| < sqrt(2GM/r)`) — no dial. `Body::absorb` conserves mass, momentum, COM and total
+   angular momentum, spins the body up on an off-centre strike, and keeps the energy budget closed.
+4. **One answer to "what is the disk?"** Four routines each carried the same preamble and had drifted; see
+   docs/46 row 17. `gpu_sph::DiskView` is now the single definition.
+
+**Also fixed, found while measuring.** `gpu_disk_stats_json()` ran EVERY FRAME with no cache and no `?nostats`
+gate, to render one HUD line — friends-of-friends plus an O(k²) binding sum. The CPU disk stats thirty lines
+above already carried a *"throttled to ~1 Hz"* comment for exactly this reason. Now throttled the same way.
+
+**Verified.** Native **341/341** (was 337). `tools/sph-verify` on the RTX 2070 — force RMS 1.85e-6, KDK
+integration, spherical + planar bulk, and a NEW positive external-mass check, since every other harness runs
+`n_ext = 0` and would pass with the channel inert or wrong-signed:
+
+```
+ext-mass: PASS -> vx=39.858 m/s vs analytic 39.857 m/s (rel 1.52e-5), a_ref=3.986 m/s^2
+```
+
+Conservation and drift tests were **mutation-checked**: zeroing `ang_mom` fails by the full spin share;
+`thermal_j = internal_ke` fails the rigid-rotator assertion; restoring the pre-fix disk filter fails with
+"the hyperbolic particle must be counted as escaped, got 0".
+
+Measured cost of the binding sum (`find_clumps_cost_against_clump_size`, `--ignored`, release):
+
+```
+  members     ms
+      500    1.9
+    1,000   11.2
+    2,000   33.0
+    4,000  121.5
+    8,000  492.1
+```
+
+**NOT done, and the blocker is honest.** The scene wiring is not in. That measurement makes a naive per-frame
+pass unusable *exactly* on the united disk it exists to catch — one call over a 20k clump extrapolates to
+seconds, i.e. the operator gets catastrophically expensive at the moment it starts succeeding. The
+prerequisite is an O(N log N) binding energy: `bhtree::BarnesHut` exists and is verified but has only
+`accelerations`, no POTENTIAL traversal. Adding one (same tree, same opening criterion, sum `Gm/r`), pinned
+to the exact O(N²) sum, is the next step — then the pass hooks in where `sph_snapshot` lands.
+
 ## 2026-07-23 — resolution-on-demand: the moon-drop caps modern Earth (deployed); Ground port foundations (docs/39)
 
 **What (shipped + deployed).** After the CPU Aggregate was retired (entry below), routing the moon-drop

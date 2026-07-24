@@ -239,6 +239,10 @@ mod app {
     // affordable) WITHOUT dragging the native test suite up to high N. The scene's time-LOD keeps it
     // interactive if a step gets heavy (observable time dilates rather than the frame stalling). Trade
     // on-screen disk richness ↔ browser step-rate by bumping these; keep CAP:DEBRIS ≈ 2:1 (docs/28 item 4).
+    /// ~1.5 h of sim time — long enough to cover the collision and its excavation. Past it the event is
+    /// over: the dt coarsens for the slow disk aftermath (docs/42) AND de-resolution is allowed to run
+    /// (docs/44 §6 — demote on quiescence). ONE definition of "the shock is finished" serves both.
+    const SPH_SHOCK_WINDOW_S: f64 = 5400.0;
     const SCENE_DEBRIS_N: usize = 512;
     const SCENE_CAP_N: usize = 1024;
     const SCENE_IMPACT_N: usize = SCENE_DEBRIS_N + SCENE_CAP_N;
@@ -689,6 +693,15 @@ mod app {
     const ORBIT_TIME_SCALE: f64 = 118_000.0; // sim-seconds per real-second
     const ORBIT_SUBSTEPS: u32 = 16;
 
+    /// A clump promoted out of the particle set (docs/58's generic body: matter + pos + vel + ang_mom).
+    /// The matter is SAMPLED from the particles that formed it, so the layering it carries is the
+    /// differentiation the simulation actually produced (`accretion::sample_layers`).
+    #[derive(Clone, Debug)]
+    struct PromotedBody {
+        body: crate::accretion::Body,
+        matter: crate::planet::LayeredBody,
+    }
+
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct SpaceUniforms {
@@ -702,7 +715,19 @@ mod app {
         /// multiple of a sunlit white surface (`blackbody::thermal_glow_gain`). A cold planet sends zeros
         /// and pays nothing; a magma ocean sends ~547 and lights itself.
         glow: [f32; 4],
+        /// THE CRATER, measured (docs/39 surface hook, docs/46 row 18). xyz = the bowl axis as a unit
+        /// vector in the globe's MODEL space, w = its angular radius (rad). Zero ⇒ no crater, so every
+        /// other consumer of this uniform pays nothing.
+        crater: [f32; 4],
+        /// x = bowl depth as a fraction of the surface radius. Derived from the EXCAVATED MASS actually
+        /// lifted above the pristine surface, never authored — see `gpu_crater_depth_frac`.
+        crater2: [f32; 4],
     }
+
+    /// Byte offset of `SpaceUniforms::crater` — 2 mat4 (128) + 5 vec4 (80). The globe patches just these
+    /// 32 bytes after `write_space_uniform`, so the crater does not have to be threaded through all 14
+    /// call sites of a uniform that only one draw uses.
+    const CRATER_UNIFORM_OFFSET: u64 = 208;
 
     /// How far (wall-clock seconds) the RENDER runs behind the PHYSICS (docs/13). Humans don't
     /// resolve detail below ~1/10 s, so the physics keeps a 100 ms head start: every collision in the
@@ -873,6 +898,16 @@ mod app {
         /// Robin): `prov 0` is the planet. Birth places fresh bodies on a designed approach and the moon-drop
         /// keeps its orbiting ones, but both resolve identically from these live states — no flag, no branch.
         sph_prov_to_body: Vec<usize>,
+        /// Live de-resolution budget (docs/08/44) — while the particle count exceeds it, redundant pairs
+        /// merge in the shader. Driven by MEASURED frame time, not a chosen constant; 0 = no coarsening.
+        sph_merge_budget: u32,
+        /// PROMOTED bodies (docs/58): a settled, self-bound clump that has left the particle set and become
+        /// a body carrying its own `LayeredBody` matter, spin and heat. They keep acting on the remaining
+        /// particles through the shader's `ext_mass` channel — which is what makes that channel
+        /// load-bearing — and are integrated here, since the shader no longer moves them.
+        sph_promoted: Vec<PromotedBody>,
+        /// Frames since the last promotion attempt; it is a change of representation, not a force.
+        sph_promote_tick: u32,
         /// A collision the ballistic `step_substep` DETECTED but must not resolve itself (docs/58 — the ONE
         /// collision engine). Holds the colliding set (`[planet, impactors…]`, planet first = prov 0);
         /// `advance` executes it via `route_bodies_to_sph` after the substep loop unwinds, because
@@ -905,6 +940,14 @@ mod app {
         /// grows as the shock excavates). `None` until contact. Persists after (bake-back — Robin's call).
         gpu_impact_site: Option<glam::DVec3>,
         gpu_crater_frac: f64,
+        /// Bowl depth as a fraction of the surface radius, MEASURED from the target material actually
+        /// lifted above its pristine surface (docs/46 row 18). 0 until something is excavated.
+        gpu_crater_depth_frac: f64,
+        /// Bowl RADIUS as a fraction of the surface radius, from the same measured excavated volume as the
+        /// depth (docs/46 row 18) — not the inherited 0.72 dial that made the crater a flat saucer.
+        gpu_crater_r_frac: f64,
+        /// Last reported bowl depth (quantised) so the diagnostic logs on CHANGE, not every frame.
+        gpu_crater_logged: i32,
     }
 
     // Moon-shot Stage A constants.
@@ -1227,6 +1270,9 @@ mod app {
                 sph_substeps: 6,
                 sph_snapshot: Vec::new(),
                 sph_eos: Vec::new(),
+                sph_merge_budget: 0,
+                sph_promoted: Vec::new(),
+                sph_promote_tick: 0,
                 sph_prov_to_body: Vec::new(),
                 pending_sph_route: None,
                 sph_cap: None,
@@ -1234,6 +1280,9 @@ mod app {
                 render_blend: 0.0, // pretty by default (docs/42)
                 gpu_impact_site: None,
                 gpu_crater_frac: 0.0,
+                gpu_crater_depth_frac: 0.0,
+                gpu_crater_r_frac: 0.0,
+                gpu_crater_logged: -1,
             })
         }
 
@@ -1989,6 +2038,190 @@ mod app {
 
         /// Set up the GPU SPH relaxation for a collision of the given bodies (docs/58 #7 — the ONE engine).
         /// Each is particalized from its MATTER (real mass, per-material EOS from the catalogue) and relaxed
+        /// PROMOTE a settled clump out of the particle set into a layered body (docs/58, docs/44).
+        ///
+        /// This is the tier above the shader's pairwise merge: merging coarsens redundant particles, and a
+        /// blob that has fully coalesced and gone quiet stops being particles at all. Robin: *"a planet is a
+        /// promoted particle with more properties/analysis"* — so the promoted record is docs/58's generic
+        /// body, `{matter, pos, vel, ang_mom}`, and its matter is SAMPLED from the very particles that made
+        /// it, never declared.
+        ///
+        /// Gated on the same quiescence the merge uses: promoting mid-shock would freeze matter that is
+        /// still being excavated. Only clumps that `accretes()` (self-bound AND outside Roche) qualify, so
+        /// the central remnant and any tidally-shredding debris are both excluded by construction.
+        ///
+        /// Returns `true` if the particle field was rewritten — the caller must not step that frame, since
+        /// `upload` replaces the field from a read-back one frame old.
+        fn promote_settled_bodies(&mut self) -> bool {
+            use glam::DVec3;
+            if self.sph_snapshot.len() < 8 || self.sph_sim_t <= SPH_SHOCK_WINDOW_S {
+                return false;
+            }
+            if self.sph_promoted.len() >= crate::gpu_sph::MAX_EXT_BODIES {
+                return false;
+            }
+            let snap = std::mem::take(&mut self.sph_snapshot);
+            let Some(view) = crate::gpu_sph::DiskView::of(&snap) else {
+                self.sph_snapshot = snap;
+                return false;
+            };
+            // Two members is the minimum that can express a radial profile at all. It is NOT the real
+            // gate: a COUNT gate is self-defeating here, because merging systematically reduces the member
+            // count, so it becomes unsatisfiable exactly when coalescence succeeds (Robin caught this —
+            // the same shape of mistake as writing the binding energy as an O(k²) sum that explodes when
+            // clumps unite). The real gate is MASS, below.
+            let clumps = view.moonlets(2);
+            let names = crate::gpu_sph::eos_material_names(&self.sph_eos, &self.mats);
+            // A clump is promoted when its own gravity has overcome its material strength — the physical
+            // boundary between a rock and a BODY (`accretion::rounding_mass`). Below it the thing has no
+            // hydrostatic interior to describe with layers and the particle tier is its right home.
+            let strength_of = |c: &crate::accretion::Clump| -> f64 {
+                let mut wsum = 0.0f64;
+                let mut msum = 0.0f64;
+                for &k in &c.members {
+                    let p = &snap[view.idx[k]];
+                    let m = p.mass as f64;
+                    let sig = names
+                        .get(p.mat as usize)
+                        .and_then(|n| self.mats.iter().find(|mm| &mm.id == n))
+                        .map(|mm| mm.fracture_strength as f64)
+                        .unwrap_or(1.0e8);
+                    wsum += m * sig;
+                    msum += m;
+                }
+                if msum > 0.0 { wsum / msum } else { 1.0e8 }
+            };
+            let Some(c) = clumps
+                .into_iter()
+                .filter(|c| c.mass >= crate::accretion::rounding_mass(strength_of(c), c.rho))
+                .max_by(|a, b| a.mass.partial_cmp(&b.mass).unwrap())
+            else {
+                self.sph_snapshot = snap;
+                return false;
+            };
+
+            // Sample the clump's own matter — the layering the sim produced, read rather than declared.
+            let idx: Vec<usize> = c.members.iter().map(|&k| view.idx[k]).collect();
+            let (mut pos, mut mass, mut rho, mut mat, mut temp) =
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            for &i in &idx {
+                let p = &snap[i];
+                pos.push(DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64));
+                mass.push(p.mass as f64);
+                rho.push(p.rho.max(1.0) as f64);
+                mat.push(p.mat as usize);
+                // T from the particle's OWN specific internal energy and its material's heat capacity.
+                let sh = names
+                    .get(p.mat as usize)
+                    .and_then(|n| self.mats.iter().find(|m| &m.id == n))
+                    .and_then(|m| m.specific_heat())
+                    .unwrap_or(840.0);
+                temp.push((p.u as f64 / sh.max(1.0)).max(0.0));
+            }
+            let layers = crate::accretion::sample_layers(&pos, &mass, &rho, &mat, &names, &temp, 12);
+            if layers.is_empty() {
+                self.sph_snapshot = snap;
+                return false;
+            }
+            let matter = crate::planet::LayeredBody::from_layers(layers);
+            let body = crate::accretion::Body {
+                pos: c.com_pos,
+                vel: c.com_vel,
+                mass: c.mass,
+                rho: c.rho,
+                radius: c.radius,
+                ang_mom: c.ang_mom,
+                thermal_j: c.thermal_ke,
+            };
+            log::info!(
+                "promote: {} particles -> a body of {:.3e} kg in {} layer(s) [{}]",
+                idx.len(),
+                body.mass,
+                matter.layers.len(),
+                matter.layers.iter().map(|l| l.material.as_str()).collect::<Vec<_>>().join(" / ")
+            );
+            self.sph_promoted.push(PromotedBody { body, matter });
+
+            // The particles it was made of leave the field; the body carries their mass, momentum and spin.
+            let consumed: std::collections::HashSet<usize> = idx.into_iter().collect();
+            let kept: Vec<crate::gpu_sph::SphParticle> = snap
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !consumed.contains(i))
+                .map(|(_, p)| *p)
+                .collect();
+            if kept.is_empty() {
+                self.sph_snapshot = snap;
+                self.sph_promoted.pop();
+                return false;
+            }
+            let ext: Vec<(DVec3, f64)> =
+                self.sph_promoted.iter().map(|p| (p.body.pos, p.body.mass)).collect();
+            let soft = self.sph_soft as f32;
+            let dt = self.sph_dt;
+            let budget = self.sph_merge_budget;
+            if let Some(sph) = self.gpu_sph.as_mut() {
+                sph.upload(&self.queue, &kept, &self.sph_eos, soft);
+                sph.set_dt(&self.queue, dt, 1.0);
+                sph.set_av(&self.queue, 1.0, 2.0);
+                sph.set_merge_budget(&self.queue, budget);
+                // THIS is what makes `ext_mass` load-bearing: without it the promoted body's mass would
+                // simply stop acting on everything left behind, and a change of representation would have
+                // changed what is true (Law IV).
+                sph.set_external_masses(&self.queue, &ext);
+                sph.begin_readback(&self.device, &self.queue);
+            }
+            true
+        }
+
+        /// Advance the PROMOTED bodies. The shader no longer integrates them — they left the particle set —
+        /// but they are still matter in the same field, so they must feel the particles and each other, or a
+        /// promoted moon would hang frozen while the disk moved around it.
+        ///
+        /// FLAGGED (Law V): kick-then-drift rather than the KDK the particles use, since the force is
+        /// evaluated once per frame here. It is symplectic, so it does not secularly gain energy, and it
+        /// converges to the particles' KDK as dt falls; the resolved form is simply evaluating the force
+        /// twice per step, as `encode_kdk` does.
+        fn step_promoted_bodies(&mut self, dt: f64) {
+            use glam::DVec3;
+            if self.sph_promoted.is_empty() || dt <= 0.0 {
+                return;
+            }
+            let g = crate::orbit::G;
+            let s = self.sph_soft.max(1.0);
+            let s2 = s * s;
+            let n = self.sph_promoted.len();
+            let mut acc = vec![DVec3::ZERO; n];
+            for i in 0..n {
+                let b = self.sph_promoted[i].body;
+                let mut a = DVec3::ZERO;
+                for pt in &self.sph_snapshot {
+                    let d = DVec3::new(pt.pos[0] as f64, pt.pos[1] as f64, pt.pos[2] as f64) - b.pos;
+                    let r2 = d.length_squared() + s2;
+                    a += d * (g * pt.mass as f64 / (r2 * r2.sqrt()));
+                }
+                for (j, o) in self.sph_promoted.iter().enumerate() {
+                    if i == j {
+                        continue;
+                    }
+                    let d = o.body.pos - b.pos;
+                    let r2 = d.length_squared() + s2;
+                    a += d * (g * o.body.mass / (r2 * r2.sqrt()));
+                }
+                acc[i] = a;
+            }
+            for (p, a) in self.sph_promoted.iter_mut().zip(acc) {
+                p.body.vel += a * dt; // kick
+                p.body.pos += p.body.vel * dt; // drift
+            }
+            // Keep the shader's copy of where they are in step with where they actually are.
+            let ext: Vec<(DVec3, f64)> =
+                self.sph_promoted.iter().map(|p| (p.body.pos, p.body.mass)).collect();
+            if let Some(sph) = self.gpu_sph.as_mut() {
+                sph.set_external_masses(&self.queue, &ext);
+            }
+        }
+
         /// far apart; the material EOS table is kept (`sph_eos`) for the assemble + dynamics uploads. `live`
         /// selects the assembly geometry when the relax completes — the LIVE N-body trajectory (a moon-drop)
         /// or the declared canonical giant impact (birth). Shared by `start_gpu_impact` and `drop_moon`.
@@ -2008,6 +2241,9 @@ mod app {
             self.sph_phase = SphPhase::Relaxing(0);
             self.gpu_impact_site = None; // no crater until contact (docs/42 Phase 2)
             self.gpu_crater_frac = 0.0;
+            self.gpu_crater_depth_frac = 0.0;
+            self.gpu_crater_r_frac = 0.0;
+            self.sph_promoted.clear();
             self.sph_substeps = 6; // start conservative; the frame-budget controller adapts up (docs/42)
         }
 
@@ -2041,6 +2277,9 @@ mod app {
             self.sph_phase = SphPhase::Relaxing(0);
             self.gpu_impact_site = None;
             self.gpu_crater_frac = 0.0;
+            self.gpu_crater_depth_frac = 0.0;
+            self.gpu_crater_r_frac = 0.0;
+            self.sph_promoted.clear();
             self.sph_substeps = 6;
         }
 
@@ -2097,6 +2336,9 @@ mod app {
             self.sph_phase = SphPhase::Relaxing(0);
             self.gpu_impact_site = None; // no crater until Theia makes contact (docs/42 Phase 2)
             self.gpu_crater_frac = 0.0;
+            self.gpu_crater_depth_frac = 0.0;
+            self.gpu_crater_r_frac = 0.0;
+            self.sph_promoted.clear();
             self.sph_substeps = 6; // start conservative; the frame-budget controller adapts up (docs/42)
             self.focus = 1; // centre on Earth (the particle system sits at the display origin)
             self.camera.zoom = 0.4; // frame the impact (the Earth–Moon default zoom shows it as a speck)
@@ -2158,6 +2400,35 @@ mod app {
                     self.sph_substeps = (self.sph_substeps * 3 / 4).max(1);
                 } else if real_dt < 0.028 {
                     self.sph_substeps = (self.sph_substeps + 1).min(24);
+                }
+                // DE-RESOLUTION BUDGET (docs/08/44). The substep throttle above is the FIRST response to a
+                // frame we cannot afford. Once it has bottomed out at 1 and the frame is STILL over budget,
+                // the cost is the particle COUNT, not the step count — and that is the honest trigger for
+                // coarsening. So necessity here is MEASURED (frame time), never a declared number: while the
+                // sim is comfortable no merging happens at all, however redundant the particles look.
+                // QUIESCENCE first (docs/44 §6: "demote on quiescence... not when motion stops"). Coarsening
+                // during the shock is not a saving, it is a CORRUPTION: the excavation is actively separating
+                // material, and merging fights it. Measured — with the gate on frame time alone, birth's disk
+                // went 0.34/0.31/0.25 M☾ -> 0.00, because the throttle bottoms out exactly during the impact
+                // and the merge then swept disk material back into the remnant. The shock window is the
+                // boundary the scheduled-dt coarsening already uses, so one definition of "the event is over"
+                // serves both.
+                let quiescent = self.sph_sim_t > SPH_SHOCK_WINDOW_S;
+                let live = self.gpu_sph.as_ref().map_or(0, |s| s.count());
+                let budget = if quiescent && real_dt > 0.060 && self.sph_substeps <= 1 {
+                    // Shed a tenth of the field per coarsening round: enough to converge over a few frames,
+                    // gentle enough that one bad frame cannot collapse the sim.
+                    (live * 9 / 10).max(64)
+                } else if real_dt < 0.028 {
+                    0 // comfortable: stop coarsening entirely
+                } else {
+                    self.sph_merge_budget // hold steady in the band between
+                };
+                if budget != self.sph_merge_budget {
+                    self.sph_merge_budget = budget;
+                    if let Some(sph) = self.gpu_sph.as_mut() {
+                        sph.set_merge_budget(&self.queue, budget);
+                    }
                 }
             }
             // GPU SPH deformable-Earth impact owns the frame while active (docs/33 stage 4c.4): encode a batch
@@ -2346,11 +2617,29 @@ mod app {
                     // disk rather than dispersing (docs/35). An in-kernel per-substep adaptive dt (to trim the
                     // residual escape) is the next refinement.
                     SphPhase::Dynamics => {
-                        let substeps = self.sph_substeps; // adaptive (frame-budget controlled) — never a fixed 100
-                        const SPH_SHOCK_WINDOW_S: f64 = 5400.0; // ~1.5 h — cover the collision + excavation, then coarsen
+                        let substeps = self.sph_substeps;
+                        let merge_budget = self.sph_merge_budget;
+                        // PROMOTION (docs/58): every so often, a settled self-bound clump leaves the
+                        // particle set and becomes a layered body. It is a change of REPRESENTATION, so it
+                        // runs on a cadence rather than every frame — and when it fires it rewrites the
+                        // field, so that frame must not also step (the read-back it works from is a frame
+                        // old, and stepping too would rewind the sim by that step).
+                        const PROMOTE_EVERY: u32 = 120;
+                        self.sph_promote_tick += 1;
+                        if self.sph_promote_tick >= PROMOTE_EVERY {
+                            self.sph_promote_tick = 0;
+                            if self.promote_settled_bodies() {
+                                return;
+                            }
+                        } // adaptive (frame-budget controlled) — never a fixed 100
                         if let Some(sph) = self.gpu_sph.as_mut() {
                             let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sph-step") });
                             sph.encode_kdk(&mut enc, substeps);
+                            // Coarsen only while over budget (docs/08/44). `encode_merge` rebuilds the grid
+                            // itself, so it is safe after the KDK batch; at budget 0 the kernels early-out.
+                            if merge_budget > 0 {
+                                sph.encode_merge(&mut enc);
+                            }
                             self.queue.submit(std::iter::once(enc.finish()));
                             if let Some(snap) = sph.take_readback() {
                                 self.sph_snapshot = snap;
@@ -2359,6 +2648,10 @@ mod app {
                         }
                         // Scheduled dt (docs/42): once the shock window has passed, coarsen the dt for the slow
                         // disk aftermath (WebGPU can't read back the adaptive Courant dt, so we schedule by time).
+                        // The promoted bodies are no longer in the shader, so advance them here — over the
+                        // SAME interval the particles just took, or they would drift out of step with the
+                        // field they gravitate on.
+                        self.step_promoted_bodies(substeps as f64 * self.sph_dt as f64);
                         self.sph_sim_t += substeps as f64 * self.sph_dt as f64;
                         if self.sph_dt < self.sph_dt_aftermath && self.sph_sim_t > SPH_SHOCK_WINDOW_S {
                             self.sph_dt = self.sph_dt_aftermath;
@@ -2698,6 +2991,48 @@ mod app {
                     }
                     if self.gpu_impact_site.is_some() {
                         self.gpu_crater_frac = (self.gpu_crater_frac + 0.03).min(1.0);
+                        // DEPTH FROM EXCAVATED MASS (docs/46 row 18). The target material now lifted above
+                        // its own pristine surface is, by conservation, the material missing from the bowl.
+                        // Its volume at the cap's real density gives the hole; a simple crater's bowl is a
+                        // PARABOLOID, V = ½·π·R²·d, so d = 2V/(πR²). Nothing here is authored — an impact
+                        // that excavates nothing leaves no crater, and one that excavates more digs deeper.
+                        let r_surf = self
+                            .body_meta
+                            .get(self.planet_idx())
+                            .map_or(EARTH_RADIUS_M, |m| m.radius_m);
+                        let (mut m_exc, mut vol) = (0.0f64, 0.0f64);
+                        for p in &self.sph_snapshot {
+                            if p.prov != 0 {
+                                continue;
+                            }
+                            let pos = glam::DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
+                            if pos.length() > r_surf {
+                                let m = p.mass as f64;
+                                m_exc += m;
+                                vol += m / (p.rho.max(1.0) as f64);
+                            }
+                        }
+                        // BOWL GEOMETRY FROM THE MEASURED VOLUME (docs/46 row 18).
+                        //
+                        // The radius used to be `gpu_crater_frac * 0.72 * r_surf` — an inherited dial, and
+                        // the rig proved it was the bug: it produced a 4,600 km bowl only 282 km deep, a
+                        // depth:radius of 0.06 where real simple craters run ~0.4. The crater was reaching
+                        // the shader correctly and rendering as an imperceptible saucer, which is why it
+                        // "never showed" however right the depth was.
+                        //
+                        // Both numbers now come from the SAME measured excavated volume plus ONE sourced
+                        // shape fact: a simple crater's depth is about a fifth of its diameter (Melosh,
+                        // *Impact Cratering*), i.e. d = 0.4 R. For a paraboloid V = ½πR²d, so
+                        // V = 0.2πR³  ⇒  R = (V / 0.2π)^⅓,  and d follows. Excavate nothing and there is
+                        // no crater; excavate more and it grows in BOTH dimensions, keeping its shape.
+                        let (r_bowl, d) = crate::accretion::crater_bowl(vol);
+                        if r_bowl > 0.0 {
+                            // A bowl cannot be deeper than the cap that was resolved to make it; past that
+                            // the excavation is reaching matter this resolution never promoted.
+                            self.gpu_crater_depth_frac = (d / r_surf).min(0.25);
+                            self.gpu_crater_r_frac = (r_bowl / r_surf).min(0.9);
+                        }
+                        let _ = m_exc;
                     }
                 }
             }
@@ -2780,6 +3115,43 @@ mod app {
                         glow_of(&crate::planet::body("earth"))
                     },
                 );
+
+                // Patch the measured crater into the globe's uniform (docs/46 row 18). The axis must be in
+                // MODEL space, and the model matrix spins with the crust — so the bowl is un-rotated by the
+                // same spin, exactly as `crater_site` is rotated INTO world space for the shell grains. The
+                // crater and the matter it is cut from must share one frame.
+                let r_surf_now = self.body_meta.get(self.planet_idx()).map_or(EARTH_RADIUS_M, |m| m.radius_m);
+                if self.gpu_crater_r_frac > 0.0 && self.gpu_crater_depth_frac > 0.0 {
+                    if let Some(dir) = self.gpu_impact_site {
+                        let axis = spin_rot.inverse() * dir;
+                        // Angular radius of the bowl on the sphere: asin(R_bowl / R_surface).
+                        let theta = self.gpu_crater_r_frac.clamp(0.0, 0.95).asin();
+                        let c: [f32; 4] = [axis.x as f32, axis.y as f32, axis.z as f32, theta as f32];
+                        let c2: [f32; 4] = [self.gpu_crater_depth_frac as f32, 0.0, 0.0, 0.0];
+                        // DIAGNOSTIC: is the bowl actually reaching the shader, and how big is it? A render
+                        // change cannot be trusted from a screenshot alone when the impact site may be on
+                        // the night side — this reports the numbers behind the picture.
+                        // Report the bowl only when it MEASURABLY changes, not every frame: a render change
+                        // has to be checkable by number as well as by eye, because the impact site may be on
+                        // the night side where no screenshot can settle it.
+                        let stamp = (self.gpu_crater_depth_frac * 200.0).round() as i32;
+                        if stamp != self.gpu_crater_logged {
+                            self.gpu_crater_logged = stamp;
+                            log::info!(
+                                "crater: depth={:.0} km radius={:.0} km (d/r={:.2}) theta={:.3}rad axis=({:.2},{:.2},{:.2})",
+                                self.gpu_crater_depth_frac * r_surf_now / 1e3,
+                                self.gpu_crater_r_frac * r_surf_now / 1e3,
+                                if self.gpu_crater_r_frac > 0.0 { self.gpu_crater_depth_frac / self.gpu_crater_r_frac } else { 0.0 },
+                                theta, axis.x, axis.y, axis.z
+                            );
+                        }
+                        self.queue.write_buffer(
+                            &self.globe_uni.buf,
+                            CRATER_UNIFORM_OFFSET,
+                            bytemuck::cast_slice(&[c, c2]),
+                        );
+                    }
+                }
             }
             for (i, uni) in self.shell_unis.iter().enumerate() {
                 let body_dir = crate::impact::fib_dir(i, SHELL_N); // this grain's fixed BODY direction
@@ -3368,6 +3740,8 @@ mod app {
             emissive,
             atm: [air[0], air[1], air[2], air[3]],
             glow,
+            crater: [0.0; 4],
+            crater2: [0.0; 4],
         };
         queue.write_buffer(&slot.buf, 0, bytemuck::bytes_of(&u));
     }

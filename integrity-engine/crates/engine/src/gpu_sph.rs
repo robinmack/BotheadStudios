@@ -74,8 +74,16 @@ pub struct SphParams {
     /// rotating-frame relaxation the shader implements was unreachable, and anyone reusing "padding" as
     /// scratch would have silently spun the body. 0.0 = the non-rotating relaxation used today.
     pub omega: f32,
-    pub _p1: f32,
-    pub _p2: f32,
+    /// Number of DE-RESOLVED bodies in the `ext_mass` buffer (docs/44). A clump whose members have united
+    /// leaves the particle set and becomes one `orbit::Body`, but its mass must keep acting on the
+    /// survivors — so it is fed back as an external point mass. 0 ⇒ the channel is inert. Took over the
+    /// `_p1` padding slot, so every offset and the 80-byte size are unchanged.
+    pub n_ext: u32,
+    /// docs/08/44 coarsening: while `n` exceeds this, redundant neighbour pairs MERGE in the shader — the
+    /// de-resolution contact law. 0 disables it. Similarity alone must never trigger a merge (every pair
+    /// inside a settled planet is within a smoothing length and mutually subsonic); this budget is the
+    /// NECESSITY half of the gate.
+    pub merge_budget: u32,
     /// The un-resolved BULK planet a particalized CAP rests on (docs/39 — resolution-on-demand). Mirrors
     /// `sph_step.wgsl`'s two `vec4` tail fields: `bulk_cr` = xyz centre + w R_core (`<= 0` disables the
     /// bulk, the whole-body impact), `bulk_vm` = xyz velocity + w mass. Landed at offset 48/64 (both
@@ -116,6 +124,9 @@ pub const MAT_IRON: u32 = 1;
 /// The GPU EOS table holds up to this many DISTINCT materials — the shader indexes `eos[particle.mat]`, and a
 /// body's layers are rock/metal/ice, so a handful. The EOS array used to be a fixed pair (`[basalt, iron]`);
 /// an N-body impact of differentiated worlds (docs/58) needs the table to grow. Generous headroom.
+/// Ceiling on DE-RESOLVED bodies fed back as external point masses (docs/44). Fixed-size so the buffer
+/// never reallocates; overflow is DROPPED and flagged by `set_external_masses`.
+pub const MAX_EXT_BODIES: usize = 32;
 pub const MAX_MATERIALS: usize = 16;
 
 /// Camera uniform for `sph_render.wgsl` (96 bytes): the view-projection matrix + the Earth display origin +
@@ -519,234 +530,224 @@ pub fn assemble_from_relaxed_with(def: &crate::terra::world_def::ImpactDef, part
     )
 }
 
-/// Measure the orbiting disk of a read-back SPH particle set (docs/33 stage 5, mirrors
-/// `tools/impact-run::measure_disk`): remnant = the 85%-mass inner body; a particle is DISK if bound with
-/// perigee above the remnant surface. Split by provenance (Earth prov 0 vs Theia prov 1), and report the
-/// largest self-bound clump (the Moon candidate) via the verified `accretion` operator. Returns HUD JSON.
-pub fn disk_stats_json(particles: &[SphParticle]) -> String {
-    use glam::DVec3;
-    const M_MOON: f64 = 7.342e22;
-    let n = particles.len();
-    if n == 0 {
-        return String::from("null");
-    }
-    let m_total: f64 = particles.iter().map(|p| p.mass as f64).sum();
-    let pos = |p: &SphParticle| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
-    let vel = |p: &SphParticle| DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64);
-    let com: DVec3 = particles.iter().map(|p| pos(p) * p.mass as f64).sum::<DVec3>() / m_total;
-    let v_com: DVec3 = particles.iter().map(|p| vel(p) * p.mass as f64).sum::<DVec3>() / m_total;
-    // Remnant radius = smallest radius about the COM enclosing 85% of the mass.
-    let mut radii: Vec<(f64, f64)> = particles.iter().map(|p| ((pos(p) - com).length(), p.mass as f64)).collect();
-    radii.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-    let (mut cum, mut r_remnant, mut m_remnant) = (0.0, radii.last().map_or(0.0, |x| x.0), m_total);
-    for &(r, m) in &radii {
-        cum += m;
-        if cum >= 0.85 * m_total {
-            r_remnant = r;
-            m_remnant = cum;
-            break;
+/// The ONE answer to "what is the disk?" (Law II — one question, one answer).
+///
+/// Four routines needed this and each carried its own copy of the preamble: the HUD statistic, the render
+/// moonlet spheres, the escape check, and the geologic hand-off. They had already DRIFTED — only
+/// `disk_stats_json` tested boundedness BEFORE geometry, so once `orbit::perigee` learned to describe
+/// hyperbolic orbits the other three began counting escaping matter as disk. That is exactly the drift
+/// Law II predicts, found in the code rather than argued for. This is now the single definition.
+pub struct DiskView {
+    /// Centre of mass of the whole field and its velocity — the frame everything below is measured in.
+    pub com: glam::DVec3,
+    pub v_com: glam::DVec3,
+    /// The central remnant: the smallest radius about the COM enclosing 85% of the mass, and that mass.
+    pub r_remnant: f64,
+    pub m_remnant: f64,
+    /// Standard gravitational parameter of the remnant, G·m_remnant.
+    pub mu: f64,
+    /// The disk members — bound to the remnant AND with perigee outside it — as the parallel arrays
+    /// `accretion` consumes.
+    pub dp: Vec<glam::DVec3>,
+    pub dv: Vec<glam::DVec3>,
+    pub dm: Vec<f64>,
+    pub dr: Vec<f64>,
+    /// Index into the ORIGINAL particle slice for each disk member — so a caller that consumes disk
+    /// members (de-resolution, docs/44) can map `accretion`'s `consumed` back to real particles.
+    pub idx: Vec<usize>,
+    /// Disk mass from source body 0, from every other source, and the mass leaving altogether.
+    pub disk_prov0: f64,
+    pub disk_other: f64,
+    pub escaped: f64,
+    /// Mean smoothing length over the WHOLE field — the friends-of-friends linking scale.
+    pub mean_h: f64,
+}
+
+impl DiskView {
+    /// Measure the disk. `None` when there is no field to measure.
+    pub fn of(particles: &[SphParticle]) -> Option<DiskView> {
+        use glam::DVec3;
+        let n = particles.len();
+        if n == 0 {
+            return None;
         }
-    }
-    let mu = crate::orbit::G * m_remnant;
-    let (mut e_disk, mut t_disk, mut esc) = (0.0f64, 0.0f64, 0.0f64);
-    for p in particles {
-        let m = p.mass as f64;
-        let (rel_p, rel_v) = (pos(p) - com, vel(p) - v_com);
-        // BOUND first, then geometry. Asking `perigee` for boundedness was safe only while it refused to
-        // describe hyperbolic orbits; once it could, everything leaving counted as disk.
-        if !crate::orbit::is_bound(rel_p, rel_v, mu) {
-            esc += m;
-            continue;
+        let pos = |p: &SphParticle| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
+        let vel = |p: &SphParticle| DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64);
+        // Retired particles (mass 0, left behind by a merge) and any non-finite state are excluded from
+        // the measurement outright — a dead particle is not matter, and a NaN must never reach a sort.
+        let live: Vec<&SphParticle> = particles
+            .iter()
+            .filter(|p| {
+                p.mass > 0.0
+                    && p.mass.is_finite()
+                    && p.pos.iter().all(|c| c.is_finite())
+                    && p.vel.iter().all(|c| c.is_finite())
+            })
+            .collect();
+        if live.len() < 2 {
+            return None;
         }
-        if matches!(crate::orbit::perigee(rel_p, rel_v, mu), Some(pg) if pg > r_remnant) {
-            if p.prov == 0 { e_disk += m } else { t_disk += m }
+        let m_total: f64 = live.iter().map(|p| p.mass as f64).sum();
+        if m_total <= 0.0 {
+            return None;
         }
-    }
-    let disk = e_disk + t_disk;
-    let earth_pct = if disk > 0.0 { 100.0 * e_disk / disk } else { 0.0 };
-    // Moon candidate: the largest self-bound clump in the disk (the verified accretion operator).
-    let (dp, dv, dm, dr): (Vec<DVec3>, Vec<DVec3>, Vec<f64>, Vec<f64>) = {
-        let (mut p, mut v, mut m, mut r) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        for pt in particles {
-            let (rel_p, rel_v) = (pos(pt) - com, vel(pt) - v_com);
-            let peri = crate::orbit::perigee(rel_p, rel_v, mu);
-            if crate::orbit::is_bound(rel_p, rel_v, mu) && matches!(peri, Some(pg) if pg > r_remnant) {
-                p.push(pos(pt));
-                v.push(vel(pt));
-                m.push(pt.mass as f64);
-                r.push(pt.rho.max(1.0) as f64);
+        let com: DVec3 = live.iter().map(|p| pos(p) * p.mass as f64).sum::<DVec3>() / m_total;
+        let v_com: DVec3 = live.iter().map(|p| vel(p) * p.mass as f64).sum::<DVec3>() / m_total;
+        // Remnant radius = smallest radius about the COM enclosing 85% of the mass.
+        let mut radii: Vec<(f64, f64)> = live.iter().map(|p| ((pos(p) - com).length(), p.mass as f64)).collect();
+        // `total_cmp` is a TOTAL order, so it cannot panic the way `partial_cmp(..).unwrap()` did when a
+        // NaN reached it (rig, 2026-07-23: a retired particle's position went NaN and took the scene down).
+        radii.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let (mut cum, mut r_remnant, mut m_remnant) = (0.0, radii.last().map_or(0.0, |x| x.0), m_total);
+        for &(r, m) in &radii {
+            cum += m;
+            if cum >= 0.85 * m_total {
+                r_remnant = r;
+                m_remnant = cum;
+                break;
             }
         }
-        (p, v, m, r)
-    };
-    let mut biggest = 0.0f64;
-    if dp.len() >= 2 {
-        let mean_h: f64 = particles.iter().map(|p| p.h as f64).sum::<f64>() / n as f64;
-        let clumps = crate::accretion::find_clumps(&dp, &dv, &dm, &dr, 2.0 * mean_h, crate::orbit::G, 1.0e4, com, m_remnant, r_remnant);
-        biggest = clumps.iter().filter(|c| c.accretes()).map(|c| c.mass).fold(0.0, f64::max);
+        let mu = crate::orbit::G * m_remnant;
+        let (mut dp, mut dv, mut dm, mut dr) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut idx: Vec<usize> = Vec::new();
+        let (mut disk_prov0, mut disk_other, mut escaped) = (0.0f64, 0.0f64, 0.0f64);
+        for (pi, pt) in particles.iter().enumerate() {
+            if !(pt.mass > 0.0 && pt.mass.is_finite() && pt.pos.iter().all(|c| c.is_finite()) && pt.vel.iter().all(|c| c.is_finite())) {
+                continue;
+            }
+            let m = pt.mass as f64;
+            let (rel_p, rel_v) = (pos(pt) - com, vel(pt) - v_com);
+            // BOUND first, then geometry. Asking `perigee` for boundedness was safe only while it refused
+            // to describe hyperbolic orbits; once it could, everything leaving counted as disk.
+            if !crate::orbit::is_bound(rel_p, rel_v, mu) {
+                escaped += m;
+                continue;
+            }
+            if matches!(crate::orbit::perigee(rel_p, rel_v, mu), Some(pg) if pg > r_remnant) {
+                if pt.prov == 0 { disk_prov0 += m } else { disk_other += m }
+                dp.push(pos(pt));
+                dv.push(vel(pt));
+                dm.push(m);
+                dr.push(pt.rho.max(1.0) as f64);
+                idx.push(pi);
+            }
+        }
+        let mean_h: f64 = live.iter().map(|p| p.h as f64).sum::<f64>() / live.len() as f64;
+        Some(DiskView { com, v_com, r_remnant, m_remnant, mu, dp, dv, dm, dr, idx, disk_prov0, disk_other, escaped, mean_h })
     }
+
+    /// Total bound orbiting mass.
+    pub fn disk_mass(&self) -> f64 {
+        self.disk_prov0 + self.disk_other
+    }
+
+    /// The disk's self-bound clumps — the one `accretion` call, with the parameters every caller used.
+    pub fn clumps(&self) -> Vec<crate::accretion::Clump> {
+        if self.dp.len() < 2 {
+            return Vec::new();
+        }
+        crate::accretion::find_clumps(
+            &self.dp, &self.dv, &self.dm, &self.dr,
+            2.0 * self.mean_h, crate::orbit::G, 1.0e4,
+            self.com, self.m_remnant, self.r_remnant,
+        )
+    }
+
+    /// The clumps that are real accreting moonlets: self-bound, outside Roche (`accretes`), and resolved by
+    /// at least `min_members` particles. An inside-Roche clump is tidal debris that shreds, not a moon.
+    pub fn moonlets(&self, min_members: usize) -> Vec<crate::accretion::Clump> {
+        self.clumps().into_iter().filter(|c| c.accretes() && c.members.len() >= min_members).collect()
+    }
+}
+
+/// Measure the orbiting disk of a read-back SPH particle set (docs/33 stage 5, mirrors
+/// `tools/impact-run::measure_disk`): remnant = the 85%-mass inner body; a particle is DISK if bound with
+/// perigee above the remnant surface. Split by provenance (source body 0 vs the rest), and report the
+/// largest self-bound clump (the Moon candidate) via the verified `accretion` operator. Returns HUD JSON.
+pub fn disk_stats_json(particles: &[SphParticle]) -> String {
+    const M_MOON: f64 = 7.342e22;
+    let Some(d) = DiskView::of(particles) else {
+        return String::from("null");
+    };
+    let disk = d.disk_mass();
+    let earth_pct = if disk > 0.0 { 100.0 * d.disk_prov0 / disk } else { 0.0 };
+    // Moon candidate: the largest self-bound clump in the disk (the verified accretion operator).
+    let biggest = d.clumps().iter().filter(|c| c.accretes()).map(|c| c.mass).fold(0.0, f64::max);
     format!(
         "{{\"disk\":{:.3},\"earth_pct\":{:.0},\"remnant_km\":{:.0},\"escaped\":{:.3},\"moon\":{:.3}}}",
         disk / M_MOON,
         earth_pct,
-        r_remnant / 1e3,
-        esc / M_MOON,
+        d.r_remnant / 1e3,
+        d.escaped / M_MOON,
         biggest / M_MOON,
     )
 }
 
-/// Promote the GPU impact's orbiting disk to geologic-time moonlets (docs/35 stage 5, 2c): find the disk's
-/// self-bound clumps (the `accretion` operator) and turn each into a `tides::Moonlet` orbiting the REAL Earth
-/// just outside the Roche limit (~3.8 R⊕, the real Moon's formation distance), carrying the clump's actual
-/// mass. The secular tidal law then migrates/merges them. This is the GPU-path replacement for the
-/// `Aggregate`-based `enter_geologic_time` hand-off. Returns an empty vec if there's no bound disk yet.
-/// docs/42 Phase 4: the accreting disk clumps as (Earth-relative COM position, sphere radius, mass) — so the
-/// pretty render can draw growing moonlet SPHERES that resolve out of the ejecta. Same disk + friends-of-friends
-/// clump detection as [`disk_moonlets`], but keeps the geometry instead of collapsing to a Moonlet {a, mass}.
+/// docs/42 Phase 4: the accreting disk's clumps as (COM position, sphere radius, mass) — so the render can
+/// draw growing moonlet SPHERES resolving out of the ejecta. Geometry kept, unlike [`disk_moonlets`].
 pub fn moonlet_bodies(particles: &[SphParticle]) -> Vec<(glam::DVec3, f64, f64)> {
-    use glam::DVec3;
     if particles.len() < 2 {
         return Vec::new();
     }
-    let m_total: f64 = particles.iter().map(|p| p.mass as f64).sum();
-    let pos = |p: &SphParticle| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
-    let vel = |p: &SphParticle| DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64);
-    let com: DVec3 = particles.iter().map(|p| pos(p) * p.mass as f64).sum::<DVec3>() / m_total;
-    let v_com: DVec3 = particles.iter().map(|p| vel(p) * p.mass as f64).sum::<DVec3>() / m_total;
-    let mut radii: Vec<(f64, f64)> = particles.iter().map(|p| ((pos(p) - com).length(), p.mass as f64)).collect();
-    radii.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-    let (mut cum, mut r_remnant, mut m_remnant) = (0.0, radii.last().map_or(0.0, |x| x.0), m_total);
-    for &(r, m) in &radii {
-        cum += m;
-        if cum >= 0.85 * m_total { r_remnant = r; m_remnant = cum; break; }
-    }
-    let mu = crate::orbit::G * m_remnant;
-    let (mut dp, mut dv, mut dm, mut dr) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    for pt in particles {
-        if matches!(crate::orbit::perigee(pos(pt) - com, vel(pt) - v_com, mu), Some(pg) if pg > r_remnant) {
-            dp.push(pos(pt)); dv.push(vel(pt)); dm.push(pt.mass as f64); dr.push(pt.rho.max(1.0) as f64);
-        }
-    }
-    if dp.len() < 2 {
+    let Some(d) = DiskView::of(particles) else {
         return Vec::new();
-    }
-    let mean_h: f64 = particles.iter().map(|p| p.h as f64).sum::<f64>() / particles.len() as f64;
-    let clumps = crate::accretion::find_clumps(&dp, &dv, &dm, &dr, 2.0 * mean_h, crate::orbit::G, 1.0e4, com, m_remnant, r_remnant);
-    // Self-bound clumps of ≥3 members: the moonlets forming in the disk (COM position kept Earth-relative).
-    // Only bound clumps OUTSIDE Roche are real moonlets (an inside-Roche clump is tidal debris that escapes —
-    // it must render as ejecta, not a moon sphere). `accretes()` = bound + outside-Roche + ≥2 members.
-    clumps
-        .iter()
-        .filter(|c| c.accretes() && c.members.len() >= 3)
-        .map(|c| (c.com_pos, c.radius, c.mass))
-        .collect()
+    };
+    d.moonlets(3).iter().map(|c| (c.com_pos, c.radius, c.mass)).collect()
 }
 
-/// docs/42 escape-check: the LARGEST self-bound disk clump's orbit about the remnant — distance, speed, specific
-/// orbital energy (bound iff < 0), semi-major axis, mass. Returns None if there is no clump. This tracks the
-/// actual proto-Moon's trajectory (is it receding / unbinding?) rather than aggregate disk mass.
+/// docs/42 escape-check: the LARGEST self-bound disk clump's orbit about the remnant — distance, speed,
+/// specific orbital energy (bound iff < 0), semi-major axis, mass, eccentricity, in-plane angle. This tracks
+/// the actual proto-Moon's trajectory (is it receding / unbinding?) rather than aggregate disk mass.
 pub fn largest_moonlet_orbit(particles: &[SphParticle]) -> Option<(f64, f64, f64, f64, f64, f64, f64)> {
-    use glam::DVec3;
     if particles.len() < 2 {
         return None;
     }
-    let m_total: f64 = particles.iter().map(|p| p.mass as f64).sum();
-    let pos = |p: &SphParticle| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
-    let vel = |p: &SphParticle| DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64);
-    let com: DVec3 = particles.iter().map(|p| pos(p) * p.mass as f64).sum::<DVec3>() / m_total;
-    let v_com: DVec3 = particles.iter().map(|p| vel(p) * p.mass as f64).sum::<DVec3>() / m_total;
-    let mut radii: Vec<(f64, f64)> = particles.iter().map(|p| ((pos(p) - com).length(), p.mass as f64)).collect();
-    radii.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-    let (mut cum, mut r_remnant, mut m_remnant) = (0.0, radii.last().map_or(0.0, |x| x.0), m_total);
-    for &(r, m) in &radii {
-        cum += m;
-        if cum >= 0.85 * m_total { r_remnant = r; m_remnant = cum; break; }
-    }
-    let mu = crate::orbit::G * m_remnant;
-    let (mut dp, mut dv, mut dm, mut dr) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    for pt in particles {
-        if matches!(crate::orbit::perigee(pos(pt) - com, vel(pt) - v_com, mu), Some(pg) if pg > r_remnant) {
-            dp.push(pos(pt)); dv.push(vel(pt)); dm.push(pt.mass as f64); dr.push(pt.rho.max(1.0) as f64);
-        }
-    }
-    if dp.len() < 2 {
-        return None;
-    }
-    let mean_h: f64 = particles.iter().map(|p| p.h as f64).sum::<f64>() / particles.len() as f64;
-    let clumps = crate::accretion::find_clumps(&dp, &dv, &dm, &dr, 2.0 * mean_h, crate::orbit::G, 1.0e4, com, m_remnant, r_remnant);
-    // Only a bound clump OUTSIDE the Roche limit is a real Moon — an inside-Roche clump is tidal debris (it
-    // forms skimming the surface and escapes; it must not be counted/rendered as the Moon).
-    let biggest = clumps.iter().filter(|c| c.accretes() && c.members.len() >= 3).max_by(|a, b| a.mass.partial_cmp(&b.mass).unwrap())?;
+    let d = DiskView::of(particles)?;
+    let biggest = d.moonlets(3).into_iter().max_by(|a, b| a.mass.total_cmp(&b.mass))?;
     // Its orbit about the remnant (COM-relative).
-    let rel_p = biggest.com_pos - com;
-    let rel_v = biggest.com_vel - v_com;
+    let rel_p = biggest.com_pos - d.com;
+    let rel_v = biggest.com_vel - d.v_com;
     let r = rel_p.length();
     let v = rel_v.length();
-    let energy = 0.5 * v * v - mu / r.max(1.0); // specific orbital energy: bound iff < 0
-    let a = if energy < 0.0 { -mu / (2.0 * energy) } else { f64::INFINITY };
+    let energy = 0.5 * v * v - d.mu / r.max(1.0); // specific orbital energy: bound iff < 0
+    let a = if energy < 0.0 { -d.mu / (2.0 * energy) } else { f64::INFINITY };
     // Angular momentum & eccentricity — does it actually ORBIT, or plunge/escape near-radially? e→1 = radial
     // (goes straight out, barely returns); e well below 1 = a real ellipse. h = |rel_p × rel_v|.
     let h = rel_p.cross(rel_v).length();
-    let ecc = (1.0 + 2.0 * energy * h * h / (mu * mu)).max(0.0).sqrt();
+    let ecc = (1.0 + 2.0 * energy * h * h / (d.mu * d.mu)).max(0.0).sqrt();
     let theta = rel_p.y.atan2(rel_p.x); // angle in the orbital plane (radians) — sweeps if it orbits
     Some((r, v, energy, a, biggest.mass, ecc, theta))
 }
 
+/// Promote the GPU impact's orbiting disk to geologic-time moonlets (docs/35 stage 5, 2c): each self-bound
+/// clump becomes a `tides::Moonlet` orbiting the REAL Earth just outside the Roche limit (~3.8 R⊕, the real
+/// Moon's formation distance), carrying the clump's actual mass. The secular tidal law then migrates/merges
+/// them. This is the GPU-path replacement for the `Aggregate`-based `enter_geologic_time` hand-off.
 pub fn disk_moonlets(particles: &[SphParticle], earth_radius: f64) -> Vec<crate::tides::Moonlet> {
-    use glam::DVec3;
     if particles.len() < 2 {
         return Vec::new();
     }
-    let m_total: f64 = particles.iter().map(|p| p.mass as f64).sum();
-    let pos = |p: &SphParticle| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
-    let vel = |p: &SphParticle| DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64);
-    let com: DVec3 = particles.iter().map(|p| pos(p) * p.mass as f64).sum::<DVec3>() / m_total;
-    let v_com: DVec3 = particles.iter().map(|p| vel(p) * p.mass as f64).sum::<DVec3>() / m_total;
-    let mut radii: Vec<(f64, f64)> = particles.iter().map(|p| ((pos(p) - com).length(), p.mass as f64)).collect();
-    radii.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-    let (mut cum, mut r_remnant, mut m_remnant) = (0.0, radii.last().map_or(0.0, |x| x.0), m_total);
-    for &(r, m) in &radii {
-        cum += m;
-        if cum >= 0.85 * m_total {
-            r_remnant = r;
-            m_remnant = cum;
-            break;
-        }
-    }
-    let mu = crate::orbit::G * m_remnant;
-    // Disk particles (bound, perigee above the remnant).
-    let (mut dp, mut dv, mut dm, mut dr) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    for pt in particles {
-        if matches!(crate::orbit::perigee(pos(pt) - com, vel(pt) - v_com, mu), Some(pg) if pg > r_remnant) {
-            dp.push(pos(pt));
-            dv.push(vel(pt));
-            dm.push(pt.mass as f64);
-            dr.push(pt.rho.max(1.0) as f64);
-        }
-    }
-    if dp.len() < 2 {
+    let Some(d) = DiskView::of(particles) else {
         return Vec::new();
-    }
-    let mean_h: f64 = particles.iter().map(|p| p.h as f64).sum::<f64>() / particles.len() as f64;
-    let clumps = crate::accretion::find_clumps(&dp, &dv, &dm, &dr, 2.0 * mean_h, crate::orbit::G, 1.0e4, com, m_remnant, r_remnant);
-    // Each self-bound clump → a moonlet just outside the real-Earth Roche limit (~3.8 R⊕).
-    let moonlets: Vec<crate::tides::Moonlet> = clumps
+    };
+    let moonlets: Vec<crate::tides::Moonlet> = d
+        .moonlets(2)
         .iter()
-        .filter(|c| c.accretes())
         .map(|c| crate::tides::Moonlet { a: 3.8 * earth_radius, mass: c.mass })
         .collect();
     if !moonlets.is_empty() {
         return moonlets;
     }
-    // No tight self-bound clump yet, but there IS bound orbiting disk: in geologic time it accretes a Moon, so
-    // promote the whole bound-disk mass to one moonlet (the secular tidal law then migrates/circularises it).
-    let disk_mass: f64 = dm.iter().sum();
+    // No tight self-bound clump yet, but there IS bound orbiting disk: in geologic time it accretes a Moon,
+    // so promote the whole bound-disk mass to one moonlet (the secular tidal law then circularises it).
+    let disk_mass = d.disk_mass();
     if disk_mass > 0.0 {
         vec![crate::tides::Moonlet { a: 3.8 * earth_radius, mass: disk_mass }]
     } else {
         Vec::new()
     }
 }
+
 
 /// Total energy of a read-back particle set: (kinetic, internal, gravitational-PE) in J. The direct signal of
 /// energy conservation — a giant impact should hold it to a few % (offline `impact-run`: 0.3–0.5 %); a
@@ -864,6 +865,29 @@ impl SphAssembly {
     }
 }
 
+
+/// Recover each EOS slot's MATERIAL NAME by inverting the dedup (docs/58 promote-to-body).
+///
+/// `material_index` dedups the shared table by reference density, because rho0 IS a material's identity —
+/// so the mapping is invertible: the catalogue entry whose Tillotson rho0 matches slot k is slot k's
+/// material. That keeps names out of the 48-byte particle and out of `HydroBody`, which carry only what the
+/// shader needs, while still letting a promoted body say what it is made of.
+///
+/// Slots with no catalogue match report "basalt" — the same fallback `Tillotson::for_material` uses.
+pub fn eos_material_names(eos: &[SphEos], mats: &[crate::materials::Material]) -> Vec<String> {
+    eos.iter()
+        .map(|e| {
+            mats.iter()
+                .find(|m| {
+                    crate::eos::Tillotson::for_material(&m.id)
+                        .is_some_and(|t| (t.rho0 - e.rho0 as f64).abs() < 1.0)
+                })
+                .map(|m| m.id.clone())
+                .unwrap_or_else(|| "basalt".to_string())
+        })
+        .collect()
+}
+
 /// GPU-resident SPH particle system + the `sph_step.wgsl` pipelines. Owns the physics buffer (which is ALSO
 /// the render vertex buffer — zero-copy instanced draw) and the grid/force scratch.
 pub struct GpuSph {
@@ -879,6 +903,8 @@ pub struct GpuSph {
     signal: wgpu::Buffer,
     grid_count: wgpu::Buffer,
     grid_bucket: wgpu::Buffer,
+    ext_mass: wgpu::Buffer,
+    merge_target: wgpu::Buffer,
     bind: wgpu::BindGroup,
     clear: wgpu::ComputePipeline,
     insert: wgpu::ComputePipeline,
@@ -887,6 +913,9 @@ pub struct GpuSph {
     kick_drift: wgpu::ComputePipeline,
     kick: wgpu::ComputePipeline,
     relax_k: wgpu::ComputePipeline,
+    merge_pick: wgpu::ComputePipeline,
+    merge_apply: wgpu::ComputePipeline,
+    merge_retire: wgpu::ComputePipeline,
     params: SphParams,
 }
 
@@ -913,6 +942,9 @@ impl GpuSph {
         let grid_count = device.create_buffer(&wgpu::BufferDescriptor { label: Some("sph-grid-count"), size: (SPH_TABLE_SIZE as u64) * 4, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
         let grid_bucket = device.create_buffer(&wgpu::BufferDescriptor { label: Some("sph-grid-bucket"), size: (SPH_TABLE_SIZE as u64) * (SPH_BUCKET_K as u64) * 4, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
 
+        let ext_mass = device.create_buffer(&wgpu::BufferDescriptor { label: Some("sph-ext-mass"), size: (MAX_EXT_BODIES as u64) * 16, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let merge_target = device.create_buffer(&wgpu::BufferDescriptor { label: Some("sph-merge-target"), size: (cap as u64) * 4, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("sph-step"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/sph_step.wgsl").into()),
@@ -934,6 +966,8 @@ impl GpuSph {
                 storage(5, false), // grid_count
                 storage(6, false), // grid_bucket
                 storage(7, false), // signal
+                storage(8, true),  // ext_mass — de-resolved bodies (docs/44)
+                storage(9, false), // merge_target — the de-resolution contact law (docs/08/44)
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("sph-pipeline-layout"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
@@ -950,13 +984,16 @@ impl GpuSph {
                 wgpu::BindGroupEntry { binding: 5, resource: grid_count.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 6, resource: grid_bucket.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 7, resource: signal.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 8, resource: ext_mass.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 9, resource: merge_target.as_entire_binding() },
             ],
         });
         GpuSph {
             clear: mk("cs_grid_clear"), insert: mk("cs_grid_insert"), density: mk("cs_density"), forces: mk("cs_forces"),
             kick_drift: mk("cs_kick_drift"), kick: mk("cs_kick"), relax_k: mk("cs_relax"),
-            store, params_buf, eos_buf, acc, dudt, signal, grid_count, grid_bucket, bind,
-            params: SphParams { n: 0, softening: 0.0, av_alpha: 1.0, av_beta: 2.0, cell_size: 1.0, table_mask: SPH_TABLE_SIZE - 1, bucket_k: SPH_BUCKET_K, dt: 0.0, damp: 1.0, omega: 0.0, _p1: 0.0, _p2: 0.0, bulk_cr: [0.0; 4], bulk_vm: [0.0; 4] },
+            merge_pick: mk("cs_merge_pick"), merge_apply: mk("cs_merge_apply"), merge_retire: mk("cs_merge_retire"),
+            store, params_buf, eos_buf, acc, dudt, signal, grid_count, grid_bucket, ext_mass, merge_target, bind,
+            params: SphParams { n: 0, softening: 0.0, av_alpha: 1.0, av_beta: 2.0, cell_size: 1.0, table_mask: SPH_TABLE_SIZE - 1, bucket_k: SPH_BUCKET_K, dt: 0.0, damp: 1.0, omega: 0.0, n_ext: 0, merge_budget: 0, bulk_cr: [0.0; 4], bulk_vm: [0.0; 4] },
         }
     }
 
@@ -1021,6 +1058,46 @@ impl GpuSph {
         self.params.bulk_cr = [plane_point.x as f32, plane_point.y as f32, plane_point.z as f32, -1.0];
         self.params.bulk_vm = [n.x as f32, n.y as f32, n.z as f32, g as f32];
         queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
+    }
+
+    /// Feed the DE-RESOLVED bodies back into the particles' gravity (docs/44). A clump that has united
+    /// leaves the particle set and becomes one `orbit::Body`; its mass still has to act on every survivor,
+    /// or collapsing it would change what is true and not merely how it is stored (Law IV). Positions are
+    /// in the SPH's working frame, the same one the particles use.
+    ///
+    /// Overflow past [`MAX_EXT_BODIES`] is DROPPED — flagged, not silent: the returned count is how many
+    /// were actually uploaded, so a caller can see it lost one.
+    pub fn set_external_masses(&mut self, queue: &wgpu::Queue, bodies: &[(glam::DVec3, f64)]) -> usize {
+        let n = bodies.len().min(MAX_EXT_BODIES);
+        let packed: Vec<[f32; 4]> = bodies[..n]
+            .iter()
+            .map(|&(p, m)| [p.x as f32, p.y as f32, p.z as f32, m as f32])
+            .collect();
+        if !packed.is_empty() {
+            queue.write_buffer(&self.ext_mass, 0, bytemuck::cast_slice(&packed));
+        }
+        self.params.n_ext = n as u32;
+        queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
+        n
+    }
+
+    /// Set the de-resolution BUDGET (docs/08/44): while the live particle count exceeds it, redundant
+    /// neighbour pairs merge in the shader. 0 disables merging entirely.
+    pub fn set_merge_budget(&mut self, queue: &wgpu::Queue, budget: u32) {
+        self.params.merge_budget = budget;
+        queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
+    }
+
+    /// Encode ONE de-resolution pass: pick → apply → retire. Needs a populated neighbour grid, so it must
+    /// follow a `force_eval` (or its own clear+insert) in the same submission.
+    pub fn encode_merge(&self, enc: &mut wgpu::CommandEncoder) {
+        let n = self.params.n;
+        self.pass(enc, &self.clear, SPH_TABLE_SIZE);
+        self.pass(enc, &self.insert, n);
+        self.pass(enc, &self.density, n);
+        self.pass(enc, &self.merge_pick, n);
+        self.pass(enc, &self.merge_apply, n);
+        self.pass(enc, &self.merge_retire, n);
     }
 
     pub fn count(&self) -> u32 {
@@ -1123,7 +1200,7 @@ mod tests {
     fn sph_params_matches_the_shader_field_for_field() {
         let rust = offsets!(
             SphParams, n, softening, av_alpha, av_beta, cell_size, table_mask, bucket_k, dt, damp,
-            omega, _p1, _p2, bulk_cr, bulk_vm,
+            omega, n_ext, merge_budget, bulk_cr, bulk_vm,
         );
         assert_eq!(
             rust,
@@ -1152,7 +1229,7 @@ mod tests {
         let names: Vec<&str> = p.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(
             &names[9..],
-            ["omega", "_p1", "_p2", "bulk_cr", "bulk_vm"],
+            ["omega", "n_ext", "merge_budget", "bulk_cr", "bulk_vm"],
             "the wrapped-comment tail must all be seen"
         );
     }
@@ -1480,5 +1557,49 @@ mod impact_geometry_tests {
         };
         let sep = (com(1) - com(0)).length();
         assert!(sep > 10.0 * earth.radius(), "bodies placed far apart for relax (sep {sep:.2e})");
+    }
+}
+
+#[cfg(test)]
+mod disk_view_tests {
+    use super::*;
+
+    fn p(pos: [f32; 3], vel: [f32; 3], mass: f32, prov: u32) -> SphParticle {
+        SphParticle { pos, h: 1.0e6, vel, u: 1.0e5, mass, mat: 0, rho: 3000.0, prov }
+    }
+
+    // The bug the four duplicated copies had: only `disk_stats_json` tested boundedness BEFORE geometry, so
+    // the other three counted ESCAPING matter as disk. Now there is one definition, so this pins it once for
+    // every consumer. A hyperbolic particle must land in `escaped`, never in the disk arrays.
+    #[test]
+    fn escaping_matter_is_not_counted_as_disk() {
+        let m_c = 6.0e24_f32; // central remnant
+        let r = 1.0e8_f64;
+        let mu = crate::orbit::G * m_c as f64;
+        let v_circ = (mu / r).sqrt() as f32; // a real bound orbit
+        let v_esc = (2.0 * mu / r).sqrt() as f32;
+
+        let parts = vec![
+            p([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], m_c, 0),
+            // bound, circular, well outside the remnant → DISK
+            p([r as f32, 0.0, 0.0], [0.0, v_circ, 0.0], 1.0e20, 1),
+            // radially outward at 7x escape speed → LEAVING, not disk
+            p([0.0, r as f32, 0.0], [0.0, 7.0 * v_esc, 0.0], 1.0e20, 1),
+        ];
+        let d = DiskView::of(&parts).expect("a field with mass measures");
+
+        assert_eq!(d.dp.len(), 1, "exactly one particle is on a bound orbit outside the remnant");
+        assert!(
+            (d.disk_mass() - 1.0e20).abs() / 1.0e20 < 1.0e-6,
+            "disk mass should be the single bound orbiter, got {}",
+            d.disk_mass()
+        );
+        assert!(
+            (d.escaped - 1.0e20).abs() / 1.0e20 < 1.0e-6,
+            "the hyperbolic particle must be counted as escaped, got {}",
+            d.escaped
+        );
+        // Provenance split rides on the same pass: the orbiter is prov 1, so none of the disk is prov 0.
+        assert_eq!(d.disk_prov0, 0.0, "the only disk member came from source body 1");
     }
 }

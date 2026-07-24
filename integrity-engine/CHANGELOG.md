@@ -9,6 +9,19 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **De-resolution physics (docs/44) — a united clump can become one gravitating body.** `accretion::Body`
+  now carries `ang_mom` and `thermal_j`, so promoting a clump conserves angular momentum and the energy
+  budget instead of silently dropping the spin (mass/momentum/COM balanced either way, which is why it hid).
+  New `Body::absorbs`/`Body::absorb` — a straggler that cannot reach escape velocity joins the body,
+  conserving momentum and spinning it up on an off-centre strike. New `GpuSph::set_external_masses` +
+  `sph_step.wgsl` `ext_mass` channel (`@binding(8)`, `Params.n_ext` in the former `_p1` slot — layout
+  unchanged) so a de-resolved body keeps gravitating on the remaining particles. New `gpu_sph::DiskView`
+  replaces four duplicated disk-selection copies; three of them silently counted escaping matter as disk,
+  and now inherit the fix. **Behaviour change** for `moonlet_bodies`, `largest_moonlet_orbit` and
+  `disk_moonlets`. The de-resolution PASS itself is not yet wired into a scene.
+- **The orbit HUD no longer runs an O(k²) clump search every frame.** `gpu_disk_stats_json()` is throttled
+  to ~1 Hz and honours `?nostats`, matching the CPU disk stats beside it.
+
 - **Resolution-on-demand cap impacts (docs/39) — the moon-drop caps modern Earth instead of melting it.**
   A small impactor now resolves the impactor(s) whole + a CAP of the target, keeping the target's bulk an
   abstract gravity source + boundary (`GpuSph::set_bulk`), so a Moon on Earth is a localized surface impact
