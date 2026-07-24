@@ -3,6 +3,80 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-24 — the flagship's engine half: entry is a collision, a swarm is a disrupted body
+
+**What.** docs/59 Stage A, engine side. Three capabilities, each natively tested, plus a DRY pass Robin
+asked for that turned into a real (small) correctness fix.
+
+- **The atmosphere is a thing you collide with.** The engine could detect body-meets-body, and could fly a
+  body through air (`atmospheric_step`); what it could not do was NOTICE that a body was in the air — that
+  was left to whichever scene cared, which is how entry stays a scene's feature instead of the engine's
+  capability. `interaction::detect_atmospheric` is the fluid branch alongside the solid one in the same
+  module. Reported as a STATE, not an event, because an impact happens at an instant and flight through air
+  happens along a path; the two compose the way the physics does.
+- **Where an atmosphere ends, derived.** It doesn't: `ρ(h) = ρ₀·e^(−h/H)` is positive everywhere, and the
+  Kármán line is a fact about wings. `air_reaches` asks where *including* the air stops being able to change
+  the answer — `|Δv| = a_drag·dt` below `ε·|v|` is not neglecting the air, it is adding it and having no
+  effect. It is a property of the BODY, not the planet.
+- **A swarm is a disintegrated asteroid, not N placed meteors.** `damage::disrupt`: Dohnanyi (1969) mass
+  shares (`m_i ∝ i^(−6/5)`, the exponent a ratio rather than a fitted decimal) normalised to the parent's
+  mass exactly, separation at the parent's own escape speed (the just-unbound condition at the disruption
+  threshold `ground_effect` already tests), spread = v·t since breakup, and golden-angle isotropy — no seed,
+  identical every run, which is what lets a scene fly back to the same crater it watched form.
+- **The entry trail.** `VaporParcel`/`Trail`. `ablated_mass` used to be subtracted from the body and
+  dropped; now it is shed as hot vapour, which is both the conservation fix and the thing you actually see
+  behind a meteor. Parcel SIZE is emergent (vapour expands to the density of the air around it), colour is
+  `blackbody_srgb` of its real temperature. Robin's steer — *"rendering/tracking should be decided based on
+  the scale it is being viewed at"* — is in the type: `Trail` holds the same mass as resolved parcels for a
+  near camera or as a booked total for one watched from orbit, and `Trail::mass()` is the same number both
+  ways. Wired into the Ground scene's meteor, so it has a live consumer.
+
+**Why.** Robin's acceptance criterion for the flagship is *"add the meteor-swarm button to any scene that
+uses the engine properly and it just works"* — Law II stated as a test. That is only true if entry,
+disruption and the trail are engine capabilities on the generic body system, so Stage A builds them there
+first and Terra hosts them second.
+
+**Verified.** 361/361 native (10 new), wasm target builds. Measured, not assumed:
+
+- The derived air edge on Earth's own emergent air (ρ₀=1.207, H=8367 m, 20 km/s, 1 s step): **296 km** for
+  a 1 m iron sphere, **354 km** for one 1000× lighter, **291 km** at half the step. Body- and
+  step-dependent, and nowhere near any declared altitude.
+- Mass conservation flown end to end: a 1 cm iron grain entering at 20 km/s from 120 km, body + trail
+  checked against the entry mass **every step**, to 1e-12.
+- Disruption momentum closes to **1e-16** relative.
+
+**Three things the tests caught rather than confirmed** (all now docs/46 rows or flagged in place):
+
+1. **Isotropic directions with UNEQUAL masses do not conserve momentum.** The heaviest fragment would have
+   dragged the parent's centre of mass off its declared trajectory — quietly, since mass and energy still
+   balanced. Disruption is internal and cannot move the centre of mass, so velocities are taken in the
+   centre-of-momentum frame. The speed spread that falls out (heaviest piece slowest) is now a CONSEQUENCE
+   of conservation rather than an assumed size–speed law.
+2. **Explicit quadratic drag on a vapour parcel overshoots.** A parcel as thin as the air around it has an
+   enormous area per kilogram; a step long enough to stop it reverses it and then accelerates it away,
+   which read as vapour speeding up. Quadratic drag integrates in closed form, so the step is solved rather
+   than sampled and decays monotonically for any dt.
+3. **`atmospheric_step` treats an ablating body as isothermal.** A 0.5 m iron body at 20 km/s barely warms
+   through the whole descent; a 1 cm grain reaches iron's boiling point in milliseconds. The model gets the
+   observable right (small meteoroids burn up, iron meteorites land) but that is not evidence the mechanism
+   is right — it holds only while the body is thinner than its thermal skin depth (~1.5 cm for iron over
+   ten seconds). Real ablation is a surface process (docs/46 row 21).
+
+**The DRY pass (Robin: "it's getting pretty long in spots").** Measuring first said the length is not the
+interesting part — the duplication is. **G was written out in five modules and two shaders**;
+Stefan–Boltzmann in three, one as a truncated `5.670e-8`, so a cooling moonlet and an ablating meteor
+radiated by literally different constants. Nothing had drifted far enough to fail a test, which is exactly
+why counting is the check and reading is not. `orbit::G` and a new `blackbody::SIGMA` are now the only
+definitions. **The guard already existed and I nearly wrote a second one**: `laws::SINGLE_SOURCE` counts a
+constant's homes across every Rust source *and* every shader — registering σ took one line, and it
+immediately caught the two WGSL copies of G a Rust-only search had missed. Those are legitimate (WGSL
+cannot read a Rust constant) so they are PINNED, the `EARTH_RADIUS_M` treatment: a second copy is honest
+only when something fails if the two disagree.
+
+**Not done / next.** The Terra half of Stage A: Terra has no body list and no step loop today, so the
+swarm has nowhere to fly yet. No rig verification in this entry — nothing visual was claimed, and the
+physics is verified natively (docs/46 rows 20–22 record what is knowingly deferred).
+
 ## 2026-07-23 (later) — de-resolution WIRED: merge, promote, crater, and the crash the rig caught
 
 **What.** The entry below landed the de-resolution *operator* and honestly called the scene wiring "not

@@ -119,6 +119,61 @@ Grounded against the code 2026-07-24:
    before it becomes full SPH. The fudge is only an UNDECLARED sprite/decal that traces to nothing and
    converges to nothing. Every declared stand-in names its resolved counterpart.
 
+## Stage A progress (2026-07-24) — the engine half is built
+
+The three engine capabilities Stage A needs exist and are natively tested. What remains for Stage A is
+the Terra half: giving Terra a body list and a step loop, and rendering the trails.
+
+- ✅ **Feature 1, the atmosphere-collision dispatch.** `interaction::detect_atmospheric` — the engine
+  sweeping every (body-with-air, body) pair and reporting who is flying through what, alongside the solid
+  branch in the same module. `BodyState` gained `air`; `atmosphere::AirShell` is a body's air as two
+  emergent numbers, and `air_density_at` delegates to it so the barometric profile has one implementation.
+  Reported as a STATE rather than an event, because an impact happens at an instant and flight through air
+  happens along a path. Swept via `orbit::swept_min_distance`, so a body cannot skim the atmosphere
+  between two frames and be recorded as never having entered it.
+- ✅ **Feature 2, the entry trail.** `atmosphere::VaporParcel` / `vapor_step` / `Trail`. Closes the
+  conservation hole: `ablated_mass` used to be subtracted from the body and dropped. Wired into the Ground
+  scene's meteor so it has a live consumer rather than joining the docs/48 built-and-unwired pile.
+- ✅ **The swarm's initial conditions.** `damage::disrupt` — a disintegrated asteroid, not N placed
+  meteors. Dohnanyi mass shares, escape-speed separation, spread = v·t since breakup, golden-angle
+  isotropy, and Σm·v = 0 exactly.
+- ⬜ **Features 3–5** (surface impact on Terra, JIT crater LOD, camera-follow) — Stages B and C, untouched.
+
+### Answers to the open decisions below, as built
+
+1. **The atmosphere shell boundary** — resolved, and more strongly than "lean threshold-from-density".
+   There is no boundary: `ρ(h) = ρ₀·e^(−h/H)` is positive everywhere, so any altitude is a declaration.
+   `atmosphere::air_reaches` asks instead where including the air stops being able to change the answer —
+   drag's `|Δv| = a_drag·dt` falling below `ε·|v|` is not neglecting the air, it is adding it and having
+   no effect. MEASURED on Earth's own emergent air: 296 km for a 1 m iron sphere at 20 km/s, 354 km for
+   one 1000× lighter, 291 km at half the step. Body-dependent and step-dependent because the physics is,
+   and it tightens by itself as the arithmetic improves.
+2. **Trail representation** — as this doc proposed: declared-but-conserving first, `AirField` parcels the
+   named counterpart. Built with the resolution choice explicit rather than implied (Robin, 2026-07-24:
+   *"rendering/tracking should be decided based on the scale it is being viewed at"*): `Trail` holds the
+   same mass either as resolved parcels for a near camera or as a booked total for one watched from orbit,
+   and `Trail::mass()` is the same number both ways — representation follows the camera, mass does not.
+   A parcel's SIZE is emergent (vapour expands to the density of the air it expands into) and its colour
+   is `blackbody_srgb` of its real temperature.
+4. **Determinism** — settled by construction. The separation directions are a golden-angle sphere, not a
+   random draw: a disruption needs ISOTROPY, and that needs no seed and is identical every run, which is
+   what lets a scene fly back to the same crater it watched form.
+
+Decision 3 (impact scale on Terra) is untouched — it belongs to Stage C.
+
+### What building it exposed (now docs/46 rows 20–22)
+
+- **Row 20** — Sutton–Graves is a continuum law and the swarm flies the whole path, including the
+  free-molecular regime above ~100 km where the classical `Λ·½ρv³` is the right one. The engine applies
+  one law everywhere. The regime is computable rather than a judgement call: air's `dynamic_viscosity` and
+  `molar_mass` give the mean free path (reproducing the measured 68 nm at sea level), so Knudsen could
+  select or blend. Bounded at metre scale, worse for small fragments — the population that decides what
+  burns up, which matters directly for what the swarm looks like.
+- **Row 21** — `atmospheric_step` heats the body's whole mass at bulk heat capacity. Real ablation is a
+  surface process. The model gets the observable right (small meteoroids burn up, iron meteorites land)
+  but only while the body is thinner than its thermal skin depth, ~1.5 cm for iron over ten seconds.
+- **Row 22** — mass booked into the air stays there; really it condenses and falls.
+
 ## Open decisions to pressure-test (before building each stage)
 
 1. **The atmosphere shell boundary.** Where does "in atmosphere" begin — a fixed altitude (Kármán ~100 km),

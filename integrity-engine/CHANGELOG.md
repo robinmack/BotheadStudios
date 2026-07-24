@@ -9,6 +9,29 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Atmospheric entry is an engine capability, not a scene's feature (docs/59 Stage A).** New
+  `interaction::detect_atmospheric` — the FLUID branch of "two things met", alongside the existing solid
+  branch: the engine sweeps every (body-with-air, body) pair and reports who is flying through what, so any
+  scene that hands the engine its bodies gets entry physics without writing any. `interaction::BodyState`
+  gains `air: Option<AirShell>` (a breaking change to a public struct literal). New
+  `atmosphere::AirShell` — a body's air as two emergent numbers; `air_density_at` now delegates to it, so
+  the barometric profile has one implementation. New `atmosphere::air_reaches` — where an atmosphere ends,
+  derived from where including the air stops being able to change the answer rather than from a declared
+  altitude. New `orbit::swept_min_distance`, so a body cannot skim an atmosphere between two frames.
+- **The entry trail, and ablated mass stops vanishing.** New `atmosphere::VaporParcel`, `vapor_step` and
+  `Trail`. `atmospheric_step` reported `ablated_mass` and callers dropped it; shed vapour is now held at
+  whichever resolution the view needs — individual parcels near the camera, a booked total from orbit —
+  with `Trail::mass()` identical either way. Wired into `Simulation` (the ground scene's meteor), which
+  gains `Simulation::trail()`.
+- **`damage::disrupt` — what a disrupted body leaves**, i.e. a meteor swarm's initial conditions: Dohnanyi
+  mass shares normalised to the parent exactly, separation at the parent's own escape speed, spread from
+  the time since breakup, isotropic directions with no seed, and Σm·v = 0 by construction. Plus
+  `damage::isotropic_directions` and `damage::Fragment`.
+- **One G and one σ.** `blackbody::SIGMA` is new and public; `orbit::G` is now the sole definition of
+  Newton's constant. `gravity::G`, `planet`, `damage` and `accretion` delegate instead of re-declaring, and
+  `aggregate`'s truncated `5.670e-8` is corrected to the CODATA value (a 7e-5 change). `laws::SINGLE_SOURCE`
+  counts both, and the shaders' necessary copies of G are pinned to the engine's.
+
 - **De-resolution physics (docs/44) — a united clump can become one gravitating body.** `accretion::Body`
   now carries `ang_mom` and `thermal_j`, so promoting a clump conserves angular momentum and the energy
   budget instead of silently dropping the spin (mass/momentum/COM balanced either way, which is why it hid).
