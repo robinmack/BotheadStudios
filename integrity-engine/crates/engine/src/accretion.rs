@@ -309,6 +309,129 @@ pub fn accrete(
     out
 }
 
+
+/// Sample a settled particle set's RADIAL composition into layers — the promote-to-body step (docs/58).
+///
+/// Robin: *"heavier materials naturally migrate toward the middle when settling, making a sampling of the
+/// materials involved easily transferable into a layered particle."* That is the mechanism, and it is
+/// precisely why this MEASURES instead of declaring. Under self-gravity denser matter really does sink, so
+/// by the time a blob is quiescent its radial material profile IS its layer structure, and reading that
+/// profile reports the differentiation the simulation actually performed.
+///
+/// The alternative — sorting the materials by density and stacking them — would manufacture layers the sim
+/// never made, and would look identical for a body that had differentiated and one that had not. Here a
+/// body that has NOT differentiated samples as a near-uniform mixture and collapses to ONE layer, which is
+/// the honest answer. **The layer COUNT emerges**: adjacent shells with the same dominant material merge,
+/// so a well-separated body yields core/mantle/crust and a stirred one yields a single layer.
+///
+/// Shells are equal-MASS rather than equal-radius, so each carries the same statistical weight instead of
+/// the outermost (largest volume, fewest particles) dominating.
+#[allow(clippy::too_many_arguments)]
+pub fn sample_layers(
+    pos: &[DVec3],
+    mass: &[f64],
+    rho: &[f64],
+    material: &[usize],
+    names: &[String],
+    temp_k: &[f64],
+    shells: usize,
+) -> Vec<crate::planet::Layer> {
+    let n = pos.len();
+    if n == 0 || shells == 0 {
+        return Vec::new();
+    }
+    let m_total: f64 = mass.iter().sum();
+    if m_total <= 0.0 {
+        return Vec::new();
+    }
+    let com: DVec3 = (0..n).map(|i| pos[i] * mass[i]).sum::<DVec3>() / m_total;
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| {
+        (pos[a] - com).length_squared().partial_cmp(&(pos[b] - com).length_squared()).unwrap()
+    });
+
+    // Walk outward, closing a shell each time it has accumulated its share of the mass. Layers accumulate
+    // MASS and VOLUME (not averaged densities), so a layer spanning several shells reports its true bulk
+    // density rather than a weighted guess.
+    struct Acc { name: String, outer_r: f64, mass: f64, vol: f64, t_inner: f64, t_outer: f64 }
+    let share = m_total / shells as f64;
+    let mut layers: Vec<Acc> = Vec::new();
+    let (mut acc, mut vol, mut t_sum) = (0.0f64, 0.0f64, 0.0f64);
+    let mut cnt = 0usize;
+    let mut inner_t: Option<f64> = None;
+    let mut by_mat: std::collections::HashMap<usize, f64> = std::collections::HashMap::new();
+    for (k, &i) in order.iter().enumerate() {
+        let m = mass[i];
+        acc += m;
+        cnt += 1;
+        vol += m / rho[i].max(1.0);
+        t_sum += m * temp_k[i];
+        let r_out = (pos[i] - com).length();
+        *by_mat.entry(material[i]).or_insert(0.0) += m;
+        if inner_t.is_none() {
+            inner_t = Some(temp_k[i]);
+        }
+        let last = k + 1 == n;
+        if acc < share && !last {
+            continue;
+        }
+        // A shell's identity is the material holding a MAJORITY of its mass. A near-tie is a MIXTURE, and
+        // a mixture is not evidence of a new layer — with 50/50 shells the "winner" is decided by noise and
+        // would fabricate a boundary every time it flipped. So an unresolved shell CONTINUES the layer below
+        // it; only a genuine majority can open a new one. (>50% is the definition of dominance, not a tuned
+        // threshold.) FLAGGED: `Layer` names ONE material, so a true mixture cannot be represented faithfully —
+        // the same IOU the shader merge carries, and the resolved form is a mixture EOS.
+        let (dom, dom_m) = by_mat
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(k, v)| (*k, *v))
+            .unwrap_or((0, 0.0));
+        // Dominance must exceed SAMPLING NOISE to count as evidence. A 50/50 shell of `cnt` particles
+        // fluctuates by ~1/sqrt(cnt) in mass fraction, so a one-particle imbalance is not a layer boundary —
+        // without this a perfectly stirred body sprouts a spurious boundary wherever a shell held an odd
+        // number of particles. The bound is the statistics of the sample, not a chosen number.
+        let majority = cnt > 0 && (dom_m / acc.max(1.0) - 0.5) > 1.0 / (cnt as f64).sqrt();
+        let name = match (majority, layers.last()) {
+            (false, Some(prev)) => prev.name.clone(), // mixture: continue the layer below
+            _ => names.get(dom).cloned().unwrap_or_else(|| "basalt".to_string()),
+        };
+        let t_mean = t_sum / acc.max(1.0);
+        match layers.last_mut() {
+            // Same material as the shell below ⇒ the SAME layer, still being described. Extend it.
+            Some(prev) if prev.name == name => {
+                prev.outer_r = r_out;
+                prev.mass += acc;
+                prev.vol += vol;
+                prev.t_outer = t_mean;
+            }
+            _ => layers.push(Acc {
+                name,
+                outer_r: r_out,
+                mass: acc,
+                vol,
+                t_inner: inner_t.unwrap_or(t_mean),
+                t_outer: t_mean,
+            }),
+        }
+        acc = 0.0;
+        vol = 0.0;
+        t_sum = 0.0;
+        cnt = 0;
+        inner_t = None;
+        by_mat.clear();
+    }
+    layers
+        .into_iter()
+        .map(|a| crate::planet::Layer {
+            material: a.name,
+            outer_r: a.outer_r,
+            density: if a.vol > 0.0 { a.mass / a.vol } else { 0.0 },
+            t_inner: a.t_inner,
+            t_outer: a.t_outer,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,6 +502,53 @@ mod tests {
         assert!((com1 - com0).length() / com0.length() < 1e-12, "COM not conserved: {com0} → {com1}");
         // Residual = the 5 singletons.
         assert_eq!(fp.len(), 2 + 5, "2 bodies + 5 residual singletons");
+    }
+
+
+    // docs/58 promote-to-body. Robin: "heavier materials naturally migrate toward the middle when settling,
+    // making a sampling of the materials involved easily transferable into a layered particle." So a
+    // DIFFERENTIATED blob must sample as core + mantle, and — the half that keeps it honest — a STIRRED one
+    // must sample as a single layer rather than being sorted into layers it never formed.
+    #[test]
+    fn sampling_reads_the_differentiation_the_sim_actually_made() {
+        let names = vec!["iron".to_string(), "basalt".to_string()];
+        let (r_core, r_surf) = (2.0e6f64, 6.0e6f64);
+        let (mut pos, mut mass, mut rho, mut mat, mut temp) = (vec![], vec![], vec![], vec![], vec![]);
+        // Settled: iron inside r_core, basalt outside. Equal-volume radii so the shells are well sampled.
+        let n = 4000;
+        for i in 0..n {
+            let rr = r_surf * ((i as f64 + 0.5) / n as f64).cbrt();
+            let dir = {
+                let y = 1.0 - 2.0 * (i as f64 + 0.5) / n as f64;
+                let rad = (1.0 - y * y).max(0.0).sqrt();
+                let th = std::f64::consts::PI * (3.0 - 5.0_f64.sqrt()) * i as f64;
+                DVec3::new(th.cos() * rad, y, th.sin() * rad)
+            };
+            let core = rr < r_core;
+            pos.push(dir * rr);
+            mass.push(if core { 1.0e19 } else { 4.0e18 });
+            rho.push(if core { 7850.0 } else { 3000.0 });
+            mat.push(if core { 0 } else { 1 });
+            temp.push(if core { 4000.0 } else { 1600.0 });
+        }
+        let layers = sample_layers(&pos, &mass, &rho, &mat, &names, &temp, 12);
+        assert_eq!(layers.len(), 2, "a differentiated body samples as core + mantle, got {layers:?}");
+        assert_eq!(layers[0].material, "iron", "the dense material is the INNER layer");
+        assert_eq!(layers[1].material, "basalt");
+        assert!(layers[0].outer_r > 0.5 * r_core && layers[0].outer_r < 1.6 * r_core,
+            "core boundary should land near r_core, got {}", layers[0].outer_r);
+        assert!(layers[1].outer_r > 0.9 * r_surf, "the outer layer reaches the surface");
+        assert!(layers[0].density > layers[1].density, "the core must sample denser than the mantle");
+        assert!(layers[0].t_inner > layers[1].t_outer, "the measured geotherm falls outward");
+
+        // STIRRED: same materials, but interleaved so nothing has separated. One layer is the honest read.
+        let mut smat = mat.clone();
+        for (i, m) in smat.iter_mut().enumerate() { *m = i % 2; }
+        let mut srho = rho.clone();
+        for (i, r) in srho.iter_mut().enumerate() { *r = if i % 2 == 0 { 7850.0 } else { 3000.0 }; }
+        let stirred = sample_layers(&pos, &mass, &srho, &smat, &names, &temp, 12);
+        assert_eq!(stirred.len(), 1,
+            "an undifferentiated body must NOT be sorted into layers it never formed, got {stirred:?}");
     }
 
     // STRAGGLERS (Robin, 2026-07-23): "a meteor that impacts the moon becomes part of the moon unless it

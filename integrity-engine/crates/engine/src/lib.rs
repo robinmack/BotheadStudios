@@ -706,7 +706,19 @@ mod app {
         /// multiple of a sunlit white surface (`blackbody::thermal_glow_gain`). A cold planet sends zeros
         /// and pays nothing; a magma ocean sends ~547 and lights itself.
         glow: [f32; 4],
+        /// THE CRATER, measured (docs/39 surface hook, docs/46 row 18). xyz = the bowl axis as a unit
+        /// vector in the globe's MODEL space, w = its angular radius (rad). Zero ⇒ no crater, so every
+        /// other consumer of this uniform pays nothing.
+        crater: [f32; 4],
+        /// x = bowl depth as a fraction of the surface radius. Derived from the EXCAVATED MASS actually
+        /// lifted above the pristine surface, never authored — see `gpu_crater_depth_frac`.
+        crater2: [f32; 4],
     }
+
+    /// Byte offset of `SpaceUniforms::crater` — 2 mat4 (128) + 5 vec4 (80). The globe patches just these
+    /// 32 bytes after `write_space_uniform`, so the crater does not have to be threaded through all 14
+    /// call sites of a uniform that only one draw uses.
+    const CRATER_UNIFORM_OFFSET: u64 = 208;
 
     /// How far (wall-clock seconds) the RENDER runs behind the PHYSICS (docs/13). Humans don't
     /// resolve detail below ~1/10 s, so the physics keeps a 100 ms head start: every collision in the
@@ -912,6 +924,9 @@ mod app {
         /// grows as the shock excavates). `None` until contact. Persists after (bake-back — Robin's call).
         gpu_impact_site: Option<glam::DVec3>,
         gpu_crater_frac: f64,
+        /// Bowl depth as a fraction of the surface radius, MEASURED from the target material actually
+        /// lifted above its pristine surface (docs/46 row 18). 0 until something is excavated.
+        gpu_crater_depth_frac: f64,
     }
 
     // Moon-shot Stage A constants.
@@ -1242,6 +1257,7 @@ mod app {
                 render_blend: 0.0, // pretty by default (docs/42)
                 gpu_impact_site: None,
                 gpu_crater_frac: 0.0,
+                gpu_crater_depth_frac: 0.0,
             })
         }
 
@@ -2016,6 +2032,7 @@ mod app {
             self.sph_phase = SphPhase::Relaxing(0);
             self.gpu_impact_site = None; // no crater until contact (docs/42 Phase 2)
             self.gpu_crater_frac = 0.0;
+            self.gpu_crater_depth_frac = 0.0;
             self.sph_substeps = 6; // start conservative; the frame-budget controller adapts up (docs/42)
         }
 
@@ -2049,6 +2066,7 @@ mod app {
             self.sph_phase = SphPhase::Relaxing(0);
             self.gpu_impact_site = None;
             self.gpu_crater_frac = 0.0;
+            self.gpu_crater_depth_frac = 0.0;
             self.sph_substeps = 6;
         }
 
@@ -2105,6 +2123,7 @@ mod app {
             self.sph_phase = SphPhase::Relaxing(0);
             self.gpu_impact_site = None; // no crater until Theia makes contact (docs/42 Phase 2)
             self.gpu_crater_frac = 0.0;
+            self.gpu_crater_depth_frac = 0.0;
             self.sph_substeps = 6; // start conservative; the frame-budget controller adapts up (docs/42)
             self.focus = 1; // centre on Earth (the particle system sits at the display origin)
             self.camera.zoom = 0.4; // frame the impact (the Earth–Moon default zoom shows it as a speck)
@@ -2740,6 +2759,34 @@ mod app {
                     }
                     if self.gpu_impact_site.is_some() {
                         self.gpu_crater_frac = (self.gpu_crater_frac + 0.03).min(1.0);
+                        // DEPTH FROM EXCAVATED MASS (docs/46 row 18). The target material now lifted above
+                        // its own pristine surface is, by conservation, the material missing from the bowl.
+                        // Its volume at the cap's real density gives the hole; a simple crater's bowl is a
+                        // PARABOLOID, V = ½·π·R²·d, so d = 2V/(πR²). Nothing here is authored — an impact
+                        // that excavates nothing leaves no crater, and one that excavates more digs deeper.
+                        let r_surf = self
+                            .body_meta
+                            .get(self.planet_idx())
+                            .map_or(EARTH_RADIUS_M, |m| m.radius_m);
+                        let (mut m_exc, mut vol) = (0.0f64, 0.0f64);
+                        for p in &self.sph_snapshot {
+                            if p.prov != 0 {
+                                continue;
+                            }
+                            let pos = glam::DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
+                            if pos.length() > r_surf {
+                                let m = p.mass as f64;
+                                m_exc += m;
+                                vol += m / (p.rho.max(1.0) as f64);
+                            }
+                        }
+                        let r_bowl = self.gpu_crater_frac * 0.72 * r_surf;
+                        if m_exc > 0.0 && r_bowl > 0.0 {
+                            let d = 2.0 * vol / (std::f64::consts::PI * r_bowl * r_bowl);
+                            // A bowl cannot be deeper than the cap that was resolved to make it; beyond
+                            // that the excavation is reaching matter this resolution never promoted.
+                            self.gpu_crater_depth_frac = (d / r_surf).min(0.25);
+                        }
                     }
                 }
             }
@@ -2822,6 +2869,25 @@ mod app {
                         glow_of(&crate::planet::body("earth"))
                     },
                 );
+
+                // Patch the measured crater into the globe's uniform (docs/46 row 18). The axis must be in
+                // MODEL space, and the model matrix spins with the crust — so the bowl is un-rotated by the
+                // same spin, exactly as `crater_site` is rotated INTO world space for the shell grains. The
+                // crater and the matter it is cut from must share one frame.
+                if self.gpu_crater_frac > 0.0 && self.gpu_crater_depth_frac > 0.0 {
+                    if let Some(dir) = self.gpu_impact_site {
+                        let axis = spin_rot.inverse() * dir;
+                        // Angular radius of the bowl on the sphere: asin(R_bowl / R_surface).
+                        let theta = (self.gpu_crater_frac * 0.72).clamp(0.0, 1.0).asin();
+                        let c: [f32; 4] = [axis.x as f32, axis.y as f32, axis.z as f32, theta as f32];
+                        let c2: [f32; 4] = [self.gpu_crater_depth_frac as f32, 0.0, 0.0, 0.0];
+                        self.queue.write_buffer(
+                            &self.globe_uni.buf,
+                            CRATER_UNIFORM_OFFSET,
+                            bytemuck::cast_slice(&[c, c2]),
+                        );
+                    }
+                }
             }
             for (i, uni) in self.shell_unis.iter().enumerate() {
                 let body_dir = crate::impact::fib_dir(i, SHELL_N); // this grain's fixed BODY direction
@@ -3410,6 +3476,8 @@ mod app {
             emissive,
             atm: [air[0], air[1], air[2], air[3]],
             glow,
+            crater: [0.0; 4],
+            crater2: [0.0; 4],
         };
         queue.write_buffer(&slot.buf, 0, bytemuck::bytes_of(&u));
     }
