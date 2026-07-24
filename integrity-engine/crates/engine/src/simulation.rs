@@ -58,9 +58,17 @@ pub struct Meteor {
     pub vel: Vec3,
     pub mass_kg: f32,
     pub material: usize,
-    /// Rendered radius (m), from its mass and its material's density: r = (3m/4πρ)^(1/3).
+    /// Rendered radius (m), from its mass and its material's density: r = (3m/4πρ)^(1/3). SHRINKS as the
+    /// meteor ablates (`fly_meteors`) — a body losing mass to vaporisation gets smaller.
     pub radius_m: f32,
+    /// Surface temperature (K). Rises from aerodynamic heating in flight and drives the meteor's real
+    /// incandescent glow — replacing a hardcoded 1600 K. `throw_meteor` stamps it to ambient.
+    pub temp_k: f32,
 }
+
+/// Ambient surface temperature (K) — Earth mean, the same value the air density and sky use. A meteor
+/// starts here and heats from there. Declared (a real surface temperature), flagged as a per-world datum.
+pub const AMBIENT_TEMP_K: f32 = 288.0;
 
 impl Simulation {
     /// Build from a parsed `"ground"` world. The voxel world is the procedural surface patch; the
@@ -224,7 +232,8 @@ impl Simulation {
     ///
     /// The impact energy is ½mv² at the moment of contact — a consequence of the matter and its flight,
     /// never a dial. A caller cannot ask for "a big crater"; it can only throw a bigger or faster rock.
-    pub fn throw_meteor(&mut self, m: Meteor) {
+    pub fn throw_meteor(&mut self, mut m: Meteor) {
+        m.temp_k = AMBIENT_TEMP_K; // a fresh rock is at ambient; it heats in flight, not before
         self.meteors.push(m);
     }
 
@@ -237,33 +246,37 @@ impl Simulation {
     /// Returns grains created this step.
     fn fly_meteors(&mut self, dt: f32) -> usize {
         let g = Vec3::new(0.0, -self.surface_g, 0.0);
-        // The air this meteor flies through (docs/48). The density is the SAME emergent exponential
+        // The air this body flies through (docs/48). The density is the SAME emergent exponential
         // atmosphere the sky is drawn from, so the picture and the physics cannot disagree about the air.
         let air = self.materials.iter().find(|mm| mm.id == "air");
-        // c_d for a sphere. FLAGGED (Law V): a DECLARED shape factor, not a tuned dial — 0.47 is the
-        // measured incompressible-sphere drag coefficient. Its resolved counterpart is the pressure field
-        // of `AirField` parcels flowing around the body (the IOU `drag_accel`'s own doc names), and its
-        // near-term refinement is c_d(Mach): a meteor at these speeds is supersonic, where a sphere's c_d
-        // rises toward ~1, so this UNDER-drags the hypersonic phase. Same primitive, finer resolution.
-        const SPHERE_DRAG_CD: f64 = 0.47;
         let mut landed: Vec<Meteor> = Vec::new();
         let mut still: Vec<Meteor> = Vec::with_capacity(self.meteors.len());
         for mut m in self.meteors.drain(..) {
-            // Atmospheric drag, opposing the meteor's motion. The kinetic energy it removes is dissipated
-            // to the air and the meteor (real re-entry heating; the meteor's own glow/ablation is the
-            // unbuilt visible follow-on) — and because the impact energy is ½mv² of the speed that ACTUALLY
-            // arrives, a meteor braked by air correctly delivers a smaller crater. Nothing is lost: the KE
-            // becomes atmospheric heat instead of excavation.
+            // ENTRY: the meteor is the first caller of the GENERIC body⊕atmosphere operator (docs/58) —
+            // drag, aeroheating and ablation are the engine's `atmosphere::atmospheric_step`, not a routine
+            // owned by this scene. "It's all impact" (Robin): a trajectory colliding with the atmosphere is
+            // the FLUID branch; the hard-matter impact below is the SOLID branch; and they compose — a
+            // meteor ablates and slows through the air, then whatever mass survives hits the ground. The
+            // engine detecting the atmosphere collision generically (a swept trajectory ∩ the atmosphere
+            // shell, like body↔body detection) is the docs/58 realignment this operator is built to serve.
             if let Some(air) = air {
                 let altitude = (m.pos.y - self.world.ground_height(m.pos.x, m.pos.z)).max(0.0) as f64;
                 let rho = crate::atmosphere::air_density_at(
-                    self.surface_pressure, air, 288.0, self.surface_g as f64, altitude,
+                    self.surface_pressure, air, AMBIENT_TEMP_K as f64, self.surface_g as f64, altitude,
                 );
-                let area = std::f64::consts::PI * (m.radius_m as f64).powi(2);
-                let a_drag = crate::atmosphere::drag_accel(
-                    rho, m.vel.as_dvec3(), area, m.mass_kg as f64, SPHERE_DRAG_CD,
+                let step = crate::atmosphere::atmospheric_step(
+                    rho, m.vel.as_dvec3(), m.mass_kg as f64, m.radius_m as f64, m.temp_k as f64,
+                    AMBIENT_TEMP_K as f64, &self.materials[m.material], dt as f64,
                 );
-                m.vel += a_drag.as_vec3() * dt;
+                m.vel += step.drag_accel.as_vec3() * dt;
+                m.temp_k = step.temp_k as f32;
+                m.mass_kg = (m.mass_kg as f64 - step.ablated_mass).max(0.0) as f32;
+                m.radius_m = step.radius_m as f32;
+            }
+            // Burned up entirely: a small meteor can ablate to nothing before it ever reaches the ground —
+            // the real fate of most meteors. It leaves no crater because no matter arrives.
+            if m.mass_kg <= 1.0e-3 {
+                continue;
             }
             m.vel += g * dt;
             m.pos += m.vel * dt;
@@ -446,6 +459,7 @@ mod tests {
                 mass_kg,
                 material: iron,
                 radius_m: 0.5,
+                temp_k: 288.0, // stamped to ambient by throw_meteor
             });
             // The ENGINE flies it and lands it; the caller never computes an impact site.
             for _ in 0..600 {
@@ -485,6 +499,7 @@ mod tests {
                 mass_kg: 1000.0,
                 material: iron,
                 radius_m,
+                temp_k: 288.0, // stamped to ambient by throw_meteor
             });
             let v0 = sim.meteors()[0].vel.x;
             for _ in 0..4 {
@@ -505,6 +520,36 @@ mod tests {
         );
     }
 
+    /// A meteor HEATS as it flies (docs/48/58), so it glows by its real temperature instead of a hardcoded
+    /// 1600 K. A small fast rock heats fast (low heat capacity): its surface climbs above ambient in a few
+    /// steps. This proves the Simulation wires `temp_k` end to end — stamped to ambient, evolved by the
+    /// generic `atmosphere::atmospheric_step`, and exposed for the renderer.
+    #[test]
+    fn a_meteor_heats_by_atmospheric_entry_in_flight() {
+        let world = r#"{"name":"g","type":"ground","ground":{"camera_m":[0,30,0],"view_radius_m":2000}}"#;
+        let iron = crate::materials::index_of(&mats(), "iron");
+        let mut sim = Simulation::from_json(world, mats()).expect("builds");
+        let c = sim.world.center();
+        let ground = sim.world.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
+        // 5 kg iron (r ≈ 5 cm), thrown fast and horizontal high up so it stays aloft while it heats.
+        let r = (3.0 * 5.0 / (4.0 * std::f32::consts::PI * 7870.0)).cbrt();
+        sim.throw_meteor(Meteor {
+            pos: Vec3::new(-60.0, ground + 60.0, 0.0),
+            vel: Vec3::new(5000.0, 0.0, 0.0),
+            mass_kg: 5.0,
+            material: iron,
+            radius_m: r,
+            temp_k: 288.0,
+        });
+        assert_eq!(sim.meteors()[0].temp_k, AMBIENT_TEMP_K, "a fresh meteor starts at ambient");
+        for _ in 0..8 {
+            sim.step(1.0 / 60.0);
+            if sim.meteors().is_empty() { break; }
+        }
+        let hot = sim.meteors().first().map_or(AMBIENT_TEMP_K, |m| m.temp_k);
+        assert!(hot > AMBIENT_TEMP_K + 5.0, "the meteor's surface must heat from entry, got {hot} K");
+    }
+
     /// The engine flies the meteor. A caller that throws one and steps must see it in flight, then gone.
     #[test]
     fn the_engine_flies_the_meteor_the_caller_only_throws_it() {
@@ -518,6 +563,7 @@ mod tests {
             mass_kg: 800.0,
             material: crate::materials::index_of(&mats(), "iron"),
             radius_m: 0.5,
+            temp_k: 288.0, // stamped to ambient by throw_meteor
         });
         assert_eq!(sim.meteors().len(), 1, "it is in flight");
         let start_y = sim.meteors()[0].pos.y;
@@ -546,6 +592,7 @@ mod tests {
             mass_kg: 800.0,
             material: crate::materials::index_of(&mats(), "iron"),
             radius_m: 0.5,
+            temp_k: 288.0, // stamped to ambient by throw_meteor
         });
         // Step to the frame the impact lands on, and check the count against the grains that exist.
         let mut peak = 0usize;

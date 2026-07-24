@@ -655,6 +655,7 @@ impl Ground {
             mass_kg,
             material: iron,
             radius_m,
+            temp_k: 288.0, // stamped to ambient by throw_meteor
         });
     }
 
@@ -778,8 +779,10 @@ impl Ground {
                 resting: 0.0,
                 color: self.mats.get(m.material).map(|mm| mm.albedo).unwrap_or([0.6, 0.5, 0.45]),
                 material: m.material as f32,
-                // Hypervelocity iron glows; the same incandescence law the ejecta uses.
-                emission: crate::emission::incandescence(1600.0),
+                // The meteor glows by its REAL surface temperature — heated by atmospheric entry in flight
+                // (docs/48), the same incandescence law the ejecta uses. Was a hardcoded 1600 K: a fudge
+                // that glowed a crawling rock the same as a hypervelocity one, regardless of the air.
+                emission: crate::emission::incandescence(m.temp_k),
                 rho: 0.0,
                 radius: m.radius_m,
                 _p0: 0.0, _p1: 0.0, _p2: 0.0,

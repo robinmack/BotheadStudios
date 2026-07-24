@@ -133,6 +133,120 @@ pub fn drag_accel(rho: f64, vel: glam::DVec3, area: f64, mass: f64, c_d: f64) ->
     -(f / mass) * (vel / speed)
 }
 
+/// **Stagnation-point convective heat flux** (W/m²) onto a blunt body of nose radius `nose_r` (m) moving
+/// at `speed` (m/s) through air of density `rho` (kg/m³) — the Sutton–Graves correlation:
+///
+/// ```text
+/// q = k · √(ρ / R_n) · v³ ,   k = 1.7415e-4  (Earth air)
+/// ```
+///
+/// This is the CONTINUUM aeroheating a meteor feels low in the atmosphere, and it is the RIGHT law for the
+/// regime a ground-scene meteor lives in — near sea level, dense air. The classical meteor `Λ·½ρv³`
+/// free-molecular law is a DIFFERENT regime (high altitude, hypervelocity, thin air); using it near the
+/// surface overpredicts the heat flux by ~10³ and would vaporise a mere supersonic pebble. Both are the
+/// same physics at different Knudsen number; `AirField` resolving the flow is the counterpart of both.
+///
+/// **Source + unit check.** Sutton, K. & Graves, R. A. (1971), *A General Stagnation-Point Convective-
+/// Heating Equation for Arbitrary Gas Mixtures*, NASA TR R-376. `k = 1.7415e-4` gives `q` in **W/m²** with
+/// SI inputs — verified against the Stardust sample-return capsule (the fastest crewed-era Earth entry,
+/// v≈12.6 km/s, R_n=0.229 m): at the ρ≈2e-4 kg/m³ of peak heating this returns ≈1.0e7 W/m² ≈ 1030 W/cm²,
+/// matching the ~1200 W/cm² Stardust peak. As W/cm² the same constant would be 10⁴× high — hence the check.
+///
+/// Zero below the local speed of sound: with no bow shock there is no stagnation heating (a subsonic body
+/// is cooled convectively, not heated — a smaller, opposite effect not modelled here).
+pub fn stagnation_heat_flux(rho: f64, speed: f64, nose_r: f64) -> f64 {
+    const K_SUTTON_GRAVES: f64 = 1.7415e-4; // Earth air, W/m² with SI inputs (NASA TR R-376)
+    const SOUND_SPEED_MS: f64 = 340.0; // sea-level; below Mach 1 there is no shock to heat the body
+    if rho <= 0.0 || speed <= SOUND_SPEED_MS || nose_r <= 0.0 {
+        return 0.0;
+    }
+    K_SUTTON_GRAVES * (rho / nose_r).sqrt() * speed * speed * speed
+}
+
+/// How one step of atmospheric flight acts on a body (docs/58 — ONE law for EVERY body, not a meteor
+/// special-case): the drag acceleration to apply, its new surface temperature, and any mass it ablated.
+///
+/// This is the generic "body ⊕ atmosphere" interaction. The same operator serves a meteor, a lump of
+/// ejecta, orbital debris re-entering, a spacecraft — anything moving through any declared atmosphere. A
+/// scene never re-implements entry physics; it hands the engine a body and the local air and applies the
+/// result. The engine deciding WHICH bodies are in atmosphere (a detected interaction, like body↔body
+/// collision) is the docs/58 generalization this operator is built to be driven by.
+#[derive(Clone, Copy, Debug)]
+pub struct AtmosphericStep {
+    /// Drag acceleration (m/s², opposing motion) — the caller integrates it like any other acceleration.
+    pub drag_accel: glam::DVec3,
+    /// Updated surface temperature (K) after this step's aeroheating and radiation.
+    pub temp_k: f64,
+    /// Mass vaporised this step (kg, ≥ 0) — the caller removes it and shrinks the body.
+    pub ablated_mass: f64,
+    /// Updated radius (m) after ablation (r ∝ m^⅓ at the material's own density).
+    pub radius_m: f64,
+}
+
+/// One step of a spherical body's flight through air of density `rho`, made of `mat`, at `temp_k`, moving
+/// at `vel` (docs/48/58). Drag (`drag_accel`) + Sutton–Graves aeroheating (`stagnation_heat_flux`) +
+/// ablation at the boiling point — every material quantity read from the catalogue, nothing meteor-specific.
+///
+/// Declared shape/surface factors, both flagged with the same resolved counterpart (`AirField` resolving
+/// the flow around the body): `c_d = 0.47` (measured incompressible-sphere drag coefficient; refinement
+/// c_d(Mach)) and `emissivity = 0.45` (measured molten-iron emissivity; belongs in the optical catalogue).
+#[allow(clippy::too_many_arguments)]
+pub fn atmospheric_step(
+    rho: f64,
+    vel: glam::DVec3,
+    mass_kg: f64,
+    radius_m: f64,
+    temp_k: f64,
+    ambient_temp_k: f64,
+    mat: &Material,
+    dt: f64,
+) -> AtmosphericStep {
+    const SPHERE_DRAG_CD: f64 = 0.47; // measured incompressible-sphere Cd; refinement c_d(Mach)
+    const EMISSIVITY: f64 = 0.45; // measured molten-iron emissivity (0.42–0.45); optical-catalogue candidate
+    const STEFAN_BOLTZMANN: f64 = 5.670_374_419e-8; // W/(m²·K⁴), CODATA
+    let mut out = AtmosphericStep { drag_accel: glam::DVec3::ZERO, temp_k, ablated_mass: 0.0, radius_m };
+    if rho <= 0.0 || mass_kg <= 0.0 || radius_m <= 0.0 {
+        return out; // no air, or nothing left of the body — vacuum flight
+    }
+    let r = radius_m;
+    let frontal = std::f64::consts::PI * r * r;
+    let speed = vel.length();
+
+    // DRAG (momentum). The KE it removes heats the air and the body; a braked body delivers less on impact.
+    out.drag_accel = drag_accel(rho, vel, frontal, mass_kg, SPHERE_DRAG_CD);
+
+    // AEROHEATING + ABLATION (energy). The catalogue must characterise the body's thermal response; a
+    // material with no boiling point or latent heat cannot ablate honestly, so it only heats.
+    let (Some(c), Some(t_boil), Some(l_v)) = (mat.specific_heat(), mat.boil_point(), mat.latent_vaporization())
+    else {
+        return out;
+    };
+    // Windward-hemisphere heat: the stagnation flux averaged (~½) over the front (~2πr²) ⇒ q·πr².
+    let p_in = stagnation_heat_flux(rho, speed, r) * frontal;
+    // Radiated from the whole surface (4πr²) as σεT⁴ — this is the glow we see.
+    let p_rad = EMISSIVITY
+        * STEFAN_BOLTZMANN
+        * (temp_k.powi(4) - ambient_temp_k.powi(4)).max(0.0)
+        * (4.0 * std::f64::consts::PI * r * r);
+    let net = p_in - p_rad; // W into the body; negative ⇒ it cools by radiating
+    if temp_k >= t_boil && net > 0.0 {
+        // At the boiling point with heat to spare: the excess vaporises mass at the latent cost `l_v`; the
+        // body shrinks (r ∝ m^⅓). A body only ablates once its aeroheating beats its own radiative loss —
+        // which for iron (boil 3134 K) needs true meteor speeds, not merely supersonic ones.
+        out.temp_k = t_boil;
+        out.ablated_mass = (net / l_v * dt).min(mass_kg);
+        let new_mass = mass_kg - out.ablated_mass;
+        let rho_mat = mat.density.max(1.0) as f64;
+        out.radius_m = (3.0 * new_mass / (4.0 * std::f64::consts::PI * rho_mat)).cbrt();
+    } else {
+        // Otherwise the net heat changes the temperature (up if heating dominates, down if radiation does).
+        // Clamped to [ambient, boiling]: it cannot radiate below the air it sits in, nor exceed boiling
+        // without ablating (the branch above).
+        out.temp_k = (temp_k + net / (mass_kg * c) * dt).clamp(ambient_temp_k, t_boil);
+    }
+    out
+}
+
 /// The 3D generalization of the column (docs/26): an SPH air FIELD. Density is estimated by a cubic
 /// spline kernel over neighbours, pressure is the ideal gas P = ρ·R_s·T (isothermal v0, flagged), and
 /// the symmetric pressure force  a_i = −Σ_j m_j (P_i/ρ_i² + P_j/ρ_j²) ∇W  conserves momentum exactly by
@@ -414,6 +528,73 @@ mod tests {
     use crate::aggregate::Aggregate;
     use crate::materials;
     use crate::orbit::Body;
+
+    /// Sutton–Graves stagnation heating, pinned to a REAL entry so the constant AND its units are right —
+    /// the PDF sources would not render, and as W/cm² the same constant is 10⁴× too large. The Stardust
+    /// capsule (v≈12.6 km/s, R_n=0.229 m) peaked near 1200 W/cm² ≈ 1.2e7 W/m²; at the ρ≈2e-4 kg/m³ of peak
+    /// heating this correlation must land in that ballpark, not orders off.
+    #[test]
+    fn stagnation_heating_matches_a_real_reentry_and_scales_right() {
+        let q_stardust = stagnation_heat_flux(2.0e-4, 12_600.0, 0.229);
+        assert!(
+            (5.0e6..2.0e7).contains(&q_stardust),
+            "Sutton-Graves must reproduce the Stardust peak (~1.2e7 W/m²); got {q_stardust:.2e} W/m² — a \
+             value 10^4 off would be the W/cm² unit error"
+        );
+        // v³ scaling: doubling the speed is 8× the flux.
+        let q1 = stagnation_heat_flux(1.0, 1000.0, 0.5);
+        let q2 = stagnation_heat_flux(1.0, 2000.0, 0.5);
+        assert!((q2 / q1 - 8.0).abs() < 1.0e-6, "heating must go as v³: {q1} -> {q2}");
+        // √ρ scaling, 1/√R scaling.
+        assert!((stagnation_heat_flux(4.0, 1000.0, 0.5) / q1 - 2.0).abs() < 1.0e-6, "√ρ");
+        assert!((stagnation_heat_flux(1.0, 1000.0, 2.0) / q1 - 0.5).abs() < 1.0e-6, "1/√R");
+        // No bow shock below Mach 1 ⇒ no stagnation heating.
+        assert_eq!(stagnation_heat_flux(1.2, 200.0, 0.5), 0.0, "subsonic: no shock, no stagnation heat");
+    }
+
+    /// The generic body⊕atmosphere operator (docs/58): drag slows any body, aeroheating warms it, and at
+    /// the boiling point it ablates — all from the material, nothing meteor-specific. Iron is the fixture.
+    #[test]
+    fn atmospheric_step_slows_heats_and_ablates_any_body() {
+        let mats = materials::load();
+        let iron = &mats[materials::index_of(&mats, "iron")];
+        let v = glam::DVec3::new(3000.0, 0.0, 0.0); // supersonic
+        let step = |rho: f64, temp: f64| {
+            atmospheric_step(rho, v, 1000.0, 0.3, temp, 288.0, iron, 1.0 / 60.0)
+        };
+
+        // DRAG opposes motion.
+        let s = step(1.2, 288.0);
+        assert!(s.drag_accel.x < 0.0, "drag must oppose motion, got {:?}", s.drag_accel);
+
+        // HEATING raises the temperature of a cold fast body.
+        assert!(s.temp_k > 288.0, "a fast body in air must heat above ambient, got {}", s.temp_k);
+
+        // ABLATION needs true METEOR speed, not merely supersonic: at 3000 m/s iron's radiative loss at its
+        // boiling point EXCEEDS the aeroheating (net < 0), so it does NOT ablate — the equilibrium temp is
+        // below boiling. Only at ~12 km/s does the heat flux overwhelm radiation and vaporise mass. That the
+        // slow case refuses to ablate is the physics being honest, not a bug.
+        let t_boil = iron.boil_point().unwrap();
+        let slow_at_boil =
+            atmospheric_step(1.2, glam::DVec3::new(3000.0, 0.0, 0.0), 1000.0, 0.3, t_boil, 288.0, iron, 1.0 / 60.0);
+        assert_eq!(slow_at_boil.ablated_mass, 0.0, "a merely-supersonic body cannot sustain iron at boiling");
+
+        // Consistent mass/radius: 1000 kg of iron is r0, and the operator recomputes radius from the
+        // ablated mass at iron's own density, so ablation must return a radius below r0.
+        let r0 = (3.0 * 1000.0 / (4.0 * std::f64::consts::PI * iron.density as f64)).cbrt();
+        let hyper =
+            atmospheric_step(1.2, glam::DVec3::new(12_000.0, 0.0, 0.0), 1000.0, r0, t_boil, 288.0, iron, 1.0 / 60.0);
+        assert!(hyper.ablated_mass > 0.0, "at meteor speed, excess heat must vaporise mass");
+        assert!(hyper.radius_m < r0, "ablation must shrink the body: {} vs {r0}", hyper.radius_m);
+        assert!((hyper.temp_k - t_boil).abs() < 1.0, "temperature pins at the boiling point while ablating");
+
+        // VACUUM / SUBSONIC: no air ⇒ nothing happens; below Mach 1 ⇒ drag only, no heating.
+        let vac = atmospheric_step(0.0, v, 1000.0, 0.3, 288.0, 288.0, iron, 1.0 / 60.0);
+        assert_eq!(vac.drag_accel, glam::DVec3::ZERO, "no air, no drag");
+        assert_eq!(vac.temp_k, 288.0, "no air, no heating");
+        let slow = atmospheric_step(1.2, glam::DVec3::new(100.0, 0.0, 0.0), 1000.0, 0.3, 288.0, 288.0, iron, 1.0 / 60.0);
+        assert!((slow.temp_k - 288.0).abs() < 1.0, "subsonic: no shock heating");
+    }
     use glam::DVec3;
 
     #[test]

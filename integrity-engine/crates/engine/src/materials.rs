@@ -294,6 +294,12 @@ impl Material {
         self.thermal.as_ref().map(|t| t.boil_point as f64).filter(|v| *v > 0.0)
     }
 
+    /// Latent heat of vaporization (J/kg, liquid → gas), or `None` when unsourced — the energy per unit
+    /// mass an ablating body sheds once its surface reaches the boiling point.
+    pub fn latent_vaporization(&self) -> Option<f64> {
+        self.thermal.as_ref().map(|t| t.latent_vaporization as f64).filter(|v| *v > 0.0)
+    }
+
     /// Melting point (K), or `None` when unsourced.
     pub fn melt_point(&self) -> Option<f64> {
         self.thermal.as_ref().map(|t| t.melt_point as f64).filter(|v| *v > 0.0)
