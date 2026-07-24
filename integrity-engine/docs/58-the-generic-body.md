@@ -81,6 +81,29 @@ makes this possible — every layer material now carries its own EOS), and seeds
 material's real **albedo** (`materials::aggregate_albedo`), which the CPU path already computes and then
 throws away.
 
+## "It's all impact" — atmosphere as a detected collision (Robin, 2026-07-24)
+
+A body's trajectory can collide with two things, and the engine should treat both as one dispatch, the way
+it already routes body↔body collisions (`interaction::detect_swept` → `route_bodies_to_sph`):
+
+- **the atmosphere** — the FLUID branch: resolve through `atmosphere::atmospheric_step` (drag + Sutton–Graves
+  aeroheating + ablation, all material-driven; the generic body⊕air operator, built 2026-07-24, docs/48).
+- **hard matter** (ground/body) — the SOLID branch: the SPH cap-on-bulk (docs/39) or granular excavation.
+
+They **compose**: a body enters the atmosphere, ablates and slows over its path, and whatever mass survives
+forks to the hard-impact routine — *"if we impact mass, fork to the hard-matter routine."* So the engine
+should detect a swept trajectory ∩ the atmosphere shell (a body with a declared `atmosphere_mass` has a
+density shell) and apply the fluid operator, exactly as it detects a surface/body collision and applies the
+solid one. A scene never re-implements entry physics; it hands the engine a moving body and the air.
+
+**Built so far:** the fluid RESOLUTION operator (`atmospheric_step`) is generic and tested; the Ground meteor
+(`Simulation::fly_meteors`) is its first caller. **Not yet built (the realignment):** the generic
+DETECTION+DISPATCH — testing every moving body's trajectory against the atmosphere shell and forking
+fluid-vs-solid — parallel to the collision-detection unification. Consumer #2 is the SPH ejecta / a body
+re-entering from orbit, which is also where entry GLOW and the ionized-gas TRAIL (the ablated vapour made
+visible; a hypervelocity phenomenon) become physical — the Ground scene's short sub-orbital drops are far
+too brief a path to heat a solid body to incandescence, so they correctly do not glow.
+
 ## Order of work
 
 Design (this) → the `Body` record + emergent `mass`/`radius`/`I` + per-body `ang_mom` (#1–3) →
