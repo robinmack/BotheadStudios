@@ -650,11 +650,11 @@ impl Ground {
         let start = target + Vec3::new(-140.0, 220.0, -90.0);
         let dir = (target - start).normalize_or(Vec3::new(0.0, -1.0, 0.0));
         self.sim.throw_meteor(crate::simulation::Meteor {
-            pos: start,
-            vel: dir * speed_ms,
-            mass_kg,
+            pos: start.as_dvec3(),
+            vel: (dir * speed_ms).as_dvec3(),
+            mass_kg: mass_kg as f64,
             material: iron,
-            radius_m,
+            radius_m: radius_m as f64,
             temp_k: 288.0, // stamped to ambient by throw_meteor
         });
     }

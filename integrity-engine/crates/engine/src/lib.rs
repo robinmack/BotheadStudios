@@ -77,6 +77,7 @@ mod tides;
 /// docs/53 — the engine driven by a DEFINITION: builds the world, applies declared matter events through
 /// the shared primitives, and steps. No scene struct, no canvas. This is what re-consumes the systems
 /// deleting terrain orphaned (docs/46 ledger row 15).
+pub mod flight;
 pub mod simulation;
 /// docs/55 — the ground scene, rebuilt from a DEFINITION. Browser-only (it owns a canvas surface).
 #[cfg(target_arch = "wasm32")]
