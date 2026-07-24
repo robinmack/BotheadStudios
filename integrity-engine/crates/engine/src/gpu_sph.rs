@@ -846,6 +846,29 @@ impl SphAssembly {
     }
 }
 
+
+/// Recover each EOS slot's MATERIAL NAME by inverting the dedup (docs/58 promote-to-body).
+///
+/// `material_index` dedups the shared table by reference density, because rho0 IS a material's identity —
+/// so the mapping is invertible: the catalogue entry whose Tillotson rho0 matches slot k is slot k's
+/// material. That keeps names out of the 48-byte particle and out of `HydroBody`, which carry only what the
+/// shader needs, while still letting a promoted body say what it is made of.
+///
+/// Slots with no catalogue match report "basalt" — the same fallback `Tillotson::for_material` uses.
+pub fn eos_material_names(eos: &[SphEos], mats: &[crate::materials::Material]) -> Vec<String> {
+    eos.iter()
+        .map(|e| {
+            mats.iter()
+                .find(|m| {
+                    crate::eos::Tillotson::for_material(&m.id)
+                        .is_some_and(|t| (t.rho0 - e.rho0 as f64).abs() < 1.0)
+                })
+                .map(|m| m.id.clone())
+                .unwrap_or_else(|| "basalt".to_string())
+        })
+        .collect()
+}
+
 /// GPU-resident SPH particle system + the `sph_step.wgsl` pipelines. Owns the physics buffer (which is ALSO
 /// the render vertex buffer — zero-copy instanced draw) and the grid/force scratch.
 pub struct GpuSph {
