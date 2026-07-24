@@ -311,6 +311,24 @@ pub fn accrete(
 
 
 
+
+/// The bowl a measured excavation carves — depth AND radius from one excavated volume (docs/46 row 18).
+///
+/// The render used to size the bowl's radius from a dial (`0.72·R_surface`) while measuring only its depth,
+/// which produced a saucer far too wide for its depth (d/r ~ 0.06) that read as flat and "never showed" —
+/// the regression Robin reported repeatedly. Both dimensions now come from the SAME excavated volume plus
+/// ONE sourced shape fact: a simple crater's depth is ~0.4 of its radius (Melosh, *Impact Cratering*). For
+/// a paraboloid V = ½πR²d = 0.2πR³, so R = (V/0.2π)^⅓ and d = 0.4R. Returns (radius_m, depth_m).
+pub fn crater_bowl(excavated_volume_m3: f64) -> (f64, f64) {
+    const DEPTH_PER_RADIUS: f64 = 0.4;
+    if excavated_volume_m3 <= 0.0 {
+        return (0.0, 0.0);
+    }
+    // V = ½πr²d and d = k·r  ⇒  V = ½πk·r³  ⇒  r = (2V / (πk))^⅓.
+    let r = (2.0 * excavated_volume_m3 / (std::f64::consts::PI * DEPTH_PER_RADIUS)).cbrt();
+    (r, DEPTH_PER_RADIUS * r)
+}
+
 /// The mass above which a body's own gravity overcomes its material strength — the physical boundary
 /// between a ROCK and a BODY.
 ///
@@ -613,6 +631,27 @@ mod tests {
         // threshold got wrong, and it is exactly the case merging now creates.
     }
 
+
+
+    // docs/46 row 18: the bowl must keep a crater's SHAPE (depth ~ 0.4 radius), not a dial's. The old code
+    // sized radius from 0.72*R_surface and depth from volume, giving d/r ~ 0.06 — a saucer that rendered
+    // flat. Both now come from the same excavated volume.
+    #[test]
+    fn a_crater_bowl_keeps_its_shape_at_every_size() {
+        for &v in &[1.0e15, 1.0e18, 3.0e19] {
+            let (r, d) = crater_bowl(v);
+            assert!(r > 0.0 && d > 0.0, "a real excavation makes a real bowl");
+            assert!((d / r - 0.4).abs() < 1.0e-9, "depth must stay ~0.4 of radius, got {:.3}", d / r);
+            // The paraboloid must actually hold the volume it was built from.
+            let v_bowl = 0.5 * std::f64::consts::PI * r * r * d;
+            assert!((v_bowl - v).abs() / v < 1.0e-9, "the bowl must contain the excavated volume");
+        }
+        // A bigger excavation is a bigger crater in BOTH dimensions, never a flatter one.
+        let (r1, d1) = crater_bowl(1.0e15);
+        let (r2, d2) = crater_bowl(1.0e18);
+        assert!(r2 > r1 && d2 > d1, "more excavation digs wider AND deeper");
+        assert_eq!(crater_bowl(0.0), (0.0, 0.0), "no excavation, no crater");
+    }
 
     // The rock/body boundary must reproduce the OBSERVED potato radius, or it is a formula rather than
     // physics. Asteroids stop being lumpy and start being round somewhere near 200-300 km.

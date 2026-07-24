@@ -943,6 +943,11 @@ mod app {
         /// Bowl depth as a fraction of the surface radius, MEASURED from the target material actually
         /// lifted above its pristine surface (docs/46 row 18). 0 until something is excavated.
         gpu_crater_depth_frac: f64,
+        /// Bowl RADIUS as a fraction of the surface radius, from the same measured excavated volume as the
+        /// depth (docs/46 row 18) — not the inherited 0.72 dial that made the crater a flat saucer.
+        gpu_crater_r_frac: f64,
+        /// Last reported bowl depth (quantised) so the diagnostic logs on CHANGE, not every frame.
+        gpu_crater_logged: i32,
     }
 
     // Moon-shot Stage A constants.
@@ -1276,6 +1281,8 @@ mod app {
                 gpu_impact_site: None,
                 gpu_crater_frac: 0.0,
                 gpu_crater_depth_frac: 0.0,
+                gpu_crater_r_frac: 0.0,
+                gpu_crater_logged: -1,
             })
         }
 
@@ -2235,6 +2242,7 @@ mod app {
             self.gpu_impact_site = None; // no crater until contact (docs/42 Phase 2)
             self.gpu_crater_frac = 0.0;
             self.gpu_crater_depth_frac = 0.0;
+            self.gpu_crater_r_frac = 0.0;
             self.sph_promoted.clear();
             self.sph_substeps = 6; // start conservative; the frame-budget controller adapts up (docs/42)
         }
@@ -2270,6 +2278,7 @@ mod app {
             self.gpu_impact_site = None;
             self.gpu_crater_frac = 0.0;
             self.gpu_crater_depth_frac = 0.0;
+            self.gpu_crater_r_frac = 0.0;
             self.sph_promoted.clear();
             self.sph_substeps = 6;
         }
@@ -2328,6 +2337,7 @@ mod app {
             self.gpu_impact_site = None; // no crater until Theia makes contact (docs/42 Phase 2)
             self.gpu_crater_frac = 0.0;
             self.gpu_crater_depth_frac = 0.0;
+            self.gpu_crater_r_frac = 0.0;
             self.sph_promoted.clear();
             self.sph_substeps = 6; // start conservative; the frame-budget controller adapts up (docs/42)
             self.focus = 1; // centre on Earth (the particle system sits at the display origin)
@@ -3002,13 +3012,27 @@ mod app {
                                 vol += m / (p.rho.max(1.0) as f64);
                             }
                         }
-                        let r_bowl = self.gpu_crater_frac * 0.72 * r_surf;
-                        if m_exc > 0.0 && r_bowl > 0.0 {
-                            let d = 2.0 * vol / (std::f64::consts::PI * r_bowl * r_bowl);
-                            // A bowl cannot be deeper than the cap that was resolved to make it; beyond
-                            // that the excavation is reaching matter this resolution never promoted.
+                        // BOWL GEOMETRY FROM THE MEASURED VOLUME (docs/46 row 18).
+                        //
+                        // The radius used to be `gpu_crater_frac * 0.72 * r_surf` — an inherited dial, and
+                        // the rig proved it was the bug: it produced a 4,600 km bowl only 282 km deep, a
+                        // depth:radius of 0.06 where real simple craters run ~0.4. The crater was reaching
+                        // the shader correctly and rendering as an imperceptible saucer, which is why it
+                        // "never showed" however right the depth was.
+                        //
+                        // Both numbers now come from the SAME measured excavated volume plus ONE sourced
+                        // shape fact: a simple crater's depth is about a fifth of its diameter (Melosh,
+                        // *Impact Cratering*), i.e. d = 0.4 R. For a paraboloid V = ½πR²d, so
+                        // V = 0.2πR³  ⇒  R = (V / 0.2π)^⅓,  and d follows. Excavate nothing and there is
+                        // no crater; excavate more and it grows in BOTH dimensions, keeping its shape.
+                        let (r_bowl, d) = crate::accretion::crater_bowl(vol);
+                        if r_bowl > 0.0 {
+                            // A bowl cannot be deeper than the cap that was resolved to make it; past that
+                            // the excavation is reaching matter this resolution never promoted.
                             self.gpu_crater_depth_frac = (d / r_surf).min(0.25);
+                            self.gpu_crater_r_frac = (r_bowl / r_surf).min(0.9);
                         }
+                        let _ = m_exc;
                     }
                 }
             }
@@ -3096,13 +3120,31 @@ mod app {
                 // MODEL space, and the model matrix spins with the crust — so the bowl is un-rotated by the
                 // same spin, exactly as `crater_site` is rotated INTO world space for the shell grains. The
                 // crater and the matter it is cut from must share one frame.
-                if self.gpu_crater_frac > 0.0 && self.gpu_crater_depth_frac > 0.0 {
+                let r_surf_now = self.body_meta.get(self.planet_idx()).map_or(EARTH_RADIUS_M, |m| m.radius_m);
+                if self.gpu_crater_r_frac > 0.0 && self.gpu_crater_depth_frac > 0.0 {
                     if let Some(dir) = self.gpu_impact_site {
                         let axis = spin_rot.inverse() * dir;
                         // Angular radius of the bowl on the sphere: asin(R_bowl / R_surface).
-                        let theta = (self.gpu_crater_frac * 0.72).clamp(0.0, 1.0).asin();
+                        let theta = self.gpu_crater_r_frac.clamp(0.0, 0.95).asin();
                         let c: [f32; 4] = [axis.x as f32, axis.y as f32, axis.z as f32, theta as f32];
                         let c2: [f32; 4] = [self.gpu_crater_depth_frac as f32, 0.0, 0.0, 0.0];
+                        // DIAGNOSTIC: is the bowl actually reaching the shader, and how big is it? A render
+                        // change cannot be trusted from a screenshot alone when the impact site may be on
+                        // the night side — this reports the numbers behind the picture.
+                        // Report the bowl only when it MEASURABLY changes, not every frame: a render change
+                        // has to be checkable by number as well as by eye, because the impact site may be on
+                        // the night side where no screenshot can settle it.
+                        let stamp = (self.gpu_crater_depth_frac * 200.0).round() as i32;
+                        if stamp != self.gpu_crater_logged {
+                            self.gpu_crater_logged = stamp;
+                            log::info!(
+                                "crater: depth={:.0} km radius={:.0} km (d/r={:.2}) theta={:.3}rad axis=({:.2},{:.2},{:.2})",
+                                self.gpu_crater_depth_frac * r_surf_now / 1e3,
+                                self.gpu_crater_r_frac * r_surf_now / 1e3,
+                                if self.gpu_crater_r_frac > 0.0 { self.gpu_crater_depth_frac / self.gpu_crater_r_frac } else { 0.0 },
+                                theta, axis.x, axis.y, axis.z
+                            );
+                        }
                         self.queue.write_buffer(
                             &self.globe_uni.buf,
                             CRATER_UNIFORM_OFFSET,
