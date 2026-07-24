@@ -33,7 +33,7 @@ struct Params {
   omega: f32,       // cs_relax ONLY: rigid-rotation rate (rad/s) about +z for a ROTATING-frame relaxation
                     // (adds centrifugal ω²·(x,y,0) so the body settles to its oblate equilibrium). 0 elsewhere.
   n_ext: u32,       // number of DE-RESOLVED bodies in `ext_mass` (docs/44). 0 ⇒ the channel is inert.
-  _p2: f32,
+  merge_budget: u32, // docs/08/44 coarsening: merge redundant pairs while `n` exceeds this. 0 ⇒ never.
   // The un-resolved BULK planet a particalized CAP rests on (docs/39 — resolution-on-demand). A small
   // impactor resolves only a cap of the planet; its 10²⁴ kg interior stays this abstract sphere — a Gauss
   // gravity source + a non-injecting floor. `bulk_cr.w` (R_core) <= 0 DISABLES the bulk (a whole-body
@@ -62,6 +62,7 @@ struct Eos {
 @group(0) @binding(6) var<storage, read_write> grid_bucket: array<u32>;
 @group(0) @binding(7) var<storage, read_write> signal: array<f32>; // Courant signal h/(c+|v|); CPU min→dt (4c.2)
 @group(0) @binding(8) var<storage, read> ext_mass: array<vec4<f32>>; // de-resolved bodies: xyz = pos, w = mass
+@group(0) @binding(9) var<storage, read_write> merge_target: array<u32>; // i → its absorber, or NO_MERGE
 
 fn cell_of(pos: vec3<f32>) -> vec3<i32> { return vec3<i32>(floor(pos / P.cell_size)); }
 fn hash_cell(c: vec3<i32>) -> u32 {
@@ -342,4 +343,165 @@ fn cs_signal(@builtin(global_invocation_id) gid: vec3<u32>) {
   let pi = particles[i];
   let c = sound_speed(eos[pi.mat], pi.rho, pi.u);
   signal[i] = pi.h / max(c + length(pi.vel), 1.0);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// DE-RESOLUTION BY PAIRWISE MERGE (Robin, 2026-07-23; docs/08 clump tier, docs/44 resolve-by-necessity)
+//
+// "If two sticky particles collide and now share a common position/vector, we merge them... the conjoined
+// particles are on their way. When others collide they are added into the composition of the largest blob."
+//
+// This is the INVERSE of particalization done as a CONTACT LAW rather than a global search: local,
+// incremental, and free of any read-back. A merged blob stays a particle, so it keeps gravitating and
+// pressure-interacting with no special case — nothing has to be fed back in from outside.
+//
+// TWO gates, and BOTH are required:
+//
+//   1. REDUNDANT — the pair carries no more information than one particle would. `r < h_ij/2` is closer
+//      than one interparticle spacing (`smoothing_for` sets h = 2·(m/ρ)^⅓, so h/2 IS the spacing): they
+//      occupy the same lattice site and SPH cannot resolve structure between them. `|Δv| < c_s` is
+//      subsonic relative motion: the fluid has already equilibrated across that gap. Both are the
+//      material's own numbers, not dials.
+//   2. NECESSARY — `P.n > P.merge_budget`. Similarity alone is NOT sufficient and this is the trap:
+//      every pair inside a settled planet is within a smoothing length and mutually subsonic, so a pure
+//      redundancy test would collapse the whole interior on the first frame. Merging is a response to
+//      BUDGET PRESSURE (docs/08: "under budget pressure, clumps merge"), so detail is only ever spent
+//      when it is not affordable — never merely because two particles look alike.
+//
+// RACE-FREEDOM by three passes with DISJOINT write sets. `pick` writes only `merge_target`; `apply` runs
+// on ROOTS (targetless particles) and writes only roots; `retire` writes only non-roots. Since an absorbed
+// particle has exactly one target and roots are by definition untargeted, no two invocations ever write
+// the same particle, and no invocation reads a particle another is writing. Chains (i→j→k) simply resolve
+// over successive frames instead of racing.
+//
+// CONSERVATION is exact: mass, momentum and centre of mass by construction, and the relative kinetic
+// energy the inelastic merge destroys is added to `u` — the specific internal energy SPH already carries.
+// It becomes heat, which is what an inelastic merge physically does, so total energy is unchanged.
+//
+// FLAGGED (Law V): the merged particle keeps the ABSORBER's material. Blending two Tillotson EOS is not
+// defined, and the absorber is the more massive by construction, so this is the majority material. The
+// resolved counterpart is a genuine mixture EOS; until then a merged blob of mixed materials reports the
+// dominant one. Also flagged: a merge discards the pair's angular momentum about their common centre —
+// bounded by the redundancy gate (they are within a spacing and subsonic), but not zero.
+// ---------------------------------------------------------------------------------------------------
+
+const NO_MERGE: u32 = 0xffffffffu;
+
+fn merge_enabled() -> bool {
+  return P.merge_budget > 0u && P.n > P.merge_budget;
+}
+
+// PASS: pick — each particle chooses the neighbour that will ABSORB it (heavier; ties by lower index).
+@compute @workgroup_size(64)
+fn cs_merge_pick(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= P.n) { return; }
+  merge_target[i] = NO_MERGE;
+  if (!merge_enabled()) { return; }
+  let pi = particles[i];
+  if (pi.mass <= 0.0) { return; }
+  let ei = eos[pi.mat];
+  let c_i = sound_speed(ei, pi.rho, pi.u);
+  var best = NO_MERGE;
+  var best_mass = pi.mass;
+  let ci = cell_of(pi.pos);
+  for (var dx: i32 = -1; dx <= 1; dx++) {
+    for (var dy: i32 = -1; dy <= 1; dy++) {
+      for (var dz: i32 = -1; dz <= 1; dz++) {
+        let cell = ci + vec3<i32>(dx, dy, dz);
+        let hh = hash_cell(cell);
+        let cnt = min(atomicLoad(&grid_count[hh]), P.bucket_k);
+        for (var s: u32 = 0u; s < cnt; s++) {
+          let j = grid_bucket[hh * P.bucket_k + s];
+          if (j == i) { continue; }
+          let pj = particles[j];
+          if (pj.mass <= 0.0) { continue; }
+          let cj = cell_of(pj.pos);
+          if (cj.x != cell.x || cj.y != cell.y || cj.z != cell.z) { continue; }
+          // The absorber must be strictly "greater" — heavier, or equal mass with the lower index. That
+          // total order is what stops i and j each claiming the other.
+          let greater = (pj.mass > pi.mass) || (pj.mass == pi.mass && j < i);
+          if (!greater) { continue; }
+          let hij = 0.5 * (pi.h + pj.h);
+          let r = length(pi.pos - pj.pos);
+          if (r >= 0.5 * hij) { continue; }              // closer than one interparticle spacing
+          if (length(pi.vel - pj.vel) >= c_i) { continue; } // subsonic relative motion
+          // Prefer the LARGEST eligible absorber — Robin's "added into the composition of the largest blob".
+          if (pj.mass > best_mass || best == NO_MERGE) {
+            best = j;
+            best_mass = pj.mass;
+          }
+        }
+      }
+    }
+  }
+  merge_target[i] = best;
+}
+
+// PASS: apply — a ROOT absorbs every neighbour that picked it. Writes only roots.
+@compute @workgroup_size(64)
+fn cs_merge_apply(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let j = gid.x;
+  if (j >= P.n) { return; }
+  if (!merge_enabled()) { return; }
+  if (merge_target[j] != NO_MERGE) { return; } // not a root: it is itself being absorbed this pass
+  let pj = particles[j];
+  if (pj.mass <= 0.0) { return; }
+  var m_new = pj.mass;
+  var mom = pj.vel * pj.mass;
+  var com = pj.pos * pj.mass;
+  var mu_acc = pj.u * pj.mass;
+  var ke_before = 0.5 * pj.mass * dot(pj.vel, pj.vel);
+  var absorbed = 0u;
+  let cj = cell_of(pj.pos);
+  for (var dx: i32 = -1; dx <= 1; dx++) {
+    for (var dy: i32 = -1; dy <= 1; dy++) {
+      for (var dz: i32 = -1; dz <= 1; dz++) {
+        let cell = cj + vec3<i32>(dx, dy, dz);
+        let hh = hash_cell(cell);
+        let cnt = min(atomicLoad(&grid_count[hh]), P.bucket_k);
+        for (var s: u32 = 0u; s < cnt; s++) {
+          let i = grid_bucket[hh * P.bucket_k + s];
+          if (i == j) { continue; }
+          if (merge_target[i] != j) { continue; }
+          let pi = particles[i];
+          let ci = cell_of(pi.pos);
+          if (ci.x != cell.x || ci.y != cell.y || ci.z != cell.z) { continue; }
+          m_new += pi.mass;
+          mom += pi.vel * pi.mass;
+          com += pi.pos * pi.mass;
+          mu_acc += pi.u * pi.mass;
+          ke_before += 0.5 * pi.mass * dot(pi.vel, pi.vel);
+          absorbed += 1u;
+        }
+      }
+    }
+  }
+  if (absorbed == 0u) { return; }
+  let v_new = mom / m_new;
+  let x_new = com / m_new;
+  // The kinetic energy the merge destroys is exactly what the single particle can no longer represent;
+  // it becomes heat, so kinetic + internal is unchanged.
+  let ke_after = 0.5 * m_new * dot(v_new, v_new);
+  let u_new = (mu_acc + max(ke_before - ke_after, 0.0)) / m_new;
+  particles[j].pos = x_new;
+  particles[j].vel = v_new;
+  particles[j].mass = m_new;
+  particles[j].u = u_new;
+  // h tracks mass at fixed density: h ∝ (m/ρ)^⅓, so the blob's kernel grows as it eats.
+  particles[j].h = pj.h * pow(m_new / pj.mass, 1.0 / 3.0);
+}
+
+// PASS: retire — an absorbed particle goes inert (mass 0 contributes nothing to gravity, density or
+// pressure). Writes only non-roots. Slots are reclaimed by the host when it next uploads.
+@compute @workgroup_size(64)
+fn cs_merge_retire(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= P.n) { return; }
+  if (!merge_enabled()) { return; }
+  let t = merge_target[i];
+  if (t == NO_MERGE) { return; }
+  if (merge_target[t] != NO_MERGE) { return; } // its absorber was not a root — try again next frame
+  particles[i].mass = 0.0;
+  particles[i].vel = vec3<f32>(0.0);
 }

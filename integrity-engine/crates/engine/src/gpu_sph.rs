@@ -79,7 +79,11 @@ pub struct SphParams {
     /// survivors — so it is fed back as an external point mass. 0 ⇒ the channel is inert. Took over the
     /// `_p1` padding slot, so every offset and the 80-byte size are unchanged.
     pub n_ext: u32,
-    pub _p2: f32,
+    /// docs/08/44 coarsening: while `n` exceeds this, redundant neighbour pairs MERGE in the shader — the
+    /// de-resolution contact law. 0 disables it. Similarity alone must never trigger a merge (every pair
+    /// inside a settled planet is within a smoothing length and mutually subsonic); this budget is the
+    /// NECESSITY half of the gate.
+    pub merge_budget: u32,
     /// The un-resolved BULK planet a particalized CAP rests on (docs/39 — resolution-on-demand). Mirrors
     /// `sph_step.wgsl`'s two `vec4` tail fields: `bulk_cr` = xyz centre + w R_core (`<= 0` disables the
     /// bulk, the whole-body impact), `bulk_vm` = xyz velocity + w mass. Landed at offset 48/64 (both
@@ -548,6 +552,9 @@ pub struct DiskView {
     pub dv: Vec<glam::DVec3>,
     pub dm: Vec<f64>,
     pub dr: Vec<f64>,
+    /// Index into the ORIGINAL particle slice for each disk member — so a caller that consumes disk
+    /// members (de-resolution, docs/44) can map `accretion`'s `consumed` back to real particles.
+    pub idx: Vec<usize>,
     /// Disk mass from source body 0, from every other source, and the mass leaving altogether.
     pub disk_prov0: f64,
     pub disk_other: f64,
@@ -586,8 +593,9 @@ impl DiskView {
         }
         let mu = crate::orbit::G * m_remnant;
         let (mut dp, mut dv, mut dm, mut dr) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut idx: Vec<usize> = Vec::new();
         let (mut disk_prov0, mut disk_other, mut escaped) = (0.0f64, 0.0f64, 0.0f64);
-        for pt in particles {
+        for (pi, pt) in particles.iter().enumerate() {
             let m = pt.mass as f64;
             let (rel_p, rel_v) = (pos(pt) - com, vel(pt) - v_com);
             // BOUND first, then geometry. Asking `perigee` for boundedness was safe only while it refused
@@ -602,10 +610,11 @@ impl DiskView {
                 dv.push(vel(pt));
                 dm.push(m);
                 dr.push(pt.rho.max(1.0) as f64);
+                idx.push(pi);
             }
         }
         let mean_h: f64 = particles.iter().map(|p| p.h as f64).sum::<f64>() / n as f64;
-        Some(DiskView { com, v_com, r_remnant, m_remnant, mu, dp, dv, dm, dr, disk_prov0, disk_other, escaped, mean_h })
+        Some(DiskView { com, v_com, r_remnant, m_remnant, mu, dp, dv, dm, dr, idx, disk_prov0, disk_other, escaped, mean_h })
     }
 
     /// Total bound orbiting mass.
@@ -853,6 +862,7 @@ pub struct GpuSph {
     grid_count: wgpu::Buffer,
     grid_bucket: wgpu::Buffer,
     ext_mass: wgpu::Buffer,
+    merge_target: wgpu::Buffer,
     bind: wgpu::BindGroup,
     clear: wgpu::ComputePipeline,
     insert: wgpu::ComputePipeline,
@@ -861,6 +871,9 @@ pub struct GpuSph {
     kick_drift: wgpu::ComputePipeline,
     kick: wgpu::ComputePipeline,
     relax_k: wgpu::ComputePipeline,
+    merge_pick: wgpu::ComputePipeline,
+    merge_apply: wgpu::ComputePipeline,
+    merge_retire: wgpu::ComputePipeline,
     params: SphParams,
 }
 
@@ -888,6 +901,7 @@ impl GpuSph {
         let grid_bucket = device.create_buffer(&wgpu::BufferDescriptor { label: Some("sph-grid-bucket"), size: (SPH_TABLE_SIZE as u64) * (SPH_BUCKET_K as u64) * 4, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
 
         let ext_mass = device.create_buffer(&wgpu::BufferDescriptor { label: Some("sph-ext-mass"), size: (MAX_EXT_BODIES as u64) * 16, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let merge_target = device.create_buffer(&wgpu::BufferDescriptor { label: Some("sph-merge-target"), size: (cap as u64) * 4, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("sph-step"),
@@ -911,6 +925,7 @@ impl GpuSph {
                 storage(6, false), // grid_bucket
                 storage(7, false), // signal
                 storage(8, true),  // ext_mass — de-resolved bodies (docs/44)
+                storage(9, false), // merge_target — the de-resolution contact law (docs/08/44)
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("sph-pipeline-layout"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
@@ -928,13 +943,15 @@ impl GpuSph {
                 wgpu::BindGroupEntry { binding: 6, resource: grid_bucket.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 7, resource: signal.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 8, resource: ext_mass.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 9, resource: merge_target.as_entire_binding() },
             ],
         });
         GpuSph {
             clear: mk("cs_grid_clear"), insert: mk("cs_grid_insert"), density: mk("cs_density"), forces: mk("cs_forces"),
             kick_drift: mk("cs_kick_drift"), kick: mk("cs_kick"), relax_k: mk("cs_relax"),
-            store, params_buf, eos_buf, acc, dudt, signal, grid_count, grid_bucket, ext_mass, bind,
-            params: SphParams { n: 0, softening: 0.0, av_alpha: 1.0, av_beta: 2.0, cell_size: 1.0, table_mask: SPH_TABLE_SIZE - 1, bucket_k: SPH_BUCKET_K, dt: 0.0, damp: 1.0, omega: 0.0, n_ext: 0, _p2: 0.0, bulk_cr: [0.0; 4], bulk_vm: [0.0; 4] },
+            merge_pick: mk("cs_merge_pick"), merge_apply: mk("cs_merge_apply"), merge_retire: mk("cs_merge_retire"),
+            store, params_buf, eos_buf, acc, dudt, signal, grid_count, grid_bucket, ext_mass, merge_target, bind,
+            params: SphParams { n: 0, softening: 0.0, av_alpha: 1.0, av_beta: 2.0, cell_size: 1.0, table_mask: SPH_TABLE_SIZE - 1, bucket_k: SPH_BUCKET_K, dt: 0.0, damp: 1.0, omega: 0.0, n_ext: 0, merge_budget: 0, bulk_cr: [0.0; 4], bulk_vm: [0.0; 4] },
         }
     }
 
@@ -1020,6 +1037,25 @@ impl GpuSph {
         self.params.n_ext = n as u32;
         queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
         n
+    }
+
+    /// Set the de-resolution BUDGET (docs/08/44): while the live particle count exceeds it, redundant
+    /// neighbour pairs merge in the shader. 0 disables merging entirely.
+    pub fn set_merge_budget(&mut self, queue: &wgpu::Queue, budget: u32) {
+        self.params.merge_budget = budget;
+        queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
+    }
+
+    /// Encode ONE de-resolution pass: pick → apply → retire. Needs a populated neighbour grid, so it must
+    /// follow a `force_eval` (or its own clear+insert) in the same submission.
+    pub fn encode_merge(&self, enc: &mut wgpu::CommandEncoder) {
+        let n = self.params.n;
+        self.pass(enc, &self.clear, SPH_TABLE_SIZE);
+        self.pass(enc, &self.insert, n);
+        self.pass(enc, &self.density, n);
+        self.pass(enc, &self.merge_pick, n);
+        self.pass(enc, &self.merge_apply, n);
+        self.pass(enc, &self.merge_retire, n);
     }
 
     pub fn count(&self) -> u32 {
@@ -1122,7 +1158,7 @@ mod tests {
     fn sph_params_matches_the_shader_field_for_field() {
         let rust = offsets!(
             SphParams, n, softening, av_alpha, av_beta, cell_size, table_mask, bucket_k, dt, damp,
-            omega, n_ext, _p2, bulk_cr, bulk_vm,
+            omega, n_ext, merge_budget, bulk_cr, bulk_vm,
         );
         assert_eq!(
             rust,
@@ -1151,7 +1187,7 @@ mod tests {
         let names: Vec<&str> = p.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(
             &names[9..],
-            ["omega", "n_ext", "_p2", "bulk_cr", "bulk_vm"],
+            ["omega", "n_ext", "merge_budget", "bulk_cr", "bulk_vm"],
             "the wrapped-comment tail must all be seen"
         );
     }
