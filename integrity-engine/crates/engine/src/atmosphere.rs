@@ -319,6 +319,172 @@ pub fn atmospheric_step(
     out
 }
 
+/// **A parcel of the body that is no longer the body** — mass [`atmospheric_step`] ablated away, at the
+/// place and moment it was shed, still on the books.
+///
+/// This is the ENTRY TRAIL (docs/59 feature 2), and it exists because the alternative is a conservation
+/// hole: `atmospheric_step` reports `ablated_mass`, callers subtract it from the body, and the vapour
+/// simply ceased to exist. What you see behind a meteor is precisely that vapour — the body, glowing at
+/// the temperature its own ablation put it at — so the thing that closes the books and the thing that
+/// makes the picture are the same thing.
+#[derive(Clone, Copy, Debug)]
+pub struct VaporParcel {
+    pub mass_kg: f64,
+    pub pos: glam::DVec3,
+    /// Shed at the body's velocity — it leaves with the momentum it had.
+    pub vel: glam::DVec3,
+    /// Its temperature (K). The glow is [`crate::blackbody::blackbody_srgb`] of THIS, not a colour chosen
+    /// for a trail: physics drives the render.
+    pub temp_k: f64,
+}
+
+impl VaporParcel {
+    /// The radius (m) this parcel occupies, EMERGENT: vapour shed into air expands until it is no denser
+    /// than what it expands into, so `r = (3m/4πρ_air)^⅓` at the local air density. Nothing declares a
+    /// puff size — a parcel shed high, into thin air, is correspondingly larger.
+    ///
+    /// *Flagged:* it reaches that density instantly here. The resolved computation is [`AirField`] — SPH
+    /// gas parcels whose density is whatever the flow makes it — which is also what turns this trail from
+    /// a column of independent parcels into one that mixes, shears and disperses.
+    pub fn radius_in(&self, rho_air: f64) -> f64 {
+        if rho_air <= 0.0 || self.mass_kg <= 0.0 {
+            return 0.0;
+        }
+        (3.0 * self.mass_kg / (4.0 * std::f64::consts::PI * rho_air)).cbrt()
+    }
+
+    /// Has it finished being a trail? A parcel that has cooled to the air around it IS the air around it:
+    /// its mass has joined the atmosphere, which is where ablated mass really goes. Retiring it is
+    /// bookkeeping reaching its end, not mass being dropped.
+    pub fn merged_into_air(&self, ambient_temp_k: f64) -> bool {
+        self.temp_k <= ambient_temp_k
+    }
+}
+
+/// One step of a shed parcel's life: it drifts, it is slowed by the air it is moving through, and it
+/// radiates its heat away.
+///
+/// The cooling is the same Stefan–Boltzmann loss [`atmospheric_step`] already applies to the body, over
+/// the area the parcel actually presents at the local air density ([`VaporParcel::radius_in`]) — one
+/// radiation law, not a second one written for trails. Drag likewise reuses [`drag_accel`]. A parcel that
+/// reaches ambient has become air; the caller retires it then.
+pub fn vapor_step(
+    p: VaporParcel,
+    rho_air: f64,
+    ambient_temp_k: f64,
+    mat: &Material,
+    dt: f64,
+) -> VaporParcel {
+    const EMISSIVITY: f64 = 0.45; // the same flagged molten-material emissivity `atmospheric_step` uses
+    const STEFAN_BOLTZMANN: f64 = 5.670_374_419e-8;
+    let mut out = p;
+    out.pos += p.vel * dt;
+    if p.mass_kg <= 0.0 || dt <= 0.0 {
+        return out;
+    }
+    let r = p.radius_in(rho_air);
+    if r > 0.0 {
+        // Shed vapour is moving at the body's speed through air that is not, and a parcel as thin as the
+        // air it is in has an enormous area per kilogram: it is stopped in milliseconds. Quadratic drag
+        // that strong is STIFF, and an explicit `v += a·dt` overshoots — a step long enough to stop the
+        // parcel reverses it and then accelerates it away, which is how this first read as a parcel
+        // speeding UP. So the step is taken exactly: dv/dt = −k·|v|·v integrates in closed form to
+        // |v|(t) = |v₀|/(1 + k·|v₀|·t), which decays monotonically for any dt and cannot overshoot.
+        // (Same law as `drag_accel`, k = ½ρ·C_d·A/m — solved rather than sampled.)
+        let speed = p.vel.length();
+        if speed > 0.0 {
+            let k = 0.5 * rho_air * SPHERE_DRAG_CD * std::f64::consts::PI * r * r / p.mass_kg;
+            out.vel = p.vel / (1.0 + k * speed * dt);
+        }
+    }
+    let Some(c) = mat.specific_heat() else {
+        return out; // uncharacterised: we do not claim to know how fast it cools
+    };
+    let area = 4.0 * std::f64::consts::PI * r * r;
+    let p_rad = EMISSIVITY * STEFAN_BOLTZMANN * (p.temp_k.powi(4) - ambient_temp_k.powi(4)).max(0.0) * area;
+    out.temp_k = (p.temp_k - p_rad / (p.mass_kg * c) * dt).max(ambient_temp_k);
+    out
+}
+
+/// **Everything a body has shed, still on the books** — the entry trail, at whichever resolution the view
+/// needs (Robin, 2026-07-24: *"rendering/tracking it should be decided based on the scale it is being
+/// viewed at"*).
+///
+/// Two representations of the same mass, which is the docs/44 ladder rather than two models:
+///
+/// - **resolved** — [`VaporParcel`]s, each drifting, slowing and cooling. What a camera near the trail
+///   needs, because from there you can see individual puffs shear and fade.
+/// - **booked** — `merged_kg`, a running total that has become part of the atmosphere. From orbit that
+///   is all a trail IS: mass returned to the air it was ablated into. A parcel is retired here once it
+///   reaches ambient temperature, and a caller watching from far enough away may book mass directly
+///   without ever resolving a parcel.
+///
+/// Either way [`Trail::mass`] is the same number, which is the point: the representation changes with the
+/// camera, the mass does not (Law IV).
+///
+/// **Flagged, and named rather than lost:** mass booked into the air stays there. In reality it condenses
+/// to micrometeoritic dust and settles out — some 40,000 tonnes a year on Earth — so `merged_kg` is a
+/// staging post, not a final resting place. The resolved computation it defers to is [`AirField`] gas
+/// parcels that condense and fall under the same gravity as everything else.
+#[derive(Clone, Debug, Default)]
+pub struct Trail {
+    parcels: Vec<VaporParcel>,
+    merged_kg: f64,
+}
+
+impl Trail {
+    /// The body shed this much mass, here, at this velocity and temperature.
+    pub fn shed(&mut self, mass_kg: f64, pos: glam::DVec3, vel: glam::DVec3, temp_k: f64) {
+        if mass_kg > 0.0 {
+            self.parcels.push(VaporParcel { mass_kg, pos, vel, temp_k });
+        }
+    }
+
+    /// Shed mass without resolving it — the coarse representation, for a trail nothing is close enough to
+    /// see. The mass is accounted for identically; only the detail differs.
+    pub fn book(&mut self, mass_kg: f64) {
+        if mass_kg > 0.0 {
+            self.merged_kg += mass_kg;
+        }
+    }
+
+    /// Total mass the trail holds — resolved parcels plus what has become air. The invariant a caller
+    /// checks: body mass + `trail.mass()` is what entered.
+    pub fn mass(&self) -> f64 {
+        self.parcels.iter().map(|p| p.mass_kg).sum::<f64>() + self.merged_kg
+    }
+
+    /// Mass that has cooled into the atmosphere.
+    pub fn merged_kg(&self) -> f64 {
+        self.merged_kg
+    }
+
+    /// The parcels still hot enough to be worth resolving — what a renderer draws, glowing at their own
+    /// temperatures via [`crate::blackbody::blackbody_srgb`].
+    pub fn parcels(&self) -> &[VaporParcel] {
+        &self.parcels
+    }
+
+    /// Age every resolved parcel one step: it drifts, is slowed, and radiates. `ambient` reports the air
+    /// density and temperature at a parcel's position, which only the scene knows the geometry for.
+    /// Parcels that reach ambient are retired into `merged_kg` — mass moves between representations, never
+    /// out of the books.
+    pub fn step(&mut self, mat: &Material, dt: f64, ambient: impl Fn(glam::DVec3) -> (f64, f64)) {
+        let mut merged = 0.0;
+        self.parcels.retain_mut(|p| {
+            let (rho, t_amb) = ambient(p.pos);
+            *p = vapor_step(*p, rho, t_amb, mat, dt);
+            if p.merged_into_air(t_amb) {
+                merged += p.mass_kg;
+                false
+            } else {
+                true
+            }
+        });
+        self.merged_kg += merged;
+    }
+}
+
 /// The 3D generalization of the column (docs/26): an SPH air FIELD. Density is estimated by a cubic
 /// spline kernel over neighbours, pressure is the ideal gas P = ρ·R_s·T (isothermal v0, flagged), and
 /// the symmetric pressure force  a_i = −Σ_j m_j (P_i/ρ_i² + P_j/ρ_j²) ∇W  conserves momentum exactly by
@@ -667,6 +833,127 @@ mod tests {
         let slow = atmospheric_step(1.2, glam::DVec3::new(100.0, 0.0, 0.0), 1000.0, 0.3, 288.0, 288.0, iron, 1.0 / 60.0);
         assert!((slow.temp_k - 288.0).abs() < 1.0, "subsonic: no shock heating");
     }
+    /// **A real entry, flown, with the books kept.** An iron grain comes in at 20 km/s and ablates its
+    /// way down through Earth's own emergent air. The thing being tested is that the mass it loses does
+    /// not cease to exist: at every step, body + trail is EXACTLY the mass that entered. Before this,
+    /// `ablated_mass` was subtracted from the body and dropped.
+    ///
+    /// A GRAIN, not a boulder, and for a physical reason: `atmospheric_step` heats the body's whole mass
+    /// at its bulk heat capacity, which is only true while the body is thinner than its own thermal skin
+    /// depth (√(αt) ≈ 1.5 cm for iron over ten seconds). A half-metre iron body run through this model
+    /// barely warms — and, as it happens, that is also what really becomes of one: small meteoroids burn
+    /// up, iron meteorites land. The model gets the right answer here for the right reason, but the
+    /// isothermal-body assumption is the flagged limit (real ablation is a SURFACE process, and resolving
+    /// it needs a temperature profile through the body).
+    #[test]
+    fn what_a_body_ablates_becomes_a_trail_and_the_mass_is_never_lost() {
+        let mats = materials::load();
+        let iron = &mats[materials::index_of(&mats, "iron")];
+        let air_mat = &mats[materials::index_of(&mats, "air")];
+        let earth = crate::planet::earth();
+        let g = earth.gravity_at(earth.radius());
+        let air = AirShell::new(earth.surface_pressure(), air_mat, 288.0, g);
+
+        // A 1 cm iron grain entering at 20 km/s, straight down from 120 km.
+        let rho_iron = iron.density as f64;
+        let mut radius: f64 = 0.005;
+        let mut mass = rho_iron * (4.0 / 3.0) * std::f64::consts::PI * radius.powi(3);
+        let start_mass = mass;
+        let mut temp = air.ambient_temp_k;
+        let mut alt: f64 = 120_000.0;
+        let mut vel = DVec3::new(0.0, -20_000.0, 0.0);
+        let mut trail = Trail::default();
+        let dt = 0.001;
+
+        let mut shed_hot = 0;
+        for _ in 0..20_000 {
+            if alt <= 0.0 || mass <= 0.0 {
+                break;
+            }
+            let rho = air.density_at(alt);
+            let s = atmospheric_step(rho, vel, mass, radius, temp, air.ambient_temp_k, iron, dt);
+            if s.ablated_mass > 0.0 {
+                // The vapour leaves the body carrying the body's own velocity and temperature.
+                trail.shed(s.ablated_mass, DVec3::new(0.0, alt, 0.0), vel, s.temp_k);
+                if s.temp_k > air.ambient_temp_k {
+                    shed_hot += 1;
+                }
+            }
+            mass -= s.ablated_mass;
+            radius = s.radius_m;
+            temp = s.temp_k;
+            vel += (s.drag_accel + DVec3::new(0.0, -g, 0.0)) * dt;
+            alt += vel.y * dt;
+            trail.step(iron, dt, |at| (air.density_at(at.y.max(0.0)), air.ambient_temp_k));
+
+            // THE INVARIANT, every single step: nothing has left the books.
+            let booked = mass + trail.mass();
+            assert!(
+                (booked / start_mass - 1.0).abs() < 1e-12,
+                "mass conserved: {booked:.9e} vs {start_mass:.9e}"
+            );
+        }
+
+        // The entry has to have actually HAPPENED for the invariant to mean anything.
+        assert!(mass < start_mass, "the grain ablated ({mass:.3e} kg of {start_mass:.3e})");
+        assert!(shed_hot > 0, "and the vapour left hot — that is the trail you see");
+        assert!(trail.mass() > 0.0, "the shed mass is somewhere");
+        assert!(
+            trail.merged_kg() > 0.0,
+            "and some of it has finished cooling into the air ({:.3e} kg)", trail.merged_kg()
+        );
+    }
+
+    /// **The camera changes representation, never existence** (Law IV). The same shed mass, tracked as
+    /// resolved parcels or simply booked into the atmosphere, is the same mass — which is what makes it
+    /// legitimate to watch a trail from orbit without resolving a single puff.
+    #[test]
+    fn a_trail_holds_the_same_mass_resolved_or_booked() {
+        let mut resolved = Trail::default();
+        let mut booked = Trail::default();
+        for i in 0..10 {
+            let m = 0.5 * (i + 1) as f64;
+            resolved.shed(m, DVec3::new(0.0, 60_000.0, 0.0), DVec3::new(0.0, -1.0e4, 0.0), 3134.0);
+            booked.book(m);
+        }
+        assert_eq!(resolved.mass(), booked.mass(), "one mass, two representations");
+        assert_eq!(resolved.parcels().len(), 10, "resolved: individual puffs to draw");
+        assert!(booked.parcels().is_empty(), "booked: nothing to draw, the mass is in the air");
+    }
+
+    /// A shed parcel expands to the air around it, and cools by the SAME radiation law the body uses —
+    /// so its size and its glow are both consequences, not settings. High, thin air ⇒ a bigger, more
+    /// rapidly cooling puff than the same mass shed low down.
+    #[test]
+    fn shed_vapor_expands_to_the_local_air_and_radiates_its_heat_away() {
+        let mats = materials::load();
+        let iron = &mats[materials::index_of(&mats, "iron")];
+        let p = VaporParcel {
+            mass_kg: 1.0,
+            pos: DVec3::ZERO,
+            vel: DVec3::new(0.0, -1.0e4, 0.0),
+            temp_k: 3134.0, // iron's boiling point: the temperature ablation sheds it at
+        };
+        // Size is set by the air it expands into: 1 kg at sea level vs at 80 km.
+        let (rho_low, rho_high) = (1.2, 1.0e-5);
+        assert!(p.radius_in(rho_high) > 10.0 * p.radius_in(rho_low), "thin air ⇒ a far bigger puff");
+
+        // It cools toward ambient and never below it.
+        let mut hot = p;
+        for _ in 0..200 {
+            hot = vapor_step(hot, rho_low, 288.0, iron, 0.01);
+        }
+        assert!(hot.temp_k < p.temp_k, "a hot parcel radiates its heat away ({:.0} K)", hot.temp_k);
+        assert!(hot.temp_k >= 288.0, "and never cools below the air it is in");
+
+        // And it is slowed by the air, like anything else moving through a fluid.
+        assert!(hot.vel.length() < p.vel.length(), "the parcel is dragged to a stop, not left at 10 km/s");
+
+        // A parcel already at ambient is simply air, and says so.
+        let cold = VaporParcel { temp_k: 288.0, ..p };
+        assert!(cold.merged_into_air(288.0), "cooled to ambient ⇒ it has joined the atmosphere");
+    }
+
     use glam::DVec3;
 
     #[test]

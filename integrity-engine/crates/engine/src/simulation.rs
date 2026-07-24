@@ -49,6 +49,10 @@ pub struct Simulation {
     created_total: usize,
     /// Meteors in flight. The engine flies and lands them; the caller only throws.
     meteors: Vec<Meteor>,
+    /// What the meteors have ablated away (docs/59). Before this, the vaporised mass was subtracted from
+    /// the meteor and simply ceased to exist — a conservation hole in the one place the engine already
+    /// flew a body through air.
+    trail: crate::atmosphere::Trail,
 }
 
 /// A meteor: real matter with a mass, a material, a place and a velocity.
@@ -115,6 +119,7 @@ impl Simulation {
             surface_pressure: planet.surface_pressure(),
             created_total: 0,
             meteors: Vec::new(),
+            trail: crate::atmosphere::Trail::default(),
         };
         sim.apply_events();
         Ok(sim)
@@ -242,6 +247,12 @@ impl Simulation {
         &self.meteors
     }
 
+    /// The entry trail — everything the meteors have ablated away, still accounted for (docs/59). Its
+    /// parcels glow at their own temperatures; a renderer asks `blackbody::blackbody_srgb` for the colour.
+    pub fn trail(&self) -> &crate::atmosphere::Trail {
+        &self.trail
+    }
+
     /// Advance every meteor in flight under the planet's gravity and impact the ones that arrive.
     /// Returns grains created this step.
     fn fly_meteors(&mut self, dt: f32) -> usize {
@@ -270,6 +281,14 @@ impl Simulation {
                 );
                 m.vel += step.drag_accel.as_vec3() * dt;
                 m.temp_k = step.temp_k as f32;
+                // The vaporised mass LEAVES the meteor; it does not leave the simulation. It is shed as
+                // trail — hot vapour at the body's own velocity, glowing at its own temperature — which is
+                // both the conservation fix and the thing you actually see behind a meteor (docs/59).
+                if step.ablated_mass > 0.0 {
+                    self.trail.shed(
+                        step.ablated_mass, m.pos.as_dvec3(), m.vel.as_dvec3(), step.temp_k,
+                    );
+                }
                 m.mass_kg = (m.mass_kg as f64 - step.ablated_mass).max(0.0) as f32;
                 m.radius_m = step.radius_m as f32;
             }
@@ -292,6 +311,20 @@ impl Simulation {
             }
         }
         self.meteors = still;
+        // Age the trail: each parcel drifts, is slowed and radiates into the air at its own altitude. A
+        // parcel that reaches ambient has become part of the atmosphere, and its mass is booked there.
+        if let Some(air) = air {
+            let (p0, g, world) = (self.surface_pressure, self.surface_g as f64, &self.world);
+            let ambient = |at: glam::DVec3| {
+                let h = (at.y - world.ground_height(at.x as f32, at.z as f32) as f64).max(0.0);
+                (crate::atmosphere::air_density_at(p0, air, AMBIENT_TEMP_K as f64, g, h), AMBIENT_TEMP_K as f64)
+            };
+            // The trail is made of what the meteors were made of; with one meteor material in flight this
+            // is that material, and a per-parcel material is the refinement when several fly at once.
+            let mat_idx = self.meteors.first().map_or(0, |m| m.material);
+            let mat = self.materials[mat_idx].clone();
+            self.trail.step(&mat, dt as f64, ambient);
+        }
         let mut created = 0;
         for m in landed {
             // Energy is ½mv² of the matter that actually arrived. Not a parameter.
