@@ -378,11 +378,13 @@ fn cs_signal(@builtin(global_invocation_id) gid: vec3<u32>) {
 // energy the inelastic merge destroys is added to `u` — the specific internal energy SPH already carries.
 // It becomes heat, which is what an inelastic merge physically does, so total energy is unchanged.
 //
-// FLAGGED (Law V): the merged particle keeps the ABSORBER's material. Blending two Tillotson EOS is not
-// defined, and the absorber is the more massive by construction, so this is the majority material. The
-// resolved counterpart is a genuine mixture EOS; until then a merged blob of mixed materials reports the
-// dominant one. Also flagged: a merge discards the pair's angular momentum about their common centre —
-// bounded by the redundancy gate (they are within a spacing and subsonic), but not zero.
+// MATERIALS DO NOT BLEND: only same-material pairs merge (see `cs_merge_pick`), so the merged particle's
+// EOS is exactly its constituents' and no mixture EOS is needed. That also means a coalescing body keeps
+// its COMPOSITION — it converges to one particle per material rather than one homogeneous lump — which is
+// what lets it still be promoted to a LAYERED body afterwards.
+//
+// FLAGGED (Law V): a merge discards the pair's angular momentum about their common centre — bounded by the
+// redundancy gate (they are within a spacing and mutually subsonic), but not zero.
 // ---------------------------------------------------------------------------------------------------
 
 const NO_MERGE: u32 = 0xffffffffu;
@@ -418,6 +420,13 @@ fn cs_merge_pick(@builtin(global_invocation_id) gid: vec3<u32>) {
           if (pj.mass <= 0.0) { continue; }
           let cj = cell_of(pj.pos);
           if (cj.x != cell.x || cj.y != cell.y || cj.z != cell.z) { continue; }
+          // SAME MATERIAL ONLY. Two different materials in contact do not become one homogeneous
+          // material — they stay distinct phases, and iron absorbed into basalt would be a physical
+          // fiction. Refusing the pair removes the material-blending IOU this kernel used to carry rather
+          // than deferring it, and it PRESERVES COMPOSITION for free: a differentiated blob converges to
+          // one particle PER MATERIAL, each still at its own radius (the iron sank), so the layering
+          // survives coalescence instead of being homogenised away.
+          if (pj.mat != pi.mat) { continue; }
           // The absorber must be strictly "greater" — heavier, or equal mass with the lower index. That
           // total order is what stops i and j each claiming the other.
           let greater = (pj.mass > pi.mass) || (pj.mass == pi.mass && j < i);

@@ -310,6 +310,29 @@ pub fn accrete(
 }
 
 
+
+/// The mass above which a body's own gravity overcomes its material strength — the physical boundary
+/// between a ROCK and a BODY.
+///
+/// Below it matter keeps whatever irregular shape it was left in; above it self-gravity crushes it into
+/// hydrostatic equilibrium and it is round. That is the honest trigger for promoting a coalesced particle
+/// into a layered body: **not a particle count** — merging systematically destroys the count, so a
+/// count-based gate becomes unsatisfiable exactly when coalescence succeeds — and not a chosen mass.
+///
+/// A self-gravitating sphere's central pressure is ~(2π/3)·G·ρ²·R², so it rounds once that exceeds the
+/// material's strength σ:  R = sqrt(3σ / (2π·G·ρ²)),  M = (4/3)·π·ρ·R³.
+///
+/// For rock (σ ~ 10⁸ Pa, ρ ~ 3000) this lands near 300 km — the observed "potato radius" where asteroids
+/// stop being lumpy and start being round, which is the check that this is physics and not a fitted number.
+pub fn rounding_mass(strength_pa: f64, density: f64) -> f64 {
+    let rho = density.max(1.0);
+    let r = (3.0 * strength_pa.max(0.0) / (2.0 * std::f64::consts::PI * G_CONST * rho * rho)).sqrt();
+    FOUR_THIRDS_PI * rho * r.powi(3)
+}
+
+/// Gravitational constant for [`rounding_mass`] — the engine's one value (`orbit::G`).
+const G_CONST: f64 = crate::orbit::G;
+
 /// Sample a settled particle set's RADIAL composition into layers — the promote-to-body step (docs/58).
 ///
 /// Robin: *"heavier materials naturally migrate toward the middle when settling, making a sampling of the
@@ -386,11 +409,19 @@ pub fn sample_layers(
             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
             .map(|(k, v)| (*k, *v))
             .unwrap_or((0, 0.0));
-        // Dominance must exceed SAMPLING NOISE to count as evidence. A 50/50 shell of `cnt` particles
-        // fluctuates by ~1/sqrt(cnt) in mass fraction, so a one-particle imbalance is not a layer boundary —
-        // without this a perfectly stirred body sprouts a spurious boundary wherever a shell held an odd
-        // number of particles. The bound is the statistics of the sample, not a chosen number.
-        let majority = cnt > 0 && (dom_m / acc.max(1.0) - 0.5) > 1.0 / (cnt as f64).sqrt();
+        // Dominance must exceed SAMPLING NOISE to count as evidence: a one-particle imbalance in a 50/50
+        // shell is not a layer boundary, or a perfectly stirred body sprouts a spurious boundary wherever a
+        // shell held an odd number of particles. The bound is the BINOMIAL standard error of the mass
+        // fraction, `sqrt(p(1−p)/cnt)`, at the conventional 2σ significance.
+        //
+        // The standard error is the right statistic and a flat `1/sqrt(cnt)` was not: it vanishes when
+        // `p == 1`, so a PURE shell is unambiguous however few particles it holds. That matters now that
+        // merging is same-material — a coalesced body arrives as a handful of pure, massive particles, and
+        // a threshold that ignored certainty would have declared every one of them a "mixture" and
+        // collapsed a differentiated planet into a single layer.
+        let p_dom = dom_m / acc.max(1.0);
+        let se = (p_dom * (1.0 - p_dom) / (cnt.max(1) as f64)).sqrt();
+        let majority = cnt > 0 && (p_dom - 0.5) > 2.0 * se;
         let name = match (majority, layers.last()) {
             (false, Some(prev)) => prev.name.clone(), // mixture: continue the layer below
             _ => names.get(dom).cloned().unwrap_or_else(|| "basalt".to_string()),
@@ -549,6 +580,54 @@ mod tests {
         let stirred = sample_layers(&pos, &mass, &srho, &smat, &names, &temp, 12);
         assert_eq!(stirred.len(), 1,
             "an undifferentiated body must NOT be sorted into layers it never formed, got {stirred:?}");
+    }
+
+
+    // The regime same-material merging actually produces. Once the shader merges only like with like, a
+    // coalesced body does NOT arrive as thousands of particles — it arrives as a HANDFUL of pure, massive
+    // ones, each still at its own radius because the dense material sank before it coalesced. Sampling must
+    // still read that as layers; if it collapsed them to one, promotion would hand back a homogeneous
+    // planet, which is worse than not promoting at all.
+    #[test]
+    fn a_coalesced_body_of_a_few_pure_particles_still_samples_as_layers() {
+        let names = vec!["iron".to_string(), "basalt".to_string()];
+        // Four particles: two iron deep, two basalt shallow — the shape a merged, differentiated blob has.
+        let pos = vec![
+            DVec3::new(3.0e5, 0.0, 0.0),
+            DVec3::new(-3.0e5, 2.0e5, 0.0),
+            DVec3::new(4.0e6, 0.0, 0.0),
+            DVec3::new(-3.5e6, 1.0e6, 0.0),
+        ];
+        let mass = vec![9.0e22, 8.0e22, 5.0e22, 4.0e22];
+        let rho = vec![7850.0, 7850.0, 3000.0, 3000.0];
+        let mat = vec![0, 0, 1, 1];
+        let temp = vec![5000.0, 4800.0, 1800.0, 1600.0];
+
+        let layers = sample_layers(&pos, &mass, &rho, &mat, &names, &temp, 4);
+        assert_eq!(layers.len(), 2, "a few PURE particles must still resolve two layers, got {layers:?}");
+        assert_eq!(layers[0].material, "iron", "the dense material is inner");
+        assert_eq!(layers[1].material, "basalt");
+        assert!(layers[0].density > layers[1].density, "the core samples denser");
+        assert!(layers[1].outer_r > layers[0].outer_r, "layers are ordered outward");
+        // A pure shell is unambiguous however few particles it holds — this is what the flat 1/sqrt(cnt)
+        // threshold got wrong, and it is exactly the case merging now creates.
+    }
+
+
+    // The rock/body boundary must reproduce the OBSERVED potato radius, or it is a formula rather than
+    // physics. Asteroids stop being lumpy and start being round somewhere near 200-300 km.
+    #[test]
+    fn the_rounding_mass_reproduces_the_observed_potato_radius() {
+        let (sigma, rho) = (1.0e8, 3000.0); // rock
+        let m = rounding_mass(sigma, rho);
+        let r = (m / (FOUR_THIRDS_PI * rho)).cbrt();
+        assert!((1.5e5..5.0e5).contains(&r), "rock should round near 200-300 km, got {:.0} km", r / 1e3);
+
+        // A STRONGER material has to grow bigger before gravity wins; a weaker one rounds sooner.
+        assert!(rounding_mass(4.0e8, rho) > m, "stronger material resists rounding to a larger mass");
+        assert!(rounding_mass(2.5e7, rho) < m, "weaker material rounds at a smaller mass");
+        // Strengthless matter (a liquid) is round at any size.
+        assert_eq!(rounding_mass(0.0, rho), 0.0, "a liquid has no shape of its own");
     }
 
     // STRAGGLERS (Robin, 2026-07-23): "a meteor that impacts the moon becomes part of the moon unless it

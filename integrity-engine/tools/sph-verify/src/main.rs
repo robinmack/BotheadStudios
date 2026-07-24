@@ -437,6 +437,26 @@ fn verify_merge(eos: &[Eos], soft: f64) -> bool {
         n0, n1, dm, dmom, de
     );
 
+    // MATERIALS MUST NOT BLEND. The same lattice, but each site's pair is iron + basalt instead of two of
+    // the same rock. Every other condition for merging is identical — inside the merge radius, mutually
+    // subsonic, over budget — so if anything coalesces here it can only be because the material test is
+    // missing. Two phases in contact stay two phases; iron absorbed into basalt would be a fiction, and it
+    // would also destroy the composition a promoted body needs to be LAYERED.
+    let mixed: Vec<Particle> = ps
+        .iter()
+        .enumerate()
+        .map(|(i, p)| Particle { mat: (i % 2) as u32, ..*p })
+        .collect();
+    let out_mixed = run_gpu_steps(&mixed, eos, soft, 0.0, 4, [0.0; 4], [0.0; 4], &[], 1);
+    let (_, _, _, n_mixed) = totals(&out_mixed);
+    let mixed_ok = n_mixed == mixed.len();
+    println!(
+        "merge-materials: {} → {} of {} particles survive when every pair is iron+basalt",
+        if mixed_ok { "PASS — different materials never merge" } else { "FAIL" },
+        n_mixed,
+        mixed.len()
+    );
+
     // The NECESSITY gate must also hold the other way: with no budget pressure, nothing may merge, however
     // redundant the pairs are. This is what stops a settled planet dissolving on the first frame.
     let idle = run_gpu_steps(&ps, eos, soft, 0.0, 4, [0.0; 4], [0.0; 4], &[], 0);
@@ -447,7 +467,7 @@ fn verify_merge(eos: &[Eos], soft: f64) -> bool {
         if gate_ok { "PASS — no budget pressure, no coarsening" } else { "FAIL" },
         n_idle, n0
     );
-    ok && gate_ok
+    ok && gate_ok && mixed_ok
 }
 
 fn verify_external_mass(eos: &[Eos], soft: f64) -> bool {

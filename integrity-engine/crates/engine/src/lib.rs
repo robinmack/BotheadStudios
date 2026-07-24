@@ -2058,17 +2058,42 @@ mod app {
                 self.sph_snapshot = snap;
                 return false;
             };
-            // A body must be resolved by enough particles to have a radial profile worth sampling; below
-            // that there is nothing to differentiate and the merge tier is the right home for it.
-            const MIN_MEMBERS: usize = 24;
-            let clumps = view.moonlets(MIN_MEMBERS);
-            let Some(c) = clumps.into_iter().max_by(|a, b| a.mass.partial_cmp(&b.mass).unwrap()) else {
+            // Two members is the minimum that can express a radial profile at all. It is NOT the real
+            // gate: a COUNT gate is self-defeating here, because merging systematically reduces the member
+            // count, so it becomes unsatisfiable exactly when coalescence succeeds (Robin caught this —
+            // the same shape of mistake as writing the binding energy as an O(k²) sum that explodes when
+            // clumps unite). The real gate is MASS, below.
+            let clumps = view.moonlets(2);
+            let names = crate::gpu_sph::eos_material_names(&self.sph_eos, &self.mats);
+            // A clump is promoted when its own gravity has overcome its material strength — the physical
+            // boundary between a rock and a BODY (`accretion::rounding_mass`). Below it the thing has no
+            // hydrostatic interior to describe with layers and the particle tier is its right home.
+            let strength_of = |c: &crate::accretion::Clump| -> f64 {
+                let mut wsum = 0.0f64;
+                let mut msum = 0.0f64;
+                for &k in &c.members {
+                    let p = &snap[view.idx[k]];
+                    let m = p.mass as f64;
+                    let sig = names
+                        .get(p.mat as usize)
+                        .and_then(|n| self.mats.iter().find(|mm| &mm.id == n))
+                        .map(|mm| mm.fracture_strength as f64)
+                        .unwrap_or(1.0e8);
+                    wsum += m * sig;
+                    msum += m;
+                }
+                if msum > 0.0 { wsum / msum } else { 1.0e8 }
+            };
+            let Some(c) = clumps
+                .into_iter()
+                .filter(|c| c.mass >= crate::accretion::rounding_mass(strength_of(c), c.rho))
+                .max_by(|a, b| a.mass.partial_cmp(&b.mass).unwrap())
+            else {
                 self.sph_snapshot = snap;
                 return false;
             };
 
             // Sample the clump's own matter — the layering the sim produced, read rather than declared.
-            let names = crate::gpu_sph::eos_material_names(&self.sph_eos, &self.mats);
             let idx: Vec<usize> = c.members.iter().map(|&k| view.idx[k]).collect();
             let (mut pos, mut mass, mut rho, mut mat, mut temp) =
                 (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
