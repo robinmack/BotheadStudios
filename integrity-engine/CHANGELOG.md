@@ -9,6 +9,26 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Matter in flight is an engine operation, at any scale (docs/59).** New `crate::flight` —
+  `Flight::introduce` (a mass, a material, a place, a velocity: the one door a scene uses),
+  `introduce_swarm` (a disrupted body's fragments, from `damage::disrupt`), `step` (air, trail, gravity,
+  arrival) and `drawn`. New `flight::FlightEnvironment` — the trait a world implements to say what gravity
+  and air are here and whether a path has met hard matter; one flight law, any geometry.
+  **Breaking:** `simulation::Meteor` is now a type alias of `flight::FlyingBody` and is `f64`/`DVec3`
+  throughout (it was a separate `f32` struct owned by the ground scene). `Simulation::fly_meteors`
+  delegates to `Flight` rather than re-implementing entry.
+- **The engine says what its matter looks like (docs/50 render path).** New public `crate::Drawn` — one
+  piece of matter as it must be drawn, physical facts only — plus `Simulation::drawn()` and
+  `Flight::drawn()`. Scenes map over that list instead of building GPU instances by hand, so a scene that
+  can draw any of the engine's matter can draw all of it, including matter the engine starts holding later.
+- **Removed a threshold that traced to nothing:** the ground scene retired a meteor below `1.0e-3` kg.
+  Ablation reaches exactly zero on its own; a gram of iron at 15 km/s carries ~110 kJ.
+- **Fixed:** the ground scene capped grains at its instance capacity and then appended meteors, writing
+  past the end of the instance buffer when the grain buffer was full.
+- **Fixed:** `atmosphere::Trail::step` took one `&Material` and cooled every parcel as whatever the first
+  body in flight was made of; parcels now carry their own material (`VaporParcel::material`, and
+  `Trail::shed` takes it).
+
 - **Atmospheric entry is an engine capability, not a scene's feature (docs/59 Stage A).** New
   `interaction::detect_atmospheric` — the FLUID branch of "two things met", alongside the existing solid
   branch: the engine sweeps every (body-with-air, body) pair and reports who is flying through what, so any

@@ -3,6 +3,76 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-24 (later) — "we shouldn't have to wire it into Terra"
+
+**What.** Robin read the plan's last line — *"next: the Terra half, give Terra a body list and a step
+loop"* — and rejected the shape: *"We shouldn't have to wire it into Terra. We should instead set it up as
+a natural operation of the engine receiving these materializations and rendering them naturally… (unless
+you mean wiring in the mass/trajectory introduction with button press part)."*
+
+That correction is the entry. A body list bolted onto a scene is a scene feature wearing an engine's
+clothes, and it is the exact failure docs/59 opens by naming (*if it only works in Terra, the design has
+failed*). The sanctioned scene-side part is the button that introduces a mass and a trajectory, because
+that is an INITIAL CONDITION — which is what a scene is for.
+
+- **`flight::Flight`** — matter in flight, as an engine operation. `introduce` is the one door;
+  `introduce_swarm` is `damage::disrupt` fed into it, so docs/59's swarm is a composition of two things
+  the engine already had rather than a feature. `step` runs the air, the trail, gravity, and arrival at
+  hard matter.
+- **`flight::FlightEnvironment`** — the entire seam between one flight law and every world it runs in:
+  gravity here, air here, has the path met hard matter. A ground patch answers from a heightfield, a
+  planet from its own layered mass and its `AirShell`.
+- **`Drawn`** + `GpuParticle::of_matter` + `Simulation::drawn()` — the engine says what its matter looks
+  like, once, from real albedo and real temperature.
+
+**Why it was mostly a MOVE, not an invention.** The flight operation already existed and was already
+correct — `Simulation::fly_meteors`. It was generic in everything except its ADDRESS: it lived inside a
+96 m voxel ground patch, in `f32`, so nothing at planetary scale could reach it. Nothing about drag,
+aeroheating or ablation was ever ground-specific; only *where the air is* and *where the ground is*. The
+same was true of the render: `ground_scene` built `GpuParticle`s by hand twice (grains, then bodies in
+flight), so the scene was reading albedo and calling the incandescence law itself — and a third copy would
+have been needed for the trail, a fourth for a swarm. Each copy is a place a scene can quietly disagree
+with the physics about what is real, which inverts Law VI.
+
+**The part that would have made it worse.** Extracting `Flight` while leaving `fly_meteors` in place would
+have been the Law II violation it exists to close. The ground scene now DELEGATES, and
+`simulation::Meteor` is a type alias of `flight::FlyingBody` — it was a second `f32` struct for one
+concept, owned by a scene.
+
+**Verified.** 365/365 native (4 new), wasm target builds. MEASURED — ablation is surface-to-volume, so the
+air takes a larger share of a smaller fragment. Eight iron fragments entering at 15 km/s from 200 km, as
+the parent grows:
+
+| parent radius | fragment radii | ablated |
+|---|---|---|
+| 1 cm | 3.3–7.5 mm | 94.7% |
+| 2 cm | 6.6–15 mm | 69.9% |
+| 5 cm | 1.6–3.8 cm | 27.5% |
+| 10 cm | 3.3–7.5 cm | 6.0% |
+| 30 cm – 3 m | 9.9 cm – 2.3 m | 0 |
+
+That is why shooting stars are small and iron meteorites reach the ground, and nothing in the engine says
+so — it falls out of one heating law meeting one mass distribution. The test asserts the TREND, not a
+recorded number. (The zeroes are also docs/46 row 21 biting: `atmospheric_step` heats a body's whole mass
+at bulk heat capacity, understating ablation past the thermal skin depth. Trend is physics; the exact
+cut-off is the flagged limit.)
+
+**A wrong premise of mine, caught by the measurement.** I first wrote the swarm test asserting "the small
+fragments burn up" while sizing a parent whose every fragment was metre-scale — so nothing ablated and the
+test failed. The code was right and the test's premise was wrong. Measuring the size sweep produced a
+better assertion than the one I had intended.
+
+**Also removed:** the ground scene retired a meteor below `1.0e-3` kg, a threshold tracing to nothing
+(Law V). Ablation takes `min(net/L_v·dt, mass)` per step, so a body being consumed reaches exactly zero on
+its own — and a gram of iron at 15 km/s still carries ~110 kJ. And a real buffer hole: the scene capped
+GRAINS at its instance capacity and then pushed meteors on top, writing past the end of the buffer;
+`drawn()` emits matter in flight first, so capping one list cannot overrun it.
+
+**Not done / next.** Nothing visual is claimed and no rig was run. To SEE a swarm, a scene has to present
+`Flight::drawn()` from orbit — the sanctioned scene-side part, and small — but Terra draws globes and
+meshes and has no instanced particle path at all. That is docs/50's remaining render-path increment, and
+it is now the only thing between the engine holding a meteor swarm and anyone watching one.
+
 ## 2026-07-24 — the flagship's engine half: entry is a collision, a swarm is a disrupted body
 
 **What.** docs/59 Stage A, engine side. Three capabilities, each natively tested, plus a DRY pass Robin
