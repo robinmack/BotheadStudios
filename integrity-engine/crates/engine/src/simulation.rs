@@ -276,6 +276,7 @@ impl Simulation {
             // Burned up entirely: a small meteor can ablate to nothing before it ever reaches the ground —
             // the real fate of most meteors. It leaves no crater because no matter arrives.
             if m.mass_kg <= 1.0e-3 {
+                log::info!("meteor burned up in the atmosphere at {:.0} K — no impact", m.temp_k);
                 continue;
             }
             m.vel += g * dt;
@@ -299,8 +300,8 @@ impl Simulation {
             let dir = m.vel.normalize_or(Vec3::new(0.0, -1.0, 0.0));
             let n = self.matter.impact(&mut self.world, &self.materials, m.pos, dir, energy_j);
             log::info!(
-                "impact: {:.0} kg at {:.0} m/s = {:.2e} J -> {n} grains",
-                m.mass_kg, speed, energy_j
+                "impact: {:.0} kg at {:.0} m/s, {:.0} K surface = {:.2e} J -> {n} grains",
+                m.mass_kg, speed, m.temp_k, energy_j
             );
             created += n;
         }
