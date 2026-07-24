@@ -13,12 +13,18 @@
 //!      of the remnant (same law as `tides::secular_step`). A clump inside Roche should tidally SHRED, not
 //!      accrete, so it is left as particles for the sim to disrupt.
 //!
-//! **Conservation.** Promotion to a point body at the clump COM conserves **mass, linear momentum, and the
-//! centre of mass EXACTLY** (the body carries `Σm`, `Σmv/Σm`, `Σmx/Σm`). It cannot conserve everything: the
-//! clump's internal random kinetic energy is absorbed as heat (physical for inelastic accretion) and its
-//! internal spin angular momentum is folded into the body — both are REPORTED (`internal_ke`, and the
-//! orbital vs total-L split is recoverable from the members), never silently dropped. This is the "conserve
-//! mass + momentum, and energy + angular momentum as far as possible" the stage-4c spec asks for.
+//! **Conservation.** Promotion to a point body at the clump COM conserves **mass, linear momentum, the
+//! centre of mass, and total angular momentum EXACTLY** (the body carries `Σm`, `Σmv/Σm`, `Σmx/Σm`, and
+//! `Σmᵢ(rᵢ−com)×(vᵢ−v_com)`). The clump's internal random kinetic energy is absorbed as heat — physical for
+//! inelastic accretion — and is carried on the body as `thermal_j` rather than discarded.
+//!
+//! Angular momentum is a FIELD (`Body::ang_mom`), not a remark. Until 2026-07-23 this doc claimed the spin
+//! was "folded into the body … recoverable from the members", but `Body` had nowhere to put it and the
+//! members are precisely what a de-resolution pass deletes — so any caller that actually consumed
+//! `Accreted::consumed` would have destroyed the spin of every clump it promoted, and a mass/momentum check
+//! would still have passed. A rotating disk is the case where that term dominates. The rule this encodes:
+//! **a demotion may only drop a quantity it can name and hand back** (docs/44 §7 — promotion and demotion
+//! must not inject energy; the inverse must be able to restore what the forward pass absorbed).
 
 use crate::neighbors::NeighborGrid;
 use glam::DVec3;
@@ -36,6 +42,8 @@ pub struct Clump {
     pub radius: f64,       // sphere of that density and mass: (3·mass / 4πρ)^⅓
     pub internal_ke: f64,  // Σ ½ mᵢ |vᵢ − v_com|²  (random motion; absorbed as heat on merge)
     pub self_pe: f64,      // −Σ_{i<j} G mᵢ mⱼ / |rᵢⱼ|  (softened) — the clump's own binding energy
+    pub ang_mom: DVec3,    // Σ mᵢ (rᵢ−com) × (vᵢ−v_com) — the clump's SPIN about its own COM
+    pub thermal_ke: f64,   // internal_ke MINUS the coherent-rotation share ½ω·L — the part that becomes heat
     pub bound: bool,       // internal_ke + self_pe < 0
     pub outside_roche: bool,
 }
@@ -48,6 +56,11 @@ impl Clump {
 }
 
 /// A body promoted from an accreted clump — mass at the clump COM with the clump's bulk velocity.
+///
+/// `ang_mom` and `thermal_j` are what make the promotion REVERSIBLE: re-particalizing this body must be
+/// able to hand back the spin and the heat it arrived with. Without them a rotating clump would come back
+/// as a still one, and the merge's inelastic heat would have vanished — both invisible to a mass/momentum
+/// check, which is why they are fields and not a comment (docs/44 §7: demotion must not inject energy).
 #[derive(Clone, Copy, Debug)]
 pub struct Body {
     pub pos: DVec3,
@@ -55,6 +68,10 @@ pub struct Body {
     pub mass: f64,
     pub rho: f64,
     pub radius: f64,
+    /// Σ mᵢ (rᵢ−com) × (vᵢ−v_com) — the clump's spin, in the frame of the body itself.
+    pub ang_mom: DVec3,
+    /// The internal random KE an inelastic merge thermalises (J). Carried, not discarded.
+    pub thermal_j: f64,
 }
 
 /// Result of one accretion pass: the promoted bodies and the indices they consumed.
@@ -137,6 +154,36 @@ pub fn find_clumps(
             .iter()
             .map(|&i| 0.5 * mass[i] * (vel[i] - com_vel).length_squared())
             .sum();
+        // SPIN about the clump's own COM. A point body at the COM already carries the clump's ORBITAL
+        // angular momentum (through com_pos × com_vel); this is the remainder, and it is the piece that
+        // silently vanishes if the members are deleted without it. A rotating disk is exactly the case
+        // where it dominates, so it is carried on the body rather than left "recoverable from members".
+        let ang_mom: DVec3 = members
+            .iter()
+            .map(|&i| mass[i] * (pos[i] - com_pos).cross(vel[i] - com_vel))
+            .sum();
+        // Split `internal_ke` into the part carried by COHERENT rotation — which the promoted body keeps as
+        // spin — and the RANDOM residual, which an inelastic merge genuinely thermalises. Counting the
+        // rotational share as heat AND as spin would inject energy through a mere change of representation
+        // (docs/44 §7 forbids exactly that). E_rot = ½ ω·L with ω = I⁻¹L about the clump's own COM.
+        let mut inertia = glam::DMat3::ZERO;
+        for &i in &members {
+            let r = pos[i] - com_pos;
+            let m = mass[i];
+            inertia += glam::DMat3::from_diagonal(DVec3::splat(m * r.length_squared()))
+                - glam::DMat3::from_cols(r * (m * r.x), r * (m * r.y), r * (m * r.z));
+        }
+        // A clump of <3 members, or one whose points are collinear/coincident, has no invertible inertia
+        // tensor and no well-defined ω. FLAGGED: those fall back to thermalising the whole internal KE,
+        // which over-reports heat for a degenerate rotator. Real clumps are 3-D and well-conditioned; the
+        // spin itself (`ang_mom`) is carried regardless, so nothing is lost, only mis-labelled as heat.
+        let det = inertia.determinant();
+        let e_rot = if members.len() >= 3 && det.is_finite() && det > 0.0 {
+            0.5 * (inertia.inverse() * ang_mom).dot(ang_mom)
+        } else {
+            0.0
+        };
+        let thermal_ke = (internal_ke - e_rot).max(0.0);
         // self gravitational PE (softened, matching the sim) — O(k²) in the clump size, fine (clumps small)
         let mut self_pe = 0.0;
         for a in 0..members.len() {
@@ -150,7 +197,7 @@ pub fn find_clumps(
         // Fluid Roche limit of the remnant for THIS clump's density.
         let d_roche = 2.44 * central_radius * (central_density(central_mass, central_radius) / clump_rho).cbrt();
         let outside_roche = (com_pos - central_pos).length() > d_roche;
-        clumps.push(Clump { members, mass: m, com_pos, com_vel, rho: clump_rho, radius, internal_ke, self_pe, bound, outside_roche });
+        clumps.push(Clump { members, mass: m, com_pos, com_vel, rho: clump_rho, radius, internal_ke, self_pe, ang_mom, thermal_ke, bound, outside_roche });
     }
     clumps
 }
@@ -178,7 +225,15 @@ pub fn accrete(
     let clumps = find_clumps(pos, vel, mass, rho, linking_length, g, softening, central_pos, central_mass, central_radius);
     let mut out = Accreted::default();
     for c in clumps.iter().filter(|c| c.accretes()) {
-        out.bodies.push(Body { pos: c.com_pos, vel: c.com_vel, mass: c.mass, rho: c.rho, radius: c.radius });
+        out.bodies.push(Body {
+            pos: c.com_pos,
+            vel: c.com_vel,
+            mass: c.mass,
+            rho: c.rho,
+            radius: c.radius,
+            ang_mom: c.ang_mom,
+            thermal_j: c.thermal_ke,
+        });
         out.consumed.extend_from_slice(&c.members);
     }
     out.consumed.sort_unstable();
@@ -255,6 +310,91 @@ mod tests {
         assert!((com1 - com0).length() / com0.length() < 1e-12, "COM not conserved: {com0} → {com1}");
         // Residual = the 5 singletons.
         assert_eq!(fp.len(), 2 + 5, "2 bodies + 5 residual singletons");
+    }
+
+    // A self-bound blob that also SPINS rigidly about `omega` — a rotating disk in miniature, and the case
+    // that separates a body which carries its spin from one that quietly drops it.
+    fn spinning_blob(
+        center: DVec3, bulk: DVec3, omega: DVec3, radius: f64, n: usize, m_i: f64, rho: f64,
+    ) -> (Vec<DVec3>, Vec<DVec3>, Vec<f64>, Vec<f64>) {
+        let (p, _, m, r) = cold_blob(center, bulk, radius, n, m_i, rho);
+        let v = p.iter().map(|&q| bulk + omega.cross(q - center)).collect();
+        (p, v, m, r)
+    }
+
+    // TOTAL angular momentum about a fixed origin must survive promotion: the body carries its ORBITAL L
+    // through pos×vel and its SPIN L in `ang_mom`. Delete the spin field and this fails by the whole spin
+    // share for a rotating clump — while mass, momentum and COM all still balance exactly. That is
+    // precisely how the missing term stayed invisible for as long as it did.
+    #[test]
+    fn accretion_conserves_angular_momentum_of_a_spinning_clump() {
+        let (m_i, rho) = (1.0e19, 3000.0);
+        let omega = DVec3::new(0.0, 0.0, 1.0e-4); // slow enough that the blob stays self-bound
+        let (pos, vel, mass, r) =
+            spinning_blob(DVec3::new(2.0e7, 0.0, 0.0), DVec3::new(0.0, 1500.0, 0.0), omega, 3.0e5, 60, m_i, rho);
+
+        let l_before: DVec3 = (0..pos.len()).map(|i| mass[i] * pos[i].cross(vel[i])).sum();
+        let out = accrete(&pos, &vel, &mass, &r, 5.0e5, G, 1.0e4, DVec3::ZERO, 5.0e24, 6.0e6);
+        assert_eq!(out.bodies.len(), 1, "the spinning blob should accrete as one body");
+
+        let b = out.bodies[0];
+        let l_after = b.mass * b.pos.cross(b.vel) + b.ang_mom;
+        assert!(
+            (l_after - l_before).length() / l_before.length() < 1.0e-10,
+            "angular momentum not conserved: {l_before} → {l_after}"
+        );
+        // ...and the spin is a term worth carrying, not round-off dressed up as physics.
+        assert!(
+            b.ang_mom.length() / l_before.length() > 1.0e-9,
+            "spin should be a measurable share of L, else this test proves nothing"
+        );
+        // The BODY (not just the clump) must also report this rigid rotator's heat as ~zero: the promoted
+        // record is what a caller keeps after the members are deleted, so it is the one that has to be right.
+        assert!(
+            b.thermal_j < 1.0e-9 * (0.5 * b.mass * b.vel.length_squared()).max(1.0),
+            "a rigid rotator thermalises nothing, but the body reports {} J",
+            b.thermal_j
+        );
+    }
+
+    // The energy split. A RIGID rotator converts NONE of its internal KE to heat — it is all coherent spin,
+    // which the body keeps. Incoherent motion converts nearly all of it. Counting rotation as both spin and
+    // heat would inject energy through a change of representation alone (docs/44 §7).
+    #[test]
+    fn rigid_rotation_is_carried_as_spin_not_as_heat() {
+        let (m_i, rho) = (1.0e19, 3000.0);
+        let omega = DVec3::new(0.0, 0.0, 1.0e-4);
+        let (pos, vel, mass, r) =
+            spinning_blob(DVec3::new(2.0e7, 0.0, 0.0), DVec3::ZERO, omega, 3.0e5, 60, m_i, rho);
+        let clumps = find_clumps(&pos, &vel, &mass, &r, 5.0e5, G, 1.0e4, DVec3::ZERO, 5.0e24, 6.0e6);
+        assert_eq!(clumps.len(), 1, "the blob is one clump at this linking length");
+        let c = &clumps[0];
+        assert!(c.internal_ke > 0.0, "a rotating clump has internal KE about its COM");
+        assert!(
+            c.thermal_ke / c.internal_ke < 1.0e-9,
+            "rigid rotation must be carried as spin, not thermalised: {} of {}",
+            c.thermal_ke,
+            c.internal_ke
+        );
+
+        // Now add INCOHERENT jitter on top of the same rotation: that part must show up as heat.
+        let vel2: Vec<DVec3> = (0..pos.len())
+            .map(|i| {
+                let h = ((i as f64 * 12.9898).sin() * 43758.5453).fract();
+                let k = ((i as f64 * 78.233).sin() * 27183.2818).fract();
+                vel[i] + DVec3::new(h - 0.5, k - 0.5, (h + k).fract() - 0.5) * 20.0
+            })
+            .collect();
+        let c2 = &find_clumps(&pos, &vel2, &mass, &r, 5.0e5, G, 1.0e4, DVec3::ZERO, 5.0e24, 6.0e6)[0];
+        assert!(
+            c2.thermal_ke / c2.internal_ke > 0.1,
+            "incoherent motion must thermalise: {} of {}",
+            c2.thermal_ke,
+            c2.internal_ke
+        );
+        // Bookkeeping closes: internal KE is exactly spin-energy + heat, nothing created or lost.
+        let e_rot = c2.internal_ke - c2.thermal_ke;
+        assert!(e_rot >= -1.0e-6 * c2.internal_ke, "rotational share must not go negative");
     }
 
     // A clump INSIDE the Roche limit must NOT accrete (it should shred); the SAME clump outside Roche must.
