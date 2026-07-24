@@ -312,6 +312,26 @@ mod tests {
         assert_eq!(fp.len(), 2 + 5, "2 bodies + 5 residual singletons");
     }
 
+    // MEASUREMENT (docs/44). `self_pe` is an O(k²) all-pairs sum whose comment reads "fine (clumps small)".
+    // A clump only stops being small when it UNITES — which is exactly the case de-resolution exists to
+    // catch — so this measures the cost against clump size before anything is wired to run it per frame.
+    // Run with `--ignored`; it reports, it does not gate.
+    #[test]
+    #[ignore]
+    fn find_clumps_cost_against_clump_size() {
+        let (m_i, rho) = (1.0e19, 3000.0);
+        eprintln!("  members     ms   pair-evals");
+        for &n in &[500usize, 1000, 2000, 4000, 8000] {
+            // One cohesive blob of n members: the united-disk case.
+            let (pos, vel, mass, r) = cold_blob(DVec3::new(2.0e7, 0.0, 0.0), DVec3::ZERO, 3.0e5, n, m_i, rho);
+            let t0 = std::time::Instant::now();
+            let clumps = find_clumps(&pos, &vel, &mass, &r, 5.0e5, G, 1.0e4, DVec3::ZERO, 5.0e24, 6.0e6);
+            let ms = t0.elapsed().as_secs_f64() * 1e3;
+            let biggest = clumps.iter().map(|c| c.members.len()).max().unwrap_or(0);
+            eprintln!("  {:7} {:6.1}   {:>12}", biggest, ms, biggest * biggest / 2);
+        }
+    }
+
     // A self-bound blob that also SPINS rigidly about `omega` — a rotating disk in miniature, and the case
     // that separates a body which carries its spin from one that quietly drops it.
     fn spinning_blob(
