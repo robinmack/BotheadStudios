@@ -74,7 +74,11 @@ pub struct SphParams {
     /// rotating-frame relaxation the shader implements was unreachable, and anyone reusing "padding" as
     /// scratch would have silently spun the body. 0.0 = the non-rotating relaxation used today.
     pub omega: f32,
-    pub _p1: f32,
+    /// Number of DE-RESOLVED bodies in the `ext_mass` buffer (docs/44). A clump whose members have united
+    /// leaves the particle set and becomes one `orbit::Body`, but its mass must keep acting on the
+    /// survivors — so it is fed back as an external point mass. 0 ⇒ the channel is inert. Took over the
+    /// `_p1` padding slot, so every offset and the 80-byte size are unchanged.
+    pub n_ext: u32,
     pub _p2: f32,
     /// The un-resolved BULK planet a particalized CAP rests on (docs/39 — resolution-on-demand). Mirrors
     /// `sph_step.wgsl`'s two `vec4` tail fields: `bulk_cr` = xyz centre + w R_core (`<= 0` disables the
@@ -116,6 +120,9 @@ pub const MAT_IRON: u32 = 1;
 /// The GPU EOS table holds up to this many DISTINCT materials — the shader indexes `eos[particle.mat]`, and a
 /// body's layers are rock/metal/ice, so a handful. The EOS array used to be a fixed pair (`[basalt, iron]`);
 /// an N-body impact of differentiated worlds (docs/58) needs the table to grow. Generous headroom.
+/// Ceiling on DE-RESOLVED bodies fed back as external point masses (docs/44). Fixed-size so the buffer
+/// never reallocates; overflow is DROPPED and flagged by `set_external_masses`.
+pub const MAX_EXT_BODIES: usize = 32;
 pub const MAX_MATERIALS: usize = 16;
 
 /// Camera uniform for `sph_render.wgsl` (96 bytes): the view-projection matrix + the Earth display origin +
@@ -879,6 +886,7 @@ pub struct GpuSph {
     signal: wgpu::Buffer,
     grid_count: wgpu::Buffer,
     grid_bucket: wgpu::Buffer,
+    ext_mass: wgpu::Buffer,
     bind: wgpu::BindGroup,
     clear: wgpu::ComputePipeline,
     insert: wgpu::ComputePipeline,
@@ -913,6 +921,8 @@ impl GpuSph {
         let grid_count = device.create_buffer(&wgpu::BufferDescriptor { label: Some("sph-grid-count"), size: (SPH_TABLE_SIZE as u64) * 4, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
         let grid_bucket = device.create_buffer(&wgpu::BufferDescriptor { label: Some("sph-grid-bucket"), size: (SPH_TABLE_SIZE as u64) * (SPH_BUCKET_K as u64) * 4, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
 
+        let ext_mass = device.create_buffer(&wgpu::BufferDescriptor { label: Some("sph-ext-mass"), size: (MAX_EXT_BODIES as u64) * 16, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("sph-step"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/sph_step.wgsl").into()),
@@ -934,6 +944,7 @@ impl GpuSph {
                 storage(5, false), // grid_count
                 storage(6, false), // grid_bucket
                 storage(7, false), // signal
+                storage(8, true),  // ext_mass — de-resolved bodies (docs/44)
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("sph-pipeline-layout"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
@@ -950,13 +961,14 @@ impl GpuSph {
                 wgpu::BindGroupEntry { binding: 5, resource: grid_count.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 6, resource: grid_bucket.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 7, resource: signal.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 8, resource: ext_mass.as_entire_binding() },
             ],
         });
         GpuSph {
             clear: mk("cs_grid_clear"), insert: mk("cs_grid_insert"), density: mk("cs_density"), forces: mk("cs_forces"),
             kick_drift: mk("cs_kick_drift"), kick: mk("cs_kick"), relax_k: mk("cs_relax"),
-            store, params_buf, eos_buf, acc, dudt, signal, grid_count, grid_bucket, bind,
-            params: SphParams { n: 0, softening: 0.0, av_alpha: 1.0, av_beta: 2.0, cell_size: 1.0, table_mask: SPH_TABLE_SIZE - 1, bucket_k: SPH_BUCKET_K, dt: 0.0, damp: 1.0, omega: 0.0, _p1: 0.0, _p2: 0.0, bulk_cr: [0.0; 4], bulk_vm: [0.0; 4] },
+            store, params_buf, eos_buf, acc, dudt, signal, grid_count, grid_bucket, ext_mass, bind,
+            params: SphParams { n: 0, softening: 0.0, av_alpha: 1.0, av_beta: 2.0, cell_size: 1.0, table_mask: SPH_TABLE_SIZE - 1, bucket_k: SPH_BUCKET_K, dt: 0.0, damp: 1.0, omega: 0.0, n_ext: 0, _p2: 0.0, bulk_cr: [0.0; 4], bulk_vm: [0.0; 4] },
         }
     }
 
@@ -1021,6 +1033,27 @@ impl GpuSph {
         self.params.bulk_cr = [plane_point.x as f32, plane_point.y as f32, plane_point.z as f32, -1.0];
         self.params.bulk_vm = [n.x as f32, n.y as f32, n.z as f32, g as f32];
         queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
+    }
+
+    /// Feed the DE-RESOLVED bodies back into the particles' gravity (docs/44). A clump that has united
+    /// leaves the particle set and becomes one `orbit::Body`; its mass still has to act on every survivor,
+    /// or collapsing it would change what is true and not merely how it is stored (Law IV). Positions are
+    /// in the SPH's working frame, the same one the particles use.
+    ///
+    /// Overflow past [`MAX_EXT_BODIES`] is DROPPED — flagged, not silent: the returned count is how many
+    /// were actually uploaded, so a caller can see it lost one.
+    pub fn set_external_masses(&mut self, queue: &wgpu::Queue, bodies: &[(glam::DVec3, f64)]) -> usize {
+        let n = bodies.len().min(MAX_EXT_BODIES);
+        let packed: Vec<[f32; 4]> = bodies[..n]
+            .iter()
+            .map(|&(p, m)| [p.x as f32, p.y as f32, p.z as f32, m as f32])
+            .collect();
+        if !packed.is_empty() {
+            queue.write_buffer(&self.ext_mass, 0, bytemuck::cast_slice(&packed));
+        }
+        self.params.n_ext = n as u32;
+        queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
+        n
     }
 
     pub fn count(&self) -> u32 {
@@ -1123,7 +1156,7 @@ mod tests {
     fn sph_params_matches_the_shader_field_for_field() {
         let rust = offsets!(
             SphParams, n, softening, av_alpha, av_beta, cell_size, table_mask, bucket_k, dt, damp,
-            omega, _p1, _p2, bulk_cr, bulk_vm,
+            omega, n_ext, _p2, bulk_cr, bulk_vm,
         );
         assert_eq!(
             rust,
@@ -1152,7 +1185,7 @@ mod tests {
         let names: Vec<&str> = p.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(
             &names[9..],
-            ["omega", "_p1", "_p2", "bulk_cr", "bulk_vm"],
+            ["omega", "n_ext", "_p2", "bulk_cr", "bulk_vm"],
             "the wrapped-comment tail must all be seen"
         );
     }

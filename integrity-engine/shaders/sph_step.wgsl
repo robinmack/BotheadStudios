@@ -32,7 +32,8 @@ struct Params {
   damp: f32,        // velocity damping for cs_relax (settle to hydrostatic equilibrium, stage 4c.2)
   omega: f32,       // cs_relax ONLY: rigid-rotation rate (rad/s) about +z for a ROTATING-frame relaxation
                     // (adds centrifugal ω²·(x,y,0) so the body settles to its oblate equilibrium). 0 elsewhere.
-  _p1: f32, _p2: f32,
+  n_ext: u32,       // number of DE-RESOLVED bodies in `ext_mass` (docs/44). 0 ⇒ the channel is inert.
+  _p2: f32,
   // The un-resolved BULK planet a particalized CAP rests on (docs/39 — resolution-on-demand). A small
   // impactor resolves only a cap of the planet; its 10²⁴ kg interior stays this abstract sphere — a Gauss
   // gravity source + a non-injecting floor. `bulk_cr.w` (R_core) <= 0 DISABLES the bulk (a whole-body
@@ -60,6 +61,7 @@ struct Eos {
 @group(0) @binding(5) var<storage, read_write> grid_count: array<atomic<u32>>;
 @group(0) @binding(6) var<storage, read_write> grid_bucket: array<u32>;
 @group(0) @binding(7) var<storage, read_write> signal: array<f32>; // Courant signal h/(c+|v|); CPU min→dt (4c.2)
+@group(0) @binding(8) var<storage, read> ext_mass: array<vec4<f32>>; // de-resolved bodies: xyz = pos, w = mass
 
 fn cell_of(pos: vec3<f32>) -> vec3<i32> { return vec3<i32>(floor(pos / P.cell_size)); }
 fn hash_cell(c: vec3<i32>) -> u32 {
@@ -228,6 +230,17 @@ fn cs_forces(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   // + the un-resolved bulk planet's gravity (docs/39 — no-op when no bulk is set)
   a += bulk_gravity(pi.pos);
+  // + DE-RESOLVED bodies (docs/44): a clump whose members have united leaves the particle set and becomes
+  // one orbit body, but its MASS must go on acting on the survivors — collapsing a body's internal
+  // structure is a change of representation, and a representation change must never change what is true
+  // (Law IV). Identical G, softening and 1/r² form as the direct sum above, so a survivor feels the same
+  // force whether the clump is still resolved or has been collapsed. `n_ext` = 0 ⇒ no-op.
+  for (var k: u32 = 0u; k < P.n_ext; k++) {
+    let e = ext_mass[k];
+    let d = e.xyz - pi.pos;
+    let r2 = dot(d, d);
+    a += d * (G * e.w / pow(r2 + s2, 1.5));
+  }
   // short-range SPH pressure + AV: the 27 neighbouring cells (exact)
   let ci = cell_of(pi.pos);
   for (var dx: i32 = -1; dx <= 1; dx++) {

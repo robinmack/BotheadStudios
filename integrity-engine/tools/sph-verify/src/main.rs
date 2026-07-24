@@ -48,7 +48,7 @@ struct Params {
     dt: f32,
     damp: f32,
     _p0: f32,
-    _p1: f32,
+    n_ext: u32,
     _p2: f32,
     // The docs/39 resolution-on-demand bulk (Gauss gravity + non-injecting floor). Zeroed here ⇒ R_core=0
     // ⇒ disabled, so this harness verifies the free self-gravitating SPH unchanged. Mirrors sph_step.wgsl.
@@ -354,8 +354,10 @@ fn main() {
     // ---- docs/39: the PLANAR bulk (terrestrial ground) — uniform g + a flat non-injecting floor ----
     let planar_ok = verify_planar_boundary(&eos, soft);
 
-    let ok = force_ok && step_ok && boundary_ok && planar_ok;
-    println!("{}", if ok { "PASS — GPU force kernel + KDK integrator + spherical & planar bulk all match the CPU physics" } else { "FAIL" });
+    // docs/44: the de-resolved-body gravity channel (n_ext > 0) — the one path the checks above leave inert.
+    let ext_ok = verify_external_mass(&eos, soft);
+    let ok = force_ok && step_ok && boundary_ok && planar_ok && ext_ok;
+    println!("{}", if ok { "PASS — GPU force kernel + KDK integrator + spherical & planar bulk + de-resolved-body gravity all match the CPU physics" } else { "FAIL" });
     std::process::exit(if ok { 0 } else { 1 });
 }
 
@@ -363,12 +365,41 @@ fn main() {
 // the meter-scale analogue of the planet sphere. A grain released above the plane must FALL under uniform g,
 // REST on the plane (y=0, no leak-through), and NOT launch (a spring floor would fling it). Verifies the
 // `bulk_cr.w < 0` branch of `bulk_gravity`/`apply_bulk_floor` and that the patch-local frame is f32-clean.
+// docs/44 DE-RESOLUTION: a clump whose members have united leaves the particle set and becomes one body,
+// and its mass is fed back through `ext_mass` so the survivors still feel it. If that channel were wrong or
+// inert, collapsing a clump would quietly DELETE its gravity — the survivors would sail on as if the mass
+// had never existed, and nothing in the resolved-path checks above would notice (they all run n_ext = 0).
+// So this is the positive test: ONE particle (n=1 ⇒ no self-gravity, no bulk) released at rest beside a
+// single external mass must accelerate toward it at exactly the softened Newtonian rate.
+fn verify_external_mass(eos: &[Eos], soft: f64) -> bool {
+    let m_ext = 5.972e24_f64; // one Earth mass, as a de-resolved body
+    let r = 1.0e7_f64;        // start 10,000 km away, at rest
+    let (dt, steps) = (0.1_f64, 100); // 10 s: far too short to move appreciably, so `a` is ~constant
+    let p = Particle { pos: [0.0; 3], h: 2.0, vel: [0.0; 3], u: 1.0e5, mass: 1.0e3, mat: 0, rho: 2700.0, _pad: 0.0 };
+    // The body sits at +x; with no bulk and no neighbours, this is the ONLY force in the sim.
+    let out = run_gpu_steps(&[p], &[eos[0]], soft, dt, steps, [0.0; 4], [0.0; 4], &[[r as f32, 0.0, 0.0, m_ext as f32]]);
+    let f = out[0];
+    let t = dt * steps as f64;
+    // Analytic: the same softened form the direct sum uses, a = G·M·r/(r²+ε²)^{3/2}.
+    let a_ref = G * m_ext * r / (r * r + soft * soft).powf(1.5);
+    let vx = f.vel[0] as f64;
+    let rel = ((vx - a_ref * t) / (a_ref * t)).abs();
+    // It must pull TOWARD the mass (+x) and match the analytic impulse.
+    let ok = vx > 0.0 && rel < 1.0e-3 && vx.is_finite();
+    println!(
+        "ext-mass: {} → vx={:.3} m/s vs analytic {:.3} m/s (rel {:.2e}), a_ref={:.3} m/s²",
+        if ok { "PASS — a de-resolved body still gravitates on the survivors" } else { "FAIL" },
+        vx, a_ref * t, rel, a_ref
+    );
+    ok
+}
+
 fn verify_planar_boundary(eos: &[Eos], soft: f64) -> bool {
     let g = 9.8_f64;
     let start = 100.0_f64; // released 100 m above the ground plane (y=0), at rest — meter scale, local frame
     let p = Particle { pos: [0.0, start as f32, 0.0], h: 2.0, vel: [0.0; 3], u: 1.0e5, mass: 1.0e3, mat: 0, rho: 2700.0, _pad: 0.0 };
     // planar bulk: bulk_cr = (plane point = origin, w = -1 marker), bulk_vm = (up = +Y, w = g)
-    let out = run_gpu_steps(&[p], &[eos[0]], soft, 0.01, 3000, [0.0, 0.0, 0.0, -1.0], [0.0, 1.0, 0.0, g as f32]);
+    let out = run_gpu_steps(&[p], &[eos[0]], soft, 0.01, 3000, [0.0, 0.0, 0.0, -1.0], [0.0, 1.0, 0.0, g as f32], &[]);
     let f = out[0];
     let y = f.pos[1] as f64;
     let speed = ((f.vel[0] as f64).powi(2) + (f.vel[1] as f64).powi(2) + (f.vel[2] as f64).powi(2)).sqrt();
@@ -398,7 +429,7 @@ fn verify_boundary(eos: &[Eos], soft: f64) -> bool {
     let p = Particle { pos: [start as f32, 0.0, 0.0], h: 4.0e4, vel: [0.0; 3], u: 1.0e5, mass: 1.0e17, mat: 0, rho: 2700.0, _pad: 0.0 };
     let g_surf = G * bulk_m / (r_core * r_core); // ~3.3 m/s² here
     let dt = 0.2 * (r_core / g_surf).sqrt() / 20.0; // comfortably sub-Courant for the fall
-    let out = run_gpu_steps(&[p], &[eos[0]], soft, dt, 6000, [0.0, 0.0, 0.0, r_core as f32], [0.0, 0.0, 0.0, bulk_m as f32]);
+    let out = run_gpu_steps(&[p], &[eos[0]], soft, dt, 6000, [0.0, 0.0, 0.0, r_core as f32], [0.0, 0.0, 0.0, bulk_m as f32], &[]);
     let f = out[0];
     let r = ((f.pos[0] as f64).powi(2) + (f.pos[1] as f64).powi(2) + (f.pos[2] as f64).powi(2)).sqrt();
     let speed = ((f.vel[0] as f64).powi(2) + (f.vel[1] as f64).powi(2) + (f.vel[2] as f64).powi(2)).sqrt();
@@ -424,7 +455,7 @@ fn verify_integration(eos: &[Eos], soft: f64) -> bool {
     let dt = 0.5f64; // safely below the ~5 s Courant limit of this ~100 km cluster (c≈3 km/s, h≈63 km)
     let particles = build_config(n);
 
-    let gpu = run_gpu_steps(&particles, eos, soft, dt, steps, [0.0; 4], [0.0; 4]);
+    let gpu = run_gpu_steps(&particles, eos, soft, dt, steps, [0.0; 4], [0.0; 4], &[]);
 
     let mut cpu = CpuState::from_particles(&particles);
     for _ in 0..steps { cpu.step(eos, soft, dt); }
@@ -494,6 +525,7 @@ fn run_gpu(particles: &[Particle], eos: &[Eos], soft: f64) -> (Vec<[f32; 4]>, Ve
             storage(4, false),
             storage(5, false),
             storage(6, false),
+            storage(8, true),
         ],
     });
     let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[&layout], push_constant_ranges: &[] });
@@ -501,7 +533,7 @@ fn run_gpu(particles: &[Particle], eos: &[Eos], soft: f64) -> (Vec<[f32; 4]>, Ve
     let (p_clear, p_insert, p_density, p_forces) = (mk("cs_grid_clear"), mk("cs_grid_insert"), mk("cs_density"), mk("cs_forces"));
 
     let cell_size = particles.iter().map(|p| p.h).fold(0.0f32, f32::max);
-    let params = Params { n, softening: soft as f32, av_alpha: AV_ALPHA as f32, av_beta: AV_BETA as f32, cell_size, table_mask: TABLE_SIZE - 1, bucket_k: BUCKET_K, dt: 0.0, damp: 0.0, _p0: 0.0, _p1: 0.0, _p2: 0.0, bulk_cr: [0.0; 4], bulk_vm: [0.0; 4] };
+    let params = Params { n, softening: soft as f32, av_alpha: AV_ALPHA as f32, av_beta: AV_BETA as f32, cell_size, table_mask: TABLE_SIZE - 1, bucket_k: BUCKET_K, dt: 0.0, damp: 0.0, _p0: 0.0, n_ext: 0, _p2: 0.0, bulk_cr: [0.0; 4], bulk_vm: [0.0; 4] };
     let pbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("particles"), contents: bytemuck::cast_slice(particles), usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC });
     let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("params"), contents: bytemuck::bytes_of(&params), usage: wgpu::BufferUsages::UNIFORM });
     let ebuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("eos"), contents: bytemuck::cast_slice(eos), usage: wgpu::BufferUsages::STORAGE });
@@ -509,6 +541,9 @@ fn run_gpu(particles: &[Particle], eos: &[Eos], soft: f64) -> (Vec<[f32; 4]>, Ve
     let dbuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("dudt"), size: (n as u64) * 4, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
     let gcount = device.create_buffer(&wgpu::BufferDescriptor { label: Some("grid_count"), size: (TABLE_SIZE as u64) * 4, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
     let gbucket = device.create_buffer(&wgpu::BufferDescriptor { label: Some("grid_bucket"), size: (TABLE_SIZE as u64) * (BUCKET_K as u64) * 4, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
+    // De-resolved bodies (docs/44). Empty here — these harnesses verify the RESOLVED path, so `n_ext` stays
+    // 0 and the channel is inert; the buffer exists only because cs_forces declares binding 8.
+    let extbuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("ext_mass"), size: 16 * 32, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
     let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &layout,
@@ -520,6 +555,7 @@ fn run_gpu(particles: &[Particle], eos: &[Eos], soft: f64) -> (Vec<[f32; 4]>, Ve
             wgpu::BindGroupEntry { binding: 4, resource: dbuf.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 5, resource: gcount.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 6, resource: gbucket.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 8, resource: extbuf.as_entire_binding() },
         ],
     });
     let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -553,7 +589,7 @@ fn run_gpu(particles: &[Particle], eos: &[Eos], soft: f64) -> (Vec<[f32; 4]>, Ve
 // Per step: clear→insert→density→forces → cs_kick_drift → clear→insert→density→forces → cs_kick. All passes
 // go into ONE command buffer — consecutive compute passes in a submission are ordered & memory-synchronized,
 // so the drift of step k is visible to the density of step k+1.
-fn run_gpu_steps(particles: &[Particle], eos: &[Eos], soft: f64, dt: f64, steps: usize, bulk_cr: [f32; 4], bulk_vm: [f32; 4]) -> Vec<Particle> {
+fn run_gpu_steps(particles: &[Particle], eos: &[Eos], soft: f64, dt: f64, steps: usize, bulk_cr: [f32; 4], bulk_vm: [f32; 4], ext: &[[f32; 4]]) -> Vec<Particle> {
     use wgpu::util::DeviceExt;
     let n = particles.len() as u32;
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor { backends: wgpu::Backends::VULKAN, ..Default::default() });
@@ -586,6 +622,7 @@ fn run_gpu_steps(particles: &[Particle], eos: &[Eos], soft: f64, dt: f64, steps:
             storage(4, false),
             storage(5, false),
             storage(6, false),
+            storage(8, true),
         ],
     });
     let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[&layout], push_constant_ranges: &[] });
@@ -594,7 +631,7 @@ fn run_gpu_steps(particles: &[Particle], eos: &[Eos], soft: f64, dt: f64, steps:
         (mk("cs_grid_clear"), mk("cs_grid_insert"), mk("cs_density"), mk("cs_forces"), mk("cs_kick_drift"), mk("cs_kick"));
 
     let cell_size = particles.iter().map(|p| p.h).fold(0.0f32, f32::max);
-    let params = Params { n, softening: soft as f32, av_alpha: AV_ALPHA as f32, av_beta: AV_BETA as f32, cell_size, table_mask: TABLE_SIZE - 1, bucket_k: BUCKET_K, dt: dt as f32, damp: 0.0, _p0: 0.0, _p1: 0.0, _p2: 0.0, bulk_cr, bulk_vm };
+    let params = Params { n, softening: soft as f32, av_alpha: AV_ALPHA as f32, av_beta: AV_BETA as f32, cell_size, table_mask: TABLE_SIZE - 1, bucket_k: BUCKET_K, dt: dt as f32, damp: 0.0, _p0: 0.0, n_ext: ext.len() as u32, _p2: 0.0, bulk_cr, bulk_vm };
     let pbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("particles"), contents: bytemuck::cast_slice(particles), usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC });
     let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("params"), contents: bytemuck::bytes_of(&params), usage: wgpu::BufferUsages::UNIFORM });
     let ebuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("eos"), contents: bytemuck::cast_slice(eos), usage: wgpu::BufferUsages::STORAGE });
@@ -602,6 +639,10 @@ fn run_gpu_steps(particles: &[Particle], eos: &[Eos], soft: f64, dt: f64, steps:
     let dbuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("dudt"), size: (n as u64) * 4, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
     let gcount = device.create_buffer(&wgpu::BufferDescriptor { label: Some("grid_count"), size: (TABLE_SIZE as u64) * 4, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
     let gbucket = device.create_buffer(&wgpu::BufferDescriptor { label: Some("grid_bucket"), size: (TABLE_SIZE as u64) * (BUCKET_K as u64) * 4, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
+    // De-resolved bodies (docs/44). Empty here — these harnesses verify the RESOLVED path, so `n_ext` stays
+    // 0 and the channel is inert; the buffer exists only because cs_forces declares binding 8.
+    let extbuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("ext_mass"), size: 16 * 32, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    if !ext.is_empty() { queue.write_buffer(&extbuf, 0, bytemuck::cast_slice(ext)); }
     let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &layout,
@@ -613,6 +654,7 @@ fn run_gpu_steps(particles: &[Particle], eos: &[Eos], soft: f64, dt: f64, steps:
             wgpu::BindGroupEntry { binding: 4, resource: dbuf.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 5, resource: gcount.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 6, resource: gbucket.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 8, resource: extbuf.as_entire_binding() },
         ],
     });
     let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
