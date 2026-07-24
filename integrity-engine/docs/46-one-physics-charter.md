@@ -52,6 +52,24 @@ Not every difference is a breach. The criterion is sharp:
   of one law that can drift. A law implemented completely in one place and partially in another. A
   quantity conserved in one scene and not in the other. Or a number chosen because the result looked right.
 
+### Two things "no fudge" does NOT forbid (Robin, 2026-07-24)
+
+The no-fudge Law is aimed at the ENGINE's physics, and even there it is not an absolute — it is bounded by
+the compute we have. Two legitimate things are easy to mistake for fudge and must not be:
+
+1. **A scene declaring initial conditions is not a fudge — it is what scenes are for.** Creating matter at a
+   specified position and velocity (a meteor swarm arriving from outside Earth, a moon on a declared orbit)
+   is honest ABRIDGEMENT: the scene skips the uninteresting prior history and starts the matter at the point
+   that matters, in its true state. That is the ICs-not-consequences Law applied to scenes — a declared
+   velocity vector is honest. (The 250 m meteor drop WAS a fudge, but not for being declared: it
+   misrepresented the entry — wrong speed, wrong heating, wrong path. A real approach velocity from space is
+   the honest version of the same declaration.)
+2. **The declared-model layer is REQUIRED, not grudgingly tolerated.** To render math-driven results at the
+   compute available, the engine stands in unaffordable resolution with models derived from the real physics
+   and convergent to it. That is not a compromise of the Law — it is how the Law is met at all within a
+   finite budget (Law VIII's honest bound). A declared model becomes a fudge only when it stops deriving
+   from, or converging to, the real math — which is exactly the test below.
+
 ### Declared is not fudged — the distinction that keeps it honest
 
 A drive-shaft *should* shear when torque exceeds what its material can carry, and in a perfect world it

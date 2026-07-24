@@ -111,9 +111,13 @@ Grounded against the code 2026-07-24:
    its trail/crater are resolved (docs/44). Off-camera fragments still fall and still cratered (Law IV).
 4. **Camera deciding existence?** No — following one fragment must not stop the others (Law IV). The crater
    forms whether or not it is watched; the camera only chooses how finely it is drawn.
-5. **Reaching for it because it will LOOK right?** The trail and crater must be the real vapour and the real
-   excavation, resolved on demand — not sprites or decals. If a shortcut is unavoidable it is a flagged IOU
-   with its resolved counterpart named (the trail → `AirField`; the crater → full SPH excavation).
+5. **Reaching for it because it will LOOK right?** The trail and crater must DERIVE from the real physics —
+   the ablated mass, the excavated volume — and converge to the resolved form as detail rises. A declared,
+   mass/energy-conserving model at orbital LOD is legitimate and in fact required (docs/46 "two things
+   no-fudge does not forbid"): the trail can be a glowing column whose light budget comes from the real
+   ablation before it becomes `AirField` parcels; the crater is `crater_bowl` from the real excavation
+   before it becomes full SPH. The fudge is only an UNDECLARED sprite/decal that traces to nothing and
+   converges to nothing. Every declared stand-in names its resolved counterpart.
 
 ## Open decisions to pressure-test (before building each stage)
 
