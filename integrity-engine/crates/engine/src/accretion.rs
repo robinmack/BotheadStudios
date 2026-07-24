@@ -30,6 +30,9 @@ use crate::neighbors::NeighborGrid;
 use glam::DVec3;
 
 const FOUR_THIRDS_PI: f64 = 4.0 / 3.0 * std::f64::consts::PI;
+/// Barnes-Hut opening angle for the clump binding energy — the same 0.5 the gravity path uses, so one
+/// accuracy/speed trade-off governs both. theta -> 0 recovers the exact all-pairs sum (pinned in `bhtree`).
+const BH_THETA: f64 = 0.5;
 
 /// A candidate accreted body found in the particle field.
 #[derive(Clone, Debug)]
@@ -194,7 +197,6 @@ pub fn find_clumps(
     }
 
     // --- classify each clump ---
-    let s2 = softening * softening;
     let mut clumps = Vec::with_capacity(groups.len());
     for members in groups.into_values() {
         let m: f64 = members.iter().map(|&i| mass[i]).sum();
@@ -241,15 +243,25 @@ pub fn find_clumps(
             0.0
         };
         let thermal_ke = (internal_ke - e_rot).max(0.0);
-        // self gravitational PE (softened, matching the sim) — O(k²) in the clump size, fine (clumps small)
-        let mut self_pe = 0.0;
-        for a in 0..members.len() {
-            for b in (a + 1)..members.len() {
-                let (ia, ib) = (members[a], members[b]);
-                let r = ((pos[ia] - pos[ib]).length_squared() + s2).sqrt();
-                self_pe -= g * mass[ia] * mass[ib] / r;
-            }
-        }
+        // Self gravitational binding energy, softened to match the sim, via Barnes-Hut (docs/30).
+        //
+        // This was an exact O(k²) all-pairs sum with the comment "fine (clumps small)". A clump only stops
+        // being small when it UNITES — which is the exact case de-resolution exists to catch — so the test
+        // became catastrophically expensive at the moment it started succeeding: measured 1.9 ms at 500
+        // members but 492 ms at 8,000, and a real 20-35k disk extrapolates to seconds
+        // (`find_clumps_cost_against_clump_size`). `BarnesHut::build` brute-forces below `BRUTE_BELOW`, so
+        // small clumps stay EXACT and only large ones take the θ-bounded approximation — pinned to the
+        // direct sum in `bhtree`'s tests, and θ→0 converges onto it.
+        let self_pe = if members.len() < 2 {
+            0.0
+        } else {
+            let mpos: Vec<DVec3> = members.iter().map(|&i| pos[i]).collect();
+            let mmass: Vec<f64> = members.iter().map(|&i| mass[i]).collect();
+            let bh = crate::bhtree::BarnesHut::build(&mpos, &mmass, BH_THETA, softening);
+            // `bhtree` uses the engine's own G while `find_clumps` takes `g` as a parameter. PE scales
+            // linearly in G, so rescale rather than let the two quietly disagree about gravity.
+            bh.self_potential_energy(&mpos, &mmass) * (g / crate::orbit::G)
+        };
         let bound = internal_ke + self_pe < 0.0;
         // Fluid Roche limit of the remnant for THIS clump's density.
         let d_roche = 2.44 * central_radius * (central_density(central_mass, central_radius) / clump_rho).cbrt();
@@ -414,23 +426,52 @@ mod tests {
         );
     }
 
-    // MEASUREMENT (docs/44). `self_pe` is an O(k²) all-pairs sum whose comment reads "fine (clumps small)".
-    // A clump only stops being small when it UNITES — which is exactly the case de-resolution exists to
-    // catch — so this measures the cost against clump size before anything is wired to run it per frame.
+    // MEASUREMENT (docs/44) — WHERE the clump cost actually is, phase by phase.
+    //
+    // The first cut of this test used a linking length (5e5) LARGER than the blob it measured (radius 3e5),
+    // so every particle landed in one neighbour-grid cell and the friends-of-friends pair loop degenerated
+    // to O(N^2). It therefore measured FoF, not the binding sum, and wrongly indicted `self_pe`. Real disks
+    // link at ~4x the interparticle spacing, which is what this uses now.
+    //
     // Run with `--ignored`; it reports, it does not gate.
     #[test]
     #[ignore]
     fn find_clumps_cost_against_clump_size() {
         let (m_i, rho) = (1.0e19, 3000.0);
-        eprintln!("  members     ms   pair-evals");
-        for &n in &[500usize, 1000, 2000, 4000, 8000] {
-            // One cohesive blob of n members: the united-disk case.
-            let (pos, vel, mass, r) = cold_blob(DVec3::new(2.0e7, 0.0, 0.0), DVec3::ZERO, 3.0e5, n, m_i, rho);
+        let radius = 3.0e5;
+        eprintln!("  members   spacing   link      FoF+all   selfPE(exact)   selfPE(BH)");
+        for &n in &[500usize, 1000, 2000, 4000, 8000, 16000] {
+            let (pos, vel, mass, r) = cold_blob(DVec3::new(2.0e7, 0.0, 0.0), DVec3::ZERO, radius, n, m_i, rho);
+            // Realistic link: ~4x the interparticle spacing, as `2.0 * mean_h` gives in the live path.
+            let spacing = (FOUR_THIRDS_PI * radius.powi(3) / n as f64).cbrt();
+            let link = 4.0 * spacing;
+
             let t0 = std::time::Instant::now();
-            let clumps = find_clumps(&pos, &vel, &mass, &r, 5.0e5, G, 1.0e4, DVec3::ZERO, 5.0e24, 6.0e6);
-            let ms = t0.elapsed().as_secs_f64() * 1e3;
+            let clumps = find_clumps(&pos, &vel, &mass, &r, link, G, 1.0e4, DVec3::ZERO, 5.0e24, 6.0e6);
+            let ms_all = t0.elapsed().as_secs_f64() * 1e3;
             let biggest = clumps.iter().map(|c| c.members.len()).max().unwrap_or(0);
-            eprintln!("  {:7} {:6.1}   {:>12}", biggest, ms, biggest * biggest / 2);
+
+            // The binding sum in isolation, both ways, over the WHOLE set.
+            let t1 = std::time::Instant::now();
+            let mut exact = 0.0f64;
+            for a in 0..n {
+                for b in (a + 1)..n {
+                    let rr = ((pos[a] - pos[b]).length_squared() + 1.0e4f64 * 1.0e4).sqrt();
+                    exact -= G * mass[a] * mass[b] / rr;
+                }
+            }
+            let ms_exact = t1.elapsed().as_secs_f64() * 1e3;
+
+            let t2 = std::time::Instant::now();
+            let bh = crate::bhtree::BarnesHut::build(&pos, &mass, BH_THETA, 1.0e4);
+            let approx = bh.self_potential_energy(&pos, &mass);
+            let ms_bh = t2.elapsed().as_secs_f64() * 1e3;
+
+            let rel = ((approx - exact) / exact).abs();
+            eprintln!(
+                "  {:7} {:9.0} {:9.0} {:9.1} {:15.1} {:12.1}   (rel {:.1e}, biggest clump {})",
+                n, spacing, link, ms_all, ms_exact, ms_bh, rel, biggest
+            );
         }
     }
 
