@@ -485,7 +485,7 @@ pub fn sample_layers(
 mod tests {
     use super::*;
 
-    const G: f64 = 6.674e-11;
+    const G: f64 = crate::orbit::G;
 
     // A dense, cold, self-bound blob of `n` particles inside `radius` about `center`, drifting at `bulk`.
     fn cold_blob(center: DVec3, bulk: DVec3, radius: f64, n: usize, m_i: f64, rho: f64) -> (Vec<DVec3>, Vec<DVec3>, Vec<f64>, Vec<f64>) {

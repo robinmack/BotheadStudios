@@ -68,7 +68,8 @@ pub enum Phase {
     Vapor,
 }
 
-const G: f64 = 6.674e-11;
+/// Newton's constant — THE one, from `orbit`. Every module that needs it reads that value.
+const G: f64 = crate::orbit::G;
 
 impl LayeredBody {
     /// Build a body from MEASURED layers (docs/58 promote-to-body). The private `_comment` field means a

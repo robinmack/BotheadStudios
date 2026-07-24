@@ -14,6 +14,10 @@ const GAMMA_DIATOMIC: f64 = 1.4;
 /// other shape factor here: [`AirField`] parcels flowing around the body, which produce the force without
 /// anyone naming a coefficient. Refinement short of that: `c_d(Mach)`.
 const SPHERE_DRAG_CD: f64 = 0.47;
+/// Measured emissivity of molten iron (0.42–0.45) — what an incandescent body radiates AS, for both the
+/// body and the vapour it sheds (one surface, one number). DECLARED, and a candidate for the optical
+/// catalogue alongside albedo, which is where a per-material emissivity belongs.
+const MOLTEN_EMISSIVITY: f64 = 0.45;
 
 /// Canonical contact parameters for a GAS parcel of the given material at a reference pressure —
 /// the gas-phase sibling of `granular::contact_from_material` (docs/26). Stiffness comes from the
@@ -274,8 +278,6 @@ pub fn atmospheric_step(
     mat: &Material,
     dt: f64,
 ) -> AtmosphericStep {
-    const EMISSIVITY: f64 = 0.45; // measured molten-iron emissivity (0.42–0.45); optical-catalogue candidate
-    const STEFAN_BOLTZMANN: f64 = 5.670_374_419e-8; // W/(m²·K⁴), CODATA
     let mut out = AtmosphericStep { drag_accel: glam::DVec3::ZERO, temp_k, ablated_mass: 0.0, radius_m };
     if rho <= 0.0 || mass_kg <= 0.0 || radius_m <= 0.0 {
         return out; // no air, or nothing left of the body — vacuum flight
@@ -296,8 +298,8 @@ pub fn atmospheric_step(
     // Windward-hemisphere heat: the stagnation flux averaged (~½) over the front (~2πr²) ⇒ q·πr².
     let p_in = stagnation_heat_flux(rho, speed, r) * frontal;
     // Radiated from the whole surface (4πr²) as σεT⁴ — this is the glow we see.
-    let p_rad = EMISSIVITY
-        * STEFAN_BOLTZMANN
+    let p_rad = MOLTEN_EMISSIVITY
+        * crate::blackbody::SIGMA
         * (temp_k.powi(4) - ambient_temp_k.powi(4)).max(0.0)
         * (4.0 * std::f64::consts::PI * r * r);
     let net = p_in - p_rad; // W into the body; negative ⇒ it cools by radiating
@@ -375,8 +377,6 @@ pub fn vapor_step(
     mat: &Material,
     dt: f64,
 ) -> VaporParcel {
-    const EMISSIVITY: f64 = 0.45; // the same flagged molten-material emissivity `atmospheric_step` uses
-    const STEFAN_BOLTZMANN: f64 = 5.670_374_419e-8;
     let mut out = p;
     out.pos += p.vel * dt;
     if p.mass_kg <= 0.0 || dt <= 0.0 {
@@ -401,7 +401,8 @@ pub fn vapor_step(
         return out; // uncharacterised: we do not claim to know how fast it cools
     };
     let area = 4.0 * std::f64::consts::PI * r * r;
-    let p_rad = EMISSIVITY * STEFAN_BOLTZMANN * (p.temp_k.powi(4) - ambient_temp_k.powi(4)).max(0.0) * area;
+    let p_rad =
+        MOLTEN_EMISSIVITY * crate::blackbody::SIGMA * (p.temp_k.powi(4) - ambient_temp_k.powi(4)).max(0.0) * area;
     out.temp_k = (p.temp_k - p_rad / (p.mass_kg * c) * dt).max(ambient_temp_k);
     out
 }

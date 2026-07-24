@@ -985,12 +985,11 @@ impl Aggregate {
             // thousands of kelvin — measured: ΔT stayed exactly 0.00).
             self.cool_elapsed += dt;
             if self.cool_elapsed >= 600.0 {
-                const SIGMA: f64 = 5.670e-8;
                 let area = 4.0 * std::f64::consts::PI * c.radius * c.radius * 0.9;
                 for (t, p) in self.temps.iter_mut().zip(self.particles.iter()) {
                     let tk = *t as f64;
                     if tk > 3.0 {
-                        let d_t = SIGMA * area * tk.powi(4) * self.cool_elapsed
+                        let d_t = crate::blackbody::SIGMA * area * tk.powi(4) * self.cool_elapsed
                             / (p.mass.max(1.0e-30) * self.specific_heat);
                         *t = (tk - d_t).max(2.7) as f32;
                     }
@@ -1661,7 +1660,7 @@ mod tests {
         // (real magma bodies: millennia). Analytic: ΔT = σ·ε·A·T⁴·t/(m·c) ≈ 0.54 K here. What reality
         // adds that we can't resolve yet is the thin cooled CRUST (fast surface fade over days, molten
         // interior) — a surface/interior temperature split, flagged for the roadmap.
-        let expect = 5.670e-8 * 0.9 * (4.0 * std::f64::consts::PI * r * r) * 4600.0f64.powi(4)
+        let expect = crate::blackbody::SIGMA * 0.9 * (4.0 * std::f64::consts::PI * r * r) * 4600.0f64.powi(4)
             * 14_400.0
             / (m * 840.0);
         let cooled = 4_600.0 - agg.temps[0] as f64;

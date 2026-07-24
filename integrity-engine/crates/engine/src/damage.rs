@@ -223,7 +223,7 @@ pub fn disrupt(mass_kg: f64, radius_m: f64, n: usize, since_s: f64) -> Vec<Fragm
     if n == 0 || mass_kg <= 0.0 || radius_m <= 0.0 {
         return Vec::new();
     }
-    const G: f64 = 6.674e-11;
+    const G: f64 = crate::orbit::G;
     // Dohnanyi: cumulative N(>m) ∝ m^(−5/6) ⇒ the i-th largest goes as i^(−6/5).
     const RANK_EXPONENT: f64 = -6.0 / 5.0;
     let weights: Vec<f64> = (1..=n).map(|i| (i as f64).powf(RANK_EXPONENT)).collect();
@@ -312,7 +312,7 @@ mod tests {
         // The separation SCALE is the parent's escape speed (0.38 m/s for this asteroid). Individual
         // speeds spread around it because momentum must close, and they spread the way conservation says:
         // the heaviest piece is the slowest.
-        let v_esc = (2.0 * 6.674e-11 * m / r).sqrt();
+        let v_esc = (2.0 * crate::orbit::G * m / r).sqrt();
         for f in &frags {
             let ratio = f.rel_vel.length() / v_esc;
             assert!((0.3..2.0).contains(&ratio), "speeds are of order the escape speed (got {ratio:.2})");
@@ -366,7 +366,7 @@ mod tests {
     #[test]
     fn moon_shatters_but_earth_only_craters() {
         // The honest regimes, with real numbers. G, masses, radii.
-        let g = 6.674e-11;
+        let g = crate::orbit::G;
         let (m_earth, r_earth) = (5.972e24, 6.371e6);
         let (m_moon, r_moon) = (7.342e22, 1.737e6);
         let bind = |m: f64, r: f64| 0.6 * g * m * m / r;

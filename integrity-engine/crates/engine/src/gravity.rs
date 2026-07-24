@@ -16,7 +16,7 @@ use crate::world::World;
 use glam::{DVec3, Vec3};
 
 /// Newton's gravitational constant (m³·kg⁻¹·s⁻²).
-pub const G: f32 = 6.674e-11;
+pub const G: f32 = crate::orbit::G as f32;
 
 /// One aggregated lump of matter: its center of mass (in the world's centered coordinates) and mass.
 #[derive(Clone, Copy)]
