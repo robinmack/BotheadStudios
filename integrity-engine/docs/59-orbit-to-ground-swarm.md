@@ -1,0 +1,143 @@
+# docs/59 — Orbit to ground: the meteor swarm (the acceptance test)
+
+Robin (2026-07-24): *"launch a meteor swarm simulating a disintegrated asteroid originating from outside
+Earth. See it from orbit (modern Earth), see the meteor trails. Then follow one meteor that reaches the
+surface, seeing better LOD as we descend, and stop over the crater — which we see because we have the math
+that generated it and JIT detail puts it in at varying levels of detail as we get closer."*
+
+This is the flagship that exercises the engine's whole promise at once: **one law, every scale, from a
+hyperbolic approach outside the atmosphere down to a crater you can stand in.** It is docs/13's
+orbit-to-ground zoom, docs/23's north star, and docs/39's JIT particalization, driven by one event.
+
+## The spine: a scene CAPABILITY, not a scene FEATURE
+
+Robin's acceptance criterion: *"in every scene that uses the engine properly, we should be able to add the
+'meteor swarm' button and it will just work, consistently."*
+
+So nothing here is a Terra feature. The swarm, atmospheric entry, the trail, the impact and the crater are
+**engine capabilities on the generic body + collision + atmosphere system** (docs/58). A scene calls one
+operation — "launch a swarm at this planet" — and the engine drives it through the ONE collision pipeline;
+the scene only renders the shared results. Terra is merely the FIRST host, because it already owns the
+orbit⇄ground camera needed to watch it. The same button on the Ground scene, or any future scene that owns
+the generic body machinery, must behave identically. **If it only works in Terra, the design has failed.**
+
+That is Law II stated as an acceptance test: the swarm is the same physics whether the camera is 400 km up
+or standing on the ejecta blanket, and the same code in every scene.
+
+## It's all impact (docs/58)
+
+A body's swept trajectory can collide with two things, and the engine dispatches both the same way it
+already routes body↔body collisions (`interaction::detect_swept` → route):
+
+- **the atmosphere** — the FLUID branch: `atmosphere::atmospheric_step` (drag + Sutton–Graves aeroheating +
+  ablation, already built, docs/48). A body with declared `atmosphere_mass` has a density shell; entering
+  it IS a collision.
+- **hard matter** — the SOLID branch: the surface/body impact → a crater (`accretion::crater_bowl` sizing,
+  `gpu_sph::promote_ground_cap` / the SPH cap for the resolved excavation).
+
+They **compose**: enter the air, ablate and slow along the path, and whatever mass survives forks to the
+hard impact. This is the ONE dispatch the swarm exercises N times over.
+
+## What already exists (do not rebuild)
+
+Grounded against the code 2026-07-24:
+
+- **Terra** (`lib.rs` `Terra`) — modern Earth from orbit: real elevation/landcover/bathymetry rasters, a
+  Rayleigh atmosphere, and `terra::fly_camera::FlyCamera` — a CONTINUOUS altitude-blended orbit⇄ground
+  camera ("space to a standing horizon, no mode switch") with `build_cap` resolving terrain under the eye.
+  **The hardest piece — the descent camera — is already built and verified (docs/43 Phase 4).**
+- **Generic body** `{matter: LayeredBody, pos, vel, ang_mom}` + N-body integration (`orbit.rs`), ICs as
+  declared vectors (docs/58). A swarm is just N such bodies.
+- **`atmosphere::atmospheric_step`** — the generic body⊕air operator (drag/heat/ablation), material-driven.
+- **`interaction::detect_swept`** — generic swept collision detection (the dispatch's natural home).
+- **`accretion::crater_bowl`** — depth+radius of a crater from excavated volume (measured, not a dial).
+- **`gpu_sph::promote_ground_cap`** + planar bulk (docs/39) — promote a voxel surface patch to SPH matter
+  under an impact. Built + tested, not yet wired into a scene.
+- **`ResolutionController::camera_grain_radius`** / `surface_detail` (docs/49) — the LOD sizing law.
+
+## The five features to build (honest gaps)
+
+1. **Atmosphere-collision dispatch** — the engine detecting a swept trajectory ∩ the atmosphere shell and
+   applying `atmospheric_step` to ANY body, in ANY scene. Recorded (docs/58), unbuilt. This is the "just
+   works everywhere" enabler.
+2. **The entry trail** — the ablated vapour, deposited as hot gas that glows (and ionises to plasma above
+   ~10–20 km/s), fading as it cools. This is what you SEE from orbit, and it closes the ablation
+   mass-conservation gap (today the shed mass leaves the books). Resolved form: `AirField` gas parcels.
+3. **A real surface impact on Terra** — a hypervelocity fragment striking Terra's real heightfield →
+   a crater, via `crater_bowl` + the SPH cap. Terra renders craters but does not yet TAKE a surface impact.
+4. **JIT crater detail at varying LOD** — the crater the math generated, resolved finer as the camera
+   approaches (docs/39 particalize-on-demand, docs/47 granularity). Design-only today.
+5. **Camera-follow a chosen fragment** — track one body's trajectory down. Unbuilt (small).
+
+## The staged plan — each stage independently VISIBLE and verified
+
+**Stage A — the swarm enters; trails from orbit.**
+- Engine: a generic `launch_swarm(target, approach_velocity, n, spread, material)` that adds N bodies with
+  ICs (a disintegrated asteroid: a common hyperbolic Earth-approach velocity — ≥ escape 11.2 km/s, typically
+  11–30 km/s — with a small disruption dispersion), positioned outside the atmosphere. **No 250 m fudge:
+  the meteors originate outside Earth on real trajectories** (Robin's explicit ask).
+- Engine: the atmosphere-collision dispatch (feature 1) + the trail (feature 2).
+- Law: II (one entry law, every body), III (resolve the trail only where seen), V (trail is real vapour,
+  not a decal).
+- Test: native — a body crossing the shell decelerates/heats/ablates (extends the `atmospheric_step` tests
+  to the swept-detection layer); trail mass = ablated mass (conservation). Rig: from orbit, a swarm of
+  glowing entry streaks.
+
+**Stage B — follow one down; LOD rises.**
+- Engine: camera-follow (feature 5) driving Terra's existing `fly_camera` descent; the ground cap +
+  `camera_grain_radius` resolve terrain finer with altitude.
+- Law: IV (the camera changes representation, never existence — the other fragments still fall off-camera),
+  VI (physics drives the view).
+- Test: rig — ride a fragment from orbit toward the surface, terrain detail increasing continuously (no
+  popping, docs/49). Note the `surface_detail` LOD-tier blocker (docs/46) may surface here.
+
+**Stage C — impact and the JIT crater.**
+- Engine: the surface impact (feature 3) → `crater_bowl` at the strike point on Terra's heightfield; JIT
+  crater detail (feature 4) resolving the bowl finer as the camera closes in.
+- Law: III (particalize the crater by necessity/energy, not the whole planet — the docs/39 cap), V (crater
+  from measured excavation, docs/46 row 18), IV (the far-side strikes still happened).
+- Test: rig — stop over a crater that sharpens as you approach; the resolved detail must be consistent with
+  the analytic bowl at every LOD (the JIT invariant: zooming in adds detail, never changes the crater).
+
+## Law pre-flight (CLAUDE.md — run BEFORE building, not after)
+
+1. **Any number not traced to physics?** Entry velocities are declared ICs (a real approach speed, not a
+   consequence); the crater is energy-sized (`crater_bowl`); drag/heat coefficients are the flagged IOUs
+   already carried by `atmospheric_step`. The trail's glow is its real temperature. No new dial.
+2. **Answering a question already answered?** The entry is `atmospheric_step` (one operator); the impact is
+   the existing crater/SPH-cap path; the descent is Terra's camera. This is CONSOLIDATION onto the generic
+   pipeline, not new physics — exactly the "just works everywhere" test.
+3. **Resolving more than necessity?** The bulk swarm stays cheap point-bodies; only a followed fragment and
+   its trail/crater are resolved (docs/44). Off-camera fragments still fall and still cratered (Law IV).
+4. **Camera deciding existence?** No — following one fragment must not stop the others (Law IV). The crater
+   forms whether or not it is watched; the camera only chooses how finely it is drawn.
+5. **Reaching for it because it will LOOK right?** The trail and crater must be the real vapour and the real
+   excavation, resolved on demand — not sprites or decals. If a shortcut is unavoidable it is a flagged IOU
+   with its resolved counterpart named (the trail → `AirField`; the crater → full SPH excavation).
+
+## Open decisions to pressure-test (before building each stage)
+
+1. **The atmosphere shell boundary.** Where does "in atmosphere" begin — a fixed altitude (Kármán ~100 km),
+   or where drag/heating first exceeds a threshold derived from density? The latter is more honest (no magic
+   altitude) and scales to any planet's declared air. Lean threshold-from-density; confirm.
+2. **Trail representation.** Deposited SPH gas parcels (resolved, expensive) vs a declared glowing column
+   with an energy/temperature budget from the ablated mass (cheap, flagged IOU → the parcels). Start
+   declared-but-conserving, converge to parcels — the docs/44 ladder.
+3. **Impact scale on Terra.** A kilometre-class fragment on Terra's ~90 m raster: the crater may be
+   sub-cell at orbital LOD and only appears as JIT detail resolves — which is the point, but confirm the
+   heightfield/raster can carry a persistent crater record (the docs/39 surface hook: a real
+   displacement/normal record so a crater stays a crater).
+4. **Determinism / following.** Which fragment do we follow, and is the swarm reproducible run to run
+   (needed to fly back to the same crater)? ICs are declared, so yes — pin it.
+
+## Non-goals (this doc)
+
+- Re-implementing Terra's camera or atmosphere (they exist).
+- A new scene struct (Robin: extend Terra; the capability is engine-level, invokable from any scene).
+- Full radiative-transfer plasma spectroscopy for the trail (blackbody + a flagged ionisation threshold is
+  the honest first cut; emission-line detail is a later resolution step).
+
+**Related:** docs/13 (scale-relative) · docs/23 (north star) · docs/39 (JIT particalization) · docs/43
+(Terra, the fly camera) · docs/44 (resolution by necessity) · docs/46 (one-physics charter; row 18 crater) ·
+docs/47 (granularity) · docs/48 (atmosphere) · docs/49 (resolution controller) · docs/58 (the generic body,
+"it's all impact").
