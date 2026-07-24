@@ -239,6 +239,10 @@ mod app {
     // affordable) WITHOUT dragging the native test suite up to high N. The scene's time-LOD keeps it
     // interactive if a step gets heavy (observable time dilates rather than the frame stalling). Trade
     // on-screen disk richness ↔ browser step-rate by bumping these; keep CAP:DEBRIS ≈ 2:1 (docs/28 item 4).
+    /// ~1.5 h of sim time — long enough to cover the collision and its excavation. Past it the event is
+    /// over: the dt coarsens for the slow disk aftermath (docs/42) AND de-resolution is allowed to run
+    /// (docs/44 §6 — demote on quiescence). ONE definition of "the shock is finished" serves both.
+    const SPH_SHOCK_WINDOW_S: f64 = 5400.0;
     const SCENE_DEBRIS_N: usize = 512;
     const SCENE_CAP_N: usize = 1024;
     const SCENE_IMPACT_N: usize = SCENE_DEBRIS_N + SCENE_CAP_N;
@@ -873,6 +877,9 @@ mod app {
         /// Robin): `prov 0` is the planet. Birth places fresh bodies on a designed approach and the moon-drop
         /// keeps its orbiting ones, but both resolve identically from these live states — no flag, no branch.
         sph_prov_to_body: Vec<usize>,
+        /// Live de-resolution budget (docs/08/44) — while the particle count exceeds it, redundant pairs
+        /// merge in the shader. Driven by MEASURED frame time, not a chosen constant; 0 = no coarsening.
+        sph_merge_budget: u32,
         /// A collision the ballistic `step_substep` DETECTED but must not resolve itself (docs/58 — the ONE
         /// collision engine). Holds the colliding set (`[planet, impactors…]`, planet first = prov 0);
         /// `advance` executes it via `route_bodies_to_sph` after the substep loop unwinds, because
@@ -1227,6 +1234,7 @@ mod app {
                 sph_substeps: 6,
                 sph_snapshot: Vec::new(),
                 sph_eos: Vec::new(),
+                sph_merge_budget: 0,
                 sph_prov_to_body: Vec::new(),
                 pending_sph_route: None,
                 sph_cap: None,
@@ -2159,6 +2167,35 @@ mod app {
                 } else if real_dt < 0.028 {
                     self.sph_substeps = (self.sph_substeps + 1).min(24);
                 }
+                // DE-RESOLUTION BUDGET (docs/08/44). The substep throttle above is the FIRST response to a
+                // frame we cannot afford. Once it has bottomed out at 1 and the frame is STILL over budget,
+                // the cost is the particle COUNT, not the step count — and that is the honest trigger for
+                // coarsening. So necessity here is MEASURED (frame time), never a declared number: while the
+                // sim is comfortable no merging happens at all, however redundant the particles look.
+                // QUIESCENCE first (docs/44 §6: "demote on quiescence... not when motion stops"). Coarsening
+                // during the shock is not a saving, it is a CORRUPTION: the excavation is actively separating
+                // material, and merging fights it. Measured — with the gate on frame time alone, birth's disk
+                // went 0.34/0.31/0.25 M☾ -> 0.00, because the throttle bottoms out exactly during the impact
+                // and the merge then swept disk material back into the remnant. The shock window is the
+                // boundary the scheduled-dt coarsening already uses, so one definition of "the event is over"
+                // serves both.
+                let quiescent = self.sph_sim_t > SPH_SHOCK_WINDOW_S;
+                let live = self.gpu_sph.as_ref().map_or(0, |s| s.count());
+                let budget = if quiescent && real_dt > 0.060 && self.sph_substeps <= 1 {
+                    // Shed a tenth of the field per coarsening round: enough to converge over a few frames,
+                    // gentle enough that one bad frame cannot collapse the sim.
+                    (live * 9 / 10).max(64)
+                } else if real_dt < 0.028 {
+                    0 // comfortable: stop coarsening entirely
+                } else {
+                    self.sph_merge_budget // hold steady in the band between
+                };
+                if budget != self.sph_merge_budget {
+                    self.sph_merge_budget = budget;
+                    if let Some(sph) = self.gpu_sph.as_mut() {
+                        sph.set_merge_budget(&self.queue, budget);
+                    }
+                }
             }
             // GPU SPH deformable-Earth impact owns the frame while active (docs/33 stage 4c.4): encode a batch
             // of KDK substeps on the GPU and skip the CPU orbital physics. Fixed dt (WebGPU forbids the
@@ -2346,11 +2383,16 @@ mod app {
                     // disk rather than dispersing (docs/35). An in-kernel per-substep adaptive dt (to trim the
                     // residual escape) is the next refinement.
                     SphPhase::Dynamics => {
-                        let substeps = self.sph_substeps; // adaptive (frame-budget controlled) — never a fixed 100
-                        const SPH_SHOCK_WINDOW_S: f64 = 5400.0; // ~1.5 h — cover the collision + excavation, then coarsen
+                        let substeps = self.sph_substeps;
+                        let merge_budget = self.sph_merge_budget; // adaptive (frame-budget controlled) — never a fixed 100
                         if let Some(sph) = self.gpu_sph.as_mut() {
                             let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sph-step") });
                             sph.encode_kdk(&mut enc, substeps);
+                            // Coarsen only while over budget (docs/08/44). `encode_merge` rebuilds the grid
+                            // itself, so it is safe after the KDK batch; at budget 0 the kernels early-out.
+                            if merge_budget > 0 {
+                                sph.encode_merge(&mut enc);
+                            }
                             self.queue.submit(std::iter::once(enc.finish()));
                             if let Some(snap) = sph.take_readback() {
                                 self.sph_snapshot = snap;
