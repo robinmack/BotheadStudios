@@ -10,6 +10,10 @@ use crate::materials::Material;
 const R_U: f64 = 8.314;
 /// Heat-capacity ratio γ for diatomic gases (N₂/O₂ air). A composition-derived value is the refinement.
 const GAMMA_DIATOMIC: f64 = 1.4;
+/// Measured incompressible-sphere drag coefficient. DECLARED, with the same resolved counterpart as every
+/// other shape factor here: [`AirField`] parcels flowing around the body, which produce the force without
+/// anyone naming a coefficient. Refinement short of that: `c_d(Mach)`.
+const SPHERE_DRAG_CD: f64 = 0.47;
 
 /// Canonical contact parameters for a GAS parcel of the given material at a reference pressure —
 /// the gas-phase sibling of `granular::contact_from_material` (docs/26). Stiffness comes from the
@@ -88,6 +92,84 @@ pub fn gas_column_accel(spacing: f64, rs_t: f64) -> f64 {
     rs_t / spacing.max(1.0e-9)
 }
 
+/// **A body's atmosphere, as the engine holds it** — the two numbers that describe an isothermal
+/// hydrostatic air column, both EMERGENT from the body's own matter, plus the temperature the air sits at.
+///
+/// This is the FLUID half of "two things met" (docs/58/59): a body carrying one of these has something
+/// for another body to collide WITH. It exists as a type so the barometric profile has exactly one
+/// implementation and so a scene can hand the engine "this planet's air" without restating the gas laws.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AirShell {
+    /// Density at the surface (kg/m³): `ρ₀ = P₀/(R_s·T)` over the EMERGENT surface pressure — the weight
+    /// of the body's declared air column, never a declared pressure.
+    pub rho_surface: f64,
+    /// The e-folding height (m): `H = R_s·T/g`, over the body's own emergent surface gravity.
+    pub scale_height_m: f64,
+    /// The air's temperature (K) — the floor a body in it radiates against, and what set `ρ₀` and `H`.
+    pub ambient_temp_k: f64,
+}
+
+impl AirShell {
+    /// The air of a body with `surface_pressure` (Pa, emergent) made of gas `air` at `temp_k` under
+    /// surface gravity `g`. An airless body — no declared atmosphere mass, or a gas with no characterised
+    /// molar mass — yields a shell of zero density: vacuum, honestly, not a small fudge of air.
+    pub fn new(surface_pressure: f64, air: &Material, temp_k: f64, g: f64) -> Self {
+        let rs = specific_gas_constant(air);
+        if rs <= 0.0 || temp_k <= 0.0 || surface_pressure <= 0.0 {
+            return AirShell { rho_surface: 0.0, scale_height_m: 0.0, ambient_temp_k: temp_k.max(0.0) };
+        }
+        AirShell {
+            rho_surface: surface_pressure / (rs * temp_k),
+            scale_height_m: scale_height(air, temp_k, g),
+            ambient_temp_k: temp_k,
+        }
+    }
+
+    /// Density (kg/m³) at altitude `h` (m) above the surface — `ρ(h) = ρ₀·e^(−h/H)`. Below the surface
+    /// (`h < 0`) it reports the surface value rather than extrapolating a column that isn't there.
+    pub fn density_at(&self, h: f64) -> f64 {
+        if self.rho_surface <= 0.0 {
+            return 0.0;
+        }
+        if self.scale_height_m <= 0.0 {
+            return self.rho_surface;
+        }
+        self.rho_surface * (-h.max(0.0) / self.scale_height_m).exp()
+    }
+
+    /// Is there any air here at all?
+    pub fn exists(&self) -> bool {
+        self.rho_surface > 0.0
+    }
+}
+
+/// **Where an atmosphere ends — DERIVED, never declared.**
+///
+/// Physically it doesn't end: `ρ(h) = ρ₀·e^(−h/H)` is positive at every altitude, so no surface is "the
+/// top of the air". The Kármán line (100 km) is an aeronautical convention about the altitude at which a
+/// wing would need orbital speed to fly — a statement about aircraft, not about gas — and writing it in
+/// here as the edge of the atmosphere would be exactly the declared number Law V forbids.
+///
+/// What IS real is the altitude at which *including* the air stops being able to change the answer. Over
+/// a step `dt` the air changes the body's speed by `|Δv| = a_drag·dt`; once that falls below the smallest
+/// difference f64 can hold against the speed itself (`ε·|v|`), the air is not being neglected — it is
+/// being added and having no effect. That is the honest bound, and this reports whether the air still
+/// reaches the body by it.
+///
+/// The boundary it defines belongs to the BODY, not to the planet: a light, wide body still feels air a
+/// dense compact one has left behind, and a fast body feels it further out than a slow one (drag goes as
+/// v²). It also tightens by itself as the arithmetic improves — it describes what the computation can
+/// represent, not where the sky stops.
+pub fn air_reaches(rho: f64, vel: glam::DVec3, mass_kg: f64, radius_m: f64, dt: f64) -> bool {
+    let speed = vel.length();
+    if rho <= 0.0 || mass_kg <= 0.0 || radius_m <= 0.0 || speed <= 0.0 || dt <= 0.0 {
+        return false;
+    }
+    let frontal = std::f64::consts::PI * radius_m * radius_m;
+    let dv = drag_accel(rho, vel, frontal, mass_kg, SPHERE_DRAG_CD).length() * dt;
+    dv > f64::EPSILON * speed
+}
+
 /// **Air density at altitude `h` above the surface** (kg/m³) — the barometric profile, derived.
 ///
 /// `ρ(h) = ρ₀·exp(−h/H)` with `ρ₀ = P₀/(R_s·T)` and `H = R_s·T/g`. Nothing here is chosen:
@@ -102,16 +184,7 @@ pub fn gas_column_accel(spacing: f64, rs_t: f64) -> f64 {
 /// concerned. Until then it gives a body something real to move through, rather than the vacuum that
 /// followed deleting the old `DRAG` fudge.
 pub fn air_density_at(surface_pressure: f64, air: &Material, temp_k: f64, g: f64, h: f64) -> f64 {
-    let rs = specific_gas_constant(air);
-    if rs <= 0.0 || temp_k <= 0.0 || surface_pressure <= 0.0 {
-        return 0.0; // airless body, or air with no characterised molar mass — vacuum, honestly
-    }
-    let rho0 = surface_pressure / (rs * temp_k);
-    let scale_h = scale_height(air, temp_k, g);
-    if scale_h <= 0.0 {
-        return rho0;
-    }
-    rho0 * (-h.max(0.0) / scale_h).exp()
+    AirShell::new(surface_pressure, air, temp_k, g).density_at(h)
 }
 
 /// **Drag acceleration** (m/s², opposing motion) on a body of cross-section `area` and mass `mass`
@@ -201,7 +274,6 @@ pub fn atmospheric_step(
     mat: &Material,
     dt: f64,
 ) -> AtmosphericStep {
-    const SPHERE_DRAG_CD: f64 = 0.47; // measured incompressible-sphere Cd; refinement c_d(Mach)
     const EMISSIVITY: f64 = 0.45; // measured molten-iron emissivity (0.42–0.45); optical-catalogue candidate
     const STEFAN_BOLTZMANN: f64 = 5.670_374_419e-8; // W/(m²·K⁴), CODATA
     let mut out = AtmosphericStep { drag_accel: glam::DVec3::ZERO, temp_k, ablated_mass: 0.0, radius_m };

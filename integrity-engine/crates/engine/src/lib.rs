@@ -2737,6 +2737,14 @@ mod app {
                     mass_kg: self.bodies[i].mass,
                     radius_m: r,
                     strength_pa: strength,
+                    // The FLUID branch is not wired in this scene yet (docs/59 Stage A wires it in Terra,
+                    // which is where the swarm flies). It is not free to leave off: proto-Earth carries a
+                    // real ~100-bar atmosphere, so Theia's approach genuinely passes through air. MEASURED
+                    // for this scene's numbers — ρ₀≈23 kg/m³, H≈44 km, Theia at ~9 km/s — the drag comes to
+                    // ~0.02 m/s² over a ~5 s crossing, ≈0.1 m/s off a 9 km/s approach: 1e-5 of the speed,
+                    // far below anything the impact outcome resolves. Declaring it `None` here is therefore
+                    // a statement about magnitude, not a scene opting out of physics.
+                    air: None,
                 }
             };
             let before: Vec<crate::interaction::BodyState> =

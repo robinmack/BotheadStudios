@@ -182,6 +182,26 @@ pub fn swept_first_contact(rel_old: DVec3, rel_new: DVec3, r_sum: f64) -> Option
     }
 }
 
+/// The CLOSEST the body's straight path over one step comes to the other's centre (m), given its relative
+/// position before (`rel_old`) and after (`rel_new`).
+///
+/// The sibling of [`swept_first_contact`] for a boundary that is not a hard surface: an atmosphere has no
+/// radius to solve against — its density simply rises inward — so what the fluid branch needs is not
+/// *when* a sphere was pierced but *how deep* the path went. Sampling the endpoints alone would let a fast
+/// body skim the top of an atmosphere between two frames and be recorded as never having been in air, the
+/// same tunnelling `swept_first_contact` exists to prevent (docs/13: what we simulate must not depend on
+/// how coarsely we sample it).
+pub fn swept_min_distance(rel_old: DVec3, rel_new: DVec3) -> f64 {
+    let delta = rel_new - rel_old;
+    let a = delta.length_squared();
+    if a < 1.0e-18 {
+        return rel_old.length(); // not moving over this step
+    }
+    // |rel_old + t·delta|² is a convex parabola in t; its minimum is at t*, clamped into the step.
+    let t = (-rel_old.dot(delta) / a).clamp(0.0, 1.0);
+    (rel_old + delta * t).length()
+}
+
 /// The relative velocity of a body at FIRST CONTACT, recovered from the two-body conservation laws —
 /// specific orbital energy (`v² = v₀² + 2μ(1/r_c − 1/r₀)`, vis-viva) and angular momentum
 /// (`v_t = |r₀×v₀|/r_c`, direction `L̂×n̂`) — using the PRE-step state. This is dt-INDEPENDENT: in
