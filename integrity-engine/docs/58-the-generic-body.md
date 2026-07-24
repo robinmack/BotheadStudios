@@ -1,6 +1,15 @@
 # docs/58 — The generic body: no "Earth", no "Moon", just matter
 
-**Status: in progress, 2026-07-22.** Robin: *"The engine should itself have no concept of 'Earth',
+**Status: in progress — several choices now BUILT (progress note added 2026-07-23).**
+
+> Where the 8 choices stand in code, so this doc no longer reads as an untouched plan:
+> - **#1** (mass/radius/I derive from matter): BUILT — `planet::LayeredBody::moment_of_inertia`/`from_layers`, tested.
+> - **#3** (spin is a vector `ang_mom`): BUILT on the de-resolution path — `accretion::Body.ang_mom`/`Clump.ang_mom`, conserved through `absorb`.
+> - **#4** (`particalize` reads real layers + per-material EOS): BUILT — `HydroBody::particalize`/`particalize_cap`; `accretion::sample_layers` reads the layering back out.
+> - **#5** (provenance = source index; albedo render): PARTIAL — `prov` is a generic source-body index in assembly, but the disk stats and `sph_render.wgsl` still use a hardcoded two-tone (warm/cool), NOT the source material's real albedo. The albedo half is the remaining work.
+> - **#7** (retire the CPU `Aggregate`): DONE for the scene — no scene references it; `aggregate.rs` survives only for tests. **#2, #6, #8** (role-not-name, scene-as-data, `laws.rs` name-freeness capstone) remain the open frontier.
+
+**Robin (2026-07-22):** *"The engine should itself have no concept of 'Earth',
 'Moon', just the objects and assemblies passed into it… this should work for all particles, all planets,
 etc; with the engine making particalization choices based on energy, scale of view."*
 

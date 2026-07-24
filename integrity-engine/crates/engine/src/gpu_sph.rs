@@ -33,7 +33,8 @@ pub struct SphParticle {
     pub mass: f32,
     pub mat: u32,
     pub rho: f32,
-    pub prov: u32, // 0 = Earth, 1 = Theia
+    pub prov: u32, // source-body index (docs/58 #5): 0 = target/cap, 1.. = impactor(s). For birth that is
+                   // Earth/Theia; for a moon-drop, Earth/Moon; for the ground cap, regolith/meteor.
 }
 
 /// Mirrors the `Eos` struct in `sph_step.wgsl` (48 bytes). Cited Tillotson params (see `eos.rs`).

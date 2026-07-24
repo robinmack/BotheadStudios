@@ -42,7 +42,9 @@ fn vs_main(@builtin(vertex_index) vi: u32,
   var o: VOut;
   o.clip = clip;
   o.uv = c;
-  // Provenance colour: Earth (prov 0) = warm rock, Theia (prov 1) = cool steel — so the mixing is visible.
+  // Provenance colour by SOURCE BODY (docs/58 #5): the target/cap (prov 0) = warm rock, the impactor
+  // (prov 1) = cool steel — so which body a particle came from stays visible as they mix. (A diagnostic
+  // two-tone; docs/58 #5's end state is the source material's real albedo, not a hardcoded pair.)
   var base: vec3<f32>;
   if (prov == 0u) {
     base = vec3<f32>(0.72, 0.48, 0.30);

@@ -3,6 +3,55 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-23 (later) — de-resolution WIRED: merge, promote, crater, and the crash the rig caught
+
+**What.** The entry below landed the de-resolution *operator* and honestly called the scene wiring "not
+done." It is done now, plus the two tiers Robin steered toward and a render fix. (That earlier "NOT done /
+the collapse never ran / bhtree has no potential traversal" text is superseded by this entry — left in place
+as the record of what was true at the time.)
+
+- **De-resolution as a CONTACT LAW, not a global search** (Robin's redirect: *"if two sticky particles
+  collide and now share a common position/vector, we merge them… done in the shader, nearly free"*). Three
+  race-free kernels in `sph_step.wgsl` (`cs_merge_pick`/`apply`/`retire`, disjoint write sets, absorber by a
+  total order). TWO gates, both required: REDUNDANT (`r < h/2` ∧ `|Δv| < c_s`, the material's own numbers)
+  and NECESSARY (`n > merge_budget`, and the budget is MEASURED — the substep throttle bottomed out AND the
+  frame still over budget). Conservation exact; the destroyed relative KE becomes heat in `u`. **Materials
+  never blend** (same-`mat` only), which RETIRES the mixture-EOS IOU and preserves composition: a body
+  converges to one particle *per material*, each at its own radius (the dense one sank).
+- **Promotion to a layered body** (Robin: *"a planet is a promoted particle with more properties/analysis";
+  "as above, so below"*). `promote_settled_bodies`: a settled self-bound clump above `rounding_mass`
+  (self-gravity beats material strength — the rock/body boundary, reproduces the ~300 km potato radius)
+  leaves the particle set and becomes a layered `orbit::Body` whose matter is SAMPLED from its own particles
+  (`accretion::sample_layers` — measures the differentiation the sim made, does not declare it). **`ext_mass`
+  is now load-bearing** — the promoted body gravitates on the survivors through it (Law IV). Gated on the
+  same quiescence as the merge: promoting or merging mid-shock was MEASURED to eat the disk (birth
+  0.34/0.31/0.25 M☾ → 0.00 until the gate was fixed; docs/44 §6 said "demote on quiescence" and I'd quoted
+  it before applying it).
+- **The gate Robin caught:** the first promotion gate was `MIN_MEMBERS = 24` — unsatisfiable *because*
+  merging works (it destroys the count). Same shape as the O(k²) binding sum that exploded when clumps
+  united: a criterion written in a quantity the mechanism itself consumes. Replaced by the mass gate above.
+- **`bhtree` potential traversal** (`potentials`/`self_potential_energy`), so the binding energy is
+  O(N log N). Corrects a prior measurement that had blamed `self_pe` for cost that was actually the FoF pair
+  loop (the synthetic blob's linking length exceeded its own radius).
+- **The crater renders** (docs/46 row 18 closed). `globe.wgsl::crater_sink` sinks the surface into a
+  paraboloid; `accretion::crater_bowl` sizes depth AND radius from the measured excavated volume plus the
+  sourced simple-crater shape d≈0.4r. The old radius came from a `0.72` dial while only depth was measured —
+  a flat saucer (d/r≈0.06) that reached the shader correctly and rendered invisible. After: d/r=0.40.
+- **A crash the rig caught, no test would have:** `cs_merge_retire` set a mass to 0 but left the particle
+  LIVE, so it kept integrating, its density → 0, `p/ρ²` → NaN, and the NaN reached the disk-stat sort. Fixed
+  by making retired particles inert in every kernel AND filtering non-finite/mass-0 in `DiskView` with
+  `total_cmp`. "Harmless because massless" was true for its effect on others, false for its own evolution.
+
+**Verified.** Native 347/347. `tools/sph-verify` on the RTX 2070: force/KDK/spherical+planar bulk +
+`ext-mass` (a de-resolved body gravitates: vx 39.858 vs analytic 39.857 m/s) + `merge` (128→20, mass/mom/
+energy conserved) + `merge-materials` (128/128 survive when every pair is iron+basalt) + `merge-gate`
+(budget 0 merges nothing) + `merge-finite` (no NaN survives). Rig: promotion observed
+(`promote: 3 particles → 6.794e21 kg, 1 layer peridotite` = 0.093 M☾, matching the disk stat), scene runs
+clean, crater geometry rig-measured d/r=0.40. `a_crater_bowl_keeps_its_shape_at_every_size` independently
+re-derives ½πr²d and caught a factor-of-2 volume error the rig could not. Deployed to integrity.bothead.net.
+**Not verified:** a fully unambiguous daylit face-on crater screenshot (needs a camera-aim hook the scene
+doesn't expose); promote-then-survive in one continuous run since the crash fix.
+
 ## 2026-07-23 — de-resolution: a united clump can become one gravitating body (docs/44)
 
 **What.** Robin: *"an essential efficiency/optimization component MUST be resolving debris (clumping) when

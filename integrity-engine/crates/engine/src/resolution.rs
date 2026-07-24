@@ -210,8 +210,10 @@ impl ResolutionController {
 // and a granularity, propagated by cheap math while off-camera (the Moon's ejecta arcing over the far
 // horizon, a shock front, a distant landslide). Once per step the scene calls `update()`; the field
 // advances every effect analytically, asks the ONE `ResolutionController` per effect, and — the frame an
-// effect enters view — materialises it through the ONE shared materialisation, `MatterSim::
-// materialize_region`, the exact call the meteor already uses.
+// effect enters view — materialises it through `MatterSim::spawn_region`. (NOTE 2026-07-23: the code calls
+// `spawn_region`, not `materialize_region`; and the Ground meteor currently excavates via `MatterSim::impact`,
+// not this path — so this is "one materialisation for camera-driven effects", not yet one call shared with
+// the meteor. Routing the meteor through the shared excavation primitive is tracked, not done.)
 //
 // THERE IS NO PER-BACKEND ADAPTER, deliberately. The engine's promise is one particle system, one contact
 // law, one materialisation, differing only in scale (docs/23, docs/46) — the forked particle containers
@@ -266,7 +268,7 @@ impl ResolutionField {
 
     /// **The one call every scene makes.** Advance every analytic effect by `dt` under `accel` (cheap
     /// math, no particles), then ask the controller whether each is now visible; for each effect that has
-    /// entered view, materialise it through the shared `MatterSim::materialize_region` and drop it from
+    /// entered view, materialise it through `MatterSim::spawn_region` and drop it from
     /// analytic tracking (the particle sim owns it thereafter). Returns the number of effects resolved
     /// this step. `in_view(center, radius)` is the scene's frustum test — the single scene-specific input,
     /// and it decides only math-vs-simulation, never existence.
@@ -470,8 +472,8 @@ mod tests {
 
     /// **The Moon example, end to end, through the ONE shared materialisation (docs/49).** An analytic
     /// effect (ejecta) starts off-camera, propagates by cheap math with NO particles created, and the
-    /// instant it enters the camera's view it is materialised into grains via `MatterSim::
-    /// materialize_region` — the same call the meteor uses. No per-backend adapter; one path.
+    /// instant it enters the camera's view it is materialised into grains via `MatterSim::spawn_region`.
+    /// (The meteor uses a separate excavation path today; unifying them is tracked, not done.)
     #[test]
     fn an_off_camera_effect_materialises_the_frame_it_enters_view() {
         let (_w, mats) = earth_world();

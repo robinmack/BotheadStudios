@@ -18,7 +18,24 @@ because **we are our own first customers** and pin exact engine versions in our 
   unchanged) so a de-resolved body keeps gravitating on the remaining particles. New `gpu_sph::DiskView`
   replaces four duplicated disk-selection copies; three of them silently counted escaping matter as disk,
   and now inherit the fix. **Behaviour change** for `moonlet_bodies`, `largest_moonlet_orbit` and
-  `disk_moonlets`. The de-resolution PASS itself is not yet wired into a scene.
+  `disk_moonlets`.
+- **De-resolution is now WIRED and runs in the space scene (docs/44/58).** The `SphPhase::Dynamics` loop
+  coarsens and promotes matter live: (a) a shader-side pairwise **merge** (`cs_merge_pick/apply/retire` in
+  `sph_step.wgsl`, `GpuSph::set_merge_budget`/`encode_merge`) collapses redundant SAME-MATERIAL neighbour
+  pairs under measured budget pressure — different materials never merge, which RETIRES the mixture-EOS IOU;
+  and (b) a settled self-bound clump above its material's `rounding_mass` (self-gravity beats strength, the
+  rock/body boundary) **promotes** into a layered `orbit::Body` whose matter is sampled from its own
+  particles (`accretion::sample_layers`), keeping the differentiation the sim produced. `ext_mass` is now
+  load-bearing (promoted bodies act on the survivors through it). Both gate on quiescence — coarsening during
+  the shock was measured to eat the disk.
+- **A merged particle keeps its constituents' energy budget.** The relative KE an inelastic merge destroys
+  becomes heat in `u`; a retired (mass-0) particle is made INERT in every kernel — leaving it live sent its
+  density to zero, `p/ρ²` to NaN, and crashed the disk-stat sort (found and fixed via the rig, not a test).
+- **`bhtree::BarnesHut` gained a potential traversal** (`potentials`, `self_potential_energy`), so the clump
+  binding energy is O(N log N) instead of the O(N²) all-pairs sum that exploded exactly when clumps united.
+- **The crater is rendered (docs/46 row 18 closed).** `globe.wgsl` sinks the surface into a paraboloid bowl
+  whose depth AND radius come from the measured excavated volume (`accretion::crater_bowl`), not a dial —
+  fixing the long-standing "Earth never craters" report. Depth:radius holds the sourced simple-crater 0.4.
 - **The orbit HUD no longer runs an O(k²) clump search every frame.** `gpu_disk_stats_json()` is throttled
   to ~1 Hz and honours `?nostats`, matching the CPU disk stats beside it.
 

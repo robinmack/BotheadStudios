@@ -45,7 +45,7 @@ struct Params {
 struct Particle {
   pos: vec3<f32>, h: f32,
   vel: vec3<f32>, u: f32,
-  mass: f32, mat: u32, rho: f32, prov: u32, // prov: provenance tag (0=Earth, 1=Theia) — survives the round-trip
+  mass: f32, mat: u32, rho: f32, prov: u32, // prov: source-body index (0 = target/cap, 1.. = impactor) — survives the round-trip
 }
 struct Eos {
   rho0: f32, a: f32, b: f32, cap_a: f32,

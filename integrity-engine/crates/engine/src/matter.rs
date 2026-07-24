@@ -971,8 +971,8 @@ impl MatterSim {
     /// `pos` (centered coords), of material `material`, returns to the voxel grid — matter-conserving
     /// (one grain → exactly one voxel). This is the on-demand-resolution principle in reverse: once the
     /// excitement passes, resolved matter goes back to bulk. It is the SINGLE source of truth for
-    /// depositing a resting grain, used by BOTH the CPU [`Self::step`] settling and the GPU debris
-    /// readback (`lib.rs::settle_gpu_debris`) — "improving one improves all".
+    /// depositing a resting grain, called from [`Self::step`]'s settling. (It once also served a GPU debris
+    /// readback, `settle_gpu_debris`, which was deleted with the terrain scene — this is now CPU-only.)
     ///
     /// Deposits into the column's air-start voxel (stacks / refills the crater). Returns `true` iff the
     /// grain was deposited (the caller then removes it). Returns `false` — grain STAYS a grain, matter
@@ -1042,10 +1042,11 @@ impl MatterSim {
             let mut p = self.particles[i];
             let accel = field.acceleration_point_approx(p.pos, 6.0);
             p.vel += accel * dt;
-            // No drag term here: this CPU stepper is not in the live scene path (the terrain band steps
-            // grains on the GPU, where drag now IS applied as a real force — see particle_step.wgsl).
-            // Removing the old `*= DRAG` no-op rather than porting the force keeps this path honest about
-            // what it does NOT model; wiring air here belongs with whatever revives this stepper.
+            // No drag term here, and this stepper IS the live Ground-scene path (`ground_scene.rs::render`
+            // → `Simulation::step` → here) — the terrain band that once stepped grains on the GPU was
+            // deleted (docs/50), so there is no GPU grain path to defer to anymore. Air drag is therefore a
+            // real gap in the Ground scene, not a deferral: an unmodelled force, flagged, until this path
+            // gains it or is replaced by the SPH cap (docs/39).
             p.pos += p.vel * dt;
 
             // Drifted off the world entirely → lost (rare; ejection is sub-escape).
