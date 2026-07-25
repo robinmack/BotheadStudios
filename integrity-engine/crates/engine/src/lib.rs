@@ -1242,6 +1242,7 @@ mod app {
                 pitch: 0.5,
                 zoom: 1.0,
                 base_distance: (MOON_DIST_M * DISPLAY_SCALE) as f32 * 1.7,
+                pan: Vec3::ZERO,
             };
 
             log::info!(
@@ -1797,19 +1798,36 @@ mod app {
             } else {
                 self.focus + 1
             };
+            // Same promise as the focus buttons: choosing a body frames that body, so any pan
+            // offset snaps back to zero.
+            self.camera.pan = Vec3::ZERO;
         }
 
         /// Put the camera's frame of reference on Earth (origin re-centres on the planet).
+        /// Choosing a focus also snaps any pan offset back to zero: the button's promise is
+        /// "frame THIS body", and a leftover offset would frame something else.
         pub fn focus_earth(&mut self) {
             self.focus = 1;
+            self.camera.pan = Vec3::ZERO;
         }
 
         /// Put the camera's frame of reference on the Moon (or, once it has shattered, the impact site,
         /// since the shattered body's point mass stays parked there — so this frames the debris/crater).
+        /// Like `focus_earth`, this snaps any pan offset back to zero.
         pub fn focus_moon(&mut self) {
             if self.bodies.len() > 2 {
                 self.focus = 2;
+                self.camera.pan = Vec3::ZERO;
             }
+        }
+
+        /// Pan the view: translate the look target off the focused body by a pointer delta in
+        /// DEVICE pixels (the render surface's own pixel grid). The offset is held in the frame
+        /// that rides the focused body (see `render::Camera::pan`), so the framing follows the
+        /// body through its orbit rather than smearing against inertial space; the focus buttons
+        /// snap it back to zero. Representation only — no matter moves.
+        pub fn pan_view(&mut self, dx_px: f32, dy_px: f32) {
+            self.camera.pan_by_pixels(dx_px, dy_px, 0.9, self.config.height.max(1) as f32);
         }
 
         /// Name of the currently-focused body (for the HUD / focus button).
@@ -3084,13 +3102,11 @@ mod app {
                 }
             }
             // Camera eye in display coordinates (relative to the focus body) — the same construction
-            // as view_proj, needed for the per-grain Rayleigh view path.
-            let cp = self.camera.pitch.cos();
-            let eye_disp = glam::DVec3::new(
-                (cp * self.camera.yaw.sin()) as f64,
-                self.camera.pitch.sin() as f64,
-                (cp * self.camera.yaw.cos()) as f64,
-            ) * (self.camera.base_distance * self.camera.zoom) as f64;
+            // as view_proj (the orbit distance around the panned look target), needed for the
+            // per-grain Rayleigh view path.
+            let eye_disp = self.camera.eye_dir().as_dvec3()
+                * (self.camera.base_distance * self.camera.zoom) as f64
+                + self.camera.pan.as_dvec3();
             let sun_dir_earth = (sun - earth_center).normalize_or_zero();
             let spin_axis = self.spin_l.try_normalize().unwrap_or(glam::DVec3::Z);
             let spin_rot = glam::DQuat::from_axis_angle(
@@ -4156,8 +4172,28 @@ mod app {
             }
             Some((self.air.density_at(pos.length() - self.radius_m), self.air.ambient_temp_k))
         }
-        fn arrival(&self, _from: glam::DVec3, to: glam::DVec3) -> Option<glam::DVec3> {
-            (to.length() <= self.radius_m).then_some(to)
+        fn arrival(
+            &self,
+            body: &crate::flight::FlyingBody,
+            from: glam::DVec3,
+            to: glam::DVec3,
+            _dt: f64,
+        ) -> Option<crate::flight::Met> {
+            if to.length() > self.radius_m {
+                return None;
+            }
+            // **The site is where the trajectory CROSSED the surface.** This used to return `to`, the
+            // post-step sample, which at orbital entry speed is kilometres inside the planet — the same
+            // defect the ground patch had, and worse here because the speeds are higher.
+            //
+            // The sphere is analytic, so the crossing can be resolved as finely as the loop allows; the
+            // tolerance that would matter is the elevation raster's, and this coarse shell does not carry
+            // one. (docs/46: the raster is 19.55 km/pixel, so a metre of site precision is already far
+            // below the surface this radius stands in for.)
+            let at = crate::flight::surface_crossing(from, to, |p| p.length() <= self.radius_m);
+            // A planet is immovable: the reduced mass is the arriving body's own.
+            let (energy_j, momentum) = crate::flight::delivered(body, glam::DVec3::ZERO, None);
+            Some(crate::flight::Met { at, energy_j, momentum })
         }
         fn air_scale_height_m(&self) -> f64 {
             self.air.scale_height_m
@@ -4674,6 +4710,20 @@ mod app {
         /// A pointer drag (pixel deltas): orbit high up, free-look near the ground (altitude-blended).
         pub fn drag_look(&mut self, dx: f64, dy: f64) {
             self.fly.drag(dx, dy);
+        }
+
+        /// Pan: slide across the surface by a pointer delta in DEVICE pixels, the same gesture the
+        /// orbit band honours, expressed in this camera's rig. The SAME mover as the strafe keys
+        /// (`FlyCamera::move_tangent`), fed metres instead of key intents: one pixel of the
+        /// camera's frustum spans `2·alt·tan(fov_y/2)/h` metres of ground under a downward view, so
+        /// the globe tracks the pointer one-for-one, map-style (dragging right carries the
+        /// viewpoint west; screen y grows downward, and dragging down carries it north). The FOV is
+        /// read from the same constant the projection is built from, never a second copy.
+        pub fn pan_tangent(&mut self, dx_px: f64, dy_px: f64) {
+            let m_per_px = 2.0 * self.fly.alt_m
+                * (0.5 * crate::terra::fly_camera::DEFAULT_FOV_Y).tan()
+                / self.config.height.max(1) as f64;
+            self.fly.move_tangent(dy_px * m_per_px, -dx_px * m_per_px, self.planet_radius);
         }
 
         pub fn altitude_m(&self) -> f64 {

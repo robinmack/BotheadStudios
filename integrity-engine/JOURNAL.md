@@ -3,6 +3,56 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-25 (step 5) — the environment answers where its own surface is, and terrain stops being special
+
+**What.** Sean's `upstream-5-ground-ball` is integrated: the declared ball is cohesive matter whose fate is
+emergent. Three of his additions moved rather than merely landing, because `flight::Flight` owns the
+trajectory and the scene no longer sees the swept segment. `FlightEnvironment::arrival` now takes the body
+and the substep and returns a `Met` — where the path crossed hard matter, and what that meeting delivers.
+`GroundAir` carries the cohesive bodies and asks about them BEFORE the terrain; his `forecast_body_contact`
+lives there now, still calling `interaction::detect_swept` and still taking that door's reduced-mass energy.
+`deposit_event` is the one door every ground arrival goes through, momentum included.
+
+**Why — his change fixed a bug of ours, and a second one fell out.** `arrival` returned `to`, the post-step
+sample. At 17 km/s a 1/60 s step is ~283 m, so an impact coupled to matter hundreds of metres underground,
+and `PlanetAir::arrival` had the identical line where the speeds are higher still. Both now call one
+`flight::surface_crossing`. Then the second: `interaction::detect_swept` already priced every body-body
+collision at ½·μ·|Δv|² — *"the energy actually available at the contact frame"* — while the terrain path
+wrote ½·m·v² separately. **Those are one law, and terrain is its immovable limit** (μ → m, Δv → v). One
+`flight::delivered(body, target_vel, target_mass_kg)` now serves both, `None` meaning immovable.
+
+**★ The bug I introduced, and what caught it.** Moving the bisection meant choosing how far to bisect. I
+derived the tolerance from the GRAIN size, on the reasoning that `deposit_event` floors coupling distance at
+the grain scale so a finer site changes nothing. **False, and every test but Sean's still passed.** The site
+is also *where the material is sampled*: a grain-sized tolerance left the bracket 0.83 m wide, put the site
+0.795 m UNDER the surface, and `strength_at(site)` read the material below the ground — different strength,
+different crater radius, different coupling length λ, and λ sits inside an exponential. Measured on his
+`an_impact_event_heats_debris_grains_already_in_flight`: the grains' coupling weight fell **284×**
+(0.2416 → 0.00085). It now resolves to the surface FIELD's precision (f32, 30 halvings), not to the
+resolution of the matter. **A tolerance argued from the consumer was wrong because it had two consumers.**
+
+**★ A knife-edge test, honestly re-based.** His `a_sufficient_meteor_shatters_the_ball` asserted
+`spread > 2.0 × spread0` and passed on his branch — in VACUUM. Through this patch's real air a 17 km/s body
+arrives with 1.645e11 J instead of 1.720e11 (2.2% of its speed lost over the last 80 m) and the scatter falls
+to 1.51×. Verified by ablation: forcing `air_at` to `None` makes the 2.0× bar pass again, so the atmosphere
+is the whole of it. The physics got more honest and a threshold with ~1% of headroom went red. Rather than
+retune the multiple onto today's number, the bound is now the body's own lattice half-spacing. **"And it
+keeps growing a second later" was tried and is FALSE — 1.91 m → 1.91 m:** under real gravity onto real
+terrain a shattered pile settles rather than dispersing, so a test must not claim the parcels are unbound.
+
+**★ Robin's question found an unpinned path: impacts on a vacuous world.** *"We do need to be certain that we
+CAN have impacts on a vacuous world like the moon."* `a_world_with_no_air_flies_its_bodies_through_real_vacuum`
+broke out of its loop on the first arrival but **never asserted one happened** — and it never did: 400 steps
+of 0.05 s is 20 s, while the 1,000 m drop at lunar 1.62 m/s² takes 35.1 s. Every claim in that test also held
+for a body that simply never landed. It now flies long enough to arrive and asserts the arrival, a site on
+the surface, zero ablated mass, and energy equal to the closed form ½mv₀² + mgh — the quantity drag eats into
+on a world that has air. **A test that stops on an event should assert the event.**
+
+**Verified.** Native **393/393** (23 skipped), wasm32 clean. New pins:
+`an_immovable_target_is_the_reduced_mass_limit` (convergence over 10³…10¹⁵ × the striker's mass) and
+`an_arrival_sites_the_impact_on_the_surface_not_where_the_step_ended` (ground and planet together); both fail
+against the previous code, so neither passes vacuously.
+
 ## 2026-07-25 — two PRs said MERGED and `main` never got them
 
 **What.** Sean's step-4 (GPU gravity dispatch) and the `merge-reports/` convention are on `main`. They were
@@ -629,6 +679,160 @@ seconds, i.e. the operator gets catastrophically expensive at the moment it star
 prerequisite is an O(N log N) binding energy: `bhtree::BarnesHut` exists and is verified but has only
 `accelerations`, no POTENTIAL traversal. Adding one (same tree, same opening criterion, sum `Gm/r`), pinned
 to the exact O(N²) sum, is the next step — then the pass hooks in where `sph_snapshot` lands.
+## 2026-07-23: pan input survives a real hand
+
+**What.** Three input fixes, one theme: every pan gesture reaches the one pan path each scene
+already owns. (1) `camera-input.ts` no longer decides pan-vs-walk only at the pointerdown
+instant: a left-drag anchored on the canvas upgrades to a pan the moment shift is seen, and in a
+scene that supplies a pan handler shift+left-button always means pan, never reverse walk
+(reverse stays on shift+ctrl, the keyboard side of the grammar). (2) The full-viewport `#status`
+overlay on every scene page is now pointer-transparent; it used to swallow all canvas input
+whenever any message was showing (2.5 s after every meteor drop, for one). (3) Shift+scroll and
+the horizontal wheel axis now pan in Ground, Terra and the space band, feeding the SAME handler
+as the drag with the sign of a grab (the world follows the fingers); bare vertical scroll keeps
+its walk/zoom meaning. No engine change: `pan_view` / `pan_tangent` were already there.
+
+**Why.** A rig could pan; a human could not. The rig pressed shift, then the button, atomically.
+A real hand lands the two within milliseconds in either order, and when the button won the race
+the gesture fell into the shift+left = reverse-walk meaning: the camera flew backward and the
+drag did nothing, which reads as "pan is dead". The same two physical inputs must not mean two
+things decided by a millisecond race. And a MacBook trackpad has no middle button, so scroll
+needed a pan chord of its own.
+
+**Verified.** Headed on the Mac (mac_shot pattern): shift-then-button drag pans (as before);
+button-then-shift drag NOW pans where it previously walked the camera backward off the patch;
+middle-drag still pans; plain left-hold still walks forward; right-drag still looks. Shift+wheel
+on Ground translates the eye in the view plane at constant 2 m eye height; on Terra it moves
+lat 20.00 to -1.72 at constant alt 8000 km through `pan_tangent` (translation, not zoom); bare
+wheel still dollies Ground and takes Terra from alt 8000 km to 4497 km at constant lat/lon.
+Pointerdown targets confirmed: with a status message showing, events landed on `#status` before
+the fix and on the canvas after.
+
+## 2026-07-23: the orbit camera pans, in the focused body's frame
+
+**What.** The space band's camera can now translate its look target off the focused body.
+`render::Camera` carries a `pan` offset plus `pan_by_pixels` (the screen-plane translation, with a
+DERIVED scale: one frustum height at the focal plane per viewport height of drag, so the world
+tracks the pointer one-for-one at every zoom); `OrbitDemo::pan_view` exposes it to the page, and
+the focus setters (`focus_earth`, `focus_moon`, `cycle_focus`) snap the offset back to zero. The
+offset lives in the frame that rides the focused body: the orbit renderer re-centres the world on
+the focus each frame, so a pan composed against Earth follows Earth around the Sun. The shared
+gesture module (`camera-input.ts`) gained an OPTIONAL `onPan` handler, bound to shift + left-drag
+and middle-drag; scenes that supply none (ground, terra) keep the previous grammar untouched.
+
+**Why.** The space scenes offered rotate, zoom and body focus, but the target was always a body's
+centre, so there was no way to frame the debris disk between Earth and a forming moonlet, or an
+impact site off-centre. Law IV bound: this is representation only, a camera target, and it moves
+no matter.
+
+**Verified.** Two native tests pin the maths (`a_full_viewport_drag_pans_exactly_one_frustum_height`,
+`pan_moves_in_the_screen_plane_and_reverses_cleanly`); full suite 364/364 green; wasm32 check
+clean. Watched headed on the Mac (mac_shot pattern, stars blocked so the bodies are unambiguous,
+positions measured from decoded PNGs): a shift-drag put Earth off-centre at (730, 244) with the
+Moon in frame; over the next 4 s at time ×14,750 Earth held that screen position within one pixel
+while the Moon advanced ~66 px along its orbit and the Sun showed no parallax (it is 1 AU behind
+the target plane; an inertial-space target would have let Earth race off-screen at ~700 px/s).
+The Earth focus button snapped the framing back to centre.
+
+## 2026-07-23: the ground HUD says whether the ball survived
+
+**What.** The ground scene's ball line leads with a one-word verdict: INTACT (green), DENTED
+(amber) or SHATTERED (red), followed by the parcel/bond counts it always showed.
+`CohesiveBody::verdict()` (simulation.rs) names the bond state the physics already runs on:
+"intact" while every forged bond holds, "dented" while a minority has fractured, "shattered" once
+fewer than half survive, the same half-way boundary the fracture tests assert. `Ground::body_verdict()`
+exports the word to the page, and `web/rig/ground_ball_shatter.mjs` now asserts the leading word
+agrees with the bond collapse it measures.
+
+**Why.** First-hand user test: after a direct hit, "ball 33 parcels · 0 bonds" read as "still
+intact" to fresh eyes, because parcels are conserved matter and never drop, and the parcel count
+led the line. The destruction meter was the bond count, second and unlabelled as such. The sim
+knew the answer all along; the HUD just never said it. No new physics: the verdict is a NAME for
+an existing public number, so a viewer is not asked to interpret it.
+
+**Verified.** Full native suite green (362 passed) with new assertions: the sufficient-meteor test
+requires `verdict() == "shattered"` after the hit, the insufficient-meteor test requires "intact"
+after settling and never "shattered" after the boulder. wasm32 check clean. Watched headed on the
+Mac (mac_shot pattern): before the hit the HUD reads "ball INTACT · 33 parcels · 212 bonds"; after
+the 17 km/s meteor it reads "ball SHATTERED · 33 parcels · 0 bonds" over the scattered parcels,
+and both words are legible at a glance.
+
+## 2026-07-23: one deposition door, and the meteor destroys the ball on its own
+
+**What.** The docs/23 north-star sentence runs. Impact deposition in the ground world is ONE
+operator, `Simulation::deposit_event` (docs/60): an event's energy and momentum reach terrain
+voxels, cohesive-body parcels and debris grains in one walk, split by geometry and coupling alone,
+w = V·exp(−d/λ)/d² with λ the crater radius the event's own energy opens in the matter at the site
+(E/σ, the same accounting every impact already uses), each share delivered through the operator
+that owns its container (`matter::impact`, `Aggregate::deposit_impact`, `deposit_impulse` +
+`deposit_shock_heat`). Detection only picks the site: body contacts stay with the swept collision
+owner, and a ground landing is now bisected to where the trajectory crosses the shared ground
+height instead of the post-step sample (which at 500 m/s was metres underground and coupled the
+event to the wrong matter). Inside an aggregate, each parcel's fate is `damage::classify` on the
+energy density deposited in it against its material's catalogued thresholds; past Intact it holds
+no tensile bond. The ground scene's aim ray now returns the first MATTER it meets, terrain or
+parcel, so the crosshair rides the ball (gold) and a meteor aimed at it hits it; the page's HUD
+panel is un-hidden (it was being filled and never shown); the drop is 1,200 kg of iron at 17 km/s,
+an asteroid's real arrival speed.
+
+**Why.** A meteor that met the ball fed ONLY the ball; one that met the ground fed ONLY voxels;
+debris got nothing. Three answers to "the impact's energy arrives" is the docs/46 pattern and
+exactly the per-object special-casing docs/16 forbids, and it blocked the docs/23 demo: the ball
+could never die of the impact reaching it, only of a scripted branch we refuse to write. The split
+had to be physical, so it is geometry (where the matter is) and coupling (spreading + absorption
+over the crater scale); the missing shock shadowing/impedance computation is a flagged IOU in
+docs/60, named in domain terms.
+
+**Verified.** Native, red-first: `a_sufficient_meteor_shatters_the_ball_and_its_hottest_parcels_glow`
+(bonds collapse under half, rms spread doubles, peak parcel temperature emits through
+`emission::incandescence`, and the same event craters the ground beneath) and
+`an_insufficient_meteor_displaces_the_ball_and_it_survives` (momentum arrives, nine tenths of the
+bonds hold, nothing glows); `one_impact_event_reaches_the_terrain_and_the_ball_through_one_door`
+and `an_impact_event_heats_debris_grains_already_in_flight` pin the walk itself. Full suite
+346/346 green; `cargo check --target wasm32-unknown-unknown` clean. Rig-watched on the Mac
+(`web/rig/ground_ball_shatter.mjs`, headed Chromium on Metal): crosshair gold on the ball, drop,
+HUD bond count 212 to 0, shots show the struck parcels glowing gold-orange and scattering into the
+new crater. fmt untouched (hand-edited).
+
+## 2026-07-22: the ball is cohesive matter in the ground scene
+
+**What.** docs/23 step 1. A ground world's definition gains a `bodies` list (material, radius,
+position, nothing else); `Simulation` builds each as `Aggregate::cohesive`: a lattice of real
+particles at the material's density, bonds at the material's own elastic modulus (k = E*L, capped
+for explicit stability, flagged), damping from `zeta_for_restitution` of the material's restitution,
+under the named planet's emergent surface gravity. Each step the body substeps to its bond
+stiffness and every particle resolves against the terrain through
+`granular::terrain_contact_resolve`, the same constraint the grains and the camera shell use. The
+renderer draws its particles through the existing instanced path (own albedo, incandescence from
+its temperature); the HUD and `run-definition` report parcels, bonds, and com height over the
+ground beneath. A meteor in flight meets the body through the one door: `fly_meteors` hands the
+swept segment to `interaction::detect_swept`, and on a matter-resolving contact the door's
+reduced-mass energy and the striker's momentum go into the parcels via `Aggregate::deposit_impact`
+(deposited at the point on the body's own outermost matter, since the door's site is the striker's
+centre at contact). No ball-specific collision or destruction branch exists; what the energy does
+next is `damage`'s call in the following step of docs/23.
+
+Found and fixed on the way: the camera-shell sweep re-lerped each sample against its own mutated
+endpoint, contracting every no-contact move toward last frame's eye by n!/n^n, so any move longer
+than the shell froze the camera. The ground scene's wheel dolly and hold-to-walk did nothing while
+mouse-look kept working; it surfaced when walking the camera up to the ball for the visual check.
+The sweep now samples the fixed segment and carries the accumulated correction
+(`granular::sweep_shell_resolve`).
+
+**Why.** The rigid `body::Sphere` probe was the last bespoke object, and the terrain deletion took
+even that; the scene had no ball at all. Making the ball declared DATA plus shared laws (cohesion
+from the material, contact from the one terrain constraint, impact from the one door) is what lets
+the next step assert emergent destruction with no special case to delete.
+
+**Verified.** Native TDD, red first: `a_declared_cohesive_ball_falls_rests_on_the_terrain_and_stays`
+(falls under gravity, lowest parcel comes to rest on the surface within tolerance, stays, no bond
+lost to its own landing), `a_meteors_energy_reaches_the_ball_through_the_shared_door` (parcels heat
+and the com recoils after `detect_swept` reports the contact), `a_body_of_unknown_material_is_refused`,
+plus sweep regressions `an_unobstructed_sweep_reaches_its_destination` and
+`a_sweep_into_the_ground_is_pushed_back_out`. Suite 338/338 green; wasm32 check clean. Live scene
+(macOS headed Chromium, /ground.html): HUD reads ball 33 parcels, 212 bonds, com 36.0 m over ground
+33.5 m, exactly the 2.5 m lattice rest height, stable across 30 s and camera moves; screenshots
+reviewed showing the iron ball seated on the dune crest at the initial crosshair point.
 
 ## 2026-07-22: the GPU gravity dispatch grows its second knee, and the LBVH tree goes live
 

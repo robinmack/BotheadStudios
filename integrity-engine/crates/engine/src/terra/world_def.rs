@@ -75,6 +75,12 @@ pub struct GroundDef {
     /// The events that make matter happen. Order is the order they are applied.
     #[serde(default)]
     pub events: Vec<GroundEvent>,
+    /// Solid bodies placed in this world (docs/23 step 1: the metal ball at ground zero). Each is
+    /// built as COHESIVE MATTER - a bonded lattice of real particles at the material's own density -
+    /// never a rigid sphere. A world declares WHAT it is, HOW BIG, and WHERE; everything after that
+    /// (the fall, the rest, an impact's effect on it) emerges from the shared laws.
+    #[serde(default)]
+    pub bodies: Vec<GroundBody>,
     /// The SURFACE this ground is (docs/54). Omitted ⇒ the declared defaults, which reproduce the
     /// constants `world::generate` used to hardcode.
     ///
@@ -183,6 +189,24 @@ impl GroundDef {
     fn default_eye_height() -> f32 { 20.0 }
     fn default_grain() -> f32 { 1.0 }
     fn default_planet() -> String { "earth".into() }
+}
+
+/// A solid body placed on a ground world - the docs/23 ball, as data. Only INITIAL CONDITIONS are
+/// declarable: the material (a DB id), the size, the position. Its rigidity is the material's own
+/// elastic modulus, its rest is the shared terrain contact law, its fate under an impact is the shared
+/// interaction door - a world cannot ask for any of those, it can only place matter.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct GroundBody {
+    /// Material id in `data/materials.json` (e.g. "iron"). Must carry an elastic modulus - a cohesive
+    /// solid's bond stiffness derives from it.
+    pub material: String,
+    /// The body's radius (m). It is built as a particle lattice at the world's grain scale, so a
+    /// radius smaller than one grain has no matter to build from and is refused.
+    pub radius_m: f64,
+    /// Where it starts (centred world coords, m). Declared above the terrain it FALLS - that is an
+    /// initial condition plus gravity, not a placement script.
+    pub at_m: [f32; 3],
 }
 
 /// One declared matter event.

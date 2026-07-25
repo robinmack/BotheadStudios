@@ -25,6 +25,9 @@
         { "material": "granite", "thickness_m": null }
       ]
     },
-    "events": []
+    "events": [],
+    "bodies": [
+      { "material": "iron", "radius_m": 2.0, "at_m": [21.3, 38.0, 50.0] }
+    ]
   }
 }

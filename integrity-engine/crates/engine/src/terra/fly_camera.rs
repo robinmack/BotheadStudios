@@ -17,6 +17,9 @@ use glam::{DMat4, DVec3, Mat4};
 /// anything that needs to know how large a metre looks on screen reads it back off [`View::fov_y`]. It was
 /// briefly written out twice — here and again in a shader's billboard sizing — which is how a "one pixel"
 /// floor silently stops being one pixel.
+///
+/// It is also what the pan gesture's pixel-to-metres scale reads (`Terra::pan_tangent`), so the projection
+/// and the gesture can never disagree about how much world a pixel spans.
 pub const DEFAULT_FOV_Y: f64 = 0.9;
 
 /// One frame's camera outputs (see `FlyCamera::view`).

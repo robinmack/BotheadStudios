@@ -74,10 +74,20 @@ pub trait FlightEnvironment {
     /// returns `None` and its bodies fly ballistically — honestly, rather than through a thin fudge.
     fn air_at(&self, pos: DVec3) -> Option<(f64, f64)>;
 
-    /// Has the path from `from` to `to` met hard matter? Returns where. This is the hand-off from the
-    /// FLUID branch to the SOLID one (docs/58 "it's all impact"): whatever mass survives the air arrives
-    /// here, and the caller excavates.
-    fn arrival(&self, from: DVec3, to: DVec3) -> Option<DVec3>;
+    /// **Has the path from `from` to `to` met hard matter, and what does that meeting deliver?** This is
+    /// the hand-off from the FLUID branch to the SOLID one (docs/58 "it's all impact"): whatever mass
+    /// survives the air arrives here, and the caller excavates.
+    ///
+    /// The ENVIRONMENT answers because the environment is the only thing that knows where its own surface
+    /// is and what is standing on it — a heightfield, a planet's radius, a cohesive body resting on the
+    /// ground. That is also why the site it returns must be the point where the TRAJECTORY CROSSED the
+    /// surface, not the post-step sample: at 17 km/s a 1/60 s step is ~280 m long, so returning `to`
+    /// couples the impact to matter hundreds of metres underground. Use [`surface_crossing`] to find it
+    /// and [`delivered`] to price it, so every environment answers with one law.
+    ///
+    /// `dt` is the SUBSTEP this segment spans (not the caller's frame), so an environment can advance
+    /// whatever else is moving over the same interval before forecasting contact against it.
+    fn arrival(&self, body: &FlyingBody, from: DVec3, to: DVec3, dt: f64) -> Option<Met>;
 
     /// The e-folding height of this world's air (m), or 0 for vacuum — the length over which the density
     /// a body is flying through changes appreciably.
@@ -90,16 +100,105 @@ pub trait FlightEnvironment {
     fn air_scale_height_m(&self) -> f64;
 }
 
+/// **What a flight path met, as the environment sees it.** The site plus what the meeting is worth —
+/// returned by [`FlightEnvironment::arrival`], which is the only thing that knows its own surface.
+#[derive(Clone, Copy, Debug)]
+pub struct Met {
+    /// Where the TRAJECTORY crossed into hard matter — see [`surface_crossing`].
+    pub at: DVec3,
+    /// Energy available at the contact frame (J) — see [`delivered`].
+    pub energy_j: f64,
+    /// Momentum delivered (kg·m/s) — see [`delivered`].
+    pub momentum: DVec3,
+}
+
+/// **Where a straight segment crosses into hard matter.** ONE bisection, used by every environment, so
+/// a ground patch and a planet locate an impact site the same way.
+///
+/// `inside` is the environment's own "is this point within hard matter" test — a heightfield comparison,
+/// a radius comparison, whatever its geometry is. The returned point is the first one known to be inside,
+/// so an excavation couples to matter that is really there.
+///
+/// **Resolve it to the surface field's own precision — NOT to the resolution of the matter.** This was
+/// got wrong once, and the way it failed is worth keeping. The first version stopped bisecting once the
+/// bracket was below the GRAIN size, reasoning that `deposit_event` floors its coupling distance at the
+/// grain scale so a finer site changes nothing. That reasoning is false, because the site is not only a
+/// distance — it is also **where the material is sampled**. A site a fraction of a voxel too deep reads
+/// the material *under* the surface, which changes the yield strength, which changes the crater radius,
+/// which changes the coupling length λ, which is inside an exponential.
+///
+/// MEASURED, on Sean's own `an_impact_event_heats_debris_grains_already_in_flight`: a grain-sized
+/// tolerance left the bracket 0.83 m wide, put the site **0.795 m under** the surface, and cut the
+/// grains' coupling weight by **284×** (0.2416 → 0.00085) — the debris took essentially none of the
+/// event. Nothing about that is visible at the call site; the test is what caught it.
+///
+/// So the bracket halves until it is below what the surface field itself can distinguish. The heights
+/// come from an `f32` field (~1e-7 relative), so 30 halvings put the bracket about an order of magnitude
+/// beneath the noise floor; more would be resolving float noise, and fewer is the bug above.
+pub fn surface_crossing(from: DVec3, to: DVec3, inside: impl Fn(DVec3) -> bool) -> DVec3 {
+    let span = (to - from).length();
+    // Already inside at the start: the segment did not cross, it began buried. The honest site is where
+    // the body already was, not somewhere further in.
+    if inside(from) {
+        return from;
+    }
+    if span <= 0.0 {
+        return to;
+    }
+    // 30 halvings: span/2³⁰ ≈ 1e-9 of the segment, an order of magnitude below the f32 surface field's
+    // ~1e-7 relative precision. Derived from what the field can represent, not tuned. It costs 30 height
+    // samples on the rare step where something actually arrives.
+    const STEPS: u32 = 30;
+    let (mut lo, mut hi) = (0.0f64, 1.0f64);
+    for _ in 0..STEPS {
+        let mid = 0.5 * (lo + hi);
+        if inside(from + (to - from) * mid) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    from + (to - from) * hi
+}
+
+/// **What an arriving body delivers to the matter it struck.** ONE formula for every arrival.
+///
+/// The energy is ½·μ·|Δv|² with the REDUCED mass μ — "the energy actually available at the contact
+/// frame, not either body's kinetic energy in an arbitrary frame", which is the law
+/// [`crate::interaction::detect_swept`] already states and applies to every body-body collision in the
+/// engine. Momentum is the arriving body's own mass times that same relative velocity.
+///
+/// `target_mass_kg = None` means matter too massive to move — a planet's bulk, a ground patch attached to
+/// one. Then μ → m and Δv → v, so this reduces EXACTLY to the ½mv² and mv the terrain path used to write
+/// out separately. **Terrain is not a special case of impact; it is the immovable limit of the general
+/// one**, and `an_immovable_target_is_the_reduced_mass_limit` pins the two against each other.
+pub fn delivered(
+    body: &FlyingBody,
+    target_vel: DVec3,
+    target_mass_kg: Option<f64>,
+) -> (f64, DVec3) {
+    let rel = body.vel - target_vel;
+    let mu = match target_mass_kg {
+        Some(mt) if mt > 0.0 => body.mass_kg * mt / (body.mass_kg + mt),
+        // Immovable (or massless-target nonsense): the reduced mass IS the arriving body's own.
+        _ => body.mass_kg,
+    };
+    (0.5 * mu * rel.length_squared(), rel * body.mass_kg)
+}
+
 /// A body that has reached hard matter — everything an excavation needs, computed from the matter that
 /// actually arrived rather than from what was launched.
 #[derive(Clone, Copy, Debug)]
 pub struct Arrival {
     pub body: FlyingBody,
-    /// Where it struck.
+    /// Where it struck — the crossing point on the surface, not the post-step sample.
     pub at: DVec3,
-    /// Kinetic energy delivered (J): ½mv² of the mass that survived the flight. Never a parameter — a
-    /// caller cannot ask for a bigger crater, only throw a bigger or faster rock.
+    /// Energy delivered (J), from [`delivered`]. Never a parameter — a caller cannot ask for a bigger
+    /// crater, only throw a bigger or faster rock.
     pub energy_j: f64,
+    /// Momentum delivered (kg·m/s), from [`delivered`]. An excavation needs a direction and a magnitude,
+    /// not just a scalar budget.
+    pub momentum: DVec3,
 }
 
 /// **Everything in flight, and what it has shed.** One call introduces matter; one call advances it.
@@ -271,9 +370,15 @@ impl Flight {
             b.vel += env.gravity_at(b.pos) * dt;
             b.pos += b.vel * dt;
             // THE SOLID BRANCH: whatever survived the air arrives, carrying the energy it actually has.
-            if let Some(at) = env.arrival(from, b.pos) {
-                let speed = b.vel.length();
-                arrivals.push(Arrival { body: *b, at, energy_j: 0.5 * b.mass_kg * speed * speed });
+            // The environment prices the meeting, because only it knows WHAT was met — bare terrain, or a
+            // body standing on it that is free to move and so takes a reduced-mass share.
+            if let Some(met) = env.arrival(b, from, b.pos, dt) {
+                arrivals.push(Arrival {
+                    body: *b,
+                    at: met.at,
+                    energy_j: met.energy_j,
+                    momentum: met.momentum,
+                });
                 return false;
             }
             true
@@ -339,8 +444,14 @@ mod tests {
         fn air_at(&self, pos: DVec3) -> Option<(f64, f64)> {
             Some((self.air.density_at(pos.y.max(0.0)), self.air.ambient_temp_k))
         }
-        fn arrival(&self, _from: DVec3, to: DVec3) -> Option<DVec3> {
-            (to.y <= 0.0).then_some(to)
+        fn arrival(&self, body: &FlyingBody, from: DVec3, to: DVec3, _dt: f64) -> Option<Met> {
+            if to.y > 0.0 {
+                return None;
+            }
+            // A flat floor is defined everywhere, so the crossing can be resolved to the loop's limit.
+            let at = surface_crossing(from, to, |p| p.y <= 0.0);
+            let (energy_j, momentum) = delivered(body, DVec3::ZERO, None);
+            Some(Met { at, energy_j, momentum })
         }
         fn air_scale_height_m(&self) -> f64 {
             self.air.scale_height_m
@@ -360,8 +471,14 @@ mod tests {
             let alt = pos.length() - self.matter.radius();
             Some((self.air.density_at(alt), self.air.ambient_temp_k))
         }
-        fn arrival(&self, _from: DVec3, to: DVec3) -> Option<DVec3> {
-            (to.length() <= self.matter.radius()).then_some(to)
+        fn arrival(&self, body: &FlyingBody, from: DVec3, to: DVec3, _dt: f64) -> Option<Met> {
+            let r = self.matter.radius();
+            if to.length() > r {
+                return None;
+            }
+            let at = surface_crossing(from, to, |p| p.length() <= r);
+            let (energy_j, momentum) = delivered(body, DVec3::ZERO, None);
+            Some(Met { at, energy_j, momentum })
         }
         fn air_scale_height_m(&self) -> f64 {
             self.air.scale_height_m
@@ -382,6 +499,77 @@ mod tests {
     /// is in: one implements "down" and a floor, the other radial gravity and a sphere, and the entry
     /// physics between them is the same code. If these ever needed different code, that would be the bug —
     /// not the eleven orders of magnitude between them.
+    /// **The immovable target is the reduced-mass limit, not a second formula.**
+    ///
+    /// `interaction::detect_swept` prices every body-body collision at ½·μ·|Δv|² — "the energy actually
+    /// available at the contact frame". The terrain path used to write out ½·m·v² separately. They are the
+    /// same law: as the struck mass grows without bound, μ → m and Δv → v. This pins that, so the two can
+    /// never drift into being two answers to one question.
+    #[test]
+    fn an_immovable_target_is_the_reduced_mass_limit() {
+        let b = FlyingBody::fresh(DVec3::ZERO, DVec3::new(0.0, -17_000.0, 0.0), 1200.0, 0, 0.33, 288.0);
+        let (e_immovable, p_immovable) = delivered(&b, DVec3::ZERO, None);
+
+        // The closed form the terrain path used to compute inline.
+        let speed = b.vel.length();
+        assert!((e_immovable - 0.5 * b.mass_kg * speed * speed).abs() < 1e-6 * e_immovable);
+        assert!((p_immovable - b.vel * b.mass_kg).length() < 1e-9);
+
+        // And it is the LIMIT of the finite-mass case, approached from below as the target gets heavier.
+        let mut last_err = f64::INFINITY;
+        for exp in [3, 6, 9, 12, 15] {
+            let m_target = b.mass_kg * 10f64.powi(exp);
+            let (e, p) = delivered(&b, DVec3::ZERO, Some(m_target));
+            assert!(e < e_immovable, "a target that can recoil takes LESS energy at the contact frame");
+            let err = (e_immovable - e) / e_immovable;
+            assert!(err < last_err, "and it converges as the target gets heavier ({err:e})");
+            last_err = err;
+            // Momentum is the arriving body's own mv either way — the target's mass does not change it.
+            assert!((p - p_immovable).length() < 1e-9);
+        }
+        assert!(last_err < 1e-14, "at 1e15x the striker's mass it is the immovable case ({last_err:e})");
+
+        // A moving target is priced on the RELATIVE velocity, so a body it cannot catch delivers nothing.
+        let (e_chasing, _) = delivered(&b, b.vel, None);
+        assert_eq!(e_chasing, 0.0, "matter moving with you does not strike you");
+    }
+
+    /// **The impact site is where the TRAJECTORY crossed the surface, not the post-step sample.**
+    ///
+    /// `arrival` used to return `to`. At entry speed one step is hundreds of metres long, so the site
+    /// landed that far underground and the excavation coupled to matter that was nowhere near the
+    /// surface. Both environments had it; this pins the fix at ground scale and planetary scale at once.
+    #[test]
+    fn an_arrival_sites_the_impact_on_the_surface_not_where_the_step_ended() {
+        let (planet, mats) = earth_planet();
+        let g = FlatGround { g: 9.81, air: crate::atmosphere::AirShell { rho_surface: 0.0, scale_height_m: 0.0, ambient_temp_k: 288.0 } };
+
+        // 17 km/s over a 1/60 s step is a ~283 m segment straddling the floor.
+        let from = DVec3::new(0.0, 40.0, 0.0);
+        let to = DVec3::new(0.0, 40.0 - 283.0, 0.0);
+        let b = FlyingBody::fresh(to, (to - from).normalize() * 17_000.0, 1200.0, 0, 0.33, 288.0);
+        let met = g.arrival(&b, from, to, 1.0 / 60.0).expect("the path met the floor");
+        assert!(
+            met.at.y.abs() < 1e-6,
+            "the site is ON the floor, not {:.1} m under it",
+            -met.at.y
+        );
+        assert!(met.at.y > to.y + 1.0, "and emphatically not the post-step sample");
+
+        // The same law at planetary scale, where the step is longer still.
+        let r = planet.matter.radius();
+        let from_p = DVec3::new(0.0, r + 5_000.0, 0.0);
+        let to_p = DVec3::new(0.0, r - 5_000.0, 0.0);
+        let bp = FlyingBody::fresh(to_p, DVec3::new(0.0, -17_000.0, 0.0), 1200.0, 0, 0.33, 288.0);
+        let met_p = planet.arrival(&bp, from_p, to_p, 1.0 / 60.0).expect("the path met the ground");
+        assert!(
+            (met_p.at.length() - r).abs() < 1e-3,
+            "the site sits on the planet's surface, {:.1} m off",
+            met_p.at.length() - r
+        );
+        let _ = mats;
+    }
+
     #[test]
     fn one_flight_law_serves_a_ground_patch_and_a_planet() {
         let (planet, mats) = earth_planet();
@@ -671,8 +859,13 @@ mod tests {
             fn air_at(&self, _p: DVec3) -> Option<(f64, f64)> {
                 None
             }
-            fn arrival(&self, _f: DVec3, t: DVec3) -> Option<DVec3> {
-                (t.y <= 0.0).then_some(t)
+            fn arrival(&self, body: &FlyingBody, f: DVec3, t: DVec3, _dt: f64) -> Option<Met> {
+                if t.y > 0.0 {
+                    return None;
+                }
+                let at = surface_crossing(f, t, |p| p.y <= 0.0);
+                let (energy_j, momentum) = delivered(body, DVec3::ZERO, None);
+                Some(Met { at, energy_j, momentum })
             }
             fn air_scale_height_m(&self) -> f64 {
                 0.0 // airless
@@ -680,14 +873,39 @@ mod tests {
         }
         let mats = crate::materials::load();
         let iron = crate::materials::index_of(&mats, "iron");
+        let (h0, v0, mass) = (1000.0, 100.0, 10.0);
         let mut flight = Flight::default();
-        flight.introduce(FlyingBody::fresh(DVec3::new(0.0, 1000.0, 0.0), DVec3::new(100.0, 0.0, 0.0), 10.0, iron, 0.1, 100.0));
-        for _ in 0..400 {
-            if !flight.step(&Airless, &mats, 0.05).is_empty() {
+        flight.introduce(FlyingBody::fresh(DVec3::new(0.0, h0, 0.0), DVec3::new(v0, 0.0, 0.0), mass, iron, 0.1, 100.0));
+        // 1,200 steps = 60 s. The drop needs t = sqrt(2h/g) = 35.1 s at lunar gravity; the ORIGINAL loop
+        // ran 400 steps = 20 s and so never landed at all, which is exactly why the arrival below was
+        // worth asserting.
+        let mut arrivals = Vec::new();
+        for _ in 0..1200 {
+            arrivals = flight.step(&Airless, &mats, 0.05);
+            if !arrivals.is_empty() {
                 break;
             }
         }
         assert_eq!(flight.trail().mass(), 0.0, "no air, nothing ablates");
         assert_eq!(flight.burned_up(), 0, "and nothing burns up");
+
+        // **A vacuous world still takes impacts.** The test above breaks out of its loop on the first
+        // arrival but never asserted that one HAPPENED, so every claim in it also held for a body that
+        // simply never landed. On an airless world the arrival is the whole point: no air means nothing
+        // slows the body down, so the ground gets ALL of it.
+        let a = *arrivals.first().expect("an airless world still receives the impact");
+        assert!(a.at.y.abs() < 1e-6, "and it is sited on the surface ({:.3e} m off)", a.at.y);
+        assert_eq!(a.body.mass_kg, mass, "nothing was ablated away on the way down");
+
+        // Energy is the launch KE plus the work gravity did over the drop — the closed form, because in
+        // vacuum there is nothing else to spend it on. On an atmosphere-bearing world this is exactly the
+        // quantity drag eats into, which is why the same drop delivers less through air.
+        let expect = 0.5 * mass * v0 * v0 + mass * 1.62 * h0;
+        assert!(
+            (a.energy_j - expect).abs() < 0.01 * expect,
+            "vacuum arrival carries the full ½mv₀² + mgh = {expect:.0} J, got {:.0} J",
+            a.energy_j
+        );
+        assert!(flight.bodies().is_empty(), "and the body is no longer in flight — it arrived");
     }
 }
