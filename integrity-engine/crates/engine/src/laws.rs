@@ -612,3 +612,99 @@ mod scene_declares_not_overrides_tests {
         );
     }
 }
+
+/// **Numbering is a shared namespace, and shared namespaces collide when two people append to them
+/// independently.** These are not style checks; they are the mechanical half of a coordination problem.
+///
+/// Three collisions happened in three consecutive integration steps of one contributor's work — two
+/// documents claiming `docs/60`, two claiming `docs/59`, and two pairs of `docs/46` ledger rows numbered
+/// 17 and 18. None was anyone's mistake: both sides appended to the next free number, and both were right
+/// about what "next free" meant on their own branch. Prose in `CLAUDE.md` cannot fix that, because a
+/// collaborator's copy of it is whatever they last merged — which is by definition older than the work
+/// they are about to send. A test can, because CI runs on THEIR pull request, before it ever reaches us.
+#[cfg(test)]
+mod numbering_tests {
+    const DOCS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs");
+
+    /// A document's number is its identity: code cites `docs/59` and a reader has to land on one file.
+    /// Two files sharing a number makes every citation to it ambiguous, and the ambiguity is invisible
+    /// until someone follows the reference.
+    #[test]
+    fn no_two_documents_claim_the_same_number() {
+        let mut seen: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
+        for entry in std::fs::read_dir(DOCS_DIR)
+            .expect("docs directory exists")
+            .flatten()
+        {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.ends_with(".md") {
+                continue;
+            }
+            let digits: String = name.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let Ok(n) = digits.parse::<u32>() else {
+                continue;
+            };
+            if let Some(other) = seen.insert(n, name.clone()) {
+                panic!(
+                    "docs/{n} is claimed by BOTH {other:?} and {name:?}. A document's number is how code \
+                     cites it, so two files cannot share one. Take the next free number and update the \
+                     references in the module that cites it."
+                );
+            }
+        }
+        assert!(
+            seen.len() > 20,
+            "the scan found only {} numbered docs — it is not reading the directory",
+            seen.len()
+        );
+    }
+
+    /// The docs/46 conformance ledger is append-only and inherited: a row number is how a violation is
+    /// referred to in commit messages, code comments and other rows. Two rows sharing a number silently
+    /// makes one of them unreachable — and the way that goes wrong in a merge is that a whole run of rows
+    /// gets replaced by a shorter run carrying the same numbers.
+    #[test]
+    fn the_conformance_ledger_numbers_each_row_once() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/46-one-physics-charter.md"
+        );
+        let text = std::fs::read_to_string(path).expect("the ledger exists");
+        let mut rows: Vec<u32> = Vec::new();
+        for line in text.lines() {
+            // A ledger row starts `| <n> |`; the header and separator rows do not.
+            let Some(rest) = line.strip_prefix("| ") else {
+                continue;
+            };
+            let Some((num, _)) = rest.split_once(" |") else {
+                continue;
+            };
+            if let Ok(n) = num.parse::<u32>() {
+                rows.push(n);
+            }
+        }
+        assert!(
+            rows.len() > 10,
+            "found only {} ledger rows — the parser is not matching",
+            rows.len()
+        );
+        let mut sorted = rows.clone();
+        sorted.sort_unstable();
+        let mut dedup = sorted.clone();
+        dedup.dedup();
+        assert_eq!(
+            sorted, dedup,
+            "the docs/46 ledger has duplicate row numbers ({rows:?}). Rows are cited by number, so each \
+             one must appear once — when a merge brings in rows numbered against a shorter ledger, \
+             renumber the incoming ones onto the end rather than letting them land on existing rows."
+        );
+        // Contiguity from 1 is what makes "the next free number" unambiguous for the next contributor.
+        let expected: Vec<u32> = (1..=rows.len() as u32).collect();
+        assert_eq!(
+            sorted, expected,
+            "the ledger's row numbers are not 1..={} with no gaps. A gap makes 'the next free number' \
+             ambiguous, which is how two people pick the same one.",
+            rows.len()
+        );
+    }
+}
