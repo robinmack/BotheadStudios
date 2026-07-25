@@ -1,7 +1,19 @@
-# TEMPORARY: the gh token lacks the `workflow` scope, so pushing .github/workflows/* is rejected.
-# The CI config lives on disk at .github/workflows/ci.yml; once the scope is granted, force-add it
-# (`git add -f .github/workflows/ci.yml`), remove this line, and push.
-.github/
+# TEMPORARY, and NARROWED 2026-07-24: only WORKFLOWS are unpushable, not all of `.github/`.
+#
+# The reason is a credential, not a policy: the local gh token lacks the `workflow` scope, so a push that
+# touches `.github/workflows/*` is rejected outright. That is why this ignore exists. But it was written as
+# `.github/`, which silently swallowed the whole directory — and the first thing that cost us was CODEOWNERS:
+# `main`'s ruleset requires a code-owner review, no CODEOWNERS file could be committed, so the requirement
+# could not be satisfied and a finished PR sat blocked with no route through it.
+#
+# So: ignore the directory that actually has the restriction, and nothing else.
+#
+# NOTE for whoever lands CI (Sean, 2026-07-24): `.github/workflows/ci.yml` exists ON DISK, untracked, from
+# 2026-07-08 — and it is STALE. It sets `working-directory: greenfield-engine`, which no longer exists (the
+# project is `integrity-engine` now), so it would fail as written. Treat it as a starting point at best.
+# A push from an account whose token HAS the `workflow` scope can commit workflows normally; this ignore is
+# only working around this machine's credential.
+.github/workflows/
 
 # Monorepo root ignores (OS / editor). Project-specific ignores live in each project's .gitignore.
 .DS_Store

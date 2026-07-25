@@ -1,0 +1,37 @@
+# Code owners — the reviewers GitHub requires on every pull request.
+#
+# WHY THIS FILE EXISTS: `main`'s ruleset sets `require_code_owner_review: true`, and until now the repo had
+# no CODEOWNERS at all — `.github/` was gitignored wholesale, so one could not be committed. A code-owner
+# requirement with no code owners defined cannot be satisfied by anyone, so a finished PR (#81) sat BLOCKED
+# with no route through it. This is that fix.
+#
+# GitHub semantics worth knowing before editing. Every one of these fails SILENTLY:
+#
+#   * An entry only takes effect for accounts with WRITE access. Naming someone who has not been added as a
+#     repository collaborator does nothing at all — no error, no warning, simply no owner.
+#   * An unknown or misspelled username is ignored the same way. There is no validation anywhere.
+#   * An EMAIL ADDRESS may be used in place of a username, and it must be an address VERIFIED on that
+#     person's GitHub account. A merely-correct-looking address is not enough, and gets no error either.
+#   * The LAST matching pattern wins, not the first, so a catch-all belongs at the TOP and any narrower
+#     rule goes below it.
+#   * GitHub reads this file from a pull request's BASE branch, so a change here only affects PRs opened
+#     against a branch that already has it. That is why this arrives on its own branch instead of inside a
+#     feature branch — shipping it inside #81 would not have unblocked #81.
+
+# Everything, unless a narrower rule below says otherwise.
+* @robinmack seanreid@gmail.com
+
+# Sean is named by EMAIL rather than by @username, which GitHub supports, because the username could not be
+# established from here: the address is not public, so an API search by it returns nothing, and a name search
+# returns several plausible `seanreid*` accounts. Naming the wrong account fails SILENTLY, so an address given
+# first-hand is the safer identifier.
+#
+# TWO THINGS STILL HAVE TO BE TRUE for that entry to do anything, and both fail without warning:
+#   1. `seanreid@gmail.com` must be a VERIFIED address on his GitHub account. (Note it differs from the
+#      seanreid.mail@gmail.com given when he was introduced — this is the one supplied for this purpose. If
+#      reviews never route to him, this is the first thing to check.)
+#   2. He must have WRITE access. The repo listed one collaborator (robinmack) when this was written, and a
+#      CODEOWNERS entry for an account without write access is inert.
+#
+# Swapping the address for `@his-username` once known is strictly more robust, since a username cannot
+# silently stop matching the way an unverified or changed email can.
