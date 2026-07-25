@@ -709,7 +709,7 @@ impl MatterSim {
                         continue; // a void in the face; `collapse` owns unsupported overhangs (docs/45 §4)
                     };
                     let m = &materials[mat];
-                    let h_crit = m.fracture_strength / (m.density.max(1.0) * 9.81);
+                    let h_crit = crate::granular::critical_bank_height(m.fracture_strength, m.density, 9.81);
                     let stable = nbrs.iter().all(|&(r, nt)| {
                         granular::face_stable(
                             (lo + idx as i32 - nt) as f32,

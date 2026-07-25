@@ -58,12 +58,240 @@ pub fn view_span_m(distance_m: f64, vertical_fov_rad: f64) -> f64 {
     2.0 * distance_m.max(0.0) * (vertical_fov_rad * 0.5).tan()
 }
 
+/// **The relief amplitude this material can hold at a wavelength** (m, zero-to-peak) — by asking the
+/// engine's own slope law, not by restating it.
+///
+/// The criterion is [`crate::granular::face_stable`]: a face stands if FRICTION carries the slope
+/// ([`crate::granular::repose_allowance_on`], over a baseline of half a wavelength — crest to trough) OR if
+/// COHESION carries the bank on its own ([`crate::granular::critical_bank_height`]). They are an OR over two
+/// different measurements, which is what lets cohesionless sand be perfectly stable at 34° yet unable to
+/// stand any vertical face, while granite keeps its crags.
+///
+/// **This function holds no slope physics of its own — it only converts a permitted DROP into a sinusoid's
+/// amplitude.** The first version did hold its own, and was wrong twice over: it used friction alone, and it
+/// added friction to cohesion in a single slope. The material table refuted the first immediately (dry sand
+/// grips HARDER than granite, μ 0.67 vs 0.60, yet only granite stands vertical — sand's cohesion is 0,
+/// granite's 28 MPa), and `granular`'s own documentation had already warned against the second: conflating
+/// the friction height with the cohesion height is *"subtly wrong in exactly the case a layered world is
+/// made of"*. The engine knew both things; this module had not asked. Hence
+/// `generated_relief_is_stable_by_the_engines_own_slope_law`, which makes not-asking fail the suite.
+///
+/// The quantum passed to the allowance is `0`: generated relief is a continuous function, not a quantised
+/// field, so there is no quantisation to allow for. The amplitude is capped at `λ/4` — not physics but
+/// REPRESENTATION, since a heightfield cannot overhang and steeper relief folds through its own samples.
+pub fn relief_amplitude_m(wavelength_m: f64, mu: f64, h_crit_m: f64) -> f64 {
+    if wavelength_m <= 0.0 {
+        return 0.0;
+    }
+    // Crest to trough is half a wavelength of horizontal run.
+    let baseline = wavelength_m * 0.5;
+    let by_friction = crate::granular::repose_allowance_on(mu as f32, baseline as f32, 0.0) as f64;
+    // The OR, exactly as `granular::face_stable` poses it: whichever term holds the face.
+    let drop = by_friction.max(h_crit_m.max(0.0));
+    // A crest-to-trough drop is twice the amplitude.
+    (drop * 0.5).min(wavelength_m * 0.25)
+}
+
+/// **Sub-raster relief at a point** (m), summed over `octaves` halvings below `base_feature_m`.
+///
+/// Below the resolution of the elevation data there is no measurement, so relief has to be generated — and
+/// Robin's rule is what makes that affordable: *"we don't have to make things renderable at planetary scale
+/// while viewing subset of surface; we have the math — we can rebuild it if the camera moves again."* The
+/// math is here, it is a pure function of position, and a caller evaluates it only for the patch it draws.
+///
+/// Two things keep it honest:
+///
+/// - **Every octave's amplitude is [`relief_amplitude_m`]**, so no generated feature is steeper than the
+///   engine's own slope law permits, and the sum converges.
+/// - **`slope_fraction` is how rough this GROUND is, not just this MATERIAL** — the local measured slope as
+///   a fraction of what the material could hold. Without it the rule states a maximum everywhere and a flat
+///   plain comes out as rough as a mountainside, which is false: relief and slope correlate because the same
+///   erosion produced both. `0` leaves the measured surface exactly as measured.
+///
+/// Octaves start at `base_feature_m/2` — strictly BELOW the measurement, since at and above it the raster
+/// already says what the ground does, and generating there would argue with data.
+///
+/// `octaves` is FRACTIONAL ([`detail_octaves`]) and the last is weighted by its fraction, so detail fades in
+/// rather than popping. The lattice is `world::value_noise`, the same one the voxel worlds use, so two LOD
+/// tiers cannot disagree about where a hill is — and being hash-keyed rather than seeded, looking away and
+/// back finds the same ground (Law IV).
+///
+/// *Flagged, with the resolved computation named:* the SHAPE stands in for the erosion and deposition
+/// history that actually carved this ground. The engine can produce that history — `granular`/`matter`
+/// settle real grains to exactly this criterion — it simply cannot afford it over a continent.
+#[allow(clippy::too_many_arguments)]
+pub fn micro_relief_m(
+    x_m: f64,
+    z_m: f64,
+    base_feature_m: f64,
+    octaves: f64,
+    mu: f64,
+    h_crit_m: f64,
+    slope_fraction: f64,
+) -> f64 {
+    if octaves <= 0.0 || base_feature_m <= 0.0 || slope_fraction <= 0.0 {
+        return 0.0;
+    }
+    let whole = octaves.floor() as u32;
+    let frac = octaves - whole as f64;
+    let mut relief = 0.0;
+    for i in 0..=whole.min(24) {
+        // Strictly sub-raster: the first generated octave is half the measured feature.
+        let wavelength = base_feature_m / (1u64 << (i + 1)) as f64;
+        let amp = relief_amplitude_m(wavelength, mu, h_crit_m) * slope_fraction.clamp(0.0, 1.0);
+        // Centred on zero: this is roughness, not a change of elevation. The measured raster stays the
+        // truth about height.
+        let n = crate::world::value_noise(x_m as f32, z_m as f32, (1.0 / wavelength) as f32) as f64 - 0.5;
+        let weight = if i == whole { frac } else { 1.0 };
+        relief += n * 2.0 * amp * weight;
+    }
+    relief
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn ctrl() -> ResolutionController {
         ResolutionController::default() // 1 mrad angular resolution, 1 mm floor
+    }
+
+    /// **The relief this module generates must be STABLE by the engine's own slope law.**
+    ///
+    /// This is the guard the engine did not have, and its absence is why a wrong slope rule could be written
+    /// here with nothing objecting. `granular` has carried Mohr-Coulomb all along (`face_stable`,
+    /// `repose_allowance`) precisely so that *"ground and grain answer the slope question with ONE law"* —
+    /// and a new module restating it in its own terms broke that silently, while every test still passed. A
+    /// name check would not have caught it. This does: every octave of generated relief is handed back to
+    /// `granular::face_stable` as the face it implies, and must be held up. If either side's physics moves,
+    /// this fails.
+    #[test]
+    fn generated_relief_is_stable_by_the_engines_own_slope_law() {
+        let mats = crate::materials::load();
+        for id in ["granite", "basalt", "sand", "dirt", "grass", "clay", "snow"] {
+            let m = &mats[crate::materials::index_of(&mats, id)];
+            let mu = m.friction_coefficient as f64;
+            let h_crit = crate::granular::critical_bank_height(m.fracture_strength, m.density, 9.81) as f64;
+            for lambda in [0.01_f64, 0.1, 1.0, 10.0, 100.0, 1000.0] {
+                let amp = relief_amplitude_m(lambda, mu, h_crit);
+                // The face this relief implies: a crest-to-trough drop over half a wavelength of run,
+                // standing in material of its own height.
+                let (drop, run) = ((2.0 * amp) as f32, (lambda * 0.5) as f32);
+                assert!(
+                    crate::granular::face_stable(drop, run, drop, mu as f32, h_crit as f32),
+                    "{id} at lambda={lambda} m: generated a {drop:.4} m face over {run:.4} m that the \
+                     engine's own Mohr-Coulomb test says would fail"
+                );
+                assert!(amp <= lambda * 0.25 + 1e-12, "{id} lambda={lambda}: relief cannot overhang");
+            }
+        }
+    }
+
+    /// **Cohesion, not friction, is why rock stands steep** — the fact that refuted the first version of
+    /// this rule. Sand grips HARDER than granite, so a friction-only criterion made sand the craggier
+    /// material; the difference is entirely cohesion, and asking `granular` gets it right.
+    #[test]
+    fn cohesionless_sand_cannot_stand_what_granite_can() {
+        let mats = crate::materials::load();
+        let get = |id: &str| {
+            let m = &mats[crate::materials::index_of(&mats, id)];
+            (
+                m.friction_coefficient as f64,
+                crate::granular::critical_bank_height(m.fracture_strength, m.density, 9.81) as f64,
+            )
+        };
+        let (g_mu, g_h) = get("granite");
+        let (s_mu, s_h) = get("sand");
+        assert!(s_mu > g_mu, "sand grips harder ({s_mu} vs {g_mu}) - friction alone is not the answer");
+        assert_eq!(s_h, 0.0, "and cohesionless sand holds no bank at all: that IS the difference");
+        assert!(g_h > 100.0, "granite holds a substantial bank ({g_h:.0} m)");
+
+        // At a SMALL scale cohesion dominates and rock is craggier than sand.
+        let (rock, sand) = (relief_amplitude_m(0.1, g_mu, g_h), relief_amplitude_m(0.1, s_mu, s_h));
+        assert!(rock > sand, "at 10 cm rock is craggier than sand ({rock:.4} vs {sand:.4})");
+        // But only just — and the reason is worth pinning, because it is a limit of the DRAWING and not of
+        // the ground: granite's cohesion permits a 1,057 m bank, so below ~2 km wavelength its ceiling is
+        // the heightfield's own `lambda/4` (a height cannot overhang) rather than anything physical. Rock is
+        // simply "as rough as a heightfield can express" across that whole range.
+        assert!(
+            (rock - 0.1 * 0.25).abs() < 1e-12,
+            "rock is at the representational cap, not a physical one ({rock:.5})"
+        );
+
+        // At a LARGE scale friction dominates for both — and then SAND stands steeper, because its
+        // friction coefficient is genuinely higher (0.67 vs 0.60). Surprising, and correct: a dune field can
+        // carry a steeper sustained slope than granite's friction alone would. It is only cohesion that
+        // makes rock the steeper material, and cohesion is a small-scale term.
+        let (rock_km, sand_km) = (
+            relief_amplitude_m(10_000.0, g_mu, g_h),
+            relief_amplitude_m(10_000.0, s_mu, s_h),
+        );
+        assert!(
+            sand_km > rock_km,
+            "at 10 km sand's higher friction wins ({sand_km:.0} vs {rock_km:.0}) - cohesion is small-scale"
+        );
+
+        // Sand is SELF-SIMILAR: with no cohesion its amplitude is pure repose at every scale, which is why
+        // dunes look the same close up and far away.
+        for lambda in [0.01_f64, 1.0, 100.0, 10_000.0] {
+            let expect = (lambda * 0.5 * s_mu * 0.5).min(lambda * 0.25);
+            let got = relief_amplitude_m(lambda, s_mu, s_h);
+            // RELATIVE tolerance: `granular::repose_allowance_on` works in f32 (it serves the voxel
+            // heightfield), so a round trip through it carries f32 precision, not f64.
+            assert!(
+                (got - expect).abs() <= 1e-5 * expect.abs(),
+                "sand at lambda={lambda} is its own repose slope and nothing else ({got} vs {expect})"
+            );
+        }
+    }
+
+    /// Generated relief is ROUGHNESS on measurement, deterministic, and it fades in. Determinism is Law IV,
+    /// not a nicety: if looking away and back gave different hills, the camera would decide what is true.
+    #[test]
+    fn micro_relief_is_deterministic_roughness_that_fades_in_with_detail() {
+        let mats = crate::materials::load();
+        let gr = &mats[crate::materials::index_of(&mats, "granite")];
+        let (mu, h_crit) = (
+            gr.friction_coefficient as f64,
+            crate::granular::critical_bank_height(gr.fracture_strength, gr.density, 9.81) as f64,
+        );
+        let base = 90.0; // the elevation raster's ground resolution - where measurement runs out
+        let r = |x: f64, z: f64, oct: f64, frac: f64| micro_relief_m(x, z, base, oct, mu, h_crit, frac);
+
+        // Same place, same answer, even after sampling elsewhere in between.
+        let a = r(1234.5, -678.9, 4.0, 1.0);
+        let _ = r(0.0, 0.0, 4.0, 1.0);
+        assert_eq!(a, r(1234.5, -678.9, 4.0, 1.0), "the same ground, every time");
+
+        // Nothing requested, nothing added - the measured surface untouched.
+        assert_eq!(r(1234.5, -678.9, 0.0, 1.0), 0.0, "no octaves => no change");
+        assert_eq!(r(1234.5, -678.9, 6.0, 0.0), 0.0, "and flat ground stays flat");
+
+        // FLAT GROUND STAYS FLAT: the slope fraction is what stops a plain coming out like a mountainside.
+        let (steep, gentle) = (r(50.0, 50.0, 6.0, 1.0).abs(), r(50.0, 50.0, 6.0, 0.1).abs());
+        assert!(gentle < steep * 0.2, "a gentle slope is far smoother ({gentle:.4} vs {steep:.4})");
+
+        // It FADES IN: a fractional octave lands between its neighbours, so nothing pops.
+        let (o3, o3h, o4) = (r(50.0, 50.0, 3.0, 1.0), r(50.0, 50.0, 3.5, 1.0), r(50.0, 50.0, 4.0, 1.0));
+        assert!(
+            (o3h - o3).abs() <= (o4 - o3).abs() + 1e-9,
+            "a half octave sits between {o3:.5} and {o4:.5}, got {o3h:.5}"
+        );
+
+        // ROUGHNESS, not elevation: over a 2D spread the mean is small against the amplitude it works at.
+        let amp = relief_amplitude_m(base * 0.5, mu, h_crit);
+        let n = 40;
+        let mut sum = 0.0;
+        for i in 0..n {
+            for j in 0..n {
+                sum += r(i as f64 * 7.3, j as f64 * 5.1, 5.0, 1.0);
+            }
+        }
+        let mean = sum / (n * n) as f64;
+        assert!(
+            mean.abs() < 0.25 * amp,
+            "relief neither raises nor lowers the ground (mean {mean:.4} m vs amplitude {amp:.4} m)"
+        );
     }
 
     /// Closer must ALWAYS mean finer, with no flat spots and no reversals — that is what "continually

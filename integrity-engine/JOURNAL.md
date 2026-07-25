@@ -3,6 +3,66 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-24 (surface detail) — Robin caught me writing a second answer to a settled question
+
+**What happened.** Starting the `surface_detail` LOD tier, I needed "how rough can this ground be?", and I
+wrote a rule for it: amplitude bounded by the material's angle of repose. Robin stopped me:
+
+> *"Wait… shouldn't this material work (sand/granite angle of repose) already be hard baked into the engine?
+> How/why were you able to change it and get it wrong with impugnity?"*
+
+It is, and I had. `granular::repose_allowance` / `face_stable` (docs/45) is Mohr–Coulomb, and its own
+documentation states the reason it exists: *"this makes ground and grain answer the slope question with ONE
+law."* I wrote a second law in a second module and every test still passed.
+
+**And it was wrong in both of the ways that module already warned about.**
+
+1. **Friction alone.** The material table refuted it immediately, which is the only reason I noticed: dry
+   sand grips HARDER than granite (μ 0.67 vs 0.60), yet only granite stands vertical. Sand's cohesion is
+   **0**; granite's is 28 MPa. A friction-only rule made sand the craggier material.
+2. **Then friction + cohesion added into one slope** — and `granular`'s doc had already written that
+   conflating the friction height with the cohesion height is *"subtly wrong in exactly the case a layered
+   world is made of"*, with the measurement to prove it (470 grains shed from a world nothing had touched).
+   They are an **OR over two different measurements**: friction acts on the SLOPE, cohesion on the BANK.
+
+**Why it was possible, which is the part worth fixing.** Nothing guarded the proven law. `laws.rs` hardens
+constants (`SINGLE_SOURCE`) and keeps scenes out of collision (`COLLISION_PRIMITIVES`), but a *derived law*
+had no such protection — so a reasonable author who did not find the primitive could contradict it silently.
+That is docs/46's stated failure mode happening to me, in the module whose own header cites it.
+
+**The fix, and the hardening** (Robin: *"We likely need to build tests to harden proven aspects of the
+engine"*):
+
+- `surface_detail::relief_amplitude_m` now holds **no slope physics at all**. It asks
+  `granular::repose_allowance_on` and `granular::critical_bank_height`, takes the OR exactly as
+  `face_stable` poses it, and only converts a permitted DROP into a sinusoid's amplitude.
+- `granular::repose_allowance_on(mu, r, quantum)` — the same law with the field's quantum as a PARAMETER.
+  `SLOPE_QUANTUM_M` is the voxel heightfield's own quantisation and belongs to that field, not to the
+  physics; a continuously generated surface passes 0. Splitting it out is what made delegation possible
+  instead of a re-derivation.
+- `granular::critical_bank_height(c, ρ, g)` — `h_crit` was computed inline in `matter.rs` while its partner
+  term lived in `granular`, i.e. half a law in each place. `matter.rs` now delegates.
+- **The guard is a CONSISTENCY test, not a grep**: `generated_relief_is_stable_by_the_engines_own_slope_law`
+  hands every octave of generated relief back to `granular::face_stable` as the face it implies, for seven
+  materials across six orders of wavelength, and requires it to be held up. A name check would not have
+  caught what I did; this does, and it fails if either side's physics moves.
+
+**Two findings the tests produced, both counter to what I assumed.**
+
+- **Below ~2 km wavelength, cohesive rock is limited by the HEIGHTFIELD, not by physics.** Granite's cohesion
+  permits a 1,057 m bank, so its ceiling across that whole range is `λ/4` — the point at which a height
+  cannot overhang. Rock is simply "as rough as a heightfield can express" there, and the honest form of an
+  overhanging crag is matter, not a height.
+- **At kilometre scales SAND stands steeper than granite**, because its friction really is higher (0.67 vs
+  0.60). Cohesion is a small-scale term; it is only cohesion that makes rock the steeper material.
+
+**Verified.** 370/370 (3 new). Nothing rig-verified here because nothing visual changed yet.
+
+**NOT done:** the tier itself. The rule and its guard exist; Terra still has one LOD tier, and wiring the
+finer one is the remaining work. Also still true: `relief_amplitude_m` is a CEILING — `slope_fraction` (the
+local measured slope as a fraction of it) is what stops a flat plain coming out as rough as a mountainside,
+and Terra will have to compute that from the elevation raster's local gradient.
+
 ## 2026-07-24 (Stage B) — the observer and the universe
 
 **What.** docs/59 Stage B: ride a fragment down. Robin redirected it into something better than a follow —
