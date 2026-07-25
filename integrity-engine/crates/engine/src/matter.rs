@@ -66,6 +66,12 @@ const VAPOR_EXPANSION: f32 = 3.0; // vaporized ejecta expand away faster (gas/pl
 /// Ambient/reference temperature (K) — cold matter; impact ejecta heat above this (`docs/20`).
 pub const REF_TEMP_K: f32 = 300.0;
 
+/// LOD guard on how far a single impact event is materialised voxel-by-voxel (m). A truly huge impact
+/// should be summarized at coarse scale instead (`docs/18`). This is also the reach of the one
+/// deposition door (`simulation::Simulation`): the same cap bounds excavation and coupling, so the
+/// crater and the energy that reaches nearby bodies describe the same event at the same LOD.
+pub(crate) const IMPACT_LOD_R: i32 = 24;
+
 /// A detached lump of matter in flight (one former voxel).
 #[derive(Clone, Copy)]
 pub struct Particle {
@@ -187,7 +193,7 @@ impl MatterSim {
         direction: Vec3,
         energy: f32,
     ) -> usize {
-        const MAX_R: i32 = 24; // LOD guard on the materialised crater
+        const MAX_R: i32 = IMPACT_LOD_R; // LOD guard on the materialised crater
         let center = world.center();
         let sv = site + center; // voxel space
         let dir = direction.normalize_or_zero();

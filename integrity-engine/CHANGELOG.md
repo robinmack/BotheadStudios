@@ -9,6 +9,87 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Pan input works for real hands and trackpads.** Shift plus left-drag now pans no matter
+  whether shift or the button lands first: a left-drag upgrades to a pan the moment the modifier
+  is seen, and in a scene with a pan handler that chord never means reverse walk (reverse stays
+  on shift+ctrl). Shift+scroll and the horizontal wheel axis now feed the SAME pan path as the
+  drag in all three scenes (Ground, Terra, the space band), with bare vertical scroll keeping its
+  walk/zoom meaning, so a trackpad can pan without a middle button. The full-viewport status
+  overlay on every scene page is now pointer-transparent, so a showing message no longer eats
+  camera input.
+
+- **One pan gesture across every scene.** Shift-drag or middle-drag now pans in the free-fly
+  scenes too, mapped to each camera's own semantics: Ground translates the eye laterally in the
+  view plane under the same free-movement law as walking (`Ground::pan_view`; the camera's matter
+  shell still keeps it out of the terrain), and Terra slides across the surface through the same
+  mover as its strafe keys (`Terra::pan_tangent` feeding `FlyCamera::move_tangent`). Both scales
+  are derived from the scene's own view geometry, one frustum height of world per viewport height
+  of drag at the aimed distance (Ground) or the current altitude (Terra), so the ground under the
+  pointer tracks it one-for-one, map-style. Controls hints on both pages name the gesture.
+
+- **The space scenes gained pan.** Shift-drag or middle-drag translates the look target off the
+  focused body (`OrbitDemo::pan_view`). The offset is held in the frame that rides the focus body,
+  so the framing follows the body's orbital motion instead of smearing against inertial space, and
+  the Earth/Luna focus buttons (and `cycle_focus`) snap it back to zero. The pan scale is derived,
+  not a feel dial: one frustum height at the focal plane per viewport height of drag, so the world
+  tracks the pointer one-for-one at every zoom. Representation only; no matter moves. Scenes that
+  supply no pan handler keep the exact previous gesture grammar.
+
+- **The ground HUD leads with the ball's verdict.** The ball line now opens with the one-word
+  structural state the sim already knows: INTACT, DENTED or SHATTERED, colour-coded, with parcels
+  and bonds kept as the supporting numbers. Parcels are conserved matter, so their count never
+  drops on impact; leading with them let a direct hit read as "still intact". New surface:
+  `CohesiveBody::verdict()` names the bond state (all bonds hold / a minority fractured / fewer
+  than half survive, the same boundaries the fracture tests assert), and `Ground::body_verdict()`
+  exports it to the page.
+
+- **Impacts deposit into the awake set through one door, and a meteor destroys the ball on its
+  own (docs/23 steps 1 and 2, docs/60).** A ground impact event, wherever detection found it (a
+  body contact forecast on the swept segment, a landing bisected to where the trajectory crosses
+  the shared ground height, or an impact declared in a world file), now goes through ONE
+  deposition operator, `Simulation::deposit_event`: terrain voxels, every cohesive body's parcels
+  and every debris grain in range receive shares of the energy and momentum from one walk with one
+  kernel (spherical spreading attenuated over the crater radius E/σ gives at the site), delivered
+  through the operator that owns each container. No per-object branch decides who is hit; the
+  isotropic kernel's missing shock shadowing and impedance split is a flagged IOU in docs/60.
+  Inside an aggregate, each parcel's fate is now `damage::classify` on its deposited energy
+  density against its own catalogued thresholds: a parcel past Intact holds no tensile bond, so a
+  sufficient meteor shatters the iron ball (bonds fracture, parcels scatter, the hottest parcels
+  melt and glow through the shared incandescence curve) while an insufficient one merely displaces
+  it, with no line of code that says destroy. The ground scene's crosshair now reports the first
+  MATTER the look ray meets (gold on a body's parcels, red on the terrain), so aiming at the ball
+  means hitting the ball; the drop button throws the same 1,200 kg of iron at 17 km/s, a real
+  asteroid arrival speed; and the ground page finally un-hides the sim HUD it was already filling.
+
+- **The conformance ledger names its consumers, and the charter states the merge rule.** Every row
+  in docs/46's ledger now carries a consumers column: the scenes and modules that actually
+  instantiate the physics in question, each claim a grep result, with **none** written where the
+  honest answer is none (`AirField`, the voxel-to-field demotion trigger, `MAX_EJECT`, body/debris
+  coupling, the two rigid-body reps). A verified law with zero consumers stays open no matter how
+  green its tests are. The new docs/46 §7 makes that the bar for merging: new physics lands either
+  wired into at least one scene or carrying a flagged IOU naming the milestone that wires it;
+  "built and verified" counts as inventory, not done.
+
+- **The ball is matter (docs/23 step 1).** A ground world can declare solid `bodies` (material,
+  radius, position); each is built as `Aggregate::cohesive`, a bonded lattice of real particles at
+  the material's own density, with bond stiffness from its real elastic modulus (k = E*L, capped for
+  explicit stability, flagged), damping derived from its restitution, and the named planet's emergent
+  surface gravity. The body falls, rests on the terrain through the same
+  `granular::terrain_contact_resolve` every grain and the camera shell use, and renders through the
+  scene's one instanced particle path. A thrown meteor meets it through the one impact door:
+  `interaction::detect_swept` forecasts the contact and the door's reduced-mass energy and momentum
+  deposit into the body's parcels (`Aggregate::deposit_impact`), so its matter heats and recoils with
+  no ball-specific branch. The shipped ground world places a 2 m iron ball at the initial crosshair
+  point; the HUD and `run-definition` report its parcels, bonds, and height over the ground beneath
+  it.
+
+- **The camera-shell sweep no longer freezes the free-fly walk.** The swept resolve re-lerped each
+  sample against its own mutated endpoint, which contracted every no-contact move toward last
+  frame's eye by n!/n^n; any move longer than the shell left the camera frozen (wheel dolly and
+  hold-to-walk were both dead in the ground scene, only mouse-look worked). The sweep now samples
+  the fixed segment and carries the accumulated contact correction
+  (`granular::sweep_shell_resolve`), with native regression tests.
+
 - **The GPU gravity dispatch gains the LBVH Barnes-Hut tree above a second measured knee (docs/37).**
   The banked tree pipeline in `bh_gravity.wgsl` (Karras build, bottom-up COM, theta=0.5 traversal, the
   kernels `tools/gpu-bh-verify` verified stage by stage) is now live: `GravityField` routes any dispatch

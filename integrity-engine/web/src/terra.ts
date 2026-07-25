@@ -129,21 +129,42 @@ async function main(): Promise<void> {
     const moveHint = ["forward", "left", "back", "right"].map((a) => keyFor(a as Action)).join("");
     const altHint = [keyFor("up"), keyFor("down")].filter(Boolean).join("/");
     const controlsHint =
-      `${moveHint ? `${moveHint} fly · ` : ""}${altHint ? `${altHint} alt · ` : ""}wheel zoom · ${CAMERA_HINT}`;
+      `${moveHint ? `${moveHint} fly · ` : ""}${altHint ? `${altHint} alt · ` : ""}wheel zoom · ` +
+      `${CAMERA_HINT} · shift-drag, middle-drag or shift+scroll to pan`;
 
     // THE shared camera controls (camera-input.ts): right-drag / alt-drag looks, left-or-ctrl walks
     // forward, +shift reverses. Terra's own `drag_look` and `move_tangent` do the work; the gesture
     // grammar is identical to every other scene.
-    const cam = attachCameraInput(canvas, (dyaw, dpitch) => {
-      // `drag_look` takes pixel deltas; the module reports radians, so convert back through its own
-      // sensitivity rather than inventing a second constant.
-      terra.drag_look(-dyaw / 0.005, -dpitch / 0.005);
-    });
+    // THE pan path (one per scene): the viewpoint slides across the surface through the same mover
+    // as the strafe keys (`pan_tangent` → `move_tangent`). Deltas arrive in CSS pixels; the engine
+    // scales in its own device-pixel grid, so convert by the canvas's dpr. Every pan gesture
+    // (shift-drag, middle-drag, shift+scroll, horizontal scroll) lands here.
+    const pan = (dxPx: number, dyPx: number) => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      terra.pan_tangent(dxPx * dpr, dyPx * dpr);
+    };
+    const cam = attachCameraInput(
+      canvas,
+      (dyaw, dpitch) => {
+        // `drag_look` takes pixel deltas; the module reports radians, so convert back through its own
+        // sensitivity rather than inventing a second constant.
+        terra.drag_look(-dyaw / 0.005, -dpitch / 0.005);
+      },
+      { onPan: pan },
+    );
     canvas.addEventListener(
       "wheel",
       (e) => {
         e.preventDefault();
-        terra.zoom_alt(e.deltaY * 0.01); // scroll down → climb (zoom out); scroll up → descend (zoom in)
+        // Shift+scroll and the horizontal wheel axis are trackpad pan: the SAME pan path as the
+        // drag, with the sign of a grab (the world follows the fingers). Bare vertical scroll
+        // stays altitude: scroll down → climb (zoom out); scroll up → descend (zoom in).
+        if (e.shiftKey) {
+          pan(-e.deltaX, -e.deltaY);
+          return;
+        }
+        if (e.deltaX !== 0) pan(-e.deltaX, 0);
+        if (e.deltaY !== 0) terra.zoom_alt(e.deltaY * 0.01);
       },
       { passive: false },
     );

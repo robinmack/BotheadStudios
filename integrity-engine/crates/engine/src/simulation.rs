@@ -20,12 +20,136 @@
 //! window later (docs/52). Keeping this headless is what makes it natively testable, which is the
 //! property the scene structs never had.
 
+use crate::aggregate::Aggregate;
 use crate::gravity::MassField;
 use crate::materials::Material;
 use crate::matter::MatterSim;
 use crate::resolution::{Effect, ResolutionField};
-use crate::terra::world_def::{GroundDef, GroundEvent, World as WorldDef};
-use glam::Vec3;
+use crate::terra::world_def::{GroundBody, GroundDef, GroundEvent, World as WorldDef};
+use glam::{DVec3, Vec3};
+
+/// Bond stiffness ceiling (N/m) for real-time explicit integration. The honest bond constant is the
+/// material's own k = E·L (iron: ~2e11 N/m), but that needs thousands of substeps per frame to stay
+/// stable explicitly - true stiffness arrives with implicit integration. FLAGGED stand-in (Law V):
+/// still ~1000x the old hand-tuned value, so the solid reads as rigid.
+const BODY_STIFFNESS_CAP: f64 = 5.0e9;
+
+/// Fractional bond stretch at which the solid fractures. Iron is nearly inextensible: it breaks at a
+/// small strain rather than stretching like rubber. FLAGGED stand-in (Law V) for a catalogued
+/// elongation-at-fracture datum the material DB does not carry yet - small enough to shatter under a
+/// meteor, large enough to survive its own landing.
+const BODY_BREAK_STRAIN: f64 = 0.06;
+
+/// Per-substep position-projection cap (m) for a body particle resolving against the terrain.
+/// Mirrors `particle_step.wgsl::MAX_SURFACE_CORRECTION` - the bound that makes the projection
+/// stack-safe and keeps it from doing work (the grains' settling-storm fix). A body's bonds are far
+/// stiffer than a grain contact, so an unbounded snap here would pump them.
+const BODY_MAX_SURFACE_CORRECTION: f64 = 0.01;
+
+/// A solid body as COHESIVE MATTER (docs/23 step 1): a lattice of real particles bonded by the
+/// material's own elastic force, resting on the terrain through the same contact law every grain
+/// uses. This is what retires the rigid-sphere probe: impacts, gravity, contact and damage all act on
+/// its particles with no special case.
+pub struct CohesiveBody {
+    pub agg: Aggregate,
+    /// Velocity-Verlet acceleration buffer, seeded once and carried across steps.
+    acc: Vec<DVec3>,
+    /// A particle's collision half-extent (m) - half the lattice spacing, so neighbours touch at rest.
+    pub part_half: f64,
+}
+
+impl CohesiveBody {
+    /// The body's structural verdict in one word, read from the same bond state the physics runs
+    /// on: "intact" while every forged bond still holds, "dented" once some fraction has fractured
+    /// but the majority still binds the lattice, "shattered" once fewer than half survive. The
+    /// half-way boundary is the one the fracture tests already assert (a sufficient meteor breaks
+    /// more than half the bonds; an insufficient one leaves at least nine in ten). No new physics -
+    /// this only NAMES the bond count so a reader is not left to interpret a raw number.
+    pub fn verdict(&self) -> &'static str {
+        let total = self.agg.bonds.len();
+        let active = self.agg.active_bonds();
+        if active == total {
+            "intact"
+        } else if 2 * active >= total {
+            "dented"
+        } else {
+            "shattered"
+        }
+    }
+}
+
+/// Build a declared body as a cohesive aggregate. The lattice spacing is the world's own grain scale,
+/// so the body is resolved at the same granularity as the matter around it (docs/47).
+fn build_cohesive_body(
+    def: &GroundBody,
+    materials: &[Material],
+    lattice_m: f64,
+    surface_g: f32,
+) -> Result<CohesiveBody, String> {
+    let mat_idx = materials
+        .iter()
+        .position(|m| m.id == def.material)
+        .ok_or_else(|| format!("body material {:?} is not in the material DB", def.material))?;
+    let mat = &materials[mat_idx];
+    if mat.youngs_modulus <= 0.0 {
+        return Err(format!(
+            "material {:?} has no elastic modulus; a cohesive solid's stiffness derives from it",
+            def.material
+        ));
+    }
+    let l = lattice_m.max(1.0e-3) as f64;
+    let density = mat.density as f64;
+    let at = DVec3::new(def.at_m[0] as f64, def.at_m[1] as f64, def.at_m[2] as f64);
+    let ri = (def.radius_m / l).ceil() as i32;
+    let mut particles = Vec::new();
+    for z in -ri..=ri {
+        for y in -ri..=ri {
+            for x in -ri..=ri {
+                let off = DVec3::new(x as f64, y as f64, z as f64) * l;
+                if off.length() <= def.radius_m {
+                    particles.push(crate::orbit::Body {
+                        pos: at + off,
+                        vel: DVec3::ZERO,
+                        mass: density * l * l * l, // one lattice cell of the real material
+                    });
+                }
+            }
+        }
+    }
+    if particles.is_empty() {
+        return Err(format!(
+            "body radius {} m is smaller than the world's {} m grain - no matter to build",
+            def.radius_m, l
+        ));
+    }
+    // Rigidity comes from the material's OWN elastic force (docs/23): a lattice bond of spacing L has
+    // spring constant k = E·A/L = E·L (A = L² tributary area) - capped for explicit stability (see
+    // BODY_STIFFNESS_CAP). Bond cutoff 1.75·L reaches face/edge/corner neighbours.
+    let stiffness = (mat.youngs_modulus as f64 * l).min(BODY_STIFFNESS_CAP);
+    let mut agg = Aggregate::cohesive(
+        particles,
+        mat_idx,
+        0.5 * l,
+        1.75 * l,
+        stiffness,
+        0.0,
+        BODY_BREAK_STRAIN,
+    );
+    // Damping DERIVED from the material's own coefficient of restitution - ζ = −ln(e)/√(π²+ln²e), the
+    // SAME `zeta_for_restitution` the granular contact law uses, so a bond and a grain contact agree on
+    // what "iron is this bouncy" means. `critically_damped` supplies the units with the coordination
+    // correction that fixed the probe-detonation bug (docs/23).
+    agg.damping =
+        agg.critically_damped(crate::granular::zeta_for_restitution(mat.restitution as f64));
+    if let Some(c) = mat.specific_heat() {
+        agg = agg.with_specific_heat(c as f64);
+    }
+    // Surface gravity is the field of the WHOLE planet below, ~uniform over this small patch -
+    // computed from the named planet (g = GM/R²), never a constant.
+    let mut agg = agg.with_gravity(DVec3::new(0.0, -(surface_g as f64), 0.0));
+    let acc = agg.accelerations();
+    Ok(CohesiveBody { agg, acc, part_half: 0.5 * l })
+}
 
 /// A running ground simulation built from a definition.
 pub struct Simulation {
@@ -45,6 +169,8 @@ pub struct Simulation {
     created_total: usize,
     /// Meteors in flight. The engine flies and lands them; the caller only throws.
     meteors: Vec<Meteor>,
+    /// The declared solid bodies, as cohesive matter (docs/23 step 1).
+    bodies: Vec<CohesiveBody>,
 }
 
 /// A meteor: real matter with a mass, a material, a place and a velocity.
@@ -88,6 +214,12 @@ impl Simulation {
         let surface_y = world.bulk_height(0.0, 0.0);
         let field = MassField::build(&world, &materials, 8)
             .on_host(planet_mass, planet_radius, surface_y);
+        // The declared solid bodies, built as cohesive matter at the world's own grain scale.
+        let bodies = ground
+            .bodies
+            .iter()
+            .map(|b| build_cohesive_body(b, &materials, ground.grain_size_m as f64, surface_g))
+            .collect::<Result<Vec<_>, String>>()?;
         let mut sim = Simulation {
             world,
             matter: MatterSim::new(60_000),
@@ -102,6 +234,7 @@ impl Simulation {
             surface_g,
             created_total: 0,
             meteors: Vec::new(),
+            bodies,
         };
         sim.apply_events();
         Ok(sim)
@@ -113,18 +246,19 @@ impl Simulation {
         Self::from_definition(&def, materials)
     }
 
-    /// Apply the declared events. Impacts go straight through the shared `MatterSim::impact`; ejecta
-    /// become analytic effects for the resolution field to hand off when they enter view.
+    /// Apply the declared events. Impacts go through the one deposition door like every other impact
+    /// event; ejecta become analytic effects for the resolution field to hand off when they enter view.
     fn apply_events(&mut self) {
         for ev in self.def.events.clone() {
             match ev {
                 GroundEvent::Impact { at_m, direction, energy_j } => {
-                    self.created_total += self.matter.impact(
-                        &mut self.world,
-                        &self.materials,
+                    // A declared impact is pure energy with no named impactor, so it carries no
+                    // momentum of its own - the deposit is heat and excavation only.
+                    self.created_total += self.deposit_event(
                         Vec3::from_array(at_m),
                         Vec3::from_array(direction),
-                        energy_j,
+                        DVec3::ZERO,
+                        energy_j as f64,
                     );
                 }
                 GroundEvent::Ejecta { at_m, velocity_ms, radius_m, grain_radius_m, material } => {
@@ -162,7 +296,68 @@ impl Simulation {
         self.created_total += self.matter.particle_count().saturating_sub(before);
         self.fly_meteors(dt);
         self.matter.step(&mut self.world, &self.field, &[], dt);
+        self.step_cohesive_bodies(dt);
         resolved
+    }
+
+    /// Advance every cohesive body: its bonds + gravity settle it to a ground state
+    /// (`Aggregate::step`, substepped to the bond stiffness - rigidity is paid for with real
+    /// substeps), and each particle rests on the terrain through the SAME non-injecting contact
+    /// constraint the grains and the camera shell use (`granular::terrain_contact_resolve`). The
+    /// bonds transmit the support up, so the ball rests as a ball; dig its ground away and its
+    /// support is really gone.
+    fn step_cohesive_bodies(&mut self, dt: f32) {
+        let dt = dt as f64;
+        // μ under a contact is the TERRAIN's own coefficient - ice is slippery because ice's datum
+        // says so. Off the patch or over an empty column, the world's declared bottom stratum
+        // continues (the bulk is the same declared matter, docs/54). FLAGGED: the surface material's
+        // μ alone; a pair-combining rule between body and ground does not exist yet.
+        let mu_fallback = self
+            .def
+            .surface
+            .strata
+            .last()
+            .and_then(|s| self.materials.iter().find(|m| m.id == s.material))
+            .map(|m| m.friction_coefficient as f64)
+            .unwrap_or(0.0);
+        let center = self.world.center();
+        for body in &mut self.bodies {
+            if body.agg.particles.is_empty() {
+                continue;
+            }
+            let sub = body.agg.stable_substeps(dt).clamp(1, 256);
+            let pdt = dt / sub as f64;
+            for _ in 0..sub {
+                body.agg.step(&mut body.acc, pdt);
+                for p in &mut body.agg.particles {
+                    let sample = Vec3::new(p.pos.x as f32, p.pos.y as f32, p.pos.z as f32);
+                    let (h, dhdx, dhdz) = self.world.surface_bilinear_grad(sample);
+                    let xi = (sample.x + center.x).floor() as i32;
+                    let zi = (sample.z + center.z).floor() as i32;
+                    let mu = self
+                        .world
+                        .surface_top_voxel(xi, zi)
+                        .and_then(|t| self.world.material_at(xi, t, zi))
+                        .map(|m| self.materials[m].friction_coefficient as f64)
+                        .unwrap_or(mu_fallback);
+                    let hit = crate::granular::terrain_contact_resolve(
+                        p.pos,
+                        p.vel,
+                        h as f64,
+                        dhdx as f64,
+                        dhdz as f64,
+                        body.part_half,
+                        mu,
+                        BODY_MAX_SURFACE_CORRECTION,
+                        f64::INFINITY, // open sky: nothing rests on the body yet
+                    );
+                    if hit.hit {
+                        p.vel = hit.vel;
+                        p.pos += hit.dpos;
+                    }
+                }
+            }
+        }
     }
 
     /// The world's declared name (for the HUD).
@@ -229,41 +424,361 @@ impl Simulation {
     }
 
     /// Advance every meteor in flight under the planet's gravity and impact the ones that arrive.
-    /// Returns grains created this step.
+    /// Wherever the arrival is detected - a solid body forecast on the swept segment, or the bulk
+    /// terrain - the delivery is the SAME event through the same door (`deposit_event`); detection
+    /// picks the site, never the recipients. Returns grains created this step.
     fn fly_meteors(&mut self, dt: f32) -> usize {
         let g = Vec3::new(0.0, -self.surface_g, 0.0);
-        let mut landed: Vec<Meteor> = Vec::new();
+        let mut landed: Vec<(Vec3, Vec3, DVec3, f64)> = Vec::new(); // (site, dir, momentum, energy)
         let mut still: Vec<Meteor> = Vec::with_capacity(self.meteors.len());
-        for mut m in self.meteors.drain(..) {
+        let mut flying = std::mem::take(&mut self.meteors);
+        for mut m in flying.drain(..) {
+            let before = m;
             m.vel += g * dt;
             m.pos += m.vel * dt;
+            // A meteor meeting a cohesive body is forecast by the ONE collision owner
+            // (`interaction::detect_swept`) on the swept segment. The forecast yields the event -
+            // site, momentum, reduced-mass energy - and nothing else; what that event reaches is
+            // the deposition door's business alone.
+            if let Some((site, momentum, energy_j)) = self.forecast_body_contact(&before, &m, dt) {
+                let dir = m.vel.normalize_or(Vec3::new(0.0, -1.0, 0.0));
+                landed.push((site, dir, momentum, energy_j));
+                log::info!(
+                    "impact event on a body: {:.0} kg, {:.2e} J through the one door",
+                    m.mass_kg, energy_j
+                );
+                continue;
+            }
             // THE shared ground height (`World::ground_height`). This asked `surface_top_voxel` — an
             // integer voxel top — while the camera's collision shell used the bilinear surface, up to a
             // metre apart on a slope. A meteor's contact height disagreed with the surface it landed on.
             let ground = self.world.ground_height(m.pos.x, m.pos.z);
             if m.pos.y <= ground {
-                landed.push(m);
+                // The site is where the TRAJECTORY crosses the surface, not wherever the post-step
+                // sample happens to be: a fast meteor moves metres per step, so the sample can be
+                // metres underground, and a buried site couples to the wrong matter (the swept body
+                // path already has this honesty; the ground gets the same). Bisect the segment
+                // against the shared ground height.
+                let (mut lo, mut hi) = (0.0f32, 1.0f32);
+                for _ in 0..16 {
+                    let mid = 0.5 * (lo + hi);
+                    let p = before.pos + (m.pos - before.pos) * mid;
+                    if p.y > self.world.ground_height(p.x, p.z) {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                let site = before.pos + (m.pos - before.pos) * hi;
+                // Energy is ½mv² of the matter that actually arrived. Not a parameter.
+                let speed = m.vel.length();
+                let energy_j = 0.5 * m.mass_kg as f64 * (speed as f64) * (speed as f64);
+                let dir = m.vel.normalize_or(Vec3::new(0.0, -1.0, 0.0));
+                let momentum =
+                    DVec3::new(m.vel.x as f64, m.vel.y as f64, m.vel.z as f64) * m.mass_kg as f64;
+                landed.push((site, dir, momentum, energy_j));
+                log::info!(
+                    "impact event on the ground: {:.0} kg at {:.0} m/s = {:.2e} J",
+                    m.mass_kg, speed, energy_j
+                );
             } else {
                 still.push(m);
             }
         }
         self.meteors = still;
         let mut created = 0;
-        for m in landed {
-            // Energy is ½mv² of the matter that actually arrived. Not a parameter.
-            let speed = m.vel.length();
-            let energy_j = 0.5 * m.mass_kg * speed * speed;
-            let dir = m.vel.normalize_or(Vec3::new(0.0, -1.0, 0.0));
-            let n = self.matter.impact(&mut self.world, &self.materials, m.pos, dir, energy_j);
-            log::info!(
-                "impact: {:.0} kg at {:.0} m/s = {:.2e} J -> {n} grains",
-                m.mass_kg, speed, energy_j
-            );
-            created += n;
+        for (site, dir, momentum, energy_j) in landed {
+            created += self.deposit_event(site, dir, momentum, energy_j);
         }
         self.created_total += created;
         created
     }
+
+    /// **The engine forecasting a meteor into a solid body.** The engine already holds both - the
+    /// meteor's mass, material and swept path; the body's matter - so it builds the `BodyState`s and
+    /// asks `interaction::detect_swept`, the same owner that forecasts Theia into proto-Earth. On a
+    /// contact that resolves matter it returns the EVENT: the site on the struck body's own skin, the
+    /// striker's momentum, and the door's reduced-mass energy. It deposits nothing itself - delivery
+    /// belongs to `deposit_event`, the same door a ground landing goes through.
+    /// (Like the ground impact, the impactor's own matter joining the wreck is a flagged IOU.)
+    fn forecast_body_contact(
+        &mut self,
+        before: &Meteor,
+        after: &Meteor,
+        dt: f32,
+    ) -> Option<(Vec3, DVec3, f64)> {
+        if self.bodies.is_empty() {
+            return None;
+        }
+        let m_strength = self
+            .materials
+            .get(before.material)
+            .map(|mm| mm.fracture_strength as f64)
+            .unwrap_or(0.0);
+        for body in &self.bodies {
+            if body.agg.particles.is_empty() {
+                continue;
+            }
+            let com = body.agg.com();
+            let mass = body.agg.total_mass();
+            let vel = body.agg.particles.iter().map(|p| p.vel * p.mass).sum::<DVec3>() / mass;
+            // The body's contact radius is its real extent: the farthest particle plus its half-width.
+            let radius = body
+                .agg
+                .particles
+                .iter()
+                .map(|p| (p.pos - com).length())
+                .fold(0.0, f64::max)
+                + body.part_half;
+            let strength = self
+                .materials
+                .get(body.agg.material)
+                .map(|mm| mm.fracture_strength as f64)
+                .unwrap_or(0.0);
+            let states = [
+                crate::interaction::BodyState {
+                    pos: com,
+                    vel,
+                    mass_kg: mass,
+                    radius_m: radius,
+                    strength_pa: strength,
+                },
+                crate::interaction::BodyState {
+                    pos: DVec3::new(before.pos.x as f64, before.pos.y as f64, before.pos.z as f64),
+                    vel: DVec3::new(before.vel.x as f64, before.vel.y as f64, before.vel.z as f64),
+                    mass_kg: before.mass_kg as f64,
+                    radius_m: before.radius_m as f64,
+                    strength_pa: m_strength,
+                },
+            ];
+            let after_pos = [
+                com + vel * dt as f64,
+                DVec3::new(after.pos.x as f64, after.pos.y as f64, after.pos.z as f64),
+            ];
+            for h in crate::interaction::detect_swept(&states, &after_pos, &[true, true]) {
+                if let crate::interaction::Response::ResolveMatter { .. } = h.response {
+                    // The door reports the contact velocity as striker-relative-to-struck; the
+                    // momentum the METEOR delivers flips sign if it is the more massive one.
+                    let v_meteor_rel = if h.striker == 1 {
+                        h.contact_velocity
+                    } else {
+                        -h.contact_velocity
+                    };
+                    let momentum = v_meteor_rel * before.mass_kg as f64;
+                    // The door's site is the STRIKER's centre at contact - a striker-radius off the
+                    // ball's skin. Report the point on the ball's own outermost matter instead, so
+                    // the deposition couples to the matter actually struck rather than empty space
+                    // beside it.
+                    let n = (h.site - after_pos[0]).normalize_or_zero();
+                    let site = after_pos[0] + n * (radius - body.part_half);
+                    return Some((
+                        Vec3::new(site.x as f32, site.y as f32, site.z as f32),
+                        momentum,
+                        h.energy_j,
+                    ));
+                }
+            }
+        }
+        None
+    }
+
+    /// **The one deposition door for the awake set** (docs/23 step 2, docs/16, docs/60). An impact
+    /// event - a meteor arriving, a declared impact, wherever detection found it - deposits its
+    /// energy and momentum into ALL matter in range in ONE walk: terrain voxels, every cohesive
+    /// body's parcels, and every debris grain. No recipient is named; the split is geometry and
+    /// coupling alone:
+    ///
+    ///   * the coupling length λ is the crater radius this much energy opens in the matter AT the
+    ///     site (E/σ - `damage::crater_volume`, the same accounting every impact in the engine
+    ///     uses), clamped between the grain scale and the materialisation LOD cap. A site of
+    ///     cohesionless matter (σ = 0) arrests nothing, so the event reaches the full cap;
+    ///   * each parcel of matter couples through the same shell it sits on: w = V · exp(−d/λ) / d²,
+    ///     spherical spreading of the front attenuated over the crater scale, with d floored at the
+    ///     grain scale (coupling below the resolution is not resolvable).
+    ///
+    /// Each recipient's SHARE of the event is w/Σw, delivered through the operator that already owns
+    /// its container - `MatterSim::impact` excavates the terrain's share (its momentum share is
+    /// transmitted into the planet the patch is attached to), `Aggregate::deposit_impact` couples a
+    /// body's share into its parcels, `deposit_impulse` + `deposit_shock_heat` drive the debris
+    /// share. What any share DOES - crater, dent, shatter, glow - stays each material's own verdict.
+    ///
+    /// FLAGGED IOU: the kernel is isotropic. Real shock transport is shadowed and impedance-matched -
+    /// a dense body between the site and the far wall absorbs what would have reached the wall, and
+    /// energy crosses a material boundary by the impedance ratio. That needs shock transport through
+    /// the actual contact network, which does not exist yet; the isotropic kernel is the honest
+    /// geometric answer until it does.
+    fn deposit_event(
+        &mut self,
+        site: Vec3,
+        direction: Vec3,
+        momentum: DVec3,
+        energy_j: f64,
+    ) -> usize {
+        if energy_j <= 0.0 {
+            return 0;
+        }
+        let cap = crate::matter::IMPACT_LOD_R as f64;
+        let grain = self.def.grain_size_m as f64;
+        let sigma = self.strength_at(site);
+        let lambda = if sigma > 0.0 {
+            crate::damage::crater_radius(crate::damage::crater_volume(energy_j, sigma))
+        } else {
+            cap
+        }
+        .clamp(grain, cap);
+        let kernel = |d: f64| {
+            let d = d.max(grain);
+            (-d / lambda).exp() / (d * d)
+        };
+        let sited = DVec3::new(site.x as f64, site.y as f64, site.z as f64);
+
+        // Terrain: every solid voxel in range couples with its own cubic metre of matter.
+        let mut w_terrain = 0.0f64;
+        {
+            let center = self.world.center();
+            let sv = site + center;
+            let (cx, cy, cz) = (sv.x.floor() as i32, sv.y.floor() as i32, sv.z.floor() as i32);
+            let ri = crate::matter::IMPACT_LOD_R;
+            for dz in -ri..=ri {
+                for dy in -ri..=ri {
+                    for dx in -ri..=ri {
+                        let (x, y, z) = (cx + dx, cy + dy, cz + dz);
+                        let vc = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+                        let d = (vc - sv).length() as f64;
+                        if d > cap || self.world.material_at(x, y, z).is_none() {
+                            continue;
+                        }
+                        w_terrain += kernel(d);
+                    }
+                }
+            }
+        }
+
+        // Debris grains in range - matter already flying or resting as particles.
+        let mut w_grains = 0.0f64;
+        let mut m_grains = 0.0f64;
+        for p in &self.matter.particles {
+            let d = (p.pos - site).length() as f64;
+            if d > cap {
+                continue;
+            }
+            let rho = self
+                .materials
+                .get(p.material)
+                .map(|mm| mm.density as f64)
+                .unwrap_or(1.0)
+                .max(1.0);
+            w_grains += (p.mass as f64 / rho) * kernel(d);
+            m_grains += p.mass as f64;
+        }
+
+        // Every cohesive body's parcels in range.
+        let mut w_bodies = vec![0.0f64; self.bodies.len()];
+        for (bi, b) in self.bodies.iter().enumerate() {
+            let rho = self
+                .materials
+                .get(b.agg.material)
+                .map(|mm| mm.density as f64)
+                .unwrap_or(1.0)
+                .max(1.0);
+            for p in &b.agg.particles {
+                let d = (p.pos - sited).length();
+                if d > cap {
+                    continue;
+                }
+                w_bodies[bi] += (p.mass / rho) * kernel(d);
+            }
+        }
+
+        let w_total = w_terrain + w_grains + w_bodies.iter().sum::<f64>();
+        if w_total <= 0.0 {
+            return 0; // an event in empty space couples to nothing
+        }
+
+        // Debris first, so the share reaches the grains the walk actually saw - the terrain's
+        // excavation appends NEW ejecta afterwards, and those carry their own energy already.
+        if w_grains > 0.0 && m_grains > 0.0 {
+            let share = w_grains / w_total;
+            let p_g = momentum * share;
+            self.matter.deposit_impulse(
+                0,
+                site,
+                Vec3::new(p_g.x as f32, p_g.y as f32, p_g.z as f32),
+                cap as f32,
+            );
+            // The heat is what the impulse did not turn into bulk motion, same as every deposit.
+            let heat = (energy_j * share - p_g.length_squared() / (2.0 * m_grains)).max(0.0);
+            self.matter.deposit_shock_heat(0, site, heat as f32, &self.materials);
+        }
+
+        for (bi, b) in self.bodies.iter_mut().enumerate() {
+            if w_bodies[bi] <= 0.0 {
+                continue;
+            }
+            let share = w_bodies[bi] / w_total;
+            b.agg.deposit_impact(&self.materials, sited, momentum * share, energy_j * share);
+        }
+
+        if w_terrain > 0.0 {
+            let share = w_terrain / w_total;
+            return self.matter.impact(
+                &mut self.world,
+                &self.materials,
+                site,
+                direction,
+                (energy_j * share) as f32,
+            );
+        }
+        0
+    }
+
+    /// Yield strength of the matter AT a site - what resists the event there, and therefore what
+    /// sets its coupling length. A body whose parcels contain the site answers with its material;
+    /// otherwise the voxel there, then the column's surface skin, then the declared bottom stratum
+    /// (off the patch the bulk is the same declared matter, docs/54).
+    fn strength_at(&self, site: Vec3) -> f64 {
+        let sited = DVec3::new(site.x as f64, site.y as f64, site.z as f64);
+        for b in &self.bodies {
+            if b.agg
+                .particles
+                .iter()
+                .any(|p| (p.pos - sited).length() <= 2.0 * b.part_half)
+            {
+                return self
+                    .materials
+                    .get(b.agg.material)
+                    .map(|m| m.fracture_strength as f64)
+                    .unwrap_or(0.0);
+            }
+        }
+        let c = self.world.center();
+        let (x, y, z) = (
+            (site.x + c.x).floor() as i32,
+            (site.y + c.y).floor() as i32,
+            (site.z + c.z).floor() as i32,
+        );
+        if let Some(m) = self.world.material_at(x, y, z) {
+            return self.materials[m].fracture_strength as f64;
+        }
+        if let Some(t) = self.world.surface_top_voxel(x, z) {
+            if let Some(m) = self.world.material_at(x, t, z) {
+                return self.materials[m].fracture_strength as f64;
+            }
+        }
+        self.def
+            .surface
+            .strata
+            .last()
+            .and_then(|s| self.materials.iter().find(|m| m.id == s.material))
+            .map(|m| m.fracture_strength as f64)
+            .unwrap_or(0.0)
+    }
+
+    /// The declared solid bodies, live - cohesive matter for the renderer and the tests.
+    pub fn cohesive_bodies(&self) -> &[CohesiveBody] {
+        &self.bodies
+    }
+
     /// Live particles, for the renderer.
     pub fn particles(&self) -> &[crate::matter::Particle] {
         &self.matter.particles
@@ -501,6 +1016,377 @@ mod tests {
             r#"{"name":"empty","type":"ground","ground":{}}"#, mats()).expect("builds");
         assert_eq!(sim.particle_count(), 0);
         assert_eq!(sim.analytic_count(), 0);
+    }
+
+    /// **The ball is matter** (docs/23 step 1). A ground world declares a solid body - material,
+    /// radius, position, nothing else - and the engine builds it as COHESIVE MATTER: a bonded lattice
+    /// of real particles. Declared above the terrain it FALLS under the planet's own gravity, RESTS
+    /// on the surface through the same contact law every grain uses, and STAYS there. No rigid-sphere
+    /// special case, no scripted placement.
+    #[test]
+    fn a_declared_cohesive_ball_falls_rests_on_the_terrain_and_stays() {
+        let json = r#"{
+          "name":"ball","type":"ground",
+          "ground":{ "camera_m":[0,50,0], "view_radius_m":200,
+            "surface":{ "amplitude_m":0.0 },
+            "bodies":[{"material":"iron","radius_m":1.5,"at_m":[0.0,50.0,0.0]}] }
+        }"#;
+        let mut sim = Simulation::from_json(json, mats()).expect("a world can declare a solid body");
+        assert_eq!(sim.cohesive_bodies().len(), 1);
+        let ground = sim.world.ground_height(0.0, 0.0) as f64;
+        let ball = &sim.cohesive_bodies()[0];
+        let bonds0 = ball.agg.active_bonds();
+        assert!(bonds0 > 0, "a cohesive solid is bonded");
+        assert!(
+            ball.agg.com().y > ground + 3.0,
+            "it starts in the air (com {:.1} vs ground {ground:.1})",
+            ball.agg.com().y
+        );
+
+        // FALLS: after one second its centre of mass is measurably lower.
+        let y0 = sim.cohesive_bodies()[0].agg.com().y;
+        for _ in 0..60 {
+            sim.step(1.0 / 60.0);
+        }
+        let y1 = sim.cohesive_bodies()[0].agg.com().y;
+        assert!(y1 < y0 - 1.0, "gravity pulls it down without help ({y0:.2} -> {y1:.2})");
+
+        // RESTS: give it time to land and ring down, then its lowest particle sits ON the surface.
+        for _ in 0..840 {
+            sim.step(1.0 / 60.0);
+        }
+        let ball = &sim.cohesive_bodies()[0];
+        let bottom = ball
+            .agg
+            .particles
+            .iter()
+            .map(|p| p.pos.y)
+            .fold(f64::INFINITY, f64::min)
+            - ball.part_half;
+        assert!(
+            (bottom - ground).abs() < 0.6,
+            "the ball rests ON the terrain: bottom {bottom:.2} vs ground {ground:.2}"
+        );
+
+        // STAYS: two more seconds move the centre of mass almost nowhere.
+        let com1 = sim.cohesive_bodies()[0].agg.com();
+        for _ in 0..120 {
+            sim.step(1.0 / 60.0);
+        }
+        let ball = &sim.cohesive_bodies()[0];
+        assert!(
+            (ball.agg.com() - com1).length() < 0.2,
+            "it has settled to a ground state (moved {:.3} m)",
+            (ball.agg.com() - com1).length()
+        );
+        // Its own landing dents nothing: iron survives a few metres of fall.
+        assert_eq!(ball.agg.active_bonds(), bonds0, "landing does not shatter it");
+    }
+
+    /// **The impact energy reaches the ball through the one door** (`interaction::detect_swept` /
+    /// `respond`) - no ball-specific collision branch. A meteor thrown at the resting ball is
+    /// forecast by the engine's own collision owner; the door's reduced-mass energy and the
+    /// striker's momentum are deposited into the ball's PARCELS (`Aggregate::deposit_impact`,
+    /// the same coupling the terrain uses), so its matter measurably heats and recoils. What that
+    /// energy then DOES to iron (dent / shatter / vaporize) is `damage`'s call, asserted when the
+    /// destruction step lands.
+    #[test]
+    fn a_meteors_energy_reaches_the_ball_through_the_shared_door() {
+        let json = r#"{
+          "name":"door","type":"ground",
+          "ground":{ "camera_m":[0,50,0], "view_radius_m":200,
+            "surface":{ "amplitude_m":0.0 },
+            "bodies":[{"material":"iron","radius_m":1.5,"at_m":[0.0,45.2,0.0]}] }
+        }"#;
+        let mut sim = Simulation::from_json(json, mats()).expect("builds");
+        // Let it settle onto the ground first, so the hit is on a RESTING ball.
+        for _ in 0..300 {
+            sim.step(1.0 / 60.0);
+        }
+        let before_temp = sim.cohesive_bodies()[0]
+            .agg
+            .temps
+            .iter()
+            .cloned()
+            .fold(0.0f32, f32::max);
+        let com_v0 = {
+            let b = &sim.cohesive_bodies()[0];
+            b.agg.particles.iter().map(|p| p.vel * p.mass).sum::<glam::DVec3>()
+                / b.agg.total_mass()
+        };
+        let ground = sim.world.ground_height(0.0, 0.0);
+        sim.throw_meteor(Meteor {
+            pos: Vec3::new(0.0, ground + 80.0, 0.0),
+            vel: Vec3::new(0.0, -250.0, 0.0),
+            mass_kg: 1200.0,
+            material: crate::materials::index_of(&mats(), "iron"),
+            radius_m: 0.33,
+        });
+        for _ in 0..600 {
+            sim.step(1.0 / 60.0);
+            if sim.meteors().is_empty() {
+                break;
+            }
+        }
+        assert!(sim.meteors().is_empty(), "the meteor arrived");
+        let ball = &sim.cohesive_bodies()[0];
+        let after_temp = ball.agg.temps.iter().cloned().fold(0.0f32, f32::max);
+        assert!(
+            after_temp > before_temp + 0.5,
+            "the door's deposit must HEAT the parcels: {before_temp:.1} K -> {after_temp:.1} K"
+        );
+        let com_v1 = ball.agg.particles.iter().map(|p| p.vel * p.mass).sum::<glam::DVec3>()
+            / ball.agg.total_mass();
+        assert!(
+            (com_v1 - com_v0).length() > 0.05,
+            "and the momentum really arrives (com velocity changed {:.3} m/s)",
+            (com_v1 - com_v0).length()
+        );
+    }
+
+    /// **One event, every recipient** (docs/23 step 2). A meteor landing BESIDE the resting ball
+    /// must reach the terrain (a crater) AND the ball (heat and momentum through the same door) in
+    /// the one deposition walk - no per-object branch decides who is hit. And the ball's fate stays
+    /// its material's own verdict: a nearby landing deposits less than iron's fracture strength, so
+    /// every bond survives.
+    #[test]
+    fn one_impact_event_reaches_the_terrain_and_the_ball_through_one_door() {
+        let json = r#"{
+          "name":"door-all","type":"ground",
+          "ground":{ "camera_m":[0,50,0], "view_radius_m":200,
+            "surface":{ "amplitude_m":0.0 },
+            "bodies":[{"material":"iron","radius_m":1.5,"at_m":[5.0,45.2,0.0]}] }
+        }"#;
+        let mut sim = Simulation::from_json(json, mats()).expect("builds");
+        for _ in 0..300 {
+            sim.step(1.0 / 60.0); // let the ball settle 5 m from ground zero
+        }
+        let bonds0 = sim.cohesive_bodies()[0].agg.active_bonds();
+        let temp0 = sim.cohesive_bodies()[0].agg.temps.iter().cloned().fold(0.0f32, f32::max);
+        let ground = sim.world.ground_height(0.0, 0.0);
+        sim.throw_meteor(Meteor {
+            pos: Vec3::new(0.0, ground + 80.0, 0.0),
+            vel: Vec3::new(0.0, -500.0, 0.0),
+            mass_kg: 2000.0,
+            material: crate::materials::index_of(&mats(), "iron"),
+            radius_m: 0.39,
+        });
+        for _ in 0..600 {
+            sim.step(1.0 / 60.0);
+            if sim.meteors().is_empty() {
+                break;
+            }
+        }
+        assert!(sim.meteors().is_empty(), "the meteor arrived");
+        assert!(sim.created_total() > 0, "the terrain's share excavated a crater");
+        let ball = &sim.cohesive_bodies()[0];
+        let temp1 = ball.agg.temps.iter().cloned().fold(0.0f32, f32::max);
+        assert!(
+            temp1 > temp0 + 0.05,
+            "the ball 5 m away is heated by the SAME event: {temp0:.2} K -> {temp1:.2} K"
+        );
+        assert_eq!(
+            ball.agg.active_bonds(),
+            bonds0,
+            "a nearby landing deposits under iron's strength, so the ball keeps every bond"
+        );
+    }
+
+    /// **The door reaches debris grains too.** Grains already in flight when an impact lands nearby
+    /// receive their share - heat a contact could never give them - through the same walk.
+    #[test]
+    fn an_impact_event_heats_debris_grains_already_in_flight() {
+        let json = r#"{
+          "name":"door-debris","type":"ground",
+          "ground":{ "camera_m":[0,50,0], "view_radius_m":200,
+            "surface":{ "amplitude_m":0.0 },
+            "events":[{"kind":"ejecta","at_m":[6.0,50.0,0.0],"velocity_ms":[0,0,0],
+                       "radius_m":2,"grain_radius_m":0.5}] }
+        }"#;
+        let mut sim = Simulation::from_json(json, mats()).expect("builds");
+        sim.step(1.0 / 60.0); // the effect is in view: it materialises into real grains
+        let n0 = sim.particle_count();
+        assert!(n0 > 0, "debris exists before the meteor arrives");
+        assert!(
+            sim.particles().iter().all(|p| p.temp_k <= crate::matter::REF_TEMP_K + 0.01),
+            "and it is cold"
+        );
+        let ground = sim.world.ground_height(0.0, 0.0);
+        sim.throw_meteor(Meteor {
+            pos: Vec3::new(0.0, ground + 60.0, 0.0),
+            vel: Vec3::new(0.0, -400.0, 0.0),
+            mass_kg: 1200.0,
+            material: crate::materials::index_of(&mats(), "iron"),
+            radius_m: 0.33,
+        });
+        for _ in 0..60 {
+            sim.step(1.0 / 60.0);
+            if sim.meteors().is_empty() {
+                break;
+            }
+        }
+        assert!(sim.meteors().is_empty(), "the meteor arrived while the grains were still airborne");
+        let heated = sim
+            .particles()
+            .iter()
+            .take(n0)
+            .filter(|p| p.temp_k > crate::matter::REF_TEMP_K + 0.05)
+            .count();
+        assert!(
+            heated > 0,
+            "pre-existing grains must receive the event's heat through the one door \
+             (0 of {n0} warmed)"
+        );
+    }
+
+    /// **The docs/23 sentence, as a test.** A meteor of sufficient energy dropped on the ball
+    /// destroys it - bonds fracture, parcels scatter, the hottest parcels glow through the shared
+    /// emission curve - with no line of code that says destroy. The deposited energy density simply
+    /// exceeds what iron can survive (`damage::classify` against `data/materials.json`), and the
+    /// same event craters the ground beneath, because the door reaches everything.
+    #[test]
+    fn a_sufficient_meteor_shatters_the_ball_and_its_hottest_parcels_glow() {
+        let json = r#"{
+          "name":"shatter","type":"ground",
+          "ground":{ "camera_m":[0,50,0], "view_radius_m":200,
+            "surface":{ "amplitude_m":0.0 },
+            "bodies":[{"material":"iron","radius_m":1.5,"at_m":[0.0,45.2,0.0]}] }
+        }"#;
+        let mut sim = Simulation::from_json(json, mats()).expect("builds");
+        for _ in 0..300 {
+            sim.step(1.0 / 60.0);
+        }
+        let bonds0 = sim.cohesive_bodies()[0].agg.active_bonds();
+        let spread0 = sim.cohesive_bodies()[0].agg.rms_radius();
+        assert!(bonds0 > 0, "the resting ball is a bonded solid");
+        let ground = sim.world.ground_height(0.0, 0.0);
+        // 1,200 kg of iron at 17 km/s - a typical asteroid arrival speed, ~1.7e11 J. Real matter on
+        // a real trajectory; the outcome is not asked for anywhere below.
+        sim.throw_meteor(Meteor {
+            pos: Vec3::new(0.0, ground + 80.0, 0.0),
+            vel: Vec3::new(0.0, -17_000.0, 0.0),
+            mass_kg: 1200.0,
+            material: crate::materials::index_of(&mats(), "iron"),
+            radius_m: 0.33,
+        });
+        for _ in 0..600 {
+            sim.step(1.0 / 60.0);
+            if sim.meteors().is_empty() {
+                break;
+            }
+        }
+        assert!(sim.meteors().is_empty(), "the meteor arrived");
+        for _ in 0..120 {
+            sim.step(1.0 / 60.0); // two seconds: the over-strained bonds break, the parcels fly
+        }
+        let ball = &sim.cohesive_bodies()[0];
+        let bonds1 = ball.agg.active_bonds();
+        assert!(
+            bonds1 < bonds0 / 2,
+            "iron's thresholds are exceeded: the structure fractures ({bonds0} -> {bonds1} bonds)"
+        );
+        assert_eq!(ball.verdict(), "shattered", "the one-word verdict reports the same bond state");
+        let spread1 = ball.agg.rms_radius();
+        assert!(
+            spread1 > 2.0 * spread0,
+            "the parcels scatter - it is no longer a ball ({spread0:.2} m -> {spread1:.2} m rms)"
+        );
+        let tmax = ball.agg.temps.iter().cloned().fold(0.0f32, f32::max);
+        let glow = crate::emission::incandescence(tmax);
+        assert!(
+            glow[0] > 0.0,
+            "the hottest parcels glow through the SHARED emission curve (peak {tmax:.0} K)"
+        );
+        assert!(
+            sim.created_total() > 0,
+            "and the same event cratered the ground beneath - the door reached everything"
+        );
+    }
+
+    /// The other half of the docs/23 sentence: an INSUFFICIENT meteor dents or merely displaces the
+    /// ball, and it survives - same code path, no branch, just less energy than iron's thresholds.
+    #[test]
+    fn an_insufficient_meteor_displaces_the_ball_and_it_survives() {
+        let json = r#"{
+          "name":"survive","type":"ground",
+          "ground":{ "camera_m":[0,50,0], "view_radius_m":200,
+            "surface":{ "amplitude_m":0.0 },
+            "bodies":[{"material":"iron","radius_m":1.5,"at_m":[0.0,45.2,0.0]}] }
+        }"#;
+        let mut sim = Simulation::from_json(json, mats()).expect("builds");
+        for _ in 0..300 {
+            sim.step(1.0 / 60.0);
+        }
+        let bonds0 = sim.cohesive_bodies()[0].agg.active_bonds();
+        assert_eq!(
+            sim.cohesive_bodies()[0].verdict(),
+            "intact",
+            "settling onto the ground breaks nothing, and the verdict says so"
+        );
+        let spread0 = sim.cohesive_bodies()[0].agg.rms_radius();
+        let com_v0 = {
+            let b = &sim.cohesive_bodies()[0];
+            b.agg.particles.iter().map(|p| p.vel * p.mass).sum::<DVec3>() / b.agg.total_mass()
+        };
+        let ground = sim.world.ground_height(0.0, 0.0);
+        // 300 kg falling at 60 m/s - a boulder, not an asteroid. Under a thousandth of the energy
+        // density iron fractures at.
+        sim.throw_meteor(Meteor {
+            pos: Vec3::new(0.0, ground + 80.0, 0.0),
+            vel: Vec3::new(0.0, -60.0, 0.0),
+            mass_kg: 300.0,
+            material: crate::materials::index_of(&mats(), "iron"),
+            radius_m: 0.21,
+        });
+        for _ in 0..600 {
+            sim.step(1.0 / 60.0);
+            if sim.meteors().is_empty() {
+                break;
+            }
+        }
+        assert!(sim.meteors().is_empty(), "the boulder arrived");
+        let struck = {
+            let b = &sim.cohesive_bodies()[0];
+            let v = b.agg.particles.iter().map(|p| p.vel * p.mass).sum::<DVec3>()
+                / b.agg.total_mass();
+            (v - com_v0).length()
+        };
+        assert!(struck > 0.02, "the ball was really hit - its momentum changed ({struck:.3} m/s)");
+        for _ in 0..120 {
+            sim.step(1.0 / 60.0);
+        }
+        let ball = &sim.cohesive_bodies()[0];
+        let bonds1 = ball.agg.active_bonds();
+        assert!(
+            bonds1 * 10 >= bonds0 * 9,
+            "below iron's thresholds the structure holds ({bonds0} -> {bonds1} bonds)"
+        );
+        assert_ne!(ball.verdict(), "shattered", "a surviving ball never reads as shattered");
+        let spread1 = ball.agg.rms_radius();
+        assert!(
+            spread1 < 1.3 * spread0,
+            "it is still a ball ({spread0:.2} m -> {spread1:.2} m rms)"
+        );
+        let tmax = ball.agg.temps.iter().cloned().fold(0.0f32, f32::max);
+        assert_eq!(
+            crate::emission::incandescence(tmax),
+            [0.0, 0.0, 0.0],
+            "nothing glows - the deposit could not heat iron to incandescence ({tmax:.1} K)"
+        );
+    }
+
+    /// A body of a material the DB does not know is REFUSED at build - never a silent default solid.
+    #[test]
+    fn a_body_of_unknown_material_is_refused() {
+        let err = match Simulation::from_json(
+            r#"{"name":"x","type":"ground",
+                "ground":{"bodies":[{"material":"unobtainium","radius_m":1.0,"at_m":[0,50,0]}]}}"#,
+            mats(),
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("an uncatalogued material must not build"),
+        };
+        assert!(err.contains("unobtainium"), "the error names it: {err}");
     }
 
     /// A world that is not a ground world must be REFUSED, not silently treated as an empty one.

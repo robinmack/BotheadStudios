@@ -58,6 +58,37 @@ pub(crate) struct Camera {
     pub(crate) pitch: f32,
     pub(crate) zoom: f32,
     pub(crate) base_distance: f32,
+    /// Look-target offset from the focus body, in display units, expressed in the frame that RIDES
+    /// the focused body: the orbit renderer re-centres the world on the focus every frame, so an
+    /// offset held here follows the body through its orbital motion instead of smearing against a
+    /// fixed point in space. Zero means the classic framing (target = the body's centre).
+    /// Representation only: this moves what the camera looks at, never any matter.
+    pub(crate) pan: glam::Vec3,
+}
+
+impl Camera {
+    /// Unit vector from the look target toward the eye, from the yaw/pitch orbit angles. The same
+    /// construction `view_proj` and the per-grain view path use, kept in one place.
+    pub(crate) fn eye_dir(&self) -> glam::Vec3 {
+        let cp = self.pitch.cos();
+        glam::Vec3::new(cp * self.yaw.sin(), self.pitch.sin(), cp * self.yaw.cos())
+    }
+
+    /// Translate the look target in the camera's screen plane by a pointer delta, in pixels. The
+    /// scale is exact, not a feel dial: at the focal plane (distance `base_distance * zoom`) one
+    /// pixel of a `fov_y` frustum `viewport_h` pixels tall spans `2 * d * tan(fov_y / 2) / h`
+    /// display units, so the world tracks the pointer one-for-one. Dragging right moves the target
+    /// left (the scene follows the pointer, map-style); screen y grows downward.
+    pub(crate) fn pan_by_pixels(&mut self, dx_px: f32, dy_px: f32, fov_y: f32, viewport_h: f32) {
+        let dist = self.base_distance * self.zoom;
+        let per_px = 2.0 * dist * (0.5 * fov_y).tan() / viewport_h.max(1.0);
+        // The camera's screen basis: forward is target-minus-eye; pitch is clamped short of the
+        // poles everywhere it is set, so forward is never parallel to world up.
+        let forward = -self.eye_dir();
+        let right = forward.cross(glam::Vec3::Y).normalize();
+        let up = right.cross(forward);
+        self.pan += (right * -dx_px + up * dy_px) * per_px;
+    }
 }
 
 pub(crate) struct GpuMesh {
@@ -324,5 +355,50 @@ impl StarField {
         pass.set_bind_group(0, &self.bind, &[]);
         pass.set_vertex_buffer(0, self.instances.slice(..));
         pass.draw(0..6, 0..self.count);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Camera;
+    use glam::Vec3;
+
+    fn cam() -> Camera {
+        Camera { yaw: 0.3, pitch: 0.2, zoom: 1.0, base_distance: 100.0, pan: Vec3::ZERO }
+    }
+
+    /// The pan scale is derived, not tuned: dragging the full viewport height translates the
+    /// target by exactly the frustum's height at the focal plane, so the world tracks the pointer
+    /// one-for-one at every zoom (half the focal distance, half the translation).
+    #[test]
+    fn a_full_viewport_drag_pans_exactly_one_frustum_height() {
+        let (fov_y, h) = (0.9_f32, 768.0_f32);
+        let mut c = cam();
+        c.pan_by_pixels(0.0, h, fov_y, h);
+        let expect = 2.0 * c.base_distance * c.zoom * (0.5 * fov_y).tan();
+        assert!((c.pan.length() - expect).abs() < 1e-3, "{} vs {}", c.pan.length(), expect);
+
+        let mut near = cam();
+        near.zoom = 0.5;
+        near.pan_by_pixels(0.0, h, fov_y, h);
+        assert!(
+            (near.pan.length() - 0.5 * expect).abs() < 1e-3,
+            "pan scales with the focal distance"
+        );
+    }
+
+    /// The offset stays in the camera's screen plane (never along the view axis), dragging right
+    /// moves the target left (the scene follows the pointer), and the gesture is reversible.
+    #[test]
+    fn pan_moves_in_the_screen_plane_and_reverses_cleanly() {
+        let mut c = cam();
+        c.pan_by_pixels(120.0, 0.0, 0.9, 768.0);
+        let forward = -c.eye_dir();
+        assert!(c.pan.dot(forward).abs() < 1e-4, "no component along the view axis");
+        let right = forward.cross(Vec3::Y).normalize();
+        assert!(c.pan.dot(right) < 0.0, "dragging right carries the target left");
+
+        c.pan_by_pixels(-120.0, 0.0, 0.9, 768.0);
+        assert!(c.pan.length() < 1e-4, "panning back returns the classic framing");
     }
 }

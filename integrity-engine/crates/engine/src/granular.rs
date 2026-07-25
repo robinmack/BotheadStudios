@@ -447,6 +447,52 @@ pub fn terrain_contact_resolve(
     TerrainContact { vel: v, dpos, hit: true }
 }
 
+/// Sweep the camera's matter shell along the FIXED segment `from → to`, resolving each sample against
+/// the surface via [`terrain_contact_resolve`] and CARRYING the accumulated correction, so the
+/// resolved position is `to` plus whatever the contacts pushed it by. `surface` returns the bilinear
+/// height and gradient `(h, dh/dx, dh/dz)` at a sample.
+///
+/// This replaces a sweep that re-lerped each sample against its own mutated endpoint: with no contact
+/// at all, that contraction returned `from + (to − from)·n!/nⁿ` - at the 24-sample clamp, a ~1e-10
+/// fraction of the requested move. In practice any camera move longer than the shell froze the eye
+/// where it was (the ground scene's wheel dolly and hold-to-walk were both dead; only mouse-look
+/// worked, because a rotation never enters the sweep). Found while walking the camera up to the
+/// declared iron ball to verify it rests on the terrain.
+pub fn sweep_shell_resolve(
+    from: DVec3,
+    to: DVec3,
+    mut surface: impl FnMut(glam::Vec3) -> (f32, f32, f32),
+) -> DVec3 {
+    /// ≥ the ground scene's near clip (0.2 m) so the near plane can never cross the surface the shell
+    /// rests on.
+    const SHELL_HALF: f64 = 0.35;
+    /// Per-sample projection cap - solver relaxation rate, the same role it plays for grains.
+    const MAX_CORR: f64 = 0.5;
+
+    let steps = ((to - from).length() / (SHELL_HALF * 2.0)).ceil().clamp(1.0, 24.0) as usize;
+    let mut corr = DVec3::ZERO;
+    for i in 1..=steps {
+        let t = i as f64 / steps as f64;
+        let p = from.lerp(to, t) + corr;
+        let (h, dhdx, dhdz) = surface(glam::Vec3::new(p.x as f32, p.y as f32, p.z as f32));
+        let hit = terrain_contact_resolve(
+            p,
+            DVec3::ZERO, // the shell is carried by the rig, not ballistic: contact corrects POSITION
+            h as f64,
+            dhdx as f64,
+            dhdz as f64,
+            SHELL_HALF,
+            0.0,           // frictionless: the camera slides, it does not stick to hillsides
+            MAX_CORR,
+            f64::INFINITY, // open sky above the camera
+        );
+        if hit.hit {
+            corr += hit.dpos;
+        }
+    }
+    to + corr
+}
+
 /// **The heightfield's slope quantum** (metres). An integer voxel heightfield can represent a column
 /// top only to whole voxels, so the shallowest NON-FLAT slope it can express over one 1 m cell is a
 /// 1 m step — 45°. Every soil in the material DB reposes BELOW that (gravel 40°, sand 34°, dirt 29°),
@@ -501,6 +547,43 @@ pub fn repose_allowance(mu: f32, r: f32) -> f32 {
 /// hillsides — measured, 470 grains shed from a world nothing had touched.
 pub fn face_stable(drop: f32, r: f32, run_height: f32, mu: f32, h_crit: f32) -> bool {
     drop <= repose_allowance(mu, r) || run_height <= h_crit
+}
+
+#[cfg(test)]
+mod sweep_shell_tests {
+    use super::sweep_shell_resolve;
+    use glam::DVec3;
+
+    /// REGRESSION: an unobstructed move must arrive. The old sweep contracted every no-contact move
+    /// toward its start by n!/nⁿ, so any step longer than the shell (~0.7 m) left the camera frozen -
+    /// the ground scene's free-fly walk and wheel dolly did nothing while mouse-look kept working.
+    #[test]
+    fn an_unobstructed_sweep_reaches_its_destination() {
+        let from = DVec3::new(0.0, 20.0, 0.0);
+        let to = DVec3::new(30.0, 12.0, 40.0); // a 50 m stride, far above the ground
+        let got = sweep_shell_resolve(from, to, |_| (0.0, 0.0, 0.0));
+        assert!(
+            (got - to).length() < 1.0e-9,
+            "open air must not slow the camera: asked for {to}, got {got}"
+        );
+    }
+
+    /// The shell still cannot be driven through the ground: a sweep ending below a flat floor is
+    /// pushed back out along the normal (position-projected, capped per sample like a grain), and a
+    /// sweep that stays above it is untouched.
+    #[test]
+    fn a_sweep_into_the_ground_is_pushed_back_out() {
+        let from = DVec3::new(0.0, 3.0, 0.0);
+        let to = DVec3::new(0.0, -6.0, 0.0); // straight down through a flat floor at y = 0
+        let got = sweep_shell_resolve(from, to, |_| (0.0, 0.0, 0.0));
+        assert!(got.y > to.y, "the contact must push the shell back toward the surface: {got}");
+
+        let grazing = sweep_shell_resolve(from, DVec3::new(6.0, 2.0, 0.0), |_| (0.0, 0.0, 0.0));
+        assert!(
+            (grazing - DVec3::new(6.0, 2.0, 0.0)).length() < 1.0e-9,
+            "a move that never meets the ground is not corrected: {grazing}"
+        );
+    }
 }
 
 #[cfg(test)]

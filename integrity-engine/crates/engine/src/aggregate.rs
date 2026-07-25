@@ -463,11 +463,34 @@ impl Aggregate {
             .iter()
             .map(|p| (-(p.pos - site).length() / lambda).exp() * (p.mass / density))
             .sum();
+        let mut e_dep = vec![0.0f64; self.particles.len()];
         if wsum > 0.0 {
             let e0 = heat / wsum;
-            for (p, temp) in self.particles.iter_mut().zip(self.temps.iter_mut()) {
-                let e_i = e0 * (-(p.pos - site).length() / lambda).exp();
-                *temp += (e_i / (density * c)) as f32;
+            for i in 0..self.particles.len() {
+                let e_i = e0 * (-(self.particles[i].pos - site).length() / lambda).exp();
+                e_dep[i] = e_i;
+                self.temps[i] += (e_i / (density * c)) as f32;
+            }
+        }
+
+        // 2b. FATE. Each parcel's deposited energy density is judged against its material's OWN
+        // thresholds (`damage::classify`, docs/20): fracture strength, then melt, then vaporize -
+        // the same data-driven verdict a voxel gets in `matter::impact`. A parcel past Intact is no
+        // longer coherent solid (it is cracked through, molten, or gas), and matter in those states
+        // holds no tensile bond, so every bond touching it ends. Nothing here says "destroy": a
+        // pebble's deposit stays below iron's strength and every bond survives; a hypervelocity
+        // strike exceeds it over a radius the falloff sets, and the shatter is that radius made
+        // visible. The deposited density stands in for the local shock pressure (both J/m³ = Pa),
+        // the same flagged stand-in `matter::impact` uses until the EOS carries pressure here.
+        let failed: Vec<bool> = e_dep
+            .iter()
+            .map(|&e| e > 0.0 && crate::damage::classify(e, mat, e) != crate::damage::PhaseChange::Intact)
+            .collect();
+        if failed.iter().any(|&f| f) {
+            for bond in &mut self.bonds {
+                if bond.active && (failed[bond.a] || failed[bond.b]) {
+                    bond.active = false;
+                }
             }
         }
 
