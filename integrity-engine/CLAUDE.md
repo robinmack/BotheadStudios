@@ -135,17 +135,30 @@ computation it defers** (Law V) — recorded in `docs/46`'s ledger, not a quiet 
    from a scene to whoever is reading the repo. `web/rig/share_button.mjs` asserts the button exists AND
    that a real PNG lands, on every scene.
 
-1. **Branch, commit, push, PR — never commit to `main` directly.** Work in the main checkout
-   (`~/workspace/BotheadStudios`) on a feature branch; worktrees cost a duplicated `node_modules` per
-   tree and a shared stash stack, so prefer not to create them unless a harness forces isolation.
-   **★ THIS REPO IS NO LONGER SINGLE-DEVELOPER (2026-07-24): seanreid.mail@gmail.com has joined.** Two
-   rules that rested on it are now void, and both said so explicitly:
-   - *"Keep the branch list at `main` alone… there is nobody else's in-flight work to preserve"* — there
-     is now. Do not prune, rebase, force-push or retire a branch that is not yours, and do not assume a
-     branch you did not create is abandoned.
-   - *"One feature branch at a time"* — no longer yours to enforce; more than one is now normal.
-   Work worth keeping but not merging (measurements, evidence, a salvaged tool) still becomes an
-   **annotated tag** `archive/<name>` whose message records WHY — same commits, zero branch clutter.
+1. **The main checkout belongs to the human** (`~/workspace/BotheadStudios`). Persistent or parked
+   worktrees stay banned, and the 2026-07-19 reasons were real: a duplicated `node_modules` per tree,
+   a shared stash stack that different sessions can pop out from under each other, and branches that
+   quietly diverge in directories nobody is looking at. Transient, tool-managed worktrees for parallel
+   agent work ARE permitted, because each of those costs is avoided by construction when the bounds
+   hold, and the bounds are the rule: one task per worktree; the worktree is removed when its task
+   ends; no stash use in a worktree, ever; every branch a worktree produces becomes a PR and dies at
+   merge. (The 2026-07-19 rationale also rested on "this is a single-developer project that is not
+   doing multi-agent work"; that premise has expired. Two contributors and their agents now work this
+   repo, which is exactly the isolation worktrees existed for. What went wrong before was parking
+   them, not the isolation.) Branch, commit, push, PR; never commit to `main` directly.
+   **Keep the branch list at `main` alone as the steady state** (Robin, 2026-07-20, stated twice), now
+   read for two people plus their agents: feature branches are short-lived, one per in-flight task,
+   merged and deleted (`gh pr merge N --merge --delete-branch`), then `git fetch --prune`.
+   ★ **`--merge`, never `--squash`** — measured over this nine-step integration: keeping merge commits
+   held each step at 2-8 conflicted files, because the contributor's own commits stay reachable from
+   `main` and every later step merges against a recent base. Squashing strands the fork and re-inflates
+   the next step toward the 12-conflict "their whole main at once" case. It also rewrites the SHA that
+   `.git-blame-ignore-revs` names. Do NOT
+   leave branches parked; the other person's in-flight work lives in their open PRs, where it is
+   visible and reviewable, not in parked branches. Work worth keeping but not merging (measurements, evidence, a salvaged
+   tool) becomes an **annotated tag** `archive/<name>` whose message records WHY: same commits,
+   `git show archive/<name>`, zero branch clutter. Five such branches were retired this way on
+   2026-07-20.
 2. **RUN `cargo fmt`; CI gates on it** (changed 2026-07-25 at Sean's request — this rule said the exact
    opposite for most of the project's life). The old rule was *"NEVER run `cargo fmt` — the crate isn't
    rustfmt-conformant, it reformats the whole tree"*: true, and it made the tree drift further from
@@ -165,8 +178,9 @@ computation it defers** (Law V) — recorded in `docs/46`'s ledger, not a quiet 
    ★ Anything added to that file must be formatting ONLY. A blame-ignored commit is one nobody will ever be
    shown, so a decision hidden inside it is hidden for good.
 3. **Test:** `bash scripts/test.sh --fast [filter]` (inner loop) · full `bash scripts/test.sh` before any
-   deploy (240 run by default). O(n²) measurement tests are `#[ignore]` (18 of them —
-   `hydrostatic.rs` 9, `impact.rs` 8, `aggregate.rs` 1; run `--ignored`). Accelerated code is always pinned
+   deploy (410 run by default, measured 2026-07-24). O(n²) measurement tests and GPU-requiring benches
+   are `#[ignore]` (22 of them: `hydrostatic.rs` 9, `impact.rs` 8, `aggregate.rs` 2, `gpu_gravity.rs` 2,
+   `gpu_host.rs` 1; run `--ignored`). Accelerated code is always pinned
    to its exact/brute-force reference so speed never changes the answer. `gpu_sph.rs`'s PHYSICS is still
    verified out-of-process by `tools/sph-verify` (which carries its own replica of the structs), but the
    module is no longer invisible to the suite: it compiles on every target since 2026-07-20, and its three
@@ -217,13 +231,21 @@ computation it defers** (Law V) — recorded in `docs/46`'s ledger, not a quiet 
 6. **Record changes:** design → `docs/NN` · what-happened+proof → `JOURNAL.md` (newest-first, What/Why/
    **Verified**) · consumer delta → `CHANGELOG.md [Unreleased]` · standing context → memory. A substantive
    change usually touches docs+JOURNAL+CHANGELOG together.
-7. **★ MERGING NOW GOES THROUGH REVIEW (changed 2026-07-24).** `main` carries an active ruleset —
-   1 approving code-owner review + `code_quality` + 90% `code_coverage` — and it was previously bypassed
-   with `--admin` on Robin's explicit reasoning: *"I set these rules up for outside contributors when/if
-   we have them. Since we don't yet we have impunity."* **We do now** (seanreid.mail@gmail.com joined), so
-   the impunity is spent: open a PR, mark it ready for review, and let the ruleset do its job. Do **not**
-   merge with `--admin`, and do not self-approve. A draft PR is the right state for work in progress; the
-   right action when it is finished is `gh pr ready N`, not `gh pr merge`.
+7. **Merging goes through the front door.** The old rule here was merge with `--admin`, on Robin's
+   grounds that the ruleset existed for outside contributors we did not have: *"Since we don't yet we
+   have impunity."* That premise no longer holds, so the bypass is retired. Two contributors exist,
+   and the `ci` workflow runs the real deploy gate on every PR (`scripts/test.sh`, the full native
+   suite, plus the wasm production build), so the branch ruleset's checks should be real ones that
+   pass on their own. What replaces impunity: CI green, and the other person able to review async.
+   Self-merge is allowed when the change is mechanical and green; when it is not, say so on the PR
+   and wait for the other pair of eyes. Never `gh pr merge --admin`.
+   ★★ **CURRENTLY NOT SATISFIABLE, and that is a fact rather than a licence (2026-07-25).** The rule above
+   is the target and it is right. Today `main` requires **1 approving code-owner review**, CODEOWNERS is
+   `* @robinmack @sean-reid`, **Sean's collaborator invite is still pending**, and GitHub will not request
+   a review from a PR's own author — so `reviewDecision=REVIEW_REQUIRED` with an EMPTY requested-reviewer
+   list, and nobody can approve. Waiting never clears it. Robin therefore authorised `--admin` explicitly
+   for this integration. Name the exception on the PR when you use it; do not let it quietly become the
+   habit it replaced. **The fix is Sean accepting the invite, not a better bypass.**
 8. **Commit with `bash scripts/commit.sh <message-file>`** — write the message to a FILE first (an editor
    or a file-writing tool), never inline in a shell command. Messages here are long and full of the exact
    characters a shell eats: backticks around identifiers, `$`, `!`, quotes. A heredoc *looks* safe and is
