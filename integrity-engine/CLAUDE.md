@@ -160,10 +160,14 @@ computation it defers** (Law V) — recorded in `docs/46`'s ledger, not a quiet 
    `git show archive/<name>`, zero branch clutter. Five such branches were retired this way on
    2026-07-20.
 2. **RUN `cargo fmt`; CI gates on it** (changed 2026-07-25 at Sean's request — this rule said the exact
-   opposite for most of the project's life). The old rule was *"NEVER run `cargo fmt` — the crate isn't
-   rustfmt-conformant, it reformats the whole tree"*: true, and it made the tree drift further from
-   conformant every day, so the cost of ever fixing it only grew. It is formatted now and
-   `cargo fmt --check` is a CI job, so it cannot drift again.
+   opposite for most of the project's life).
+   ~~SUPERSEDED 2026-07-25 — do not follow: "never run cargo fmt; the crate isn't rustfmt-conformant, it
+   reformats the whole tree."~~ That was true, and it made the tree drift further from conformant every
+   day, so the cost of ever fixing it only grew. **The tree is formatted now and `cargo fmt --check` is a
+   CI job, so it cannot drift again.**
+   *(The superseded wording is kept struck-through and marked because it survived in this file, in
+   `CONTRIBUTING.md` and on a contributor's branch simultaneously — deleting it silently is how two of them
+   came back. Anyone grepping for the old rule should land on this line and see it is dead.)*
    **STOCK defaults — there is no `rustfmt.toml`, deliberately.** A custom config was measured first
    (`max_width=110` + `use_small_heuristics="Max"` reproduced the hand style at net +362 lines instead of
    +5,782) and rejected: the 110 came from a width distribution dominated by COMMENT lines, which rustfmt
