@@ -2,8 +2,6 @@
   "name": "Earth",
   "type": "planet",
   "planet": {
-    "radius_m": 6371000,
-    "mass_kg": 5.972e+24,
     "rotation_period_s": 86400,
     "profile": "earth"
   },

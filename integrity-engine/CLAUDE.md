@@ -163,6 +163,18 @@ computation it defers** (Law V) — recorded in `docs/46`'s ledger, not a quiet 
    verified out-of-process by `tools/sph-verify` (which carries its own replica of the structs), but the
    module is no longer invisible to the suite: it compiles on every target since 2026-07-20, and its three
    shader-facing layouts are pinned to `sph_step.wgsl` in-crate.
+   ★★ **The FULL run now compiles `mod app` for wasm32, and that is a GATE, not advice** (added
+   2026-07-25). The scene structs (`Terra`, `OrbitDemo`, `Ground`) sit behind
+   `#[cfg(target_arch = "wasm32")]`, so a native `cargo check --all-targets` is **green for code that does
+   not build**. This file warned about that in prose for months and it still bit us: Sean's one-Earth step
+   removed `EARTH_RADIUS_M`, three readers survived inside `mod app`, the native check reported **0
+   errors**, and only the wasm target found them. Prose is not a gate. `--fast` skips it to keep the inner
+   loop tight; the full run is the deploy gate, so nothing ships unchecked. CI has the same job
+   (`mod app (wasm32)`), which fails in ~1 min instead of waiting for the full wasm-pack + Vite build.
+   ★ The gate was verified by BREAKING `mod app` on purpose and checking the run went red (exit 101) —
+   its first version piped cargo into `grep` inside an `if !`, so it printed the compiler errors and then
+   exited 0. **A gate that reports a failure and passes is worse than no gate: it teaches you to trust
+   it.** Verify a new gate by making it fail.
 4b. **Motion is a property of the SEQUENCE, not of any frame.** A screenshot cannot see stutter, a
    freeze, popping or a teleport. `scripts/rigvideo.sh <rig>.mjs` records the composited screen
    losslessly while the rig drives the scene and reports freeze %, delivered fps, worst hitch, and

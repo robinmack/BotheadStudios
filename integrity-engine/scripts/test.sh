@@ -56,4 +56,32 @@ fi 2>&1 | tee /tmp/gf-test.log \
   | grep -E "test result:|Summary|FAIL|error\[|^error:|FAILED|panicked|warning: unused" | tail -40
 status="${PIPESTATUS[0]}"
 echo "--- test exit ${status} · full log: /tmp/gf-test.log ---"
+
+# **`mod app` IS NOT COMPILED BY ANY OF THE ABOVE.** The scene structs (`Terra`, `OrbitDemo`, `Ground`)
+# live behind `#[cfg(target_arch = "wasm32")]`, so a native `cargo check --all-targets` is GREEN for code
+# that does not build — CLAUDE.md rule 3 has warned about this in prose for months and it caught us again
+# on 2026-07-25: Sean's one-Earth step removed `EARTH_RADIUS_M`, three readers survived inside `mod app`,
+# native check passed, and only the wasm target found them. Prose is not a gate; this is.
+#
+# `cargo check` (not `build`) against wasm32 is the cheap form — it type-checks every scene without
+# emitting or running wasm-bindgen, so it costs seconds after the first run. Skipped under --fast to keep
+# the edit→test loop tight; the full run IS the deploy gate, so it never ships unchecked.
+if [[ $status -eq 0 && $fast -eq 0 ]]; then
+  echo "--- compiling mod app (wasm32) — the scenes a native check cannot see ---"
+  # Run it BARE and read $? directly. The first version piped straight into `grep` inside an `if !`,
+  # which reads the status of the *grep*, not of cargo — so it printed the compiler errors and then
+  # reported success. A gate that prints a failure and exits 0 is worse than no gate: it teaches you
+  # to trust it. Caught only by deliberately breaking `mod app` and checking the run went red.
+  cargo check --quiet --lib --target wasm32-unknown-unknown \
+    --manifest-path crates/engine/Cargo.toml > /tmp/gf-wasm.log 2>&1
+  wstatus=$?
+  if [[ $wstatus -ne 0 ]]; then
+    grep -E "^error" -A 6 /tmp/gf-wasm.log | head -40 >&2
+    echo "--- mod app FAILED to compile for wasm32 (exit ${wstatus}) · log: /tmp/gf-wasm.log ---" >&2
+    status="$wstatus"
+  else
+    echo "--- mod app compiles ---"
+  fi
+fi
+
 exit "${status}"

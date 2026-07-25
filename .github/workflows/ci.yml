@@ -21,6 +21,25 @@ jobs:
         working-directory: integrity-engine
         run: cargo fmt --manifest-path crates/engine/Cargo.toml --all -- --check
 
+  modapp:
+    name: mod app (wasm32)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: integrity-engine
+      # The scene structs (Terra, OrbitDemo, Ground) are behind #[cfg(target_arch = "wasm32")], so a
+      # native check is GREEN for code that does not build. The `wasm production build` job below does
+      # catch it, but only after wasm-pack + npm ci + a full Vite build; this type-checks the same code
+      # in a fraction of the time, so a broken scene fails fast instead of last.
+      - name: cargo check --target wasm32-unknown-unknown
+        working-directory: integrity-engine
+        run: cargo check --lib --target wasm32-unknown-unknown --manifest-path crates/engine/Cargo.toml
+
   tests:
     name: native suite
     runs-on: ubuntu-latest
