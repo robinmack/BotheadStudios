@@ -47,9 +47,20 @@ and gravity all compose correctly). Grouped by consumer:
 | `grain` | struct | anisotropy direction + scale + contrast for procedural texture noise |
 | `color_variance` | – | per-grain/mineral color spread (dirt mottling, granite specks) |
 
-### Thermal (future phases — reserved, not used yet)
-`melting_point` (K), `specific_heat` (J/kg·K), `thermal_conductivity` (W/m·K),
-`ignition_point` (K). Included in the schema now so save files don't break later.
+### Thermal
+
+`melt_point` (K), `specific_heat` (J/kg·K), `latent_fusion`/`latent_vaporization` (J/kg), `boil_point` (K),
+the Simon–Glatzel melting-curve coefficients, `molar_mass` (kg/mol), `decomposes_k` (K) — all in use.
+
+**`thermal_conductivity` (W/(m·K)) is in use as of 2026-07-24**, and its arrival is worth recording as a
+pattern: this section said "reserved, not used yet" for months while the field was absent from the data,
+and the consequence was invisible until something needed it. `atmosphere::atmospheric_step` heated a
+body's whole mass at once because it had no way to know how fast heat travels, which made it impossible
+for anything metre-scale to glow on atmospheric entry (`docs/46` row 21). With `specific_heat` and
+`density` it gives the thermal diffusivity `α = k/(ρc)`, whose square root sets how deep a heat front
+reaches in a given time — the difference between a body that warms through and one that grows a hot skin
+over a cold core. Sourced for 28 of 29 materials; `hh_plasma` is left unknown, and callers must not
+pretend otherwise.
 
 ### Tillotson (condensed-matter equation of state)
 The `tillotson` block gives `P(ρ, u)` for shock physics — the pressure a material develops as it is

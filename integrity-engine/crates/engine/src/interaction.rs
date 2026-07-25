@@ -503,7 +503,7 @@ mod tests {
         // drops out, adding a step of drag does not change its speed at all.
         let rho = air.density_at(alt);
         let step = crate::atmosphere::atmospheric_step(
-            rho, dense.vel, dense.mass_kg, dense.radius_m, 300.0, air.ambient_temp_k,
+            rho, dense.vel, dense.mass_kg, dense.radius_m, 300.0, dense.radius_m, air.ambient_temp_k,
             &crate::materials::load()[crate::materials::index_of(&crate::materials::load(), "iron")], dt,
         );
         let v0 = dense.vel;

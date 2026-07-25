@@ -3,6 +3,66 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-24 (night) — row 21 closed: only the skin heats, so a metre-class body glows
+
+**What.** `atmospheric_step` raised the temperature of a body's WHOLE mass at its bulk heat capacity.
+Thermal response therefore scaled with VOLUME, and a half-metre iron body flew a perfectly correct 20 km/s
+entry and barely warmed — while real iron meteorites arrive with a molten fusion crust over a core cold
+enough to frost. Ablation is a SURFACE process.
+
+Now the heat front advances at the material's own thermal diffusivity `α = k/(ρc)` and only the mass it has
+reached takes part: `atmosphere::soak_depth` (from `δ = √(αt)`, so one step is exactly `δ' = √(δ² + α·dt)`)
+and `atmosphere::heated_mass` (the shell `ρ·(4/3)π[r³ − (r−δ)³]`). Bulk heating is not replaced — it is the
+LIMIT the model reduces to once the skin reaches the radius, which is why the existing operator tests pass
+unchanged by passing `skin = r`.
+
+**Data first (Law VII SOP).** `thermal_conductivity` is now sourced in `data/materials.json` for 28 of 29
+materials — rocks from Clauser & Huenges 1995 (AGU Reference Shelf 3), metals and gases from the CRC
+Handbook, the moisture-dependent soils carried with explicit `estimated` notes, and `hh_plasma` left
+UNKNOWN rather than guessed. `docs/04` had reserved this field and nothing had ever used it; that section
+now records the pattern, because "reserved, not used yet" hid the consequence until something needed it.
+
+**Verified.** 367/367 native (2 new), wasm builds, rig-verified on the 5060 Ti. MEASURED before → after,
+8 iron fragments at 15 km/s from 200 km:
+
+| parent radius | ablated before | ablated after | peak surface T after |
+|---|---|---|---|
+| 1 cm | 94.7% | 94.7% | 3134 K |
+| 5 cm | 27.5% | 31.1% | 3134 K |
+| 10 cm | 6.0% | 14.6% | 3134 K |
+| 30 cm | **0%** | **4.3%** | **3134 K** (was a few hundred K) |
+| 1 m | **0%** | **0.75%** | **3134 K** |
+| 3 m | **0%** | **0.03%** | **3134 K** |
+| 10 m | 0% | 0% | 2346 K |
+
+The live swarm's ablated mass went **397 kg → 15,871 kg**, and the Terra swarm's ICs no longer have to be
+shrunk to fit the model: it is a 3 m, ~890 tonne iron asteroid resolved into 1,200 fragments (11 cm to
+1.85 m), which is the disintegrated asteroid Robin actually asked for.
+
+**Three things fell out that nothing declares.**
+
+1. **The heated layer SETTLES rather than growing** — ~1.4 cm for iron, ~2.8 mm for basalt. Ablation strips
+   the skin as fast as conduction deepens it, and the balance is the classical `δ = α/2v` thermal boundary
+   layer of a receding surface. Nobody wrote that thickness; it is where two rates meet.
+2. **Basalt ablates MORE than iron at every size** (99.8% vs 94.7% for pebbles, 3.7% vs 0.75% at a metre),
+   because its diffusivity is 21× lower so the heat stays at the surface instead of being conducted away.
+   That is why stony meteorites carry thin fusion crusts and shed more of themselves than irons do.
+3. **A 10 m body still does not reach boiling, and that is Sutton–Graves being RIGHT**, not a limit left
+   over: stagnation flux goes as `√(ρ/R_n)`, so a blunter body is heated less — the reason re-entry
+   capsules are blunt.
+
+**How the test proves it rather than asserting it.** `a_metre_class_body_glows_because_only_its_skin_heats`
+flies the SAME 1 m iron body twice, differing only in `skin_m`: fresh (the real case) reaches 3134 K and
+ablates; pre-soaked to the radius (the old bulk case) stays under 1500 K and ablates exactly nothing.
+
+**Still open, and smaller** (docs/46 row 21 keeps a tail): only the skin's temperature is tracked, so the
+interior is unmodelled and heat conducting past the front is not accounted anywhere. The resolved
+computation is a real temperature PROFILE through the body; the moving-boundary treatment of a receding
+surface is its refinement.
+
+**Not measured:** peak frame rate fell from ~200 to ~37 fps at 24k drawn marks. I have not measured where
+that time goes and, per this project's own rule, will not guess — `/gpu-perf` before any claim.
+
 ## 2026-07-24 (evening) — press the button, watch it burn
 
 **What.** The swarm is visible. Terra holds a `flight::Flight`, a `PlanetAir` environment and a

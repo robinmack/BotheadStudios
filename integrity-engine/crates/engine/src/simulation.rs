@@ -498,6 +498,7 @@ mod tests {
                 material: iron,
                 radius_m: 0.5,
                 temp_k: 288.0, // stamped to ambient by throw_meteor
+                skin_m: 0.0, // a fresh rock has no heated skin yet
             });
             // The ENGINE flies it and lands it; the caller never computes an impact site.
             for _ in 0..600 {
@@ -538,6 +539,7 @@ mod tests {
                 material: iron,
                 radius_m: radius_m as f64,
                 temp_k: 288.0, // stamped to ambient by throw_meteor
+                skin_m: 0.0, // a fresh rock has no heated skin yet
             });
             let v0 = sim.meteors()[0].vel.x;
             for _ in 0..4 {
@@ -578,6 +580,7 @@ mod tests {
             material: iron,
             radius_m: r as f64,
             temp_k: 288.0,
+            skin_m: 0.0, // a fresh rock has no heated skin yet
         });
         assert_eq!(sim.meteors()[0].temp_k, AMBIENT_TEMP_K as f64, "a fresh meteor starts at ambient");
         for _ in 0..8 {
@@ -614,6 +617,7 @@ mod tests {
             material: iron,
             radius_m: r as f64,
             temp_k: 288.0,
+            skin_m: 0.0, // a fresh rock has no heated skin yet
         });
         // The body in flight is matter, and is reported as such the moment it exists.
         let flying = sim.drawn();
@@ -666,6 +670,7 @@ mod tests {
             material: crate::materials::index_of(&mats(), "iron"),
             radius_m: 0.5,
             temp_k: 288.0, // stamped to ambient by throw_meteor
+            skin_m: 0.0, // a fresh rock has no heated skin yet
         });
         assert_eq!(sim.meteors().len(), 1, "it is in flight");
         let start_y = sim.meteors()[0].pos.y;
@@ -695,6 +700,7 @@ mod tests {
             material: crate::materials::index_of(&mats(), "iron"),
             radius_m: 0.5,
             temp_k: 288.0, // stamped to ambient by throw_meteor
+            skin_m: 0.0, // a fresh rock has no heated skin yet
         });
         // Step to the frame the impact lands on, and check the count against the grains that exist.
         let mut peak = 0usize;

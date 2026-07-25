@@ -36,8 +36,20 @@ pub struct FlyingBody {
     pub material: usize,
     /// Radius (m), from its mass at its material's density. SHRINKS as it ablates.
     pub radius_m: f64,
-    /// Surface temperature (K). Rises from aeroheating in flight, and is what it glows AT.
+    /// Surface temperature (K). Rises from aeroheating in flight, and is what it glows AT. It is the
+    /// SKIN's temperature: for anything bigger than `skin_m` the interior is cooler and unmodelled.
     pub temp_k: f64,
+    /// How deep the aeroheating has soaked into this body (m) — 0 for a body that has not been heated.
+    /// Only the mass within this depth warms, which is why a metre-class body can glow at all
+    /// (`atmosphere::heated_mass`, docs/46 row 21). It saturates at the radius, recovering bulk heating.
+    pub skin_m: f64,
+}
+
+impl FlyingBody {
+    /// A body that has not been heated yet — the state anything is introduced in.
+    pub fn fresh(pos: DVec3, vel: DVec3, mass_kg: f64, material: usize, radius_m: f64, temp_k: f64) -> Self {
+        FlyingBody { pos, vel, mass_kg, material, radius_m, temp_k, skin_m: 0.0 }
+    }
 }
 
 /// **The world a body is flying through**, reduced to the three things flight actually needs to ask of it.
@@ -103,14 +115,9 @@ impl Flight {
         temp_k: f64,
     ) {
         for f in crate::damage::disrupt(parent_mass_kg, parent_radius_m, count, since_s) {
-            self.introduce(FlyingBody {
-                pos: origin + f.rel_pos,
-                vel: approach + f.rel_vel,
-                mass_kg: f.mass_kg,
-                material,
-                radius_m: f.radius_m,
-                temp_k,
-            });
+            self.introduce(FlyingBody::fresh(
+                origin + f.rel_pos, approach + f.rel_vel, f.mass_kg, material, f.radius_m, temp_k,
+            ));
         }
     }
 
@@ -154,7 +161,7 @@ impl Flight {
             // whatever air this world has at this point.
             if let (Some((rho, ambient)), Some(mat)) = (env.air_at(b.pos), mats.get(b.material)) {
                 let s = crate::atmosphere::atmospheric_step(
-                    rho, b.vel, b.mass_kg, b.radius_m, b.temp_k, ambient, mat, dt,
+                    rho, b.vel, b.mass_kg, b.radius_m, b.temp_k, b.skin_m, ambient, mat, dt,
                 );
                 // The vaporised mass LEAVES the body; it does not leave the simulation.
                 if s.ablated_mass > 0.0 {
@@ -176,6 +183,7 @@ impl Flight {
                     b.vel += s.drag_accel * dt;
                 }
                 b.temp_k = s.temp_k;
+                b.skin_m = s.skin_m;
                 b.mass_kg = (b.mass_kg - s.ablated_mass).max(0.0);
                 b.radius_m = s.radius_m;
             }
@@ -304,14 +312,7 @@ mod tests {
             air: crate::atmosphere::AirShell::new(101_325.0, &mats[crate::materials::index_of(&mats, "air")], 288.0, 9.81),
         };
         let mut flight = Flight::default();
-        flight.introduce(FlyingBody {
-            pos: DVec3::new(0.0, 200.0, 0.0),
-            vel: DVec3::ZERO,
-            mass_kg: grain(0.1),
-            material: iron,
-            radius_m: 0.1,
-            temp_k: 288.0,
-        });
+        flight.introduce(FlyingBody::fresh(DVec3::new(0.0, 200.0, 0.0), DVec3::ZERO, grain(0.1), iron, 0.1, 288.0));
         let mut hit = None;
         for _ in 0..2000 {
             if let Some(a) = flight.step(&ground, &mats, 0.005).first() {
@@ -326,14 +327,7 @@ mod tests {
         // Planet: the SAME code, the same struct, from 300 km up at orbital-entry speed, falling in.
         let mut orbital = Flight::default();
         let r0 = planet.matter.radius() + 300_000.0;
-        orbital.introduce(FlyingBody {
-            pos: DVec3::new(0.0, r0, 0.0),
-            vel: DVec3::new(0.0, -15_000.0, 0.0),
-            mass_kg: grain(0.5),
-            material: iron,
-            radius_m: 0.5,
-            temp_k: 288.0,
-        });
+        orbital.introduce(FlyingBody::fresh(DVec3::new(0.0, r0, 0.0), DVec3::new(0.0, -15_000.0, 0.0), grain(0.5), iron, 0.5, 288.0));
         let mut arrived = None;
         for _ in 0..40_000 {
             if let Some(x) = orbital.step(&planet, &mats, 0.002).first() {
@@ -358,25 +352,26 @@ mod tests {
     /// into `introduce`; the engine has nothing called "meteor".
     ///
     /// And what the swarm DOES is not written anywhere either. Ablation is a surface-to-volume effect —
-    /// heating scales with frontal area, thermal mass with volume — so the smaller a fragment is, the
-    /// larger the fraction of it the air takes. MEASURED here on Earth's own emergent atmosphere, eight
-    /// fragments of an iron parent entering at 15 km/s from 200 km, as the parent grows:
+    /// heating enters through the frontal area, and the mass behind it grows as the cube — so the smaller
+    /// a fragment is, the larger the fraction of it the air takes. MEASURED on Earth's own emergent
+    /// atmosphere, eight iron fragments entering at 15 km/s from 200 km, as the parent grows:
     ///
     /// ```text
-    /// parent r   fragment r        ablated
-    ///   1 cm     3.3–7.5 mm         94.7%
-    ///   2 cm     6.6–15  mm         69.9%
-    ///   5 cm     1.6–3.8 cm         27.5%
-    ///  10 cm     3.3–7.5 cm          6.0%
-    ///  30 cm     9.9–23  cm          0
-    ///   3 m      0.98–2.3 m          0
+    /// parent r   ablated   peak surface T
+    ///   1 cm      94.7%     3134 K  (iron's boiling point)
+    ///   5 cm      31.1%     3134 K
+    ///  10 cm      14.6%     3134 K
+    ///  30 cm       4.3%     3134 K
+    ///   1 m        0.75%    3134 K
+    ///   3 m        0.03%    3134 K
+    ///  10 m        0%       2346 K  — too blunt to reach boiling
     /// ```
     ///
-    /// That is the reason shooting stars are small and iron meteorites reach the ground, and nothing in
-    /// the engine states it: it falls out of one heating law meeting one mass distribution. (The zeroes
-    /// are also where docs/46 row 21 bites — `atmospheric_step` heats a body's whole mass at bulk heat
-    /// capacity, so it understates ablation for anything past its thermal skin depth. The TREND is the
-    /// physics; the exact cut-off is the flagged limit.)
+    /// That is why shooting stars are small and iron meteorites reach the ground, and nothing in the
+    /// engine states it: it falls out of one heating law meeting one mass distribution.
+    ///
+    /// The 10 m body is not a limitation either — it is Sutton–Graves being right. Stagnation flux goes as
+    /// `√(ρ/R_n)`, so a BLUNTER body is heated less, which is the whole reason re-entry capsules are blunt.
     #[test]
     fn a_swarm_enters_and_the_air_takes_more_of_the_small_fragments() {
         let (planet, mats) = earth_planet();
@@ -398,7 +393,7 @@ mod tests {
             assert!((launched / parent_m - 1.0).abs() < 1e-9, "the swarm IS the parent's mass");
 
             let mut arrived_mass = 0.0;
-            for _ in 0..60_000 {
+            for _ in 0..120_000 {
                 for a in flight.step(&planet, &mats, 0.002) {
                     arrived_mass += a.body.mass_kg;
                 }
@@ -416,12 +411,88 @@ mod tests {
             flight.trail().mass() / parent_m
         };
 
-        let f = [0.01_f64, 0.02, 0.05, 0.1, 0.3].map(ablated_fraction);
+        let f = [0.01_f64, 0.05, 0.1, 0.3, 1.0].map(ablated_fraction);
         for w in f.windows(2) {
             assert!(w[0] > w[1], "the air takes a larger share of a smaller fragment: {w:?}");
         }
         assert!(f[0] > 0.9, "millimetre pieces are almost entirely consumed ({:.1}%)", f[0] * 100.0);
-        assert_eq!(f[4], 0.0, "decimetre iron reaches the ground intact — iron meteorites do");
+        // A METRE-CLASS body still arrives with essentially all of itself — iron meteorites do — but it is
+        // no longer untouched: it ablates a real, small fraction, which before the thermal-skin model was
+        // exactly zero because the whole body was heated at once (docs/46 row 21).
+        assert!(
+            (1.0e-4..0.05).contains(&f[4]),
+            "a metre iron body loses a little of itself, not none and not much ({:.3}%)", f[4] * 100.0
+        );
+    }
+
+    /// **Row 21, closed: a metre-class body glows because only its SKIN heats.**
+    ///
+    /// `atmospheric_step` used to raise the temperature of a body's WHOLE mass at its bulk heat capacity.
+    /// Thermal response therefore scaled with volume, and a half-metre iron body flew a perfectly correct
+    /// 20 km/s entry and barely warmed — while real iron meteorites arrive with a molten fusion crust over
+    /// a core cold enough to frost. Ablation is a SURFACE process.
+    ///
+    /// Now the heat front advances at the material's own diffusivity `α = k/(ρc)` and only the mass it has
+    /// reached takes part. This asserts the fix directly, by flying the SAME body both ways: with a fresh
+    /// skin (the real case) and with the skin pre-set to the radius (the old bulk case, which the model
+    /// still contains as its limit).
+    #[test]
+    fn a_metre_class_body_glows_because_only_its_skin_heats() {
+        let (planet, mats) = earth_planet();
+        let iron = crate::materials::index_of(&mats, "iron");
+        let r = 1.0_f64;
+        let m = mats[iron].density as f64 * (4.0 / 3.0) * std::f64::consts::PI * r.powi(3);
+        let t_boil = mats[iron].boil_point().expect("iron boils");
+
+        // `skin_m` is the only difference between the two bodies.
+        let fly = |skin_m: f64| -> (f64, f64, f64) {
+            let mut flight = Flight::default();
+            let mut b = FlyingBody::fresh(
+                DVec3::new(0.0, planet.matter.radius() + 200_000.0, 0.0),
+                DVec3::new(0.0, -15_000.0, 0.0), m, iron, r, 288.0,
+            );
+            b.skin_m = skin_m;
+            flight.introduce(b);
+            let (mut peak_t, mut peak_skin) = (0.0_f64, 0.0_f64);
+            for _ in 0..120_000 {
+                flight.step(&planet, &mats, 0.002);
+                for x in flight.bodies() {
+                    peak_t = peak_t.max(x.temp_k);
+                    peak_skin = peak_skin.max(x.skin_m);
+                }
+                if flight.bodies().is_empty() {
+                    break;
+                }
+            }
+            (peak_t, flight.trail().mass(), peak_skin)
+        };
+
+        let (skin_t, skin_ablated, peak_skin) = fly(0.0);
+        let (bulk_t, bulk_ablated, _) = fly(r); // heated through from the start: the old behaviour
+
+        assert!(
+            (skin_t - t_boil).abs() < 1.0,
+            "with a real skin, a 1 m iron body reaches its BOILING point ({skin_t:.0} K of {t_boil:.0} K)"
+        );
+        assert!(skin_ablated > 0.0, "and therefore ablates ({skin_ablated:.2} kg)");
+        assert!(
+            bulk_t < 1500.0,
+            "heated in bulk the same body barely warms ({bulk_t:.0} K) — that was row 21"
+        );
+        assert_eq!(bulk_ablated, 0.0, "and ablates nothing at all");
+        assert!(
+            skin_t > bulk_t * 2.0,
+            "the surface runs far hotter than the bulk average: {skin_t:.0} K vs {bulk_t:.0} K"
+        );
+
+        // The skin does not simply grow: ablation strips it as fast as conduction deepens it, so it
+        // SETTLES — at δ = α/2v for a surface receding at v, the classical thermal boundary layer of an
+        // ablating body. Nothing declares that thickness; it is where the two rates balance. MEASURED at
+        // ~1.4 cm for iron, and it must stay a small fraction of a metre-wide body or "skin" means nothing.
+        assert!(
+            (0.002..0.05).contains(&peak_skin),
+            "the heated layer settles thin ({:.4} m on a {r} m body)", peak_skin
+        );
     }
 
     /// **Nothing is left aloft forever** (Robin, 2026-07-24: *"we should be certain the particles
@@ -504,6 +575,7 @@ mod tests {
         );
     }
 
+
     /// An airless world flies its bodies ballistically — no drag, no heating, no trail. Vacuum honestly,
     /// rather than a thin atmosphere nobody declared.
     #[test]
@@ -523,14 +595,7 @@ mod tests {
         let mats = crate::materials::load();
         let iron = crate::materials::index_of(&mats, "iron");
         let mut flight = Flight::default();
-        flight.introduce(FlyingBody {
-            pos: DVec3::new(0.0, 1000.0, 0.0),
-            vel: DVec3::new(100.0, 0.0, 0.0),
-            mass_kg: 10.0,
-            material: iron,
-            radius_m: 0.1,
-            temp_k: 100.0,
-        });
+        flight.introduce(FlyingBody::fresh(DVec3::new(0.0, 1000.0, 0.0), DVec3::new(100.0, 0.0, 0.0), 10.0, iron, 0.1, 100.0));
         for _ in 0..400 {
             if !flight.step(&Airless, &mats, 0.05).is_empty() {
                 break;

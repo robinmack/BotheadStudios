@@ -4384,31 +4384,30 @@ mod app {
             let east = glam::DVec3::Y.cross(up).normalize_or(glam::DVec3::X);
             let start = target + up * 500_000.0 - east * 900_000.0;
             let approach = (target - start).normalize() * 17_000.0;
-            // A half-metre iron body — a ~4 tonne bolide — that came apart a day ago, resolved into 600
-            // pieces. Both numbers are declared, and they are different KINDS of declaration:
+            // A 3 m iron asteroid — ~890 tonnes — that came apart a day ago, resolved into 1,200 pieces
+            // from ~11 cm to ~1.85 m. Both numbers are declared, and they are different KINDS of
+            // declaration:
             //
-            // - The parent SIZE is an initial condition, and it is chosen inside the regime the entry
-            //   model is honest in. `atmospheric_step` heats a body at its bulk heat capacity, which is
-            //   only true below the thermal skin depth (~1.5 cm for iron over ten seconds), so metre-scale
-            //   iron neither glows nor ablates in this engine — MEASURED: a first pass with a 2 m parent
-            //   flew a perfectly correct entry in which nothing reached 800 K and nothing ablated, because
-            //   every fragment was metre-scale. That is docs/46 row 21, and picking a parent whose pieces
-            //   are centimetres is staying inside the model rather than papering over it.
+            // - The parent SIZE is an initial condition: a disintegrated asteroid, which is what Robin
+            //   asked for. It USED to be a half-metre bolide, chosen small because `atmospheric_step`
+            //   heated a body's whole mass at once and nothing metre-scale could reach incandescence
+            //   (docs/46 row 21). That is fixed — the heat now soaks in at the material's own diffusivity
+            //   and only the skin warms — so the scene no longer has to shrink the event to fit the model.
+            //   MEASURED after the fix: iron glows at its 3134 K boiling point at every size up to 3 m.
             // - The fragment COUNT is a RESOLUTION choice, not physics (docs/44): the same mass, divided
-            //   more finely. 600 puts the pieces between ~2 cm and ~31 cm, which straddles the size where
-            //   the air consumes a fragment — so the small ones burn and the large ones reach the ground,
-            //   which is what a real fall does.
-            let parent_r = 0.5_f64;
+            //   more finely. 1,200 spans the size range where the air's share falls from ~15% to under 1%,
+            //   so small pieces are consumed and large ones reach the ground — what a real fall does.
+            let parent_r = 3.0_f64;
             let parent_m =
                 self.mats[iron].density as f64 * (4.0 / 3.0) * std::f64::consts::PI * parent_r.powi(3);
             // The trail resolves up to a fraction of the instance budget; past that the shed mass is
             // booked into the air (same mass, coarser). Law IV: representation, not existence.
             self.flight.set_trail_budget(120_000);
             self.flight.introduce_swarm(
-                start, approach, parent_m, parent_r, iron, 600, 86_400.0, 250.0,
+                start, approach, parent_m, parent_r, iron, 1_200, 86_400.0, 250.0,
             );
             log::info!(
-                "swarm: 600 fragments of a {:.0} kg body, entering at {:.1} km/s toward lat {:.1} lon {:.1}",
+                "swarm: 1200 fragments of a {:.0} kg asteroid, entering at {:.1} km/s toward lat {:.1} lon {:.1}",
                 parent_m, approach.length() / 1000.0, self.fly.lat, self.fly.lon
             );
         }

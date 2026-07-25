@@ -258,6 +258,44 @@ pub struct AtmosphericStep {
     pub ablated_mass: f64,
     /// Updated radius (m) after ablation (r ∝ m^⅓ at the material's own density).
     pub radius_m: f64,
+    /// **How deep the heat has soaked** (m) — the thickness of the body's heated skin after this step.
+    /// The caller carries it forward; a fresh body starts at 0. See [`heated_mass`].
+    pub skin_m: f64,
+}
+
+/// **How much of a body is actually hot** (kg) — the mass within `skin_m` of the surface of a sphere of
+/// radius `r` and density `rho`: `ρ·(4/3)π[r³ − (r−δ)³]`, saturating at the whole body once the heat has
+/// soaked all the way through.
+///
+/// This is the correction that lets a metre-class body glow (docs/46 row 21). Heating a body's WHOLE mass
+/// at its bulk heat capacity makes thermal response scale with volume, so a half-metre iron body flew a
+/// perfectly correct entry at 20 km/s and barely warmed — while real iron meteorites arrive with a molten
+/// fusion crust over a core still cold enough to frost. Ablation is a SURFACE process; the mass that
+/// participates is the mass the heat has reached.
+pub fn heated_mass(mass_kg: f64, radius_m: f64, skin_m: f64) -> f64 {
+    if radius_m <= 0.0 || mass_kg <= 0.0 {
+        return 0.0;
+    }
+    if skin_m >= radius_m {
+        return mass_kg; // soaked through — the bulk limit, and the old behaviour exactly
+    }
+    let inner = radius_m - skin_m.max(0.0);
+    mass_kg * (1.0 - (inner / radius_m).powi(3))
+}
+
+/// **How far a heat front has travelled into a material** after `dt` more of heating, given it had already
+/// reached `skin_m`: from `δ = √(α·t)` it follows that `δ² = α·t`, so one step is simply
+/// `δ' = √(δ² + α·dt)` — exact, and cheaper than integrating `dδ/dt = α/2δ`.
+///
+/// `α` is [`crate::materials::Material::thermal_diffusivity`], a ratio of three measured quantities. A
+/// material whose heat transport is uncharacterised returns `None`, and a caller must then not claim to
+/// know how the heat spread — the honest fallback is to treat the body as soaked through, which
+/// under-predicts ablation rather than inventing it.
+pub fn soak_depth(skin_m: f64, alpha: f64, dt: f64) -> f64 {
+    if alpha <= 0.0 || dt <= 0.0 {
+        return skin_m.max(0.0);
+    }
+    (skin_m.max(0.0).powi(2) + alpha * dt).sqrt()
 }
 
 /// One step of a spherical body's flight through air of density `rho`, made of `mat`, at `temp_k`, moving
@@ -274,11 +312,13 @@ pub fn atmospheric_step(
     mass_kg: f64,
     radius_m: f64,
     temp_k: f64,
+    skin_m: f64,
     ambient_temp_k: f64,
     mat: &Material,
     dt: f64,
 ) -> AtmosphericStep {
-    let mut out = AtmosphericStep { drag_accel: glam::DVec3::ZERO, temp_k, ablated_mass: 0.0, radius_m };
+    let mut out =
+        AtmosphericStep { drag_accel: glam::DVec3::ZERO, temp_k, ablated_mass: 0.0, radius_m, skin_m };
     if rho <= 0.0 || mass_kg <= 0.0 || radius_m <= 0.0 {
         return out; // no air, or nothing left of the body — vacuum flight
     }
@@ -303,6 +343,21 @@ pub fn atmospheric_step(
         * (temp_k.powi(4) - ambient_temp_k.powi(4)).max(0.0)
         * (4.0 * std::f64::consts::PI * r * r);
     let net = p_in - p_rad; // W into the body; negative ⇒ it cools by radiating
+
+    // **HOW MUCH OF THE BODY IS HOT.** The heat front advances by conduction at the material's own
+    // diffusivity; only the mass it has reached takes part in the temperature change. Without this,
+    // thermal response scales with VOLUME and nothing metre-sized can ever glow (docs/46 row 21) —
+    // measured: a 0.5 m iron body at 20 km/s barely warmed over an entire descent.
+    // A material with no characterised heat transport falls back to the whole body, which under-predicts
+    // ablation rather than inventing it (flagged).
+    let alpha = mat.thermal_diffusivity();
+    let skin = match alpha {
+        Some(a) => soak_depth(skin_m, a, dt).min(r),
+        None => r,
+    };
+    out.skin_m = skin;
+    let hot_mass = heated_mass(mass_kg, r, skin).max(1.0e-30);
+
     if temp_k >= t_boil && net > 0.0 {
         // At the boiling point with heat to spare: the excess vaporises mass at the latent cost `l_v`; the
         // body shrinks (r ∝ m^⅓). A body only ablates once its aeroheating beats its own radiative loss —
@@ -312,11 +367,16 @@ pub fn atmospheric_step(
         let new_mass = mass_kg - out.ablated_mass;
         let rho_mat = mat.density.max(1.0) as f64;
         out.radius_m = (3.0 * new_mass / (4.0 * std::f64::consts::PI * rho_mat)).cbrt();
+        // The ablated shell was the HOTTEST material, and it has gone: the surface has receded into the
+        // body, so the heated layer left behind is thinner by exactly what was removed. It then regrows by
+        // conduction, and the balance between the two is not declared anywhere — it settles at δ = α/2v
+        // for a surface receding at v, which is the classical thermal boundary layer of an ablating body.
+        out.skin_m = (skin - (r - out.radius_m)).max(0.0);
     } else {
         // Otherwise the net heat changes the temperature (up if heating dominates, down if radiation does).
         // Clamped to [ambient, boiling]: it cannot radiate below the air it sits in, nor exceed boiling
         // without ablating (the branch above).
-        out.temp_k = (temp_k + net / (mass_kg * c) * dt).clamp(ambient_temp_k, t_boil);
+        out.temp_k = (temp_k + net / (hot_mass * c) * dt).clamp(ambient_temp_k, t_boil);
     }
     out
 }
@@ -856,13 +916,18 @@ mod tests {
 
     /// The generic body⊕atmosphere operator (docs/58): drag slows any body, aeroheating warms it, and at
     /// the boiling point it ablates — all from the material, nothing meteor-specific. Iron is the fixture.
+    ///
+    /// Every call here passes a skin already equal to the radius — i.e. a body heated all the way through —
+    /// so these assertions still test exactly what they were written to test. That the bulk case is
+    /// reachable as `skin = r` is the point: the thermal-skin model does not replace bulk heating, it
+    /// contains it as the limit.
     #[test]
     fn atmospheric_step_slows_heats_and_ablates_any_body() {
         let mats = materials::load();
         let iron = &mats[materials::index_of(&mats, "iron")];
         let v = glam::DVec3::new(3000.0, 0.0, 0.0); // supersonic
         let step = |rho: f64, temp: f64| {
-            atmospheric_step(rho, v, 1000.0, 0.3, temp, 288.0, iron, 1.0 / 60.0)
+            atmospheric_step(rho, v, 1000.0, 0.3, temp, 0.3, 288.0, iron, 1.0 / 60.0)
         };
 
         // DRAG opposes motion.
@@ -878,23 +943,23 @@ mod tests {
         // slow case refuses to ablate is the physics being honest, not a bug.
         let t_boil = iron.boil_point().unwrap();
         let slow_at_boil =
-            atmospheric_step(1.2, glam::DVec3::new(3000.0, 0.0, 0.0), 1000.0, 0.3, t_boil, 288.0, iron, 1.0 / 60.0);
+            atmospheric_step(1.2, glam::DVec3::new(3000.0, 0.0, 0.0), 1000.0, 0.3, t_boil, 0.3, 288.0, iron, 1.0 / 60.0);
         assert_eq!(slow_at_boil.ablated_mass, 0.0, "a merely-supersonic body cannot sustain iron at boiling");
 
         // Consistent mass/radius: 1000 kg of iron is r0, and the operator recomputes radius from the
         // ablated mass at iron's own density, so ablation must return a radius below r0.
         let r0 = (3.0 * 1000.0 / (4.0 * std::f64::consts::PI * iron.density as f64)).cbrt();
         let hyper =
-            atmospheric_step(1.2, glam::DVec3::new(12_000.0, 0.0, 0.0), 1000.0, r0, t_boil, 288.0, iron, 1.0 / 60.0);
+            atmospheric_step(1.2, glam::DVec3::new(12_000.0, 0.0, 0.0), 1000.0, r0, t_boil, r0, 288.0, iron, 1.0 / 60.0);
         assert!(hyper.ablated_mass > 0.0, "at meteor speed, excess heat must vaporise mass");
         assert!(hyper.radius_m < r0, "ablation must shrink the body: {} vs {r0}", hyper.radius_m);
         assert!((hyper.temp_k - t_boil).abs() < 1.0, "temperature pins at the boiling point while ablating");
 
         // VACUUM / SUBSONIC: no air ⇒ nothing happens; below Mach 1 ⇒ drag only, no heating.
-        let vac = atmospheric_step(0.0, v, 1000.0, 0.3, 288.0, 288.0, iron, 1.0 / 60.0);
+        let vac = atmospheric_step(0.0, v, 1000.0, 0.3, 288.0, 0.3, 288.0, iron, 1.0 / 60.0);
         assert_eq!(vac.drag_accel, glam::DVec3::ZERO, "no air, no drag");
         assert_eq!(vac.temp_k, 288.0, "no air, no heating");
-        let slow = atmospheric_step(1.2, glam::DVec3::new(100.0, 0.0, 0.0), 1000.0, 0.3, 288.0, 288.0, iron, 1.0 / 60.0);
+        let slow = atmospheric_step(1.2, glam::DVec3::new(100.0, 0.0, 0.0), 1000.0, 0.3, 288.0, 0.3, 288.0, iron, 1.0 / 60.0);
         assert!((slow.temp_k - 288.0).abs() < 1.0, "subsonic: no shock heating");
     }
     /// **A real entry, flown, with the books kept.** An iron grain comes in at 20 km/s and ablates its
@@ -924,6 +989,7 @@ mod tests {
         let mut mass = rho_iron * (4.0 / 3.0) * std::f64::consts::PI * radius.powi(3);
         let start_mass = mass;
         let mut temp = air.ambient_temp_k;
+        let mut skin = 0.0_f64;
         let mut alt: f64 = 120_000.0;
         let mut vel = DVec3::new(0.0, -20_000.0, 0.0);
         let mut trail = Trail::default();
@@ -935,7 +1001,8 @@ mod tests {
                 break;
             }
             let rho = air.density_at(alt);
-            let s = atmospheric_step(rho, vel, mass, radius, temp, air.ambient_temp_k, iron, dt);
+            let s = atmospheric_step(rho, vel, mass, radius, temp, skin, air.ambient_temp_k, iron, dt);
+            skin = s.skin_m;
             if s.ablated_mass > 0.0 {
                 // The vapour leaves the body carrying the body's own velocity and temperature.
                 trail.shed(

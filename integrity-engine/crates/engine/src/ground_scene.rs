@@ -656,6 +656,7 @@ impl Ground {
             material: iron,
             radius_m: radius_m as f64,
             temp_k: 288.0, // stamped to ambient by throw_meteor
+            skin_m: 0.0,   // a fresh rock has no heated skin yet
         });
     }
 

@@ -9,6 +9,21 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Only a body's SKIN heats on atmospheric entry, so metre-class bodies glow (docs/46 row 21, CLOSED).**
+  New `atmosphere::soak_depth` and `atmosphere::heated_mass`; `atmospheric_step` gains a `skin_m` parameter
+  and returns the updated depth, and `flight::FlyingBody` carries it (`FlyingBody::fresh` builds an unheated
+  body). Bulk heating remains the limit the model reduces to when the skin reaches the radius, so passing
+  `skin = r` reproduces the old behaviour exactly. **Breaking:** `atmospheric_step` takes 9 arguments;
+  `FlyingBody`/`simulation::Meteor` has a new `skin_m` field.
+  Measured: a 30 cm iron parent went from 0% ablated at a few hundred K to 4.3% at its 3134 K boiling point;
+  the live swarm's ablated mass went 397 kg → 15,871 kg.
+- **`thermal_conductivity` is now sourced in `data/materials.json`** for 28 of 29 materials (rocks: Clauser
+  & Huenges 1995; metals and gases: CRC Handbook; soils flagged `estimated`; `hh_plasma` left unknown).
+  New `Material::thermal_conductivity()` and `Material::thermal_diffusivity()`. `docs/04` had reserved the
+  field since the schema was written and nothing had used it.
+- **Terra's swarm is now a 3 m, ~890 tonne iron asteroid** resolved into 1,200 fragments (11 cm–1.85 m). It
+  was a half-metre bolide only because the old bulk-heating model could not make anything larger glow.
+
 - **A meteor swarm you can watch (docs/59 Stage A).** `Terra::launch_swarm()` and a "Meteor swarm" button:
   the scene declares initial conditions, the engine flies the entry. New `render::MatterField` — a
   scene-agnostic renderer for whatever the engine is holding — and `shaders/matter.wgsl`, whose billboard
