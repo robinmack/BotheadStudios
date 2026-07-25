@@ -37,7 +37,8 @@ Requires a **WebGPU-capable browser** (recent Chrome/Edge/Firefox, or Safari 26+
 
 ## Before opening a PR
 
-- `cargo fmt` and `cargo clippy` clean.
+- `cargo clippy` clean. Do **not** run `cargo fmt`: the tree is not rustfmt-conformant, so a
+  blanket format rewrites files your change never touched. Match the surrounding style by hand.
 - `cargo test` passes (solver unit tests, Barnes-Hut vs O(N²) accuracy checks, etc.).
 - Explain *what physical behavior* your change produces and how you verified it.
 

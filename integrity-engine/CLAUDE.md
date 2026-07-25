@@ -127,23 +127,32 @@ computation it defers** (Law V) — recorded in `docs/46`'s ledger, not a quiet 
    from a scene to whoever is reading the repo. `web/rig/share_button.mjs` asserts the button exists AND
    that a real PNG lands, on every scene.
 
-1. **Work directly in the main checkout on a feature branch** — `~/workspace/BotheadStudios`. Do NOT
-   create git worktrees. (This reversed on 2026-07-19: worktrees existed to isolate parallel agents, and
-   this is a single-developer project that is not doing multi-agent work. They cost a duplicated
-   `node_modules` per tree, a shared stash stack that different sessions can pop out from under each
-   other, and branches that quietly diverge in directories nobody is looking at.) Branch, commit, push,
-   PR — never commit to `main` directly.
-   **Keep the branch list at `main` alone** (Robin, 2026-07-20, stated twice). One feature branch at a
-   time; merge it, delete it (`gh pr merge N --squash --admin --delete-branch`), and `git fetch --prune`.
-   Do NOT leave branches parked: this is a single-developer repo and there is nobody else's in-flight
-   work to preserve. Work worth keeping but not merging (measurements, evidence, a salvaged tool) becomes
-   an **annotated tag** `archive/<name>` whose message records WHY — same commits, `git show
-   archive/<name>`, zero branch clutter. Five such branches were retired this way on 2026-07-20.
+1. **The main checkout belongs to the human** (`~/workspace/BotheadStudios`). Persistent or parked
+   worktrees stay banned, and the 2026-07-19 reasons were real: a duplicated `node_modules` per tree,
+   a shared stash stack that different sessions can pop out from under each other, and branches that
+   quietly diverge in directories nobody is looking at. Transient, tool-managed worktrees for parallel
+   agent work ARE permitted, because each of those costs is avoided by construction when the bounds
+   hold, and the bounds are the rule: one task per worktree; the worktree is removed when its task
+   ends; no stash use in a worktree, ever; every branch a worktree produces becomes a PR and dies at
+   merge. (The 2026-07-19 rationale also rested on "this is a single-developer project that is not
+   doing multi-agent work"; that premise has expired. Two contributors and their agents now work this
+   repo, which is exactly the isolation worktrees existed for. What went wrong before was parking
+   them, not the isolation.) Branch, commit, push, PR; never commit to `main` directly.
+   **Keep the branch list at `main` alone as the steady state** (Robin, 2026-07-20, stated twice), now
+   read for two people plus their agents: feature branches are short-lived, one per in-flight task,
+   merged and deleted (`gh pr merge N --squash --delete-branch`), then `git fetch --prune`. Do NOT
+   leave branches parked; the other person's in-flight work lives in their open PRs, where it is
+   visible and reviewable, not in parked branches. Work worth keeping but not merging (measurements, evidence, a salvaged
+   tool) becomes an **annotated tag** `archive/<name>` whose message records WHY: same commits,
+   `git show archive/<name>`, zero branch clutter. Five such branches were retired this way on
+   2026-07-20.
 2. **NEVER run `cargo fmt`** — the crate isn't rustfmt-conformant; it reformats the whole tree. Edit by
-   hand. (`CONTRIBUTING.md` says otherwise for outside contributors; the working rule is do-not-run.)
+   hand. (`CONTRIBUTING.md` now says the same; if the two ever disagree again, this rule is the
+   working one and the other is the bug.)
 3. **Test:** `bash scripts/test.sh --fast [filter]` (inner loop) · full `bash scripts/test.sh` before any
-   deploy (240 run by default). O(n²) measurement tests are `#[ignore]` (18 of them —
-   `hydrostatic.rs` 9, `impact.rs` 8, `aggregate.rs` 1; run `--ignored`). Accelerated code is always pinned
+   deploy (410 run by default, measured 2026-07-24). O(n²) measurement tests and GPU-requiring benches
+   are `#[ignore]` (22 of them: `hydrostatic.rs` 9, `impact.rs` 8, `aggregate.rs` 2, `gpu_gravity.rs` 2,
+   `gpu_host.rs` 1; run `--ignored`). Accelerated code is always pinned
    to its exact/brute-force reference so speed never changes the answer. `gpu_sph.rs`'s PHYSICS is still
    verified out-of-process by `tools/sph-verify` (which carries its own replica of the structs), but the
    module is no longer invisible to the suite: it compiles on every target since 2026-07-20, and its three
@@ -173,8 +182,13 @@ computation it defers** (Law V) — recorded in `docs/46`'s ledger, not a quiet 
 6. **Record changes:** design → `docs/NN` · what-happened+proof → `JOURNAL.md` (newest-first, What/Why/
    **Verified**) · consumer delta → `CHANGELOG.md [Unreleased]` · standing context → memory. A substantive
    change usually touches docs+JOURNAL+CHANGELOG together.
-7. **Merging is yours to do:** `main` carries an active ruleset (1 approving code-owner review +
-   `code_quality` + 90% `code_coverage`). Robin: *"I set these rules up for outside contributors when/if
-   we have them. Since we don't yet we have impunity."* → merge with `--admin`. Do not ask each time.
+7. **Merging goes through the front door.** The old rule here was merge with `--admin`, on Robin's
+   grounds that the ruleset existed for outside contributors we did not have: *"Since we don't yet we
+   have impunity."* That premise no longer holds, so the bypass is retired. Two contributors exist,
+   and the `ci` workflow runs the real deploy gate on every PR (`scripts/test.sh`, the full native
+   suite, plus the wasm production build), so the branch ruleset's checks should be real ones that
+   pass on their own. What replaces impunity: CI green, and the other person able to review async.
+   Self-merge is allowed when the change is mechanical and green; when it is not, say so on the PR
+   and wait for the other pair of eyes. Never `gh pr merge --admin`.
 8. **Commit** `area: imperative subject (docs/NN)` (lowercase area). **Deploy only when asked:**
    `./scripts/deploy.sh` (full suite green first) → integrity.bothead.net (PUBLIC).
