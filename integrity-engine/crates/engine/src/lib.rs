@@ -68,6 +68,7 @@ mod planet;
 mod render;
 /// What the engine is holding, as it must be drawn — the one physics→picture mapping (docs/50).
 pub use render::Drawn;
+pub mod arc; // the out-and-back demo arc: one continuous camera path, surface <-> celestial, pacing derived
 /// docs/53 — the engine driven by a DEFINITION: builds the world, applies declared matter events through
 /// the shared primitives, and steps. No scene struct, no canvas. This is what re-consumes the systems
 /// deleting terrain orphaned (docs/46 ledger row 15).
@@ -78,6 +79,7 @@ pub mod ground_scene;
 /// ONE entry point for "two things met — what does the engine do?". Delegates to the laws that already
 /// own each half, so a new scene finds them instead of writing a third path.
 pub mod interaction;
+mod intercept; // the launch-window solve: release time chosen so the site rotates under the impact
 mod isotropy;
 #[cfg(test)]
 /// docs/00 — the Laws, made checkable: fails the build when a world file declares a quantity that must
@@ -1045,6 +1047,15 @@ mod app {
         globe_pipeline: wgpu::RenderPipeline,
         globe_mesh: Option<GpuMesh>,
         globe_uni: UniformSlot,
+        /// **The descent corridor's fine ground cap** — the SAME close-range treatment Terra
+        /// renders (terra::ground_cap + the shared SurfaceSampler + the same alpha-blend globe
+        /// shader), picked up by this scene once the arc descends below the derived hand-off
+        /// altitude, where one texel of the planetary rasters exceeds the angular budget and the
+        /// coarse globe would otherwise stretch them across the view.
+        cap_pipeline: wgpu::RenderPipeline,
+        cap_gpu: GpuMesh,
+        cap_uni: UniformSlot,
+        cap_verts: Vec<Vertex>,
         earth_surface: Option<EarthSurface>,
         /// GEOLOGIC time-LOD (docs/27): once the aftermath is quiet, each settled clump IS one body
         /// (orbital elements), evolved by the validated secular tidal law — millennia per real second.
@@ -1121,6 +1132,12 @@ mod app {
         sph_snapshot: Vec<crate::gpu_sph::SphParticle>,
         /// The GPU impact's setup/step phase (relax on GPU → assemble collision → dynamics). See `advance`.
         sph_phase: SphPhase,
+        /// A drop ARMED for the launch window (`crate::intercept`): on a world that declares a
+        /// site, the Drop control solves for the release time at which the site rotates under
+        /// the fall's impact point and arms this instead of releasing. The times count down in
+        /// SIM seconds inside `step_substep`; the release fires itself at the window. `None` =
+        /// nothing armed (and a world without a site never arms - the drop stays instant).
+        armed_drop: Option<crate::intercept::DropWindow>,
         /// docs/42 render-layer blend: 0 = the PRETTY render (sphere/atmosphere), 1 = the raw PHYSICS particles.
         /// Cross-fades by size (grains × (1−blend), billboards × blend), so no alpha-sort. Only meaningful while
         /// `sph_active`. Default 0 (pretty first — the slider reveals the physics).
@@ -1182,6 +1199,44 @@ mod app {
         pi_prediction: Option<(f64, f64)>,
         /// The latest pi-gate readout (measured rim vs prediction, or the stated refusal).
         pi_line: String,
+        // --- The out-and-back demo arc (crate::arc): a CAMERA/TIME driver, never physics. ---
+        /// The world's declared arc pacing (s per octave of camera distance). `None` = this world
+        /// declares no arc; the control never appears.
+        arc_octave_s: Option<f64>,
+        /// The world's DECLARED celestial time scale, the pacing law's top anchor. `time_scale`
+        /// itself mutates (⏪/⏩, the arc), so the declaration is kept separately.
+        arc_declared_scale: f64,
+        /// The running arc, when one is active. While `Some`, the arc owns the camera pose and the
+        /// observable time rate; manual camera/time input is ignored until `arc_stop`.
+        arc: Option<ArcDrive>,
+        /// The time scale to hand back on `arc_stop` (captured at start).
+        arc_saved_scale: f64,
+    }
+
+    /// Where the running demo arc is in its choreography. Glides advance on real time; holds wait
+    /// for the operator's next press (the arc is a camera/time driver, dropping Luna, watching the
+    /// impact, and when to come home stay the operator's calls).
+    #[derive(Clone, Copy, PartialEq)]
+    enum ArcPhase {
+        GlideDown,
+        HoldLow,
+        GlideUp,
+        HoldHigh,
+    }
+
+    /// The running arc: the derived span plus the current scalar state. The POSE is stateless,
+    /// a pure function of (`d_m`, the leg, the live crust orientation) via `crate::arc`, so the
+    /// path is continuous by construction, in both directions.
+    struct ArcDrive {
+        span: crate::arc::ArcSpan,
+        phase: ArcPhase,
+        d_m: f64,
+        leg: crate::arc::Leg,
+        /// Where the manual camera was aiming when the arc took over (Earth-relative, m), faded
+        /// into the arc's own look target over the first octave of travel so taking over is a
+        /// glide, not a cut.
+        aim_from_rel: glam::DVec3,
+        octaves: f64,
     }
 
     /// Earth rendered as a shell of particles (the honest low-res look, docs/15): a smooth sphere is a
@@ -1346,6 +1401,22 @@ mod app {
             );
             let globe_uni =
                 make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
+            // The descent corridor's ground cap: Terra's exact recipe — the same shader, alpha-blended
+            // for the cross-fade, a writable vertex buffer rebuilt per frame over a fixed topology.
+            let cap_pipeline = build_globe_pipeline(
+                &device,
+                &bind_layout,
+                config.format,
+                wgpu::BlendState::ALPHA_BLENDING,
+            );
+            let cap_gpu = make_dynamic_mesh(
+                &device,
+                "corridor-cap",
+                CAP_RES * CAP_RES,
+                &crate::terra::ground_cap::cap_indices(CAP_RES),
+            );
+            let cap_uni =
+                make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
             // GPU SPH deformable-Earth impact (stage 4c.4): its instanced-particle pipeline + a camera
             // uniform (reuses the uniform-only `bind_layout`; the buffer is sized for `SphCam`).
             // The SPH particle render is NOT a textured surface — it draws particles from the physics
@@ -1455,7 +1526,8 @@ mod app {
                 yaw: 0.6,
                 pitch: 0.5,
                 zoom: 1.0,
-                base_distance: (MOON_DIST_M * display_scale()) as f32 * 1.7,
+                base_distance: (MOON_DIST_M * display_scale() * crate::arc::WHOLE_ORBIT_MARGIN)
+                    as f32,
                 pan: Vec3::ZERO,
             };
 
@@ -1504,6 +1576,10 @@ mod app {
                 globe_pipeline,
                 globe_mesh: None,
                 globe_uni,
+                cap_pipeline,
+                cap_gpu,
+                cap_uni,
+                cap_verts: Vec::new(),
                 earth_surface: None,
                 interior_tint,
                 interior_glow,
@@ -1529,6 +1605,7 @@ mod app {
                 pending_sph_route: None,
                 sph_cap: None,
                 sph_phase: SphPhase::Dynamics,
+                armed_drop: None,
                 render_blend: 0.0, // pretty by default (docs/42)
                 gpu_impact_site: None,
                 gpu_crater_frac: 0.0,
@@ -1551,6 +1628,10 @@ mod app {
                 site_dyn: None,
                 pi_prediction: None,
                 pi_line: String::new(),
+                arc_octave_s: None,
+                arc_declared_scale: ORBIT_TIME_SCALE,
+                arc: None,
+                arc_saved_scale: ORBIT_TIME_SCALE,
             })
         }
 
@@ -1771,6 +1852,11 @@ mod app {
             if let Some(t) = w.time.as_ref() {
                 self.time_scale = t.scale.clamp(1.0, 2_000_000.0);
             }
+            // The pacing law's anchors: the DECLARED celestial scale (kept apart from the mutable
+            // time_scale) and the world's declared arc pacing, if it declares an arc at all.
+            self.arc_declared_scale = self.time_scale;
+            self.arc_octave_s = w.arc.as_ref().map(|a| a.octave_s);
+            self.arc = None;
 
             // Orbit camera: frame-of-reference focus body + framing.
             self.focus = planet_idx;
@@ -1794,7 +1880,8 @@ mod app {
             if let Some(moon) = self.bodies.get(planet_idx + 1) {
                 let sep = (moon.pos - self.bodies[planet_idx].pos).length();
                 if sep > 0.0 {
-                    self.camera.base_distance = (sep * display_scale()) as f32 * 1.7;
+                    self.camera.base_distance =
+                        (sep * display_scale() * crate::arc::WHOLE_ORBIT_MARGIN) as f32;
                 }
             }
 
@@ -1923,10 +2010,32 @@ mod app {
             self.camera.zoom = 0.4;
         }
 
+        /// The Drop control. On a world that declares a ground site, this ARMS for the launch
+        /// window instead of releasing: the intercept solve (`crate::intercept`) integrates the
+        /// same fall the scene will run and picks the release time at which the site rotates
+        /// under the impact point - the ball never moves, the trajectory is never bent, only the
+        /// release time is chosen, which is what any real mission does. The release then fires
+        /// itself in `step_substep` when the countdown reaches the window. A world without a
+        /// site (or one whose solve cannot find a window) keeps the instant drop.
+        pub fn drop_moon(&mut self) {
+            if let Some(w) = self.solve_site_drop_window() {
+                log::info!(
+                    "drop armed: window in {:.0} sim s, contact {:.2} sim days out (residual {:.4} deg, plane offset {:.1} deg)",
+                    w.release_in_s,
+                    w.impact_in_s / 86_400.0,
+                    w.residual_rad.to_degrees(),
+                    w.plane_offset_rad.to_degrees(),
+                );
+                self.armed_drop = Some(w);
+                return;
+            }
+            self.release_drop();
+        }
+
         /// Cancel every moon's velocity relative to the planet — they drop straight in and crash — then
         /// route the planet + moon(s) through the ONE SPH engine (docs/58). The dramatic version (every
         /// moon at once): a two-moon world resolves all three bodies in a single N-body SPH collision.
-        pub fn drop_moon(&mut self) {
+        fn release_drop(&mut self) {
             let planet = self.planet_idx();
             let planet_vel = self.bodies[planet].vel;
             for i in 2..self.bodies.len() {
@@ -1940,10 +2049,70 @@ mod app {
             self.route_bodies_to_sph(&set);
         }
 
+        /// Solve the launch window for the declared site from the CURRENT deterministic state:
+        /// the N-body positions, the planet's declared spin (day length and accumulated angle),
+        /// and the site's lat/lon. `None` when no site is declared, the planet does not spin,
+        /// or no moon is left to drop - the callers then keep the instant behaviour.
+        fn solve_site_drop_window(&self) -> Option<crate::intercept::DropWindow> {
+            let spec = self.site_spec.as_ref()?;
+            let p = self.planet_idx();
+            let drop = self
+                .body_meta
+                .iter()
+                .position(|m| matches!(m.role, BodyRole::Moon) && !m.materialized)?;
+            let inertia = self.spin_inertia();
+            let omega = if inertia > 0.0 {
+                self.spin_l.length() / inertia
+            } else {
+                0.0
+            };
+            let spin = crate::intercept::Spin {
+                axis: self.spin_l.try_normalize().unwrap_or(glam::DVec3::Z),
+                omega_rad_s: omega,
+                angle_rad: self.spin_angle,
+            };
+            let r_contact = self
+                .body_meta
+                .get(p)
+                .map_or(earth_radius_m(), |m| m.radius_m)
+                + self
+                    .body_meta
+                    .get(drop)
+                    .map_or(self.impactor_radius, |m| m.radius_m);
+            // The solver integrates the scene's own law; its step only needs to resolve the
+            // fall, so bound it: at the top fast-forward the scene substep is ~2,000 s, far too
+            // coarse a statement of the trajectory to time a window against, and at 1x it is
+            // milliseconds, which would spend minutes of compute on a days-long forecast. The
+            // release itself still fires on the LIVE substep grid, whatever its size.
+            let dt = (self.time_scale / 960.0).clamp(30.0, 120.0);
+            crate::intercept::solve_drop_window(
+                &self.bodies,
+                p,
+                drop,
+                r_contact,
+                &spin,
+                spec.lat_deg,
+                spec.lon_deg,
+                dt,
+            )
+        }
+
+        /// SIM seconds until an armed drop releases (-1 when nothing is armed) - the HUD's
+        /// "window in T−…" countdown.
+        pub fn drop_window_s(&self) -> f64 {
+            self.armed_drop.map_or(-1.0, |w| w.release_in_s)
+        }
+
+        /// SIM seconds from now to the armed drop's forecast contact (−1 when nothing is armed).
+        pub fn drop_window_impact_s(&self) -> f64 {
+            self.armed_drop.map_or(-1.0, |w| w.impact_in_s)
+        }
+
         /// Restore the original Sun–Earth–Moon(s) state (undo braking / the crash).
         pub fn reset_moon(&mut self) {
             self.bodies = self.initial_bodies.clone();
             self.acc = crate::orbit::accelerations(&self.bodies);
+            self.armed_drop = None; // an armed window belongs to the state this just discarded
             self.impacted = false;
             self.impact_energy_j = 0.0;
             for hit in &mut self.moon_hit {
@@ -2085,6 +2254,9 @@ mod app {
         /// body through its orbit rather than smearing against inertial space; the focus buttons
         /// snap it back to zero. Representation only — no matter moves.
         pub fn pan_view(&mut self, dx_px: f32, dy_px: f32) {
+            if self.arc.is_some() {
+                return; // the demo arc is the camera driver until arc_stop hands back
+            }
             self.camera
                 .pan_by_pixels(dx_px, dy_px, 0.9, self.config.height.max(1) as f32);
         }
@@ -2103,6 +2275,9 @@ mod app {
         }
 
         pub fn set_orbit(&mut self, yaw: f32, pitch: f32, zoom: f32) {
+            if self.arc.is_some() {
+                return; // the demo arc is the camera driver until arc_stop hands back
+            }
             self.camera.yaw = yaw;
             self.camera.pitch = pitch.clamp(-1.5, 1.5);
             // Floor low enough for the descent-follow camera (25% of lunar distance ≈ zoom 0.147).
@@ -2230,6 +2405,9 @@ mod app {
         }
 
         pub fn set_time_scale(&mut self, scale: f32) {
+            if self.arc.is_some() {
+                return; // while the arc runs, the pacing law owns the observable clock
+            }
             self.time_scale = (scale as f64).clamp(1.0, 2_000_000.0);
         }
 
@@ -2472,6 +2650,260 @@ mod app {
             s
         }
 
+        // ----------------------------------------------------------------------------------
+        // The out-and-back demo arc (crate::arc): one continuous camera path from the manual
+        // celestial rig down to standing over the declared site and back, with sim-time
+        // compression tied to camera distance. A CAMERA/TIME driver only, it moves the eye
+        // and the observable clock, never any matter; the site trigger fires along the way
+        // exactly as it does under a manual camera, in both directions.
+        // ----------------------------------------------------------------------------------
+
+        /// Whether this world declares the arc (its pacing lives in the world file) AND arms a
+        /// site for it to open on. No declaration, no control.
+        pub fn arc_available(&self) -> bool {
+            self.arc_octave_s.is_some() && self.site_spec.is_some()
+        }
+
+        pub fn arc_active(&self) -> bool {
+            self.arc.is_some()
+        }
+
+        /// The arc control's label, the ENGINE names the phase, so the button cannot disagree
+        /// with what the camera is actually doing.
+        pub fn arc_label(&self) -> String {
+            match self.arc.as_ref().map(|a| a.phase) {
+                None if self.arc_available() => "▶ glide to the ball".to_string(),
+                None => String::new(),
+                Some(ArcPhase::GlideDown) => "descending · sim time easing to real".to_string(),
+                Some(ArcPhase::HoldLow) => "▶ pull out (sim time will compress)".to_string(),
+                Some(ArcPhase::GlideUp) => "pulling out · sim time compressing".to_string(),
+                Some(ArcPhase::HoldHigh) => "▶ descend to the site".to_string(),
+            }
+        }
+
+        /// The arc camera's current distance to the site (m); 0 while inactive. For the HUD and
+        /// the verification rig.
+        pub fn arc_distance_m(&self) -> f64 {
+            self.arc.as_ref().map_or(0.0, |a| a.d_m)
+        }
+
+        /// The manual rig's pose, `[yaw, pitch, zoom]`, the host resyncs its camera state from
+        /// this after `arc_stop`, so releasing the arc does not fight a stale local copy.
+        pub fn camera_state(&self) -> Vec<f32> {
+            vec![self.camera.yaw, self.camera.pitch, self.camera.zoom]
+        }
+
+        /// One press advances the choreography: from idle, take over the camera and glide down
+        /// to the site (opening framing); from the low hold, pull out; from the high hold,
+        /// descend home. Presses during a glide do nothing, the glide finishes first.
+        pub fn arc_press(&mut self) {
+            if self.arc.is_none() {
+                let Some(octave_s) = self.arc_octave_s else {
+                    return;
+                };
+                let Some(spec) = self.site_spec.as_ref() else {
+                    return;
+                };
+                let Some(q) = spec.finest_child_extent_m(&self.mats) else {
+                    return;
+                };
+                let theta = crate::resolution::ResolutionController::default().angular_resolution;
+                let threshold =
+                    crate::site::view_resolution_distance(spec.declared_coarse_extent_m(), theta);
+                let span = crate::arc::ArcSpan::derive(
+                    q,
+                    theta,
+                    self.camera.base_distance as f64 / display_scale(),
+                    threshold,
+                    self.arc_declared_scale,
+                    octave_s,
+                );
+                // Take over exactly where the manual camera stands: the leg's start direction
+                // and distance ARE the current eye, and the manual aim fades into the arc's
+                // over the first octave, a glide, never a cut.
+                let earth_c = self.bodies[self.planet_idx()].pos;
+                let r_anchor = self.site_anchor_radius_m();
+                let eye_w = self.manual_eye_world();
+                let v0 = (eye_w - earth_c).normalize_or(glam::DVec3::X);
+                let d0 = ((eye_w - earth_c).length() - r_anchor).max(span.d_floor_m);
+                let focus_w = self.bodies.get(self.focus).map_or(earth_c, |b| b.pos);
+                let aim_from_rel = focus_w + self.camera.pan.as_dvec3() / display_scale() - earth_c;
+                self.arc_saved_scale = self.time_scale;
+                self.arc = Some(ArcDrive {
+                    span,
+                    phase: ArcPhase::GlideDown,
+                    d_m: d0,
+                    leg: crate::arc::Leg {
+                        from_dir: v0,
+                        d_start_m: d0,
+                    },
+                    aim_from_rel,
+                    octaves: 0.0,
+                });
+                return;
+            }
+            // A hold advances to the next leg. The new leg sets out from the CURRENT pose
+            // direction, so the pose is continuous across the press by construction.
+            let earth_c = self.bodies[self.planet_idx()].pos;
+            let Some((eye_w, _, _, _)) = self.arc_pose_world(earth_c) else {
+                return;
+            };
+            let v_now = (eye_w - earth_c).normalize_or(glam::DVec3::X);
+            let Some(a) = self.arc.as_mut() else { return };
+            match a.phase {
+                ArcPhase::HoldLow => {
+                    a.leg = crate::arc::Leg {
+                        from_dir: v_now,
+                        d_start_m: a.d_m,
+                    };
+                    a.phase = ArcPhase::GlideUp;
+                }
+                ArcPhase::HoldHigh => {
+                    a.leg = crate::arc::Leg {
+                        from_dir: v_now,
+                        d_start_m: a.d_m,
+                    };
+                    a.phase = ArcPhase::GlideDown;
+                }
+                ArcPhase::GlideDown | ArcPhase::GlideUp => {}
+            }
+        }
+
+        /// Release the camera to the manual rig at the nearest pose it can represent: same eye
+        /// direction, distance clamped into its envelope. The manual rig has no surface regime
+        /// (docs/59's open descent-camera remainder), so releasing near the floor steps out to
+        /// its zoom floor, an explicit exit from the choreography, stated, not a cut inside it.
+        /// The observable clock returns to the rate the arc found the scene at.
+        pub fn arc_stop(&mut self) {
+            if self.arc.is_none() {
+                return;
+            }
+            let p = self.planet_idx();
+            let earth_c = self.bodies[p].pos;
+            if let Some((eye_w, _t, _u, _d)) = self.arc_pose_world(earth_c) {
+                let dir = (eye_w - earth_c).normalize_or(glam::DVec3::X).as_vec3();
+                self.camera.yaw = dir.x.atan2(dir.z);
+                self.camera.pitch = dir.y.clamp(-1.0, 1.0).asin().clamp(-1.5, 1.5);
+                let dist_disp = ((eye_w - earth_c).length() * display_scale()) as f32;
+                self.camera.zoom = (dist_disp / self.camera.base_distance).clamp(0.05, 6.0);
+                self.camera.pan = Vec3::ZERO;
+                self.focus = p;
+            }
+            self.arc = None;
+            self.time_scale = self.arc_saved_scale;
+        }
+
+        /// The manual rig's eye in WORLD metres, the one construction `view_proj`, the site
+        /// trigger and the arc's takeover all share, so they cannot disagree about where the
+        /// camera stands.
+        fn manual_eye_world(&self) -> glam::DVec3 {
+            let focus_w = self
+                .bodies
+                .get(self.focus)
+                .map_or(self.bodies[self.planet_idx()].pos, |b| b.pos);
+            let eye_disp = self.camera.eye_dir().as_dvec3()
+                * (self.camera.base_distance * self.camera.zoom) as f64
+                + self.camera.pan.as_dvec3();
+            focus_w + eye_disp / display_scale()
+        }
+
+        /// The site's local elevation on the DRAWN planet (m): the raster elevation at the
+        /// declared lat/lon under the render's own exaggeration; 0 before the rasters arrive.
+        fn site_elev_m(&self) -> f64 {
+            let Some(spec) = self.site_spec.as_ref() else {
+                return 0.0;
+            };
+            self.earth_surface
+                .as_ref()
+                .and_then(|s| {
+                    s.elevation.as_ref().map(|r| {
+                        r.elevation_m_at(
+                            spec.lat_deg,
+                            spec.lon_deg,
+                            s.elev_range[0],
+                            s.elev_range[1],
+                        )
+                        .max(0.0)
+                            * s.relief_exag
+                    })
+                })
+                .unwrap_or(0.0)
+        }
+
+        /// The site's radial anchor on the drawn planet: body radius plus the local drawn
+        /// elevation, the same anchor the site's particles render on, so the arc's floor
+        /// hovers over the site the viewer actually sees.
+        fn site_anchor_radius_m(&self) -> f64 {
+            let p = self.planet_idx();
+            self.body_meta
+                .get(p)
+                .map_or(earth_radius_m(), |m| m.radius_m)
+                + self.site_elev_m()
+        }
+
+        /// The arc's camera pose in WORLD metres about the given planet centre (live for the
+        /// trigger, render-lagged for the frame, the caller picks the frame it composes in).
+        /// STATELESS: a pure function of the arc scalars and the crust's current orientation
+        /// through `crate::arc`, which is what makes the path cut-free in both directions.
+        /// Returns `(eye, look target, view up, distance-to-site)`.
+        fn arc_pose_world(
+            &self,
+            earth_c: glam::DVec3,
+        ) -> Option<(glam::DVec3, glam::DVec3, glam::DVec3, f64)> {
+            let a = self.arc.as_ref()?;
+            let spec = self.site_spec.as_ref()?;
+            let spin_axis = self.spin_l.try_normalize().unwrap_or(glam::DVec3::Z);
+            let spin_rot = glam::DQuat::from_axis_angle(
+                spin_axis,
+                self.spin_angle % (2.0 * std::f64::consts::PI),
+            );
+            let (up_b, north_b, _east) = crate::geo::tangent_frame(spec.lat_deg, spec.lon_deg);
+            let (u_crust, north) = (spin_rot * up_b, spin_rot * north_b);
+            let r_anchor = self.site_anchor_radius_m();
+            let spin_rate = self.spin_l.length() / self.spin_inertia();
+            let v = match a.phase {
+                ArcPhase::GlideDown | ArcPhase::HoldLow => crate::arc::descend_dir(
+                    &a.span, &a.leg, a.d_m, u_crust, spin_axis, spin_rate, r_anchor,
+                ),
+                ArcPhase::GlideUp | ArcPhase::HoldHigh => {
+                    crate::arc::ascend_dir(&a.span, &a.leg, a.d_m, u_crust)
+                }
+            };
+            let eye_w = earth_c + crate::arc::eye(v, r_anchor, a.d_m);
+            let mut target_rel = crate::arc::look_target(&a.span, a.d_m, u_crust * r_anchor);
+            if a.octaves < 1.0 {
+                // The takeover blend (one octave): manual aim → the arc's own target.
+                target_rel = a.aim_from_rel.lerp(target_rel, a.octaves.clamp(0.0, 1.0));
+            }
+            let up = crate::arc::view_up(&a.span, a.d_m, north, glam::DVec3::Y);
+            Some((eye_w, earth_c + target_rel, up, a.d_m))
+        }
+
+        /// Advance the arc by real time: the glide moves the one scalar, the pacing law sets
+        /// the observable clock (every frame while active, the arc owns time until released),
+        /// and a finished glide parks in the next hold. Camera/time state only.
+        fn arc_tick(&mut self, real_dt: f64) {
+            let Some(a) = self.arc.as_mut() else { return };
+            match a.phase {
+                ArcPhase::GlideDown => {
+                    a.d_m = a.span.glide(a.d_m, real_dt, true);
+                    a.octaves += real_dt / a.span.octave_s;
+                    if a.d_m <= a.span.d_floor_m {
+                        a.phase = ArcPhase::HoldLow;
+                    }
+                }
+                ArcPhase::GlideUp => {
+                    a.d_m = a.span.glide(a.d_m, real_dt, false);
+                    a.octaves += real_dt / a.span.octave_s;
+                    if a.d_m >= a.span.d_top_m {
+                        a.phase = ArcPhase::HoldHigh;
+                    }
+                }
+                ArcPhase::HoldLow | ArcPhase::HoldHigh => {}
+            }
+            self.time_scale = a.span.time_scale(a.d_m);
+        }
+
         /// docs/59 - the per-frame site check: the camera's mirror of the moon-drop's
         /// resolution-distance crossing (`live_resolution_crossing`), so the engine has ONE
         /// materialization pattern. Derives the view-necessity threshold from the coarse quantum
@@ -2495,16 +2927,12 @@ mod app {
             );
             let site_dir = spin_rot * crate::geo::dir_from_lat_lon(spec.lat_deg, spec.lon_deg);
             let site_w = self.bodies[p].pos + site_dir * r_p;
-            // The camera eye in world metres: the focus body plus the display-space eye offset
-            // (the same construction as `view_proj`).
-            let focus_w = self
-                .bodies
-                .get(self.focus)
-                .map_or(self.bodies[p].pos, |b| b.pos);
-            let eye_disp = self.camera.eye_dir().as_dvec3()
-                * (self.camera.base_distance * self.camera.zoom) as f64
-                + self.camera.pan.as_dvec3();
-            let eye_w = focus_w + eye_disp / display_scale();
+            // The camera eye in world metres: the arc's pose while the arc drives, the manual
+            // rig's otherwise (ONE construction each, shared with the render path).
+            let eye_w = self
+                .arc_pose_world(self.bodies[p].pos)
+                .map(|(e, _, _, _)| e)
+                .unwrap_or_else(|| self.manual_eye_world());
             let dist = (eye_w - site_w).length();
             // The coarse quantum this site is currently represented at.
             let live = self.sph_active
@@ -3113,8 +3541,11 @@ mod app {
         /// the physics with an oversized step — time slows before truth breaks.
         pub fn advance(&mut self, real_dt: f64) {
             let real_dt = real_dt.clamp(0.0, 0.25); // tab-sleep / hiccup guard
-                                                    // docs/59 - the declared site's camera trigger runs every frame, whichever machine
-                                                    // owns the physics below (the SPH phases early-return out of this function).
+                                                    // The demo arc drives camera distance and the observable clock first (a pure
+                                                    // camera/time driver), so the site trigger below sees the arc's eye this frame.
+            self.arc_tick(real_dt);
+            // docs/59 - the declared site's camera trigger runs every frame, whichever machine
+            // owns the physics below (the SPH phases early-return out of this function).
             self.update_site(real_dt);
             // docs/42 — ADAPTIVE GPU-load control: keep each frame's encoded work inside a wall-clock budget so
             // the sim can never monopolize the GPU and freeze the tab / OS. `real_dt` is the previous frame's
@@ -3484,6 +3915,22 @@ mod app {
         /// engine routes the whole colliding set through the ONE SPH engine (docs/58) and the GPU resolves
         /// the touch. The legacy CPU Aggregate that used to materialise debris here is retired.
         fn step_substep(&mut self, dt: f64) {
+            // An ARMED drop counts down in sim time and fires at the substep boundary nearest
+            // the solved window (±dt/2 - the wiring's honest quantization, measured in the
+            // intercept tests). The solver chose the time; nothing else about the drop changes.
+            // The release de-orbits and routes through the ONE SPH engine (`route_bodies_to_sph`,
+            // the same call the un-armed Drop makes); the relax it starts touches only the SPH
+            // state, so the remaining substeps of this frame stay pure ballistics (`sph_active`
+            // returns early below) until the machine owns the next `advance`.
+            if let Some(w) = self.armed_drop.as_mut() {
+                if w.release_in_s <= 0.5 * dt {
+                    self.armed_drop = None;
+                    self.release_drop();
+                } else {
+                    w.release_in_s -= dt;
+                    w.impact_in_s -= dt;
+                }
+            }
             let strength =
                 self.mats[materials::index_of(&self.mats, "basalt")].fracture_strength as f64;
             // Each body's radius comes from its OWN metadata — no shared `impactor_radius`, so two moons
@@ -3605,12 +4052,39 @@ mod app {
             // by `advance(real_dt)`, on wall-clock time, independent of this function's call rate.
             let r_bodies = self.sampled_state();
 
-            let view_proj = self.view_proj();
-
             // Render in the focused body's frame of reference (docs/17): its position is the origin,
             // everything else is drawn relative to it. Switching focus re-centres the whole view.
             let focus = r_bodies[self.focus];
             let sun = r_bodies[0];
+
+            // The demo arc's pose, composed in this same lagged frame, replaces the manual rig's
+            // view while it drives. Built in f64 and cast once, with a distance-scaled near plane
+            // (the fly camera's discipline): at the arc floor the ground is ~1.4 km away, far
+            // inside the manual rig's fixed 0.05-display-unit near plane; near never EXCEEDS the
+            // manual value and far stays put, so the top of the arc is exactly the manual frustum.
+            let arc_pose = self.arc_pose_world(r_bodies[self.planet_idx()]);
+            let view_proj = match arc_pose {
+                Some((eye_w, target_w, up, d)) => {
+                    let ds = display_scale();
+                    let aspect = self.config.width as f64 / self.config.height.max(1) as f64;
+                    let near = (0.03 * d * ds).min(0.05);
+                    // SPACE_FOV_Y, not a bare 0.9. This is the ARC's projection, and the arc is one of
+                    // two camera systems this scene can switch between — which is exactly the case
+                    // Robin's condition covers: *"as long as we can unify FOV within the engine for
+                    // rendering"*. If the arc rendered at its own literal, switching producers would
+                    // silently change how wide the world is.
+                    let proj = glam::DMat4::perspective_rh(
+                        SPACE_FOV_Y as f64,
+                        aspect.max(1.0e-3),
+                        near,
+                        100_000.0,
+                    );
+                    let view =
+                        glam::DMat4::look_at_rh((eye_w - focus) * ds, (target_w - focus) * ds, up);
+                    (proj * view).as_mat4()
+                }
+                None => self.view_proj(),
+            };
 
             // GPU SPH impact (docs/33 stage 4c.4): push the particle-shader camera uniform. The particle
             // system lives in an Earth-relative f32 frame, so its display origin is Earth's position in the
@@ -3954,11 +4428,16 @@ mod app {
                 }
             }
             // Camera eye in display coordinates (relative to the focus body) — the same construction
-            // as view_proj (the orbit distance around the panned look target), needed for the
-            // per-grain Rayleigh view path.
-            let eye_disp = self.camera.eye_dir().as_dvec3()
-                * (self.camera.base_distance * self.camera.zoom) as f64
-                + self.camera.pan.as_dvec3();
+            // as view_proj (the arc's eye while it drives, the orbit distance around the panned look
+            // target otherwise), needed for the per-grain Rayleigh view path.
+            let eye_disp = match arc_pose {
+                Some((eye_w, _, _, _)) => (eye_w - focus) * display_scale(),
+                None => {
+                    self.camera.eye_dir().as_dvec3()
+                        * (self.camera.base_distance * self.camera.zoom) as f64
+                        + self.camera.pan.as_dvec3()
+                }
+            };
             let sun_dir_earth = (sun - earth_center).normalize_or_zero();
             let spin_axis = self.spin_l.try_normalize().unwrap_or(glam::DVec3::Z);
             let spin_rot = glam::DQuat::from_axis_angle(
@@ -4074,6 +4553,122 @@ mod app {
                             bytemuck::cast_slice(&[c, c2]),
                         );
                     }
+                }
+            }
+            // **The descent corridor picks up Terra's close-range treatment.** Below the DERIVED
+            // hand-off altitude the planetary rasters no longer fill the view — one texel exceeds
+            // the docs/49 angular budget, the same budget the site materialization threshold uses —
+            // so this scene builds the SAME fine ground cap Terra builds (`terra::ground_cap`), from
+            // the SAME sampler the globe mesh is built from, cross-faded in by the SAME derived
+            // fade; the coarse globe is skipped only once the cap covers the view past the horizon.
+            // Where even the finest raster is exhausted (the known missing finer LOD tier), the
+            // cap's raster texels at their true size plus globe.wgsl's material relief mottle are
+            // the honest floor — stretching would be blur pretending to be data.
+            //
+            // The cap's vertices are built in the BODY (crust) frame around the sub-camera point
+            // and subtracted from the eye in f64; the draw then goes through the GLOBE'S OWN
+            // conventions (the same view_proj, the spin as the model rotation, the eye re-added as
+            // an f64-built translation), so the cap and the globe cannot disagree about where or
+            // how the same surface is drawn, and the absolute-f32 residual stays inside the
+            // sub-pixel bound the arc floor itself is licensed by (crate::arc's floor test). The
+            // manual rig's zoom floor sits above the hand-off, so the arc's descent is what crosses
+            // it; during the GPU impact the planet is drawn at the SPH field's sub-scale radius and
+            // the particle field is the matter, so no cap.
+            let mut corridor_cap = false;
+            let mut corridor_skip_globe = false;
+            if let (Some((eye_w, _, _, d_m)), Some(surf), false) =
+                (arc_pose, self.earth_surface.as_ref(), self.sph_active)
+            {
+                let theta = crate::resolution::ResolutionController::default().angular_resolution;
+                let cap_start_alt = crate::terra::ground_cap::handoff_alt_m(
+                    crate::terra::ground_cap::finest_texel_arc_m(
+                        &[
+                            surf.landmask.as_ref(),
+                            surf.elevation.as_ref(),
+                            surf.landcover.as_ref(),
+                        ],
+                        earth_radius_m(),
+                    )
+                    .unwrap_or(0.0),
+                    theta,
+                );
+                let fade = crate::terra::ground_cap::cap_fade(d_m, cap_start_alt);
+                if fade > 0.0 && self.globe_mesh.is_some() {
+                    let centre = target.map_or(earth_center, |(c, _, _)| c);
+                    let ds = pretty_scale;
+                    let r_draw = pretty_r_surf * ds;
+                    let q_inv = spin_rot.conjugate();
+                    let eye_body = (q_inv * (eye_w - centre)) * ds; // body frame, display units
+                    let dir_body = eye_body.normalize_or(glam::DVec3::Y);
+                    let (lat, lon) = crate::geo::lat_lon_from_dir(dir_body);
+                    let (up_b, north_b, east_b) = crate::geo::tangent_frame(lat, lon);
+                    let h = (eye_body.length() - r_draw).max(1.0e-9);
+                    let horizon = (h * (h + 2.0 * r_draw)).sqrt();
+                    let angle = crate::terra::ground_cap::cap_angle(horizon, r_draw);
+                    corridor_skip_globe =
+                        fade >= 1.0 && crate::terra::ground_cap::cap_covers_view(horizon, r_draw);
+                    let lift = crate::terra::ground_cap::cap_lift_disp(d_m, ds);
+                    let mut verts = std::mem::take(&mut self.cap_verts);
+                    {
+                        let sampler = crate::terra::globe_mesh::SurfaceSampler::new(
+                            &self.mats,
+                            &surf.biome_mats,
+                            surf.landmask.as_ref(),
+                            surf.elevation.as_ref(),
+                            surf.landcover.as_ref(),
+                            surf.elev_range,
+                            ds,
+                            surf.relief_exag,
+                        );
+                        // The spin's oblate figure as a radial factor — first-order identical to
+                        // the globe draw's affine scale about the spin axis (the mesh's y), so the
+                        // cap sits on the same flattened surface the globe draws.
+                        let sample = |dir: glam::DVec3| {
+                            let (col, off, mat) = sampler.sample(dir);
+                            (
+                                col,
+                                off + lift + r_draw * flat * (1.0 / 3.0 - dir.y * dir.y),
+                                mat,
+                            )
+                        };
+                        crate::terra::ground_cap::fill_ground_cap(
+                            &mut verts, up_b, east_b, north_b, eye_body, r_draw, angle, CAP_RES,
+                            sample,
+                        );
+                    }
+                    self.queue.write_buffer(
+                        &self.cap_gpu.vertex_buf,
+                        0,
+                        bytemuck::cast_slice(&verts),
+                    );
+                    self.cap_verts = verts;
+                    // Drawn through the GLOBE'S OWN conventions — the same focus-relative
+                    // view_proj, the same spin rotation in the model, the same world-frame light
+                    // and anchor — so the cap differs from the globe by sampling density alone
+                    // and the cross-fade cannot shade one point two ways. The vertices are
+                    // eye-relative in the body frame (subtracted in f64); the model adds the eye
+                    // back as a translation built in f64 and cast once, so the absolute-f32
+                    // residual stays inside the sub-pixel bound the arc floor itself is licensed
+                    // by (see crate::arc's floor test).
+                    let spin_m = Mat4::from_quat(glam::Quat::from_xyzw(
+                        spin_rot.x as f32,
+                        spin_rot.y as f32,
+                        spin_rot.z as f32,
+                        spin_rot.w as f32,
+                    ));
+                    let eye_spos = ((eye_w - focus) * ds).as_vec3();
+                    write_space_uniform(
+                        &self.queue,
+                        &self.cap_uni,
+                        view_proj,
+                        Mat4::from_translation(eye_spos) * spin_m,
+                        earth_light,
+                        [1.0, 1.0, 1.0, fade as f32 * pretty_fade],
+                        [eye_disp.x as f32, eye_disp.y as f32, eye_disp.z as f32, 0.0],
+                        self.air(),
+                        glow_of(&crate::planet::body("earth")),
+                    );
+                    corridor_cap = true;
                 }
             }
             for (i, uni) in self.shell_unis.iter().enumerate() {
@@ -4400,8 +4995,14 @@ mod app {
                     // Earth from the one next door. Excavation is not this mesh's job — the impact resolves
                     // real particles at the impact site, and THEY are the matter (and the crater) there.
                     if let Some(globe) = self.globe_mesh.as_ref() {
-                        pass.set_pipeline(&self.globe_pipeline);
-                        draw(&mut pass, &self.globe_uni, globe);
+                        // Skipped once the corridor cap is fully faded in and covers the view out
+                        // past the horizon (ground_cap::cap_covers_view — the same rule Terra
+                        // skips its globe by): the depth buffer cannot separate two copies of one
+                        // surface in the final metres.
+                        if !corridor_skip_globe {
+                            pass.set_pipeline(&self.globe_pipeline);
+                            draw(&mut pass, &self.globe_uni, globe);
+                        }
                         pass.set_pipeline(&self.pipeline);
                         // The impactor, as the body it still is. Zero-alpha when it has come apart, at
                         // which point its particles are the matter and are already being drawn.
@@ -4417,6 +5018,13 @@ mod app {
                     for uni in self.debris_unis.iter().take(n_moonlets) {
                         draw(&mut pass, uni, &self.sphere_gpu);
                     }
+                }
+                // The descent corridor's ground cap (built above): alpha-blended over the globe
+                // through the fade band, the whole foreground below it. Drawn before the site's
+                // billboards so the fine matter at the site depth-tests against the real ground.
+                if corridor_cap {
+                    pass.set_pipeline(&self.cap_pipeline);
+                    draw(&mut pass, &self.cap_uni, &self.cap_gpu);
                 }
                 // GPU SPH particles: instanced billboards straight from the physics buffer (zero-copy).
                 // Particles are drawn only once they ARE the matter. During the relax and the approach the
@@ -4455,10 +5063,15 @@ mod app {
         /// which the HUD renders as a km/AU scale bar. Honest live read of camera state; feeds the
         /// same scale bar as the terrain scene through `metres_per_pixel_at`.
         pub fn meters_per_pixel(&self) -> f64 {
-            let dist_m = (self.camera.base_distance * self.camera.zoom) as f64 / display_scale();
-            // SPACE_FOV_Y, not a bare 0.9. The scale bar and the projection must read ONE field of view:
-            // when this was written out twice, changing one made the bar measure a frustum the scene was
-            // not drawing (PR #88). Sean's branch predates that fix and reintroduced the literal here.
+            // While the arc drives, the focal distance is its camera-to-site distance; the HUD
+            // scale bar then reads honestly all the way down to the surface framing. (Sean, upstream-8.)
+            let dist_m = match self.arc.as_ref() {
+                Some(a) => a.d_m,
+                None => (self.camera.base_distance * self.camera.zoom) as f64 / display_scale(),
+            };
+            // SPACE_FOV_Y, not a bare 0.9 — the scale bar and the projection must read ONE field of view
+            // (PR #88). His branch predates that fix, so the literal comes back on every merge; it is the
+            // half `laws::fov_tests` cannot see, because this is not a `perspective_rh` call.
             crate::metres_per_pixel_at(dist_m, SPACE_FOV_Y as f64, self.config.height.max(1) as f64)
         }
 
@@ -5064,6 +5677,9 @@ mod app {
     /// and carry the eye offset in the model matrix, and a tier then only needs rebuilding when the camera
     /// leaves it. That is what unlocks the rest of the ladder, and it is the next piece of work.
     const TERRA_DEFAULT_TIERS: usize = 1;
+    /// (fixed topology) is built once. One resolution for every scene's cap — Terra's descent and the
+    /// space band's corridor build the same patch.
+    const CAP_RES: usize = 192;
     /// The finest REAL feature the elevation raster carries (m). Detail below this is not in the data,
     /// so it must come from the material — see the micro-relief in the cap sample.
     const RASTER_FEATURE_M: f64 = 20_000.0;
@@ -5346,6 +5962,9 @@ mod app {
                 make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
             // The ground cap: same shader, alpha-blended for the cross-fade; a writable vertex buffer rebuilt each
             // frame, fixed index topology.
+            // Same shader as the globe, alpha-blended for the cross-fade. (The merge had this calling
+            // build_globe_pipeline with make_dynamic_mesh's arguments — the pipeline takes a bind layout
+            // and a blend state; the label/count/indices belong to the mesh built just below.)
             let cap_pipeline = build_globe_pipeline(
                 &device,
                 &bind_layout,
@@ -5961,13 +6580,30 @@ mod app {
                 crate::orbit::solar_direction_earth_fixed(crate::orbit::unix_now_seconds());
             let sun_light = Vec3::new(sun_dir.x as f32, sun_dir.y as f32, sun_dir.z as f32);
 
-            // docs/43 Phase 5 — build the fine ground cap under the camera and cross-fade it in as we descend.
-            // The fade/lift rules live in `terra::ground_cap` (natively tested). At full fade the cap covers
-            // the whole view out past the horizon, so the coarse globe is not drawn at all; that removal is
-            // what keeps the final metres free of the cap-vs-globe depth fight.
+            // docs/43 Phase 5 — build the fine ground cap under the camera and cross-fade it in as we
+            // descend. The fade/lift rules live in `terra::ground_cap` (natively tested). The hand-off
+            // altitude is DERIVED from the rasters' own resolution against the docs/49 angular budget
+            // (`ground_cap::handoff_alt_m`) — below it the planetary raster is being stretched, so the
+            // cap (which resamples the same raster at the camera's own angular density) takes over.
+            // The globe is skipped only once the cap is fully faded in AND genuinely covers the view
+            // out past the horizon; that removal is what keeps the final metres free of the
+            // cap-vs-globe depth fight.
             let alt_m = self.fly.alt_m;
-            let cap_fade = crate::terra::ground_cap::cap_fade(alt_m) as f32;
-            let draw_globe = cap_fade < 1.0;
+            let cap_start_alt = crate::terra::ground_cap::handoff_alt_m(
+                crate::terra::ground_cap::finest_texel_arc_m(
+                    &[
+                        self.landmask.as_ref(),
+                        self.elevation.as_ref(),
+                        self.landcover.as_ref(),
+                    ],
+                    self.planet_radius,
+                )
+                .unwrap_or(0.0),
+                self.detail.angular_resolution,
+            );
+            let cap_fade = crate::terra::ground_cap::cap_fade(alt_m, cap_start_alt) as f32;
+            let draw_globe = !(cap_fade >= 1.0
+                && crate::terra::ground_cap::cap_covers_view(view.horizon, r_disp));
             if cap_fade > 0.0 && self.globe_mesh.is_some() {
                 self.build_cap(&view, sun_light, cap_fade, anchor);
             }
@@ -6178,9 +6814,9 @@ mod app {
                     );
                 }
                 if let Some(globe) = &self.globe_mesh {
-                    // At full cap fade the globe is SKIPPED: the cap covers the view out past the
-                    // horizon, and near the ground the depth buffer cannot separate two copies of the
-                    // same surface (see ground_cap::CAP_FULL_ALT_M).
+                    // Once the cap is fully faded in AND covers the view out past the horizon, the
+                    // globe is SKIPPED: near the ground the depth buffer cannot separate two copies
+                    // of the same surface (see ground_cap::cap_covers_view).
                     if draw_globe {
                         pass.set_pipeline(&self.globe_pipeline);
                         draw(&mut pass, &self.globe_uni, globe);
@@ -6301,19 +6937,19 @@ mod app {
             let r_disp = self.planet_radius * display_scale();
             let exag = self.relief_exag;
             let ds = display_scale();
-            let res = TERRA_CAP_RES;
-            // Cover ~1.3× the horizon angle so the patch reaches past the visible horizon (its far edge then sits
-            // below the horizon / is occluded — no visible cap boundary).
+            let res = CAP_RES;
+            // Cover past the visible horizon so the far edge sits below it / occluded — no visible cap
+            // boundary (the margin + clamp live in `ground_cap::cap_angle`, shared with the space band).
             // NOTE (2026-07-21): sizing this to the camera-resolvable texel instead of the horizon was
             // tried and REVERTED — it shrank the fine cap ~46x while the coarse globe is cross-faded out
             // at low altitude, leaving nothing drawn at any altitude below orbital. The diagnosis stands
             // (at 2 m a horizon-sized cap is ~34 m/cell while the eye resolves ~2 mm), but the fix has to
             // add a finer LOD tier, not shrink the only one. See `surface_detail` and docs/08's tiers.
-            let cap_angle = (1.3 * view.horizon / r_disp).clamp(1e-4, 0.6);
+            let cap_angle = crate::terra::ground_cap::cap_angle(view.horizon, r_disp);
             // The radial lift that wins the depth fight against the coarse globe while both are drawn.
-            // Altitude-scaled (rule + tests in terra::ground_cap): full 20 m through the fade band, and
-            // shrinking with the descent below it so it can never reach a camera standing 2 m up; the
-            // old fixed 20 m put the cap above the eye there, showing its underside.
+            // Altitude-proportional (rule + tests in terra::ground_cap), so it clears the depth
+            // buffer's own altitude-proportional resolution at every height and still can never reach
+            // a camera standing 2 m up.
             let lift = crate::terra::ground_cap::cap_lift_disp(self.fly.alt_m, ds);
             let water_idx = materials::index_of(&self.mats, "water");
             let water_alb = self.mats[water_idx].albedo;
@@ -6330,20 +6966,15 @@ mod app {
             let outer_angle = (1.3 * view.horizon / r_disp).clamp(1e-4, 0.6);
             let mut verts = std::mem::take(&mut self.cap_verts);
             for tier in 0..self.cap_tiers.clamp(1, TERRA_CAP_TIERS) {
-                // Each tier covers a quarter of the span of the one outside it, so its cells are 4× finer.
+                // Each tier covers a quarter of the span of the one outside it, so its cells are 4x finer.
                 let cap_angle = outer_angle / TERRA_TIER_RATIO.powi(tier as i32);
-                // A tier's cell size on the ground — what its own detail budget is measured against.
+                // A tier's cell size on the ground - what its own detail budget is measured against.
                 let cell_m = (cap_angle * self.planet_radius * 2.0 / res as f64).max(1e-6);
                 // Lift each tier a little further toward the camera so the finer one wins the depth fight
-                // with the coarser one beneath it. SCALED TO ALTITUDE, not a constant: the old constant
-                // 20 m exceeded the eye height at low altitude and put the ground ABOVE the camera, which
-                // is the documented bug this replaces. A depth-precision allowance, flagged as such — it is
-                // about the depth buffer, not about the world, and it vanishes proportionally as you descend.
+                // with the coarser one beneath it. Scaled to altitude (`cap_lift_disp`), not a constant.
                 let lift = lift * (tier as f64 + 1.0);
                 let octave_budget = self.cap_octave_budget;
-                // The local measured slope, sampled ONCE for the tier rather than at every vertex. A tier is
-                // small compared with a 19.55 km raster pixel, so its ground sits inside one measurement:
-                // four raster lookups per tier instead of four per vertex, for the same number.
+                // The local measured slope, sampled ONCE for the tier rather than at every vertex.
                 let tier_slope = {
                     let (lat, lon) = (self.fly.lat, self.fly.lon);
                     let d = 360.0 / self.elevation.as_ref().map_or(2048, |r| r.w.max(1)) as f64;
@@ -6358,29 +6989,40 @@ mod app {
                     (dn * dn + de * de).sqrt()
                 };
                 {
+                    // **THE shared sampler** (`terra::globe_mesh::SurfaceSampler`, Sean's upstream-8): the
+                    // cap samples the same surface as the globe mesh BY CONSTRUCTION, so the two cannot
+                    // drift into a second Earth. It answers what the surface IS - albedo, material, and the
+                    // measured elevation offset.
+                    let sampler = crate::terra::globe_mesh::SurfaceSampler::new(
+                        &self.mats,
+                        &self.biome_mats,
+                        self.landmask.as_ref(),
+                        self.elevation.as_ref(),
+                        self.landcover.as_ref(),
+                        self.elev_range,
+                        ds,
+                        exag,
+                    );
                     let mats = &self.mats;
-                    let landmask = self.landmask.as_ref();
-                    let landcover = self.landcover.as_ref();
-                    let elevation = self.elevation.as_ref();
-                    let biome_mats = &self.biome_mats;
                     let detail = &self.detail;
+                    let planet_radius = self.planet_radius;
                     let sample = |dir: glam::DVec3| -> ([f32; 3], f64, u32) {
-                        let (lat, lon) = crate::geo::lat_lon_from_dir(dir);
-                        let is_land = landmask.map(|r| r.land_at(lat, lon)).unwrap_or_else(|| {
-                            crate::planet::earth_surface_material(dir) == "granite"
-                        });
-                        if !is_land {
-                            return (water_alb, lift, water_idx as u32);
+                        let (col, off, mat) = sampler.sample(dir);
+                        let mi = mat as usize;
+                        // Water is a surface, not ground: it carries no generated relief.
+                        if mi == water_idx {
+                            return (col, off + lift, mat);
                         }
-                        let biome = landcover.map_or(1, |r| r.biome_at(lat, lon) as usize);
-                        let mi = biome_mats.get(biome).copied().unwrap_or(water_idx);
-                        let e =
-                            elevation.map_or(0.0, |r| r.elevation_m_at(lat, lon, elev_lo, elev_hi));
-
-                        // SUB-RASTER RELIEF (`crate::surface_detail`). Below the raster there is no
-                        // measurement, so the relief is generated — bounded by what this material can
-                        // actually stand (which `surface_detail` gets from `granular`, not from itself) and
-                        // scaled by how steep this ground already MEASURES, so a plain stays a plain.
+                        // SUB-RASTER RELIEF (`crate::surface_detail`, docs/46 row 23) ON TOP of what the
+                        // sampler measured. Below the raster there is no measurement, so the relief is
+                        // generated - bounded by what this material can actually stand (which
+                        // `surface_detail` asks `granular` for, never decides itself) and scaled by how
+                        // steep this ground already MEASURES, so a plain stays a plain.
+                        //
+                        // Sean's upstream-8 REMOVED this, correctly reasoning that one 192-cell cap has
+                        // nowhere to put metre-scale relief. That holds for one tier; the ladder is what
+                        // gives it somewhere to go, so the rule is kept and the sampler adopted.
+                        let (lat, lon) = crate::geo::lat_lon_from_dir(dir);
                         let m = &mats[mi];
                         let mu = m.friction_coefficient as f64;
                         let h_crit = crate::granular::critical_bank_height(
@@ -6388,26 +7030,24 @@ mod app {
                             m.density,
                             9.81,
                         ) as f64;
-                        // How many halvings below the raster this tier's cells can actually show. The tier's
-                        // own cell size is the limit: generating finer than the mesh can carry costs time and
-                        // draws nothing (the measured reason the first attempt at this was removed).
+                        // How many halvings below the raster THIS tier's cells can actually show:
+                        // generating finer than the mesh can carry costs time and draws nothing.
                         let octaves =
                             crate::surface_detail::detail_octaves(detail, cell_m, raster_step_m)
                                 .min((raster_step_m / cell_m).max(1.0).log2())
                                 .min(octave_budget);
                         let relief = if octaves > 0.0 {
-                            // How close this ground already is to what the material can hold — the measured
-                            // slope against its own limit. It is what turns a CEILING into this ground's
-                            // roughness, so a plain stays a plain instead of coming out like a mountainside.
+                            // How close this ground already is to what the material can hold - the measured
+                            // slope against its own limit. It turns a CEILING into this ground's roughness.
                             let frac = if mu > 0.0 {
                                 (tier_slope / mu).clamp(0.0, 1.0)
                             } else {
                                 0.0
                             };
-                            // Position in a surface-tangent frame, in metres, so the lattice is stable in the
-                            // WORLD and not in the view — look away and back, same ground (Law IV).
-                            let px = lon.to_radians() * self.planet_radius * lat.to_radians().cos();
-                            let pz = lat.to_radians() * self.planet_radius;
+                            // A surface-tangent frame in metres, so the lattice is stable in the WORLD and
+                            // not in the view - look away and back, same ground (Law IV).
+                            let px = lon.to_radians() * planet_radius * lat.to_radians().cos();
+                            let pz = lat.to_radians() * planet_radius;
                             crate::surface_detail::micro_relief_m(
                                 px,
                                 pz,
@@ -6420,11 +7060,8 @@ mod app {
                         } else {
                             0.0
                         };
-                        (
-                            m.albedo,
-                            (e.max(0.0) + relief) * ds * exag + lift,
-                            mi as u32,
-                        )
+                        // The sampler's offset is already in display units; the relief is metres.
+                        (col, off + relief * ds * exag + lift, mat)
                     };
                     crate::terra::ground_cap::fill_ground_cap(
                         &mut verts, view.up, view.east, view.north, view.eye, r_disp, cap_angle,

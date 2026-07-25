@@ -168,6 +168,79 @@ because **we are our own first customers** and pin exact engine versions in our 
 - **The orbit HUD no longer runs an O(k²) clump search every frame.** `gpu_disk_stats_json()` is throttled
   to ~1 Hz and honours `?nostats`, matching the CPU disk stats beside it.
 
+- **The descent corridor picks up Terra's close-range render (the space band).** Below a
+  hand-off altitude the Ground Zero descent now builds the same fine ground cap Terra flies
+  over (the `terra::ground_cap` patch, filled through the one shared
+  `terra::globe_mesh::SurfaceSampler` the globe mesh itself is built from) and cross-fades it
+  over the coarse globe, so the corridor resolves the surface rasters at the camera's own
+  angular density instead of stretching planetary texels across the view. The hand-off is
+  DERIVED, never declared: `ground_cap::handoff_alt_m` is the altitude where one texel of the
+  finest shipped raster subtends the angular budget (the same budget the site materialization
+  threshold uses, via the same `view_resolution_distance` law), about 19,500 km for the shipped
+  2048x1024 Earth rasters, and the cross-fade spans the first octave of deficit below it. Terra
+  reads the same derivation (its declared 40 km / 15 km cap constants are retired), the coarse
+  globe is skipped only where the cap genuinely covers the view past the horizon
+  (`ground_cap::cap_covers_view`; skipping higher would cut the limb), and the cap's depth lift
+  is now altitude-proportional so it clears the depth buffer's own altitude-proportional
+  resolution at every height. Where even the finest raster is exhausted (the known missing
+  finer LOD tier), its texels render at their true size with the material relief as the floor:
+  the degradation is honest, never a blur pretending to be data.
+
+- **The drop arms for the launch window, not the instant.** On a world that declares a ground
+  site, the Drop control now solves the intercept and ARMS: the new `intercept` module
+  integrates the same fall the scene will run (verlet plus the swept first-contact forecast,
+  never an analytic stand-in) from the current N-body state, and picks the next release time at
+  which the site rotates under the impact azimuth - the ball never moves and the trajectory is
+  never bent; only the release time is chosen. The HUD carries the countdown in sim time
+  ("DROP ARMED · window in T-...") and the release fires itself at the window, quantized to the
+  live substep (a stated ±dt/2). Measured end to end at the Ground Zero world's own
+  fast-forward: the contact lands 0.086° of spin-axis azimuth from the site; the fall's fixed
+  44.1° polar offset from the 45N site ring is reported by the solver, not hidden. A site on
+  the far side of the spin waits about half a sidereal day for its window with the same
+  trajectory. Worlds without a site keep the instant drop; Reset disarms.
+
+- **One continuous camera path, surface to celestial and back (`crate::arc`).** The Ground Zero
+  page carries a demo-arc control, labelled as the camera/time driver it is: one press glides
+  the space band's camera from wherever it stands down to standing over the declared site, the
+  next pulls out past the fold threshold, the next descends home, no cuts, no scene switch,
+  either direction, with the site trigger materializing and folding along the way. Both ends of
+  the path are derived: the floor is the view-resolution distance of the site's finest
+  materialized quantum (about 1.4 km for the declared ball's one-rung child, as deep as the
+  current representation honestly serves the view), and the top clears the fold threshold at
+  the scene's own whole-orbit framing margin. Sim-time compression is tied to camera distance
+  by a derived pacing law, proportional to distance (constant apparent angular rate), anchored
+  at the world's declared celestial `time.scale`, real time at the surface. The world file
+  declares the one pacing number the arc adds (`arc.octave_s`, real seconds per octave of
+  scale). Riding the spinning crust under compression uses two derived rules: crust-anchored
+  quantities weight by the reciprocal of the compression (their drift never exceeds Earth's
+  real rotation rate), and the descent leads the spin by the closed-form remaining crust turn,
+  so the site rotates into place beneath the arriving camera. Dropping Luna from the celestial
+  hold is witnessed at scale, and the descent through a quiescent aftermath re-materializes the
+  site carrying the live field's sampled internal energy; the arc itself drives only the camera
+  and the observable clock, never matter.
+
+- **The ground-zero demo is a world definition (docs/23 as data).** `worlds/ground-zero/world.json`
+  declares the whole demo in one file: the Sun, the shared Earth, one Luna instance on her real
+  orbit, and the iron ball as declared cohesive matter at a ground-zero lat/lon site on that same
+  Earth. A new Ground Zero page (`groundzero.html`, listed in the scene picker) loads it through
+  the space band: the same system as Space, plus the declared iron ball standing at the impact
+  site, the witness the zoom milestones descend to. Braking or dropping Luna into the Earth runs
+  today from this definition, through the same N-body integrator, swept contact and GPU impact
+  assembly the Space scene uses. The ground block is the surface placement the zoom milestones
+  (docs/59 order of work 2 to 4) will materialize; nothing renders the ball at orbital scale yet,
+  and the file says so itself. No new schema was needed: a system world may carry the existing
+  `ground` block, whose `planet`, `lat` and `lon` anchor it to the body the orbital cast places.
+  Native tests execute both halves of the shipped file (the system cast parses and is bound; the
+  ground half builds and runs through the definition-driven `Simulation`) and pin the ground-zero
+  round trip onto the orbital Earth's surface through the one `geo` conversion.
+
+- **The declared site sits on the fall's own impact ring.** Ground Zero declares its site at
+  lat 45, lon 0, by derivation rather than taste: the whole cast starts in the orbital plane, so a
+  from-rest lunar fall stays in it and the reachable contact points are the great circle that plane
+  cuts through the crust. Release timing can fix the azimuth but never the polar plane, so a site
+  off the ring can never be hit whatever the timing. The derivation is in the world file's comment
+  and the solver test asserts the declared site's plane offset reads ~0.
+
 - **The materialized site enters dynamics: the event's arriving energy moves and breaks the
   site's matter (docs/59).** Two pieces. The release gate resolved on real relief: a stalled
   relax plateau is a true fixed point caused by the release criterion's own two smoothing

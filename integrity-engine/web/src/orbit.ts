@@ -292,6 +292,62 @@ async function main(): Promise<void> {
       bar.appendChild(slot);
     }
 
+    // The out-and-back DEMO ARC (worlds that declare `arc` + `ground`): one continuous camera
+    // path from the site to celestial framing and back, sim time compressing with altitude. A
+    // camera/time driver ONLY, it moves the eye and the observable clock, never any matter,
+    // and the panel says so. The engine names each phase; the button reads it back every frame
+    // so the label cannot disagree with what the camera is doing.
+    let arcBtn: HTMLButtonElement | null = null;
+    if ((world as { arc?: unknown; ground?: unknown } | null)?.arc && demo.arc_available()) {
+      const slot = document.createElement("div");
+      Object.assign(slot.style, {
+        display: "flex", flexDirection: "column", gap: "4px",
+        padding: "8px 11px", color: "#fff",
+        font: "600 12px/1.3 system-ui, sans-serif",
+        background: "rgba(20,24,40,0.72)", border: "1px solid rgba(255,255,255,0.25)",
+        borderRadius: "10px", backdropFilter: "blur(6px)",
+      });
+      const caption = document.createElement("div");
+      caption.textContent = "Demo arc · drives camera + time only";
+      caption.style.opacity = "0.75";
+      arcBtn = document.createElement("button");
+      arcBtn.className = "gf-btn";
+      arcBtn.textContent = demo.arc_label();
+      Object.assign(arcBtn.style, {
+        padding: "8px 11px", font: "600 13px/1 system-ui, sans-serif",
+        color: "#fff", background: "rgba(20,24,40,0.72)",
+        border: "1px solid rgba(255,255,255,0.25)", borderRadius: "8px", cursor: "pointer",
+        touchAction: "manipulation",
+      });
+      arcBtn.addEventListener("click", () => {
+        arcBtn!.classList.add("gf-flash");
+        setTimeout(() => arcBtn!.classList.remove("gf-flash"), 180);
+        demo.arc_press();
+      });
+      const endBtn = document.createElement("button");
+      endBtn.textContent = "✕ end arc (release camera)";
+      Object.assign(endBtn.style, {
+        padding: "6px 11px", font: "600 12px/1 system-ui, sans-serif",
+        color: "#cfd9ee", background: "rgba(20,24,40,0.5)",
+        border: "1px solid rgba(255,255,255,0.18)", borderRadius: "8px", cursor: "pointer",
+        touchAction: "manipulation",
+      });
+      endBtn.addEventListener("click", () => {
+        demo.arc_stop();
+        // Resync the local camera mirror from the engine's handed-back pose, so manual
+        // control resumes from where the arc left the camera rather than a stale copy.
+        const st = demo.camera_state();
+        cam.yaw = st[0];
+        cam.pitch = st[1];
+        cam.zoom = st[2];
+        timeScale = demo.time_scale_value();
+        followMoon = false;
+        userInteracted = true;
+      });
+      slot.append(caption, arcBtn, endBtn);
+      bar.appendChild(slot);
+    }
+
     // (The GPU deformable-Earth impact is now the DEFAULT birth scene — auto-started on load — so the old
     // "🌋 GPU Impact" trigger button is retired; "Replay" below re-runs it.)
 
@@ -303,10 +359,17 @@ async function main(): Promise<void> {
       // used to produce debris.
       const moonWord = numMoons === 1 ? "Moon" : "Moons";
       mkBtn(`Brake ${moonWord} ½×`, () => demo.brake_moon());
-      mkBtn(`Drop ${moonWord}`, () => {
+      // On a world that declares a ground site, the engine ARMS this drop for the launch window
+      // (the release fires itself when the site rotates under the impact point; the HUD carries
+      // the countdown). A world without a site keeps the instant drop. Same button either way.
+      const dropBtn = mkBtn(`Drop ${moonWord}`, () => {
         demo.drop_moon();
         followMoon = true; // ride the descent down
       });
+      if ((world as { ground?: unknown } | null)?.ground) {
+        dropBtn.title =
+          "Arms for the launch window: releases automatically when the site rotates under the impact point";
+      }
     }
     if (birthScene) {
       // Geologic time (docs/27): retire the particle cloud, evolve the settled moonlets by the
@@ -553,6 +616,16 @@ async function main(): Promise<void> {
       } else if (birthScene && countdown >= 0) {
         events.push(`<b style="color:#ff8a8a; font-size:16px">IMPACT IN T−${countdown.toFixed(1)} s</b>`);
       }
+      // The launch window (worlds that declare a site): Drop ARMS and the release fires itself
+      // when the site rotates under the fall's impact point. SIM time - the window is a sim event.
+      const windowS = demo.drop_window_s();
+      if (windowS >= 0) {
+        const fallS = Math.max(0, demo.drop_window_impact_s() - windowS);
+        events.push(
+          `<b style="color:#8ad6ff">DROP ARMED</b> · window in <b>T−${fmtSim(windowS)}</b> sim · ` +
+            `then a ${fmtSim(fallS)} fall to ground zero`,
+        );
+      }
       // Scene-specific physics lines (bodies distance/speed, orbit/impact state, Earth's day).
       const physics: string[] = [
         `Earth–${body3} <b>${demo.moon_distance_km().toFixed(0)}</b> km · v <b>${demo.moon_speed_kms().toFixed(2)}</b> km/s`,
@@ -561,6 +634,8 @@ async function main(): Promise<void> {
       if (demo.earth_day_hours() > 0) {
         physics.push(`Earth day <b>${demo.earth_day_hours().toFixed(1)} h</b>`);
       }
+      // The demo arc's phase, read back from the engine every frame (the label never lies).
+      if (arcBtn) arcBtn.textContent = demo.arc_label();
       // docs/59: the declared site's honest state - armed / materialized with its conservation
       // audit / refused with the stated reason / folded - plus the live trigger numbers.
       const siteLine = demo.site_status();
