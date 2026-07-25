@@ -183,6 +183,17 @@ pub struct Simulation {
     flight: crate::flight::Flight,
     /// The declared solid bodies, as cohesive matter (docs/23 step 1).
     bodies: Vec<CohesiveBody>,
+    /// How long the impact aftermath has been continuously quiet (docs/61) — the trigger for the
+    /// batch downward rung that folds any remaining settled particles back into the world.
+    settle: crate::recohere::SettleGauge,
+    /// Voxels the batch rung has returned to the world since construction (matter accounting).
+    recohered_voxels: usize,
+    /// J of kinetic energy the batch rung's crossings have measured since construction. The voxel
+    /// world has no thermal sink for it yet (docs/46 row 17), so this is a MEASURED loss the
+    /// energy accounting can see, not a deposit.
+    recohered_kinetic_j: f64,
+    /// J of carried heat measured at the same crossings, same missing sink, same deferral.
+    recohered_heat_j: f64,
 }
 
 /// **The ground patch as a world to fly through** — the whole of what is scene-specific about entry here:
@@ -374,7 +385,7 @@ impl Simulation {
     /// Build from a parsed `"ground"` world. The voxel world is the procedural surface patch; the
     /// definition declares the observer, the gravity the analytic effects fall under, and the events.
     pub fn from_definition(def: &WorldDef, materials: Vec<Material>) -> Result<Self, String> {
-        let ground = def
+        let mut ground = def
             .ground
             .clone()
             .ok_or_else(|| "not a ground world: no `ground` block".to_string())?;
@@ -389,6 +400,12 @@ impl Simulation {
         let planet_radius = planet.radius();
         let planet_mass = planet.total_mass();
         let surface_g = planet.gravity_at(planet_radius) as f32;
+        // The COLUMN the patch digs through comes from the same body, at the declared site (docs/59):
+        // a world says WHERE it sits; the skin and strata derive from the shared definition unless the
+        // world declared an explicit sandbox column.
+        ground
+            .surface
+            .resolve_strata(&planet, ground.lat, ground.lon);
         let world = crate::world::generate_from(&ground.surface, &materials);
         // **The patch belongs to the planet.** Without this the field is the patch's own self-gravity —
         // measured at 0.000214 m/s² against this planet's 9.8808, one forty-six-thousandth of Earth — and
@@ -422,6 +439,10 @@ impl Simulation {
             created_total: 0,
             flight: crate::flight::Flight::default(),
             bodies,
+            settle: crate::recohere::SettleGauge::new(),
+            recohered_voxels: 0,
+            recohered_kinetic_j: 0.0,
+            recohered_heat_j: 0.0,
         };
         sim.apply_events();
         Ok(sim)
@@ -494,7 +515,51 @@ impl Simulation {
         self.fly_meteors(dt);
         self.matter.step(&mut self.world, &self.field, &[], dt);
         self.step_cohesive_bodies(dt);
+        self.recohere_when_settled(dt);
         resolved
+    }
+
+    /// **The impact site re-coheres into meshed ground** (docs/61): the production trigger for the
+    /// batch downward rung. Once the aftermath is quiet at the rung's own physical criterion —
+    /// nothing in flight and every remaining grain below the quiescent speed for one cell dynamical
+    /// time — whatever the per-grain settle path left behind is offered back to the voxel world in
+    /// one conserving pass, and `take_dirty()` drives the remesh that renders the result as ground.
+    /// The per-grain path usually empties the field first on this CPU container; this is the
+    /// REGION-level guarantee, and the trigger the particle-ball remnants of other containers wire
+    /// into next (the flagged docs/61 IOU).
+    fn recohere_when_settled(&mut self, dt: f32) {
+        if self.matter.particles.is_empty() || !self.meteors().is_empty() {
+            // Nothing left to demote, or more matter inbound: a fresh disturbance re-arms the gauge.
+            self.settle.reset();
+            return;
+        }
+        let peak = self
+            .matter
+            .particles
+            .iter()
+            .map(|p| p.vel.length())
+            .fold(0.0f32, f32::max);
+        self.settle.observe(peak, self.surface_g, dt);
+        if !self.settle.settled(self.surface_g) {
+            return;
+        }
+        if let Ok(r) = self.matter.recohere_settled(
+            &mut self.world,
+            &self.materials,
+            self.surface_g,
+            &self.settle,
+            &[],
+        ) {
+            self.recohered_voxels += r.voxels;
+            // The crossing's measured energy (docs/46 row 17): kinetic energy and carried heat the
+            // binned mass took into a store with no thermal state. Accumulated so the loss is
+            // visible in the accounting, not silent.
+            self.recohered_kinetic_j += r.binned_kinetic_j;
+            self.recohered_heat_j += r.binned_heat_j;
+            // Re-arm: what remains (sub-quantum mass, law-refused columns) stays honest particles,
+            // and any new excitement starts its own settle window.
+            self.settle.reset();
+        }
     }
 
     /// Advance every cohesive body: its bonds + gravity settle it to a ground state
@@ -569,6 +634,12 @@ impl Simulation {
             .first()
             .map(|s| s.material.as_str())
             .unwrap_or("?")
+    }
+    /// The RESOLVED material column, top-down - inherited from the placed body at the declared site
+    /// unless the world declared a sandbox column. Exposed so "the ground is the shared Earth" is
+    /// measurable, not asserted.
+    pub fn strata(&self) -> &[crate::terra::world_def::Stratum] {
+        &self.def.surface.strata
     }
     /// Did matter change the world since the last call (a crater dug, grains de-resolved)? Drives remesh.
     pub fn take_dirty(&mut self) -> bool {
@@ -979,6 +1050,27 @@ impl Simulation {
     pub fn resolved_total(&self) -> usize {
         self.resolved_total
     }
+
+    /// Voxels the batch downward rung (docs/61) has returned to the world — the matter-accounting
+    /// counterpart of `created_total`, so "the grains became ground" is measurable, not assumed.
+    pub fn recohered_voxels(&self) -> usize {
+        self.recohered_voxels
+    }
+
+    /// J of kinetic energy measured at the batch rung's grain-to-voxel crossings since
+    /// construction. Settling is dissipation, so this energy should become heat on the receiving
+    /// side; the voxel world carries no thermal state yet (docs/46 row 17), so the engine measures
+    /// the loss instead of pretending it did not happen.
+    pub fn recohered_kinetic_j(&self) -> f64 {
+        self.recohered_kinetic_j
+    }
+
+    /// J of heat above ambient measured at the same crossings: the binned mass's carried
+    /// temperature, which the voxel store cannot hold yet (docs/46 row 17). Remainder grains keep
+    /// their own heat; only what actually crossed is booked here.
+    pub fn recohered_heat_j(&self) -> f64 {
+        self.recohered_heat_j
+    }
 }
 
 #[cfg(test)]
@@ -987,6 +1079,65 @@ mod tests {
 
     fn mats() -> Vec<Material> {
         crate::materials::load()
+    }
+
+    /// **Ledger row 16, the ground half** (docs/59 order-of-work 1): a ground world declares WHERE on
+    /// the shared Earth it sits, and its gravity AND its material column both derive from the one body
+    /// definition at that site. No strata list exists in the world file; deleting the private copy
+    /// broke nothing because nothing reads one.
+    #[test]
+    fn the_ground_column_and_gravity_derive_from_the_shared_earth_at_the_declared_site() {
+        let earth = crate::planet::earth();
+        // A LAND site: biosphere skin, then Earth's own layers, top-down.
+        let sim = Simulation::from_json(
+            r#"{"name":"g","type":"ground","ground":{"lat":45.0,"lon":-100.0}}"#,
+            mats(),
+        )
+        .expect("builds");
+        let names: Vec<&str> = sim.strata().iter().map(|s| s.material.as_str()).collect();
+        let mut from_layers: Vec<String> = earth
+            .layers
+            .iter()
+            .rev()
+            .map(|l| l.material.clone())
+            .collect();
+        from_layers.dedup();
+        assert_eq!(
+            names[1..].to_vec(),
+            from_layers.iter().map(String::as_str).collect::<Vec<_>>(),
+            "the column under the skin IS the definition's layer stack"
+        );
+        assert_eq!(names[0], "grass", "a land site wears the biosphere skin");
+        // An OCEAN site from the same body: the crust is the seabed, no skin.
+        let ocean = Simulation::from_json(
+            r#"{"name":"o","type":"ground","ground":{"lat":0.0,"lon":-150.0}}"#,
+            mats(),
+        )
+        .expect("builds");
+        assert_eq!(
+            ocean.strata()[0].material,
+            "basalt",
+            "sea floor is the body's own crust"
+        );
+        // Gravity and the planet's bulk parameters are the definition's, to the digit.
+        assert_eq!(sim.planet_radius_m(), earth.radius());
+        assert_eq!(sim.planet_mass_kg(), earth.total_mass());
+        assert_eq!(sim.gravity_ms2(), earth.gravity_at(earth.radius()) as f32);
+        // And the SHIPPED ground world carries no private column: it inherits this same derivation.
+        let shipped = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../web/public/worlds/ground/world.json"
+        ))
+        .expect("shipped ground world");
+        assert!(
+            !shipped.contains("\"strata\""),
+            "worlds/ground/world.json must not carry a private strata list - the body answers"
+        );
+        let s = Simulation::from_json(&shipped, mats()).expect("shipped world builds");
+        assert!(
+            !s.strata().is_empty(),
+            "the shipped world's column is inherited, not absent"
+        );
     }
 
     /// **Ledger row 15, paid.** An impact declared in DATA must reach `MatterSim` and make real
@@ -1118,6 +1269,51 @@ mod tests {
         assert!(
             tops.windows(2).any(|p| p[0] != p[1]),
             "the default world has real relief"
+        );
+    }
+
+    /// **The impact site re-coheres into meshed ground** (docs/61). After a thrown meteor's
+    /// aftermath settles — quiet at the rung's own physical criterion, not merely "the test waited
+    /// a while" — NO bare particles remain: every grain either deposited through the per-grain
+    /// settle path or was folded back by the batch rung, so the remnant is ground the mesher can
+    /// stand a camera on, not a frozen particle field. The world must hold the returned matter as
+    /// real voxels (excavated minus returned = only what left the patch, which the accounting
+    /// counters expose separately).
+    #[test]
+    fn a_settled_impact_aftermath_leaves_ground_not_bare_particles() {
+        let mut sim = Simulation::from_json(
+            r#"{"name":"g","type":"ground","ground":{"camera_m":[0,30,0],"view_radius_m":120}}"#,
+            mats(),
+        )
+        .expect("builds");
+        let c = sim.world.center();
+        let ground = sim.world.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
+        sim.throw_meteor(Meteor {
+            id: 0,
+            pos: glam::DVec3::new(0.0, (ground + 60.0) as f64, 0.0),
+            vel: glam::DVec3::new(0.0, -80.0, 0.0),
+            mass_kg: 1500.0,
+            material: crate::materials::index_of(&mats(), "iron"),
+            radius_m: 0.5,
+            temp_k: 288.0,
+            skin_m: 0.0,
+        });
+        // A minute of simulated time: land, excavate, loft, settle, re-cohere.
+        for _ in 0..3600 {
+            sim.step(1.0 / 60.0);
+            if sim.meteors().is_empty() && sim.created_total() > 0 && sim.particle_count() == 0 {
+                break;
+            }
+        }
+        assert!(
+            sim.created_total() > 0,
+            "the meteor must excavate real matter"
+        );
+        assert_eq!(
+            sim.particle_count(),
+            0,
+            "a settled impact site must be GROUND again — {} grains left as a bare particle field",
+            sim.particle_count()
         );
     }
 

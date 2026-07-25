@@ -679,6 +679,172 @@ seconds, i.e. the operator gets catastrophically expensive at the moment it star
 prerequisite is an O(N log N) binding energy: `bhtree::BarnesHut` exists and is verified but has only
 `accelerations`, no POTENTIAL traversal. Adding one (same tree, same opening criterion, sum `Gm/r`), pinned
 to the exact O(N²) sum, is the next step — then the pass hooks in where `sph_snapshot` lands.
+
+## 2026-07-23: one Earth serves the orbit and the ground
+
+**What.** The three shipped scenes stopped carrying private Earths (docs/59 order-of-work item 1;
+docs/46 ledger row 16). The ownership call, made provisionally: the WORLD DEFINITION owns the body
+(docs/43's direction) - `assets/bodies/earth.json` is the one record of Earth's orbital parameters,
+layered matter and surface sources, and a scene only PLACES it and asks for a representation.
+Concretely: the space band's `EARTH_MASS`/`EARTH_RADIUS_M`/`MOON_MASS`/`MOON_RADIUS_M` constants
+(and the `DISPLAY_SCALE` const derived from one) are gone from `lib.rs`, replaced by cached reads
+of the definitions; Terra's radius resolves from the body its world names
+(`declared_planet_radius`, natively tested), and `worlds/earth/world.json` no longer declares
+`radius_m`/`mass_kg`; the ground world declares WHERE it sits (`lat: 45, lon: -100` in
+`worlds/ground/world.json`) and inherits g, air pressure and its material column from the shared
+body at that site - `LayeredBody::surface_strata` derives the strata from the body's own layers
+(order real, adjacent same-material shells collapsed, band thickness = log2 of the real thickness
+as a declared vertical LOD, flagged; grass skin on land only, so an ocean site's seabed is the
+body's own basalt crust). The hand-written default column in `GroundSurface::default_strata` and
+the duplicate one inside `world::generate` are both deleted; `generate` now resolves the same
+derivation every ground world gets.
+
+**Why.** The demo needs the ball resting on the same body the Moon hits - one body owning both its
+orbital presence and its local surface patch is the prerequisite for the materialization trigger
+and the descent hand-off (docs/59 items 2 to 5). Two representations of "Earth" that merely agree
+numerically will drift; one definition read three ways cannot (Law II). This also answers docs/59's
+open question of which representation owns the shared Earth, provisionally and reversibly: the
+data definition owns it, scenes hold no copy.
+
+**Verified.** Red first: `one_earth_tests::the_three_scenes_read_one_earth` (digit-identity of
+radius, mass and surface g across the space-band instance, the shipped Terra world and the shipped
+ground world) and
+`simulation::tests::the_ground_column_and_gravity_derive_from_the_shared_earth_at_the_declared_site`
+both failed against the old world files, then passed once the private copies were deleted. The
+laws scans keep it true: `a_scene_module_carries_no_copy_of_a_body_parameter` (zero hits for the
+four body literals in scene modules, comments and test fixtures stripped) and the planet-block
+extension of `no_scene_body_overrides_the_physics_of_the_body_it_names`. Full native suite
+367/367 green; wasm32 check clean (same warning count as baseline). Headed-Chromium screenshots
+of orbit.html, terra.html and ground.html: Earth renders in all three; the ground patch's
+visible change is the derived column - a grass biosphere skin over Earth's own crust, mantle and
+core replaces the former sand/gravel/dirt sandbox list the world file carried (the strata
+sequence itself is asserted in tests).
+
+## 2026-07-23: the re-coherence rung measures the energy it cannot yet keep
+
+**What.** The batch downward rung (docs/61) had three physics debts: a binned grain's heat was
+dropped at the grain-to-voxel crossing, its remaining sub-threshold kinetic energy was zeroed
+rather than dissipated to heat, and re-cohered ejecta consolidates instantly to intact strength
+and reference density. Status after this change, plainly: **debts 1 and 2 are MEASURED and
+ledgered, not closed** (the receiving sink they need, thermal state on the voxel side, does not
+exist anywhere in `World`, and building a fake one was refused); **debt 3 is DESIGNED only**
+(docs/46 row 17c, no code). The rung's audit `Recohered` now carries `binned_kinetic_j` and
+`binned_heat_j`, booked per column as energy carried in minus energy the remainder carries back
+out, with heat counted only where `Material::specific_heat` is sourced so an unknown c stays
+unknown. `MatterSim::recohere_settled` returns the full audit, `Simulation` accumulates it
+behind `recohered_kinetic_j()` / `recohered_heat_j()`, and `run-definition` prints a `recohered`
+line whenever the rung ran. All three debts are one ledger row (docs/46 row 17) naming the
+deferred computations: a voxel-side thermal field that `deposit_grain` deposits into, and a
+consolidation state (porosity and strength fraction) relaxing toward intact over a physical
+timescale, each with the test that would close it.
+
+**Why.** Settling is dissipation, and dissipation becomes heat, not nothing; energy that
+silently vanishes at a representation crossing is a conservation violation the accounting cannot
+see. Law V allows the deferral but not the silence: an IOU must name the real computation it
+defers, and a loss that is measured is a loss that can be paid back and tested against. The
+smaller honest step was chosen over inventing a thermal sink the store cannot hold.
+
+**Verified.** Red first: `the_crossing_measures_the_binned_kinetic_energy_and_carried_heat` was
+written against the empty audit and failed (audit read 0 J), then passed once the booking
+landed. The test checks both parts against independently computed expectations (two
+whole-quantum gravel grains at 2 m/s and 50 K above ambient bin entirely; a 1.6-quantum grain
+loses exactly its binned quantum's share while the 0.6-quantum remainder keeps its own velocity
+and temperature) and holds the ledger identity, energy in = energy still on particles + energy
+in the audit, within f32 accumulation. Full native suite 363/363 green (362 at baseline, one
+new); wasm32 check clean; `run-definition definitions/ejecta-ground.json` unchanged in its
+matter accounting (the per-grain path empties that field before the batch rung fires, so the
+`recohered` line prints only when the rung actually ran).
+
+## 2026-07-23: the upward rung exists: split, relax, release, conserved (and unwired by design)
+
+**What.** `crate::refine`, docs/59 order-of-work item 3: the coarse celestial SPH field can now
+initialize a fine local patch, conserving mass, momentum, angular momentum, kinetic and internal
+energy across the bridge. One-shot icosahedral splitting (12 vertex children plus the mandatory
+retained center child; velocity and specific internal energy inherited; the center child absorbs
+the f64 mass remainder so the 13 masses sum exactly to the parent's), then relax-then-release:
+child positions shift, damped, against the density the engine's own symmetrized-h sum reads in
+the ORIGINAL coarse field, clock frozen, coarse exterior held as a fixed guard band, and the
+patch releases only when every child's relative density error is inside the stated 5e-3 bound
+(an iteration cap exists solely as a divergence guard; hitting it is a stated refusal, never a
+silent release). Interface discipline per zoom-in practice, as refusals with reasons on screen:
+one rung per interface (a split whose children would touch matter more than one rung coarser is
+refused until the shell is refined first), and a coarse particle inside the fine region is
+contamination that invalidates the refinement; `contamination_check` is the standing per-step
+form the future wiring runs. The caller-facing ledger audits all five quantities before, after
+split and after relax, with the relax's angular-momentum drift bounded by its own accumulated
+`sum m |dx| |v|`. The Holsapple-Housen pi-scaling gate (gravity regime; v2.2.1 hard-rock
+K1 0.012 mu 0.55 and regolith K1 0.14 mu 0.4 rows, vintage named in the constants) ships
+alongside, ready for the future end-to-end crater test.
+
+The two stencil constants were RE-DERIVED for the engine's one cubic-spline kernel
+(`atmosphere::sph_w`, full support inside r < h) instead of copying the literature values, per
+docs/59's own instruction: least squares of the integrated squared density error between parent
+kernel and 13-child stencil, 141^3 grid quadrature cross-checked at 201^3. The unconstrained
+problem is degenerate (zero separation reproduces the parent exactly and refines nothing); the
+interior stationary point is separation 0.3051 h with child smoothing 0.7915 h, residual 0.70%
+L2 (peak 0.38% of the parent's central density). The literature pair (0.4 h, 0.9 h in the
+2h-support convention, i.e. 0.2 h here) measures 4.9% L2 on this kernel: seven times worse,
+which is why the re-derivation was not optional.
+
+**Why.** docs/59: the zoom from the celestial energy event to local ground zero must hand the
+state DOWN, not invent it (Law IV: the camera changes representation, never existence; Law V: no
+analytic effect standing in for the field). This module deliberately lands with ZERO production
+consumers: the camera-driven materialization trigger's home depends on collision routing
+decisions that are still open upstream (docs/58 item 7, docs/59 open questions), so wiring now
+would race a moving seam. Per the docs/46 rule that a verified law with no consumers stays an
+open ledger row, row 18 carries the flagged IOU and names the M4 zoom materialization milestone
+as the wiring owner.
+
+**Verified.** Seven native tests, written red first against stubs, all green: exact conservation
+of all five audited quantities on the split (mass, momentum, kinetic, internal to 1e-6 relative;
+angular momentum to 1e-5, all f32 rounding scale, with the stencil reconstructed child by child);
+the relax releases inside the bound on a uniform basalt field (raw blip 7.5e-2, released 5.0e-3
+in 378 iterations, max child shift 0.234 m at h = 2 m, relax angular-momentum drift 3.8e2 against
+its stated bound 7.9e4 on |L| 6.9e6) and across a basalt/iron interface (9.5e-2 released to
+5.0e-3 in 1212 iterations, material identity preserved through the rung); contamination refused
+with the offender named and the world untouched; a second rung against unbuffered coarse refused
+while a buffered interior second rung is admitted; the pi gate reproduces a hand-computed Meteor
+Crater example (rim radius 425 m predicted, observed 593 m, ratio 1.39, inside the factor-2 gate)
+and degrades explicitly to the order-of-magnitude bound when the predicted crater rivals the
+body. Full native suite 369 green, 22 ignored; wasm32 check clean.
+
+## 2026-07-23: the settled impact site re-coheres into meshed ground
+
+**What.** The de-resolution ladder gains its batch downward rung and a production trigger
+(docs/61). New `crate::recohere`: a SETTLED region of a particle field bins back into the voxel
+`World`, and the existing surface-nets mesher renders the result as walkable ground. The settle
+criterion is physical, not a frame count: quiescent speed `sqrt(2gΔ)` — below it a grain's
+kinetic energy cannot buy a one-cell rise, so its motion is sub-resolution at the binning scale —
+held continuously for one cell dynamical time `sqrt(2Δ/g)`, integrated in seconds by
+`recohere::SettleGauge` (the docs/57 #4 lesson applied forward: the step size must not decide
+when matter stops being matter). Conservation is the contract: grain mass accumulates per column
+and material in f64, whole voxel quanta `ρ·Δ³` deposit through the ONE grain→voxel law
+(`deposit_resting_grain`'s body, extracted as the shared free function `matter::deposit_grain`),
+and the sub-quantum remainder stays particles — matter is never deleted to lower a count, and
+gravel comes back as gravel. A still-moving region is refused before any write. Production
+consumer: `Simulation::step` → `recohere_when_settled` — once no meteors are in flight and the
+whole remaining field has been quiet for one dynamical time, the aftermath folds back into the
+world and the dirty flag drives the remesh. The SPH remnant (the observed bare-particle-ball gap,
+in a path under active upstream rework) and the shattered cohesive body are docs/61's flagged
+wiring IOUs.
+
+**Why.** After an impact settles, the remnant stayed a bare particle field forever: every
+downward mechanism existed and was verified (docs/46 row 6), but nothing ever decided "this
+region's excitement has passed" for a field at once. docs/44 §6 already named the honest trigger
+— demote on quiescence, a kinetic-energy bound, never "when motion stops" and never disinterest —
+so this increment is that trigger plus the conserving batch bin, not new physics.
+
+**Verified.** Red-first natively: a settled synthetic gravel mound (including a deliberately
+sub-quantum grain) folds with mass conserved to f32 accumulation error, material preserved and
+the remainder surviving as a particle; a still-moving region is refused with the world untouched;
+the criterion settles identically at 0.1 s and 0.001 s steps and a mid-window jolt resets the
+sustained clock; the `MatterSim` adapter pins that 4 × 0.4-quantum grains yield exactly one voxel
+plus a 0.6-quantum particle (the per-grain one-grain-one-voxel law would have conjured 2.4 quanta
+of rock); end to end, a thrown meteor's settled aftermath leaves zero bare particles. Full suite
+353/353 green; `cargo check --target wasm32-unknown-unknown -p engine` clean; ground scene
+rig-watched on a Mac (meteor dropped, aftermath settled, ejecta and crater render as meshed
+ground, no frozen grain field).
+
 ## 2026-07-23: pan input survives a real hand
 
 **What.** Three input fixes, one theme: every pan gesture reaches the one pan path each scene

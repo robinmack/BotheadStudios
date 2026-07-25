@@ -6,6 +6,8 @@
     "camera_m": [0, 20, 0],
     "view_radius_m": 60.0,
     "planet": "earth",
+    "lat": 45.0,
+    "lon": -100.0,
     "grain_size_m": 1.0,
     "surface": {
       "size_voxels": [96, 96, 96],
@@ -16,18 +18,12 @@
         { "frequency": 0.021, "weight": 0.55 },
         { "frequency": 0.058, "weight": 0.30 },
         { "frequency": 0.140, "weight": 0.15 }
-      ],
-      "strata": [
-        { "material": "sand",    "thickness_m": 2 },
-        { "material": "gravel",  "thickness_m": 4 },
-        { "material": "dirt",    "thickness_m": 6 },
-        { "material": "basalt",  "thickness_m": 24 },
-        { "material": "granite", "thickness_m": null }
       ]
     },
     "events": [],
     "bodies": [
       { "material": "iron", "radius_m": 2.0, "at_m": [21.3, 38.0, 50.0] }
     ]
-  }
+  },
+  "$comment": "This world PLACES a patch of the shared Earth (assets/bodies/earth.json) at the declared lat/lon; its gravity, air and material strata all derive from that one body. The surface block declares only the local relief dials."
 }

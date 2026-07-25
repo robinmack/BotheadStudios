@@ -88,6 +88,8 @@ pub mod matter;
 mod mesher;
 mod neighbors;
 mod orbit;
+pub mod recohere; // docs/61 — the batch downward rung: a settled particle field re-coheres to ground
+pub mod refine; // docs/59, the upward rung: the celestial field initializes the local patch, conserved
 pub mod resolution; // docs/44 — resolution by necessity: the quasi-static admission test
 pub mod simulation;
 /// docs/49 — surface detail that follows the camera CONTINUOUSLY. The consumer
@@ -214,6 +216,113 @@ fn declared_body_radius(d: &crate::terra::world_def::BodyDef) -> f64 {
         return def.radius();
     }
     d.radius_m.unwrap_or(0.0)
+}
+
+/// The radius (m) a `"planet"` world's body renders and computes at - the Terra half of the
+/// "instance of a defined body" rule. A world that names a defined body (the world-level `body`, or
+/// the planet's `profile`) takes the DEFINITION's radius, and any `radius_m` it declared is ignored;
+/// an undefined body keeps its declared radius. `None` only when neither source names one.
+fn declared_planet_radius(w: &crate::terra::world_def::World) -> Option<f64> {
+    let named = w
+        .body
+        .as_deref()
+        .or_else(|| w.planet.as_ref().and_then(|p| p.profile.as_deref()));
+    if let Some(def) = body_definition(named) {
+        return Some(def.radius());
+    }
+    w.planet.as_ref().and_then(|p| p.radius_m)
+}
+
+#[cfg(test)]
+mod one_earth_tests {
+    /// **One Earth serves the orbit, the globe and the ground** (docs/59 order-of-work 1; docs/46
+    /// row 16). The three shipped paths - the space band's body instance, Terra's placed body, and the
+    /// ground patch's host planet - must all read `assets/bodies/earth.json`, to the digit. Not
+    /// "close": IDENTICAL, because they are supposed to be reads of one value, and the shipped world
+    /// files must carry no private copy for the paths to drift toward.
+    #[test]
+    fn the_three_scenes_read_one_earth() {
+        let def = crate::planet::earth();
+
+        // The SPACE BAND: an Earth instance in a system world resolves to the definition.
+        let mut d = crate::terra::world_def::BodyDef::default();
+        d.profile = Some("earth".into());
+        assert_eq!(
+            super::declared_body_radius(&d),
+            def.radius(),
+            "orbit radius is the definition's"
+        );
+        assert_eq!(
+            super::declared_body_mass(&d),
+            def.total_mass(),
+            "orbit mass is the definition's"
+        );
+
+        // TERRA: the shipped Earth world places the body and inherits its radius - the file itself
+        // declares none.
+        let json = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../web/public/worlds/earth/world.json"
+        ))
+        .expect("shipped Earth world");
+        let w = crate::terra::world_def::World::parse(&json).expect("parses");
+        assert_eq!(
+            super::declared_planet_radius(&w),
+            Some(def.radius()),
+            "Terra radius is the definition's"
+        );
+        let p = w.planet.as_ref().expect("planet block");
+        assert!(
+            p.radius_m.is_none(),
+            "the Earth world file must not carry a private radius"
+        );
+        assert!(p.mass_kg.is_none(), "nor a private mass");
+
+        // The GROUND: the shipped ground world's host planet is the same body.
+        let gjson = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../web/public/worlds/ground/world.json"
+        ))
+        .expect("shipped ground world");
+        let sim = crate::simulation::Simulation::from_json(&gjson, crate::materials::load())
+            .expect("ground world builds");
+        assert_eq!(
+            sim.planet_radius_m(),
+            def.radius(),
+            "ground radius is the definition's"
+        );
+        assert_eq!(
+            sim.planet_mass_kg(),
+            def.total_mass(),
+            "ground mass is the definition's"
+        );
+        assert_eq!(
+            sim.gravity_ms2(),
+            def.gravity_at(def.radius()) as f32,
+            "ground gravity emerges from the same body"
+        );
+    }
+
+    /// A world that names a defined body cannot smuggle a different radius past the engine - the same
+    /// refusal `declared_body_radius` makes for system bodies, on the Terra path.
+    #[test]
+    fn a_planet_world_cannot_override_its_named_bodys_radius() {
+        let w = crate::terra::world_def::World::parse(
+            r#"{"name":"w","type":"planet","body":"earth","planet":{"radius_m":1.0,"profile":"earth"}}"#,
+        )
+        .expect("parses");
+        assert_eq!(
+            super::declared_planet_radius(&w),
+            Some(crate::planet::earth().radius()),
+            "the definition answers, not the file"
+        );
+        // A body with NO definition keeps its declared radius - a sandbox planet is still expressible.
+        let bare = crate::terra::world_def::World::parse(
+            r#"{"name":"bare","type":"planet","planet":{"radius_m":1.0e6}}"#,
+        )
+        .expect("parses");
+        assert_eq!(super::declared_planet_radius(&bare), Some(1.0e6));
+    }
 }
 
 /// **The live resolution-crossing check** (the wiring the SPH assembly primitive exists for): the first
@@ -707,11 +816,32 @@ mod app {
     // band" of docs/13 — the first rung of the scale ladder.
     // ============================================================================================
 
-    // Real-world constants (SI). See docs/04-material-physical-properties / orbit.rs.
-    const EARTH_MASS: f64 = 5.972e24; // kg
-    const MOON_MASS: f64 = 7.342e22; // kg
-    const EARTH_RADIUS_M: f64 = 6.371e6; // m
-    const MOON_RADIUS_M: f64 = 1.737e6; // m
+    // The default bodies this band places (its `create()` path predates worlds-as-data). Their
+    // parameters are READS of the shared definitions in `assets/bodies/*.json` - the private
+    // `earth_mass()`/`earth_radius_m()`/`MOON_*` constants that used to sit here are retired (docs/58,
+    // docs/59 one Earth): mass EMERGES from the declared layers, radius is the outer layer, and a
+    // `laws` scan keeps the literals from creeping back into a scene. Cached once; a definition is a
+    // file, not a per-frame parse.
+    static EARTH_PARAMS: std::sync::LazyLock<(f64, f64)> = std::sync::LazyLock::new(|| {
+        let e = crate::planet::earth();
+        (e.total_mass(), e.radius())
+    });
+    static MOON_PARAMS: std::sync::LazyLock<(f64, f64)> = std::sync::LazyLock::new(|| {
+        let m = crate::planet::moon();
+        (m.total_mass(), m.radius())
+    });
+    fn earth_mass() -> f64 {
+        EARTH_PARAMS.0
+    }
+    fn earth_radius_m() -> f64 {
+        EARTH_PARAMS.1
+    }
+    fn moon_mass() -> f64 {
+        MOON_PARAMS.0
+    }
+    fn moon_radius_m() -> f64 {
+        MOON_PARAMS.1
+    }
 
     /// What kind of body this is, for the generic render (a star lights, a planet is the globe, a moon is
     /// a sphere). Declared by the scene's `role`; the engine decides everything downstream.
@@ -730,7 +860,7 @@ mod app {
         role: BodyRole,
         /// **This body's matter** — its layered material composition (`docs/58`). The engine keeps each
         /// body's own matter so mass, radius, moment of inertia and particalization all DERIVE from it,
-        /// with no named `planet::earth()` lookup and no `EARTH_RADIUS_M`: a body is a body. `None` for a
+        /// with no named `planet::earth()` lookup and no `earth_radius_m()`: a body is a body. `None` for a
         /// bare point mass with no defined composition.
         matter: Option<crate::planet::LayeredBody>,
         /// The engine has resolved this body into the debris field — its matter is particles now, so it
@@ -742,8 +872,15 @@ mod app {
     const SUN_MASS: f64 = 1.989e30; // kg — holds and lights the system
     const AU_M: f64 = 1.496e11; // m (Earth–Sun distance)
     const EARTH_HELIO_SPEED: f64 = 29_780.0; // m/s (Earth's mean heliocentric speed = sqrt(G·M_sun/AU))
-                                             // Metres -> display units: Earth's radius becomes 1.0, so the Moon sits ~60 units out.
-    const DISPLAY_SCALE: f64 = 1.0 / EARTH_RADIUS_M;
+    /// Metres -> display units: Earth's radius becomes 1.0, so the Moon sits ~60 units out. Derived
+    /// from the shared definition like everything else about the body.
+    ///
+    /// (`display_scale()`, a second scale that magnified a 5,000 km stand-in Earth 4.5x, was retired when
+    /// the impact started running the REAL Earth and Theia from their definitions - one scale, one
+    /// place to disagree fewer.)
+    fn display_scale() -> f64 {
+        1.0 / EARTH_PARAMS.1
+    }
     // Fast-forward so a full ~27.3-day orbit plays in ~20 s. Symplectic Verlet stays stable with many
     // substeps per frame (dt ~= 125 s at this scale => thousands of steps per orbit).
     const ORBIT_TIME_SCALE: f64 = 118_000.0; // sim-seconds per real-second
@@ -1215,7 +1352,7 @@ mod app {
                 crate::orbit::Body {
                     pos: glam::DVec3::new(AU_M, 0.0, 0.0),
                     vel: glam::DVec3::new(0.0, EARTH_HELIO_SPEED, 0.0),
-                    mass: EARTH_MASS,
+                    mass: earth_mass(),
                 },
             ];
             // Moons on the same circular orbit. For two, place them on OPPOSITE sides and give the
@@ -1226,14 +1363,14 @@ mod app {
                 bodies.push(crate::orbit::Body {
                     pos: glam::DVec3::new(AU_M + side * MOON_DIST_M, 0.0, 0.0),
                     vel: glam::DVec3::new(0.0, EARTH_HELIO_SPEED + side * MOON_SPEED, 0.0),
-                    mass: MOON_MASS,
+                    mass: moon_mass(),
                 });
             }
             let acc = crate::orbit::accelerations(&bodies);
             let initial_bodies = bodies.clone();
             // Modern Earth: the measured sidereal day, spin axis ⊥ the orbital (x-y) plane.
             let spin_l = glam::DVec3::new(0.0, 0.0, 1.0)
-                * (crate::tides::moment_of_inertia(EARTH_MASS, EARTH_RADIUS_M)
+                * (crate::tides::moment_of_inertia(earth_mass(), earth_radius_m())
                     * (2.0 * std::f64::consts::PI / 86_164.0));
 
             // Body colours derived from a real composition, aggregated (docs/17) — NOT hand-picked.
@@ -1269,7 +1406,7 @@ mod app {
                 yaw: 0.6,
                 pitch: 0.5,
                 zoom: 1.0,
-                base_distance: (MOON_DIST_M * DISPLAY_SCALE) as f32 * 1.7,
+                base_distance: (MOON_DIST_M * display_scale()) as f32 * 1.7,
                 pan: Vec3::ZERO,
             };
 
@@ -1299,8 +1436,8 @@ mod app {
                 moon_hit: vec![false; num_moons],
                 impact_energy_j: 0.0,
                 mats,
-                impactor_radius: MOON_RADIUS_M,
-                impactor_mass: MOON_MASS,
+                impactor_radius: moon_radius_m(),
+                impactor_mass: moon_mass(),
                 sim_since_impact: 0.0,
                 spin_l,
                 initial_spin_l: spin_l,
@@ -1369,7 +1506,7 @@ mod app {
         /// (positions/velocities/masses), the planet's spin, the composition-derived tints, the time scale, the
         /// frame-of-reference focus, and the orbit-camera framing. The deorbit stays a user control
         /// (`brake_moon`/`drop_moon`) — no scripted outcome. (The planet's render radius still uses the
-        /// `EARTH_RADIUS_M` constant in v1; per-body render radii from data is a flagged follow-up.)
+        /// `earth_radius_m()` constant in v1; per-body render radii from data is a flagged follow-up.)
         /// Hand the scene the real star catalogue (`sky/stars.bin`). The engine derives each star's
         /// temperature and colour from its measured colour index; nothing about the sky is authored.
         pub fn load_star_catalog(&mut self, bytes: &[u8]) -> Result<(), JsValue> {
@@ -1449,7 +1586,7 @@ mod app {
             let mesh = crate::terra::globe_mesh::build_body_globe(
                 192,
                 1.0,
-                1.0 / EARTH_RADIUS_M,
+                1.0 / earth_radius_m(),
                 surf.relief_exag,
                 &self.mats,
                 &surf.biome_mats,
@@ -1592,7 +1729,7 @@ mod app {
             if let Some(moon) = self.bodies.get(planet_idx + 1) {
                 let sep = (moon.pos - self.bodies[planet_idx].pos).length();
                 if sep > 0.0 {
-                    self.camera.base_distance = (sep * DISPLAY_SCALE) as f32 * 1.7;
+                    self.camera.base_distance = (sep * display_scale()) as f32 * 1.7;
                 }
             }
 
@@ -1831,13 +1968,13 @@ mod app {
 
         /// The Moon's gravitational binding energy (J), for comparison: impact ≫ binding ⇒ it shatters.
         pub fn moon_binding_energy_j(&self) -> f64 {
-            crate::orbit::binding_energy(MOON_MASS, MOON_RADIUS_M)
+            crate::orbit::binding_energy(moon_mass(), moon_radius_m())
         }
 
         /// The Earth's gravitational binding energy (J). The Moon impact is a small fraction of this,
         /// so the Earth is not destroyed — it takes a planet-scale crater (docs/19 LOD bridge).
         pub fn earth_binding_energy_j(&self) -> f64 {
-            crate::orbit::binding_energy(EARTH_MASS, EARTH_RADIUS_M)
+            crate::orbit::binding_energy(earth_mass(), earth_radius_m())
         }
 
         /// Current time multiplier (sim-seconds per real-second), for the HUD.
@@ -1937,14 +2074,14 @@ mod app {
         /// `gpu_sph::disk_stats_json`); the CPU `Aggregate` twin of that measurement is retired
         /// (docs/58 #7, docs/46 rows 1/3), so this delegates rather than answering a second way.
         pub fn disk_stats_json(&self) -> String {
-            const M_MOON: f64 = 7.342e22;
+            let m_moon = moon_mass(); // the HUD's "lunar masses" unit - the definition's, not a literal
             if self.geologic {
                 let bound: f64 = self.geo_moonlets.iter().map(|m| m.mass).sum();
                 let biggest = self.geo_moonlets.iter().map(|m| m.mass).fold(0.0, f64::max);
                 return format!(
                     "{{\"bound\":{:.3},\"escaped\":0,\"biggest\":{:.3},\"clumps\":{}}}",
-                    bound / M_MOON,
-                    biggest / M_MOON,
+                    bound / m_moon,
+                    biggest / m_moon,
                     self.geo_moonlets.len()
                 );
             }
@@ -1959,7 +2096,7 @@ mod app {
             if !self.sph_active {
                 return; // no live particle field, nothing to promote
             }
-            let moonlets = crate::gpu_sph::disk_moonlets(&self.sph_snapshot, EARTH_RADIUS_M);
+            let moonlets = crate::gpu_sph::disk_moonlets(&self.sph_snapshot, earth_radius_m());
             if moonlets.is_empty() {
                 return; // no orbiting disk yet — keep the impact running rather than blanking the scene
             }
@@ -2007,7 +2144,7 @@ mod app {
             }
             let rel = self.bodies[2].pos - self.bodies[1].pos;
             let relv = self.bodies[2].vel - self.bodies[1].vel;
-            let dist = rel.length() - (EARTH_RADIUS_M + self.impactor_radius);
+            let dist = rel.length() - (earth_radius_m() + self.impactor_radius);
             let closing = -rel.dot(relv) / rel.length().max(1.0);
             if closing <= 0.0 {
                 return -1.0;
@@ -2120,7 +2257,7 @@ mod app {
                 .and_then(|m| m.matter.as_ref())
                 .map(|b| b.moment_of_inertia())
                 .unwrap_or_else(|| {
-                    crate::tides::moment_of_inertia(self.bodies[p].mass, EARTH_RADIUS_M)
+                    crate::tides::moment_of_inertia(self.bodies[p].mass, earth_radius_m())
                 })
         }
 
@@ -2534,7 +2671,7 @@ mod app {
                     "{{\"dist_km\":{:.0},\"v_kms\":{:.3},\"bound\":{},\"a_km\":{},\"ecc\":{:.3},\"theta_deg\":{:.0},\"mass_moon\":{:.3}}}",
                     r / 1e3, v / 1e3, e < 0.0,
                     if a.is_finite() { format!("{:.0}", a / 1e3) } else { "\"unbound\"".to_string() },
-                    ecc, theta.to_degrees(), mass / 7.342e22,
+                    ecc, theta.to_degrees(), mass / moon_mass(),
                 ),
                 None => String::from("null"),
             }
@@ -2682,7 +2819,7 @@ mod app {
                         let r_t = self
                             .body_meta
                             .get(planet_i)
-                            .map_or(EARTH_RADIUS_M, |m| m.radius_m);
+                            .map_or(earth_radius_m(), |m| m.radius_m);
                         let r_imp = self
                             .body_meta
                             .get(imp_i)
@@ -2882,7 +3019,7 @@ mod app {
                         &mut self.geo_moonlets,
                         &mut self.spin_l,
                         self.bodies[1].mass,
-                        EARTH_RADIUS_M,
+                        earth_radius_m(),
                         crate::tides::EARTH_K2_OVER_Q,
                         step * year_s,
                     );
@@ -2936,7 +3073,7 @@ mod app {
             // of different sizes would collide at their own contact distances.
             let radii: Vec<f64> = self.body_meta.iter().map(|m| m.radius_m).collect();
             let body_state = |i: usize| {
-                let r = radii.get(i).copied().unwrap_or(EARTH_RADIUS_M);
+                let r = radii.get(i).copied().unwrap_or(earth_radius_m());
                 crate::interaction::BodyState {
                     pos: self.bodies[i].pos,
                     vel: self.bodies[i].vel,
@@ -3060,9 +3197,9 @@ mod app {
 
             // GPU SPH impact (docs/33 stage 4c.4): push the particle-shader camera uniform. The particle
             // system lives in an Earth-relative f32 frame, so its display origin is Earth's position in the
-            // focused frame; the shader maps each Earth-relative position through DISPLAY_SCALE and view_proj.
+            // focused frame; the shader maps each Earth-relative position through display_scale() and view_proj.
             if self.sph_active {
-                let origin = ((r_bodies[self.planet_idx()] - focus) * DISPLAY_SCALE).as_vec3();
+                let origin = ((r_bodies[self.planet_idx()] - focus) * display_scale()).as_vec3();
                 let cam = crate::gpu_sph::SphCam {
                     view_proj: view_proj.to_cols_array_2d(),
                     origin: [origin.x, origin.y, origin.z, 0.0],
@@ -3072,7 +3209,7 @@ mod app {
                     // real ejecta plume.
                     // Particles fade IN exactly as the surface fades out — one matter, one budget.
                     params: [
-                        DISPLAY_SCALE as f32,
+                        display_scale() as f32,
                         0.013 * self.render_blend as f32,
                         6.5e6,
                         0.006,
@@ -3092,7 +3229,7 @@ mod app {
             // the matter there now, and the void they leave IS the crater.
             let earth_center = r_bodies[self.planet_idx()];
             // The impact now runs the REAL Earth and the REAL Theia (their own definitions), so there is no
-            // sub-scale body and no second display scale: both branches draw at DISPLAY_SCALE and differ
+            // sub-scale body and no second display scale: both branches draw at display_scale() and differ
             // only in which radius they ask for. The `render_blend` cross-fade between the resolved surface
             // and the particle field remains, and is the next thing to go — see the note at its use.
             // Earth's RADIUS comes from Earth's definition — the scene does not get to say how big Earth
@@ -3130,9 +3267,9 @@ mod app {
                 target
             };
             let (pretty_scale, pretty_r_surf) = match (&target, self.sph_active) {
-                (Some((_, r, _)), _) => (DISPLAY_SCALE, *r),
-                (None, true) => (DISPLAY_SCALE, self.impact_def.target.radius_m()),
-                (None, false) => (DISPLAY_SCALE, crate::planet::body("earth").radius()),
+                (Some((_, r, _)), _) => (display_scale(), *r),
+                (None, true) => (display_scale(), self.impact_def.target.radius_m()),
+                (None, false) => (display_scale(), crate::planet::body("earth").radius()),
             };
             // Coherence decides how it is drawn — no dial. Intact ⇒ the resolved surface; genuinely torn
             // apart ⇒ the particles that ARE the matter; re-accreted ⇒ a surface again. Smoothstepped so
@@ -3250,7 +3387,7 @@ mod app {
                         let r_surf = self
                             .body_meta
                             .get(self.planet_idx())
-                            .map_or(EARTH_RADIUS_M, |m| m.radius_m);
+                            .map_or(earth_radius_m(), |m| m.radius_m);
                         let (mut m_exc, mut vol) = (0.0f64, 0.0f64);
                         for p in &self.sph_snapshot {
                             if p.prov != 0 {
@@ -3322,7 +3459,7 @@ mod app {
             let flat = crate::tides::flattening_from_spin(
                 spin_omega_r,
                 self.bodies[self.planet_idx()].mass,
-                EARTH_RADIUS_M,
+                earth_radius_m(),
             );
             // **The definitive Earth's transform.** One draw: spin the CRUST (so continents co-rotate,
             // exactly as they must), flatten it by the spin's own oblateness, and scale to the display.
@@ -3377,7 +3514,7 @@ mod app {
                 let r_surf_now = self
                     .body_meta
                     .get(self.planet_idx())
-                    .map_or(EARTH_RADIUS_M, |m| m.radius_m);
+                    .map_or(earth_radius_m(), |m| m.radius_m);
                 if self.gpu_crater_r_frac > 0.0 && self.gpu_crater_depth_frac > 0.0 {
                     if let Some(dir) = self.gpu_impact_site {
                         let axis = spin_rot.inverse() * dir;
@@ -3431,7 +3568,7 @@ mod app {
                 // veil (into the emissive channel: it IS added light) whose ground shows through
                 // slightly reddened (two-way transmittance). All from the emergent pressure; an
                 // airless world renders colorless by the same code.
-                let v_dir = (eye_disp - (pos_w - focus) * DISPLAY_SCALE).normalize_or_zero();
+                let v_dir = (eye_disp - (pos_w - focus) * display_scale()).normalize_or_zero();
                 let mu_v = dir.dot(v_dir);
                 let mu_s = dir.dot(sun_dir_earth);
                 let cos_th = v_dir.dot(sun_dir_earth);
@@ -3467,13 +3604,13 @@ mod app {
             // rock). It enters frame whenever the camera looks sunward — opposition geometry included —
             // because it is drawn at its position, not painted on a skybox.
             {
-                let spos = ((r_bodies[0] - focus) * DISPLAY_SCALE).as_vec3();
+                let spos = ((r_bodies[0] - focus) * display_scale()).as_vec3();
                 // Radius and photosphere temperature from the SUN'S OWN DEFINITION (assets/bodies/sun.json),
                 // not repeated here. The ~0.53° disk seen from Earth is then emergent — it is a real sphere
                 // of a real size at a real distance, so it grows on approach and shrinks from Mars without
                 // anyone writing an angle down.
                 let sun = crate::planet::body("sun");
-                let sun_r_disp = (sun.radius() * DISPLAY_SCALE) as f32;
+                let sun_r_disp = (sun.radius() * display_scale()) as f32;
                 // Colour from the declared photosphere temperature through the SAME incandescence law that
                 // makes hot rock glow — a star is not a special case, it is matter at a temperature. At the
                 // Sun's 5,772 K that lands on white, which is what the Sun actually looks like from space
@@ -3599,8 +3736,8 @@ mod app {
                     continue;
                 }
                 let m = meta.unwrap();
-                let mpos = ((r_bodies[bi] - focus) * DISPLAY_SCALE).as_vec3();
-                let mr = (m.radius_m * DISPLAY_SCALE) as f32;
+                let mpos = ((r_bodies[bi] - focus) * display_scale()).as_vec3();
+                let mr = (m.radius_m * display_scale()) as f32;
                 let mlight = (sun - r_bodies[bi]).as_vec3().normalize();
                 write_space_uniform(
                     &self.queue,
@@ -3628,8 +3765,8 @@ mod app {
                     let dir = glam::DVec3::new(ang.cos(), ang.sin(), 0.0);
                     let pos_w = earth_center + dir * m.a;
                     let r_disp = ((3.0 * m.mass / (4.0 * std::f64::consts::PI * rho)).cbrt()
-                        * DISPLAY_SCALE) as f32;
-                    let fpos = ((pos_w - focus) * DISPLAY_SCALE).as_vec3();
+                        * display_scale()) as f32;
+                    let fpos = ((pos_w - focus) * display_scale()).as_vec3();
                     let flight = (sun - pos_w).as_vec3().normalize();
                     write_space_uniform(
                         &self.queue,
@@ -3693,7 +3830,7 @@ mod app {
                     // parallax is correctly invisible; the machinery is the same one that would show a
                     // different sky from another star.
                     const PC_M: f64 = 3.085_677_581e16;
-                    let eye_from_sol = (focus + eye_disp / DISPLAY_SCALE) - r_bodies[0];
+                    let eye_from_sol = (focus + eye_disp / display_scale()) - r_bodies[0];
                     let cam_pc = (eye_from_sol / PC_M).as_vec3();
                     stars.draw(
                         &self.queue,
@@ -3775,26 +3912,27 @@ mod app {
 
         /// World metres spanned by one screen pixel at the focus body (the look target sits at the
         /// display origin, so the focal distance is exactly `base_distance·zoom` display units).
-        /// Display units are metres·DISPLAY_SCALE, so divide back out to report a true metres/pixel —
+        /// Display units are metres·display_scale(), so divide back out to report a true metres/pixel -
         /// which the HUD renders as a km/AU scale bar. Honest live read of camera state; feeds the
         /// same scale bar as the terrain scene through `metres_per_pixel_at`.
         pub fn meters_per_pixel(&self) -> f64 {
-            let dist_disp = (self.camera.base_distance * self.camera.zoom) as f64;
-            let dist_m = dist_disp / DISPLAY_SCALE; // display units → metres
+            let dist_m = (self.camera.base_distance * self.camera.zoom) as f64 / display_scale();
+            // SPACE_FOV_Y, not a bare 0.9. The scale bar and the projection must read ONE field of view:
+            // when this was written out twice, changing one made the bar measure a frustum the scene was
+            // not drawing (PR #88). Sean's branch predates that fix and reintroduced the literal here.
             crate::metres_per_pixel_at(dist_m, SPACE_FOV_Y as f64, self.config.height.max(1) as f64)
         }
 
         fn view_proj(&self) -> Mat4 {
             let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
             let proj = Mat4::perspective_rh(SPACE_FOV_Y, aspect, 0.05, 100_000.0);
-            let cp = self.camera.pitch.cos();
-            let dir = Vec3::new(
-                cp * self.camera.yaw.sin(),
-                self.camera.pitch.sin(),
-                cp * self.camera.yaw.cos(),
-            );
-            let eye = dir * (self.camera.base_distance * self.camera.zoom);
-            let view = Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y);
+            // The look target is the focus body (display origin) plus the user's pan offset; the
+            // eye keeps its orbit distance and angles around that target, so rotate/zoom and pan
+            // compose without either changing the other's meaning.
+            let target = self.camera.pan;
+            let eye =
+                self.camera.eye_dir() * (self.camera.base_distance * self.camera.zoom) + target;
+            let view = Mat4::look_at_rh(eye, target, Vec3::Y);
             proj * view
         }
     }
@@ -4659,7 +4797,7 @@ mod app {
                 40_000_000.0,
             );
             let matter = MatterField::new(&device, config.format, 200_000);
-            let flight_env = PlanetAir::of(&mats, "earth", EARTH_RADIUS_M);
+            let flight_env = PlanetAir::of(&mats, "earth", earth_radius_m());
             Ok(Terra {
                 detail: Default::default(),
                 flight: crate::flight::Flight::default(),
@@ -4693,7 +4831,7 @@ mod app {
                 relief_exag: TERRA_RELIEF_EXAG,
                 mats,
                 fly,
-                planet_radius: EARTH_RADIUS_M,
+                planet_radius: earth_radius_m(),
                 atm_twilight,
                 atm_tau,
                 world_name: String::new(),
@@ -4724,27 +4862,35 @@ mod app {
         ) -> Result<(), JsValue> {
             let w = crate::terra::world_def::World::parse(world_json)
                 .map_err(|e| JsValue::from_str(&e))?;
-            let planet = w
-                .planet
-                .as_ref()
-                .ok_or_else(|| JsValue::from_str("Terra world is missing a `planet` section"))?;
-            self.planet_radius = planet.radius_m;
+            if w.planet.is_none() {
+                return Err(JsValue::from_str(
+                    "Terra world is missing a `planet` section",
+                ));
+            }
+            // The radius comes from the DEFINITION the world names (docs/59 one Earth) - the world
+            // file places a body, it does not size one. Only an undefined sandbox body may declare
+            // its own radius.
+            self.planet_radius = crate::declared_planet_radius(&w).ok_or_else(|| {
+                JsValue::from_str("Terra world names no body and declares no radius")
+            })?;
             // ONE SOURCE for surface pressure: the declared atmosphere MASS, weighed. Reading a declared
             // `surface_pressure_pa` here was a docs/46 violation with a measured cost — Earth's world file
             // said 101,325 Pa while the emergent value is 99,049 Pa, so Terra's sky was a 2.2%-different
             // atmosphere from the one the terrain and orbit scenes render. Same planet, two airs.
-            let g_surface = crate::planet::earth().gravity_at(planet.radius_m);
+            let g_surface = crate::planet::earth().gravity_at(self.planet_radius);
             let p_ratio = w
                 .atmosphere
                 .as_ref()
-                .and_then(|a| a.surface_pressure(planet.radius_m, g_surface))
+                .and_then(|a| a.surface_pressure(self.planet_radius, g_surface))
                 .unwrap_or_else(|| crate::planet::earth().surface_pressure())
                 / 101_325.0;
             self.atm_tau = crate::atmosphere::rayleigh_tau(p_ratio);
             // The flight environment is this body's own matter and air — re-resolve it when the world
-            // changes, and never again per frame.
-            self.flight_env = PlanetAir::of(&self.mats, &self.body_id, planet.radius_m);
-            self.atm_twilight = twilight_of(planet.radius_m, g_surface, &self.mats, self.atm_tau);
+            // changes, and never again per frame. (Sean's branch predates this cache and dropped it;
+            // without it the flight step deserializes the planet every frame.)
+            self.flight_env = PlanetAir::of(&self.mats, &self.body_id, self.planet_radius);
+            self.atm_twilight =
+                twilight_of(self.planet_radius, g_surface, &self.mats, self.atm_tau);
             self.world_name = w.name.clone();
 
             // docs/43 Phase 4 — seed the fly camera from the world's declared camera (default: orbital over 20°N).
@@ -4934,7 +5080,7 @@ mod app {
             // Altitude above the LOCAL ground, so the LOD machinery sees the same altitude it would if the
             // fly camera had been driven here.
             let (lat, lon) = crate::geo::lat_lon_from_dir(eye.normalize_or(glam::DVec3::Y));
-            let ground_m = self.ground_disp_at(lat, lon) / DISPLAY_SCALE;
+            let ground_m = self.ground_disp_at(lat, lon) / display_scale();
             let alt_m = (r - self.planet_radius - ground_m).max(0.0);
             // Keep the fly camera in step: it is what the HUD, the cap and the blend read, and a caller
             // that later releases the pose should not find the camera somewhere else.
@@ -4942,7 +5088,7 @@ mod app {
             self.fly.lon = lon;
             self.fly.alt_m = alt_m.clamp(self.fly.min_alt, self.fly.max_alt);
             self.cam_pose = Some((
-                (eye * DISPLAY_SCALE).to_array(),
+                (eye * display_scale()).to_array(),
                 [fwd_x, fwd_y, fwd_z],
                 [up_x, up_y, up_z],
                 fov_y,
@@ -5150,19 +5296,20 @@ mod app {
         }
 
         pub fn render(&mut self) -> Result<(), JsValue> {
-            let r_disp = self.planet_radius * DISPLAY_SCALE; // = 1.0 for Earth
-                                                             // docs/43 Phase 4/5 — the fly camera builds the frame (absolute + camera-relative view·projection, the
-                                                             // f64 eye, and the tangent frame). The terrain height under the camera keeps "altitude" above the
-                                                             // local ground (not sea level).
+            let r_disp = self.planet_radius * display_scale(); // = 1.0 for Earth
+                                                               // docs/43 Phase 4/5 — the fly camera builds the frame (absolute + camera-relative
+                                                               // view·projection, the f64 eye, and the tangent frame). The terrain height under the camera
+                                                               // keeps "altitude" above the local ground (not sea level).
             let aspect = self.config.width as f64 / self.config.height.max(1) as f64;
             let ground_disp = self.ground_disp_at(self.fly.lat, self.fly.lon);
             // An externally supplied pose is the authority when there is one; otherwise the fly camera.
+            // (docs/59 observer/universe, PR #81 — Sean's branch predates it and dropped the whole arm.)
             let view = match self.cam_pose {
                 Some((eye, fwd, up, fov_y, alt_m)) => {
                     // How close is the engine's OWN matter? The camera may be riding a metre-wide fragment
                     // from eighty metres away while two hundred kilometres up, and a near plane derived
                     // from altitude would clip it (measured: it did — a black screen with a working HUD).
-                    let eye_m = glam::DVec3::from_array(eye) / DISPLAY_SCALE;
+                    let eye_m = glam::DVec3::from_array(eye) / display_scale();
                     let nearest_m = self
                         .flight
                         .bodies()
@@ -5176,13 +5323,13 @@ mod app {
                         glam::DVec3::from_array(up),
                         fov_y,
                         r_disp,
-                        DISPLAY_SCALE,
+                        display_scale(),
                         aspect,
                         alt_m,
                         nearest_m,
                     )
                 }
-                None => self.fly.view(r_disp, DISPLAY_SCALE, aspect, ground_disp),
+                None => self.fly.view(r_disp, display_scale(), aspect, ground_disp),
             };
             let view_proj = view.vp_abs;
             let eye = view.eye;
@@ -5248,8 +5395,9 @@ mod app {
                     // into buffers that persist across frames.
                     if self.draw_matter >= 1 {
                         let (drawn, inst) = (&mut self.drawn_buf, &mut self.inst_buf);
-                        self.flight
-                            .drawn_into(drawn, &self.flight_env, |p| (p * DISPLAY_SCALE).as_vec3());
+                        self.flight.drawn_into(drawn, &self.flight_env, |p| {
+                            (p * display_scale()).as_vec3()
+                        });
                         inst.clear();
                         inst.extend(drawn.iter().map(|d| GpuParticle::of_matter(d, &self.mats)));
                         self.matter.upload(&self.queue, inst);
@@ -5283,7 +5431,7 @@ mod app {
                 // Fallback: the Phase-2 grain shell (used until a world's surface rasters build the globe mesh).
                 let shell_spacing = self.planet_radius
                     * (4.0 * std::f64::consts::PI / self.shell_count as f64).sqrt();
-                let grain_r = ((0.62 * shell_spacing) * DISPLAY_SCALE) as f32;
+                let grain_r = ((0.62 * shell_spacing) * display_scale()) as f32;
                 const EXAG: f64 = TERRA_RELIEF_EXAG;
                 let water_idx = materials::index_of(&self.mats, "water");
                 for (i, uni) in self.shell_unis.iter().enumerate() {
@@ -5314,7 +5462,7 @@ mod app {
                         (water_idx, 0.0)
                     };
                     let m = &self.mats[mat_idx];
-                    let pos = dir * (r_disp + elev_m * DISPLAY_SCALE * EXAG);
+                    let pos = dir * (r_disp + elev_m * display_scale() * EXAG);
                     let spos = pos.as_vec3();
                     // Rayleigh atmosphere (docs/26): blue veil (added light) + two-way transmittance on the ground.
                     let v_dir = (eye - pos).normalize_or_zero();
@@ -5448,7 +5596,7 @@ mod app {
                         &mut pass,
                         &self.queue,
                         view_proj,
-                        DISPLAY_SCALE as f32,
+                        display_scale() as f32,
                         (proj_x, proj_y),
                         self.config.height as f32,
                     );
@@ -5498,7 +5646,7 @@ mod app {
                     peak = peak.max(e);
                 }
             }
-            peak * DISPLAY_SCALE * self.relief_exag
+            peak * display_scale() * self.relief_exag
         }
 
         /// Terra's globe — built by the ONE shared body-globe builder, so Terra and the space scenes
@@ -5506,8 +5654,8 @@ mod app {
         fn build_surface_mesh(&self) -> Mesh {
             crate::terra::globe_mesh::build_body_globe(
                 256,
-                self.planet_radius * DISPLAY_SCALE,
-                DISPLAY_SCALE,
+                self.planet_radius * display_scale(),
+                display_scale(),
                 self.relief_exag,
                 &self.mats,
                 &self.biome_mats,
@@ -5528,9 +5676,9 @@ mod app {
             sun_light: Vec3,
             cap_fade: f32,
         ) {
-            let r_disp = self.planet_radius * DISPLAY_SCALE;
+            let r_disp = self.planet_radius * display_scale();
             let exag = self.relief_exag;
-            let ds = DISPLAY_SCALE;
+            let ds = display_scale();
             let res = TERRA_CAP_RES;
             let alt_m = self.fly.alt_m.max(0.1);
             // Cover ~1.3× the horizon angle so the OUTERMOST patch reaches past the visible horizon (its far
