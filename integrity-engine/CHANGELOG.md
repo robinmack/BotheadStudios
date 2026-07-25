@@ -149,6 +149,99 @@ because **we are our own first customers** and pin exact engine versions in our 
 - **The orbit HUD no longer runs an O(k²) clump search every frame.** `gpu_disk_stats_json()` is throttled
   to ~1 Hz and honours `?nostats`, matching the CPU disk stats beside it.
 
+- **The CPU Aggregate debris path is deleted; the orbital scene has ONE collision resolution
+  (docs/58 item 7; docs/46 ledger rows 1 and 3 closed).** `OrbitDemo` no longer holds a
+  `moon_debris: Option<Aggregate>`: the swept-collision materialization block, the CPU debris
+  substep mode, the crater-wall/heal render machinery, the per-fragment snapshot plumbing and the
+  `start_birth` CPU birth scenario are all gone: a dropped moon resolves through the same GPU SPH
+  machine as birth (runtime-proven end to end, headed Chromium on Metal, zero console errors), and
+  a bare point mass that reaches contact now merges inelastically and momentum-conservingly into
+  the planet with its energy reported, never materialised twice. Public-API deltas: `start_birth`
+  removed (no caller since the birth scene moved to `start_gpu_impact`); `disk_stats_json`
+  delegates to the SPH read-back measurement outside geologic time; `debris_count` counts the SPH
+  snapshot; `nudge_aftermath_rate` nudges geologic time only. `impact::build_impact_debris` (the
+  moon-into-Earth wrapper) retired with its last caller; `build_impact_debris_between`/`_scaled`
+  and the furrow/plough physics stay, consumed by that module's own measurement tests. The retired
+  CPU physics pin is ported to the SPH seam:
+  `gpu_sph::a_dropped_moon_impact_leaves_most_matter_bound_on_the_sph_path` stages with
+  `build_far_apart_n`, assembles the energy-conserving drop geometry with
+  `assemble_from_relaxed_n`, steps the CPU KDK twin (`HydroBody::step`), and asserts most matter
+  stays bound (measured 100%) with emergent shock heating past the 800 K emission threshold
+  (impactor 1,977 K to 34,349 K). The SPH remnant measures 5,873 km live (5,601 km at the native
+  seam), an 85%-mass radius, and the declared Earth's own 85%-mass radius is 5,941 km, so the
+  remnant is within 1.2% of an intact Earth by the same yardstick; its re-coherence to a
+  standable surface remains docs/61's flagged IOU 1.
+
+- **The live de-orbit hand-off runs on the generic N-body primitives; its two-EOS collapse is dead
+  (docs/58).** `start_live_drop_sph` stages the colliding pair with `build_far_apart_n`, the same
+  builder the declared birth path uses, so each body's layers reach the GPU with their own catalogue
+  EOS through the shared N-material table kept in `sph_eos`; the flagged collapse onto two fixed
+  slots (basalt-like vs iron-like by reference density) no longer happens on this path. The live
+  `Assembling` arm places the collision with `assemble_from_relaxed_n`: the target's spin is handed
+  over as the FULL vector `omega = L/I` (any axis, no +z projection), and the impactor's spin stays
+  a zero vector as a narrowed Law V IOU (the assembly accepts per-body vector spin now; what is
+  still missing is per-body spin state in the N-body integrator, which keeps only the planet's
+  `spin_l`). The declared birth path is untouched by the arm change (it already ignores the legacy
+  pair and re-uploads the kept table).
+
+- **The declared birth impact builds through the generic engine (docs/58 item 7).**
+  `start_gpu_impact` no longer builds its bodies through the Earth/Theia-shaped
+  `build_far_apart_from` with the fixed `[basalt, iron]` pair: it particalizes each body from its
+  declared matter via `build_far_apart_n` (equal particle mass across the bodies, the target
+  setting it) and keeps the shared N-material EOS table in the new `sph_eos` field for the
+  assemble and dynamics uploads, so every particle carries its own catalogue material as `mat`.
+  The `Assembling` re-upload now reads that kept table on both the declared and the live path
+  (the live relax staging stores its two-slot pair there unchanged for now); the legacy pair the
+  two-body assembly returns is ignored. The disk geometry is unchanged, only the build.
+
+- **The GPU SPH gains N-material upload and N-body assembly (docs/58 items 4/5/7).**
+  `GpuSph::upload` now takes a material EOS table (`&[SphEos]`, up to `MAX_MATERIALS` = 16 entries,
+  the buffer sized to match) instead of the fixed `[basalt, iron]` pair, and `SphEos::from_tillotson`
+  mirrors any engine-side Tillotson EOS to the GPU, so a particalized body's own catalogue materials
+  can reach the shader rather than being collapsed onto two slots. The new `SphAssembly` builds the
+  particle set plus the shared EOS table for a collision of any number of bodies: each body is
+  appended with its own source index as provenance, and materials dedup across all bodies into one
+  table. `assemble_from_relaxed_n(particles, placements)` places each source body at its own
+  `{offset, vel, spin}` where spin is a vector (any axis, applied as omega cross (r - com)); the
+  two-body `assemble_from_relaxed_at` now delegates to it, byte-identical (the +z scalar becomes
+  `omega = (0, 0, spin)`). `build_far_apart_n(bodies, separation)` particalizes each
+  `(matter, resolution)` and places the bodies far apart on a line for the GPU relax, returning
+  particles plus the shared deduped EOS table plus softening and relax dt: the generic relax input
+  for any number of bodies. The declared birth path is unchanged: it passes its `[basalt, iron]`
+  pair as a two-entry slice.
+
+- **The live drop particalizes each body's own matter; the definition-id stopgap is gone (docs/58).**
+  `start_live_drop_sph` no longer overwrites `impact_def` with `earth`/`moon` id strings: at the live
+  hand-off both colliding bodies are built by `HydroBody::particalize` from the layered matter the
+  scene declared per body (`BodyMeta.matter`), each layer carrying its own catalogue EOS, specific
+  heat and geotherm, and staged for GPU relaxation by the new composition-agnostic
+  `gpu_sph::far_apart_pair` (which the declared birth path now also stages through, so where a
+  relaxing pair sits is answered once). The resolution stays the engine's 2400-particle budget at one
+  particle mass across the system, with the birth builder's small-body floor. The `Approaching`
+  resolve distance for a live drop reads the colliding bodies' own mass and radius (the same inputs
+  the crossing detection used), not the birth definitions. A body that carries no matter (a bare
+  point mass, or the un-migrated default scene) is no longer eligible for the SPH hand-off and stays
+  a point mass on the CPU contact path, rather than being rebuilt from a named definition.
+
+- **The live moon-drop wiring reads the generic body (docs/58).** `live_resolution_crossing` takes the
+  planet's index, resolved from the role the scene declared (`planet_idx`), instead of assuming the
+  planet sits at `bodies[1]`; the `Approaching` separation check and the `Assembling` body-centric
+  geometry read the same role-resolved planet, and the crossing test now covers a permuted body order
+  reporting identical geometry. The `Assembling` arm derives the target's spin rate with the moment of
+  inertia emergent from the body's own layered matter (`spin_inertia()`), replacing the uniform-sphere
+  `2/5 M R^2` with the hardcoded Earth radius, so the spin handed to the SPH reproduces the declared
+  day length. The solid-sphere constant's one remaining use is the CPU debris materialization, which
+  retires with the `Aggregate`. The live handoff still names `earth`/`moon` by definition id: per-body
+  matter carries composition, not the id `ImpactDef` resolves definitions by (recorded at the site).
+
+- **A de-orbited moon now enters the SPH machine at its resolution distance.** When the engine detects
+  an orbiting body crossing `accretion::resolution_distance` of its planet (the new native-tested
+  `live_resolution_crossing` check, run right after each N-body substep), it starts the same GPU relax
+  as the birth impact and `Assembling` places the collision with `assemble_from_relaxed_at` on the LIVE
+  body-centric (offset, relative velocity) read from `self.bodies` at assembly time, never the birth
+  scene's synthesized canonical approach. Earth's spin is handed over as `spin_l.z / (0.4 M R^2)`; the
+  impactor's spin is 0.0, a flagged Law V IOU (the engine keeps no per-body spin state). The CPU
+  `Aggregate` debris path is untouched and still pinned by its tests; retiring it is the next step.
 - **Doc truth-up: the architecture map traces the one SPH path.** docs/32 §6 now describes the live
   birth trace (the GPU SPH machine with its two entries, the declared impact and the live-drop
   hand-off) instead of the retired CPU `Aggregate` debris path, with anchors re-verified against the
@@ -203,7 +296,8 @@ because **we are our own first customers** and pin exact engine versions in our 
   `resolution_distance.max(contact)` (matter resolves when tides dominate OR surfaces meet), and detection
   routes to SPH instead of resolving on the CPU. Removed from the scene: the `moon_debris` field +
   `build_impact_debris_scaled` call, the O(N²) CPU debris advance/render, `start_birth`, and the CPU
-  crater. **Consumer note:** `OrbitDemo::debris_count()` and `start_birth()` are gone from the JS API; the
+  crater. **Consumer note:** `start_birth()` is gone from the JS API; `OrbitDemo::debris_count()` now
+  counts the live GPU SPH read-back (0 outside a resolve); the
   `IMPACT · N fragments` HUD line is replaced by the live `GPU impact · disk …` line. The
   `aggregate::Aggregate` solver module remains (general N-body particle solver, still used by the
   atmosphere and impact tests).
