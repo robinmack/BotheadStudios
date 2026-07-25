@@ -28,6 +28,13 @@ use glam::DVec3;
 /// a pebble over a field and a fragment on a hyperbolic approach from outside a planet's atmosphere.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FlyingBody {
+    /// A stable handle for this body, for as long as it is in flight.
+    ///
+    /// Needed because an INDEX is not one: bodies leave the list when they arrive or are consumed, so the
+    /// fragment at slot 7 is not the fragment that was at slot 7 a second ago. Anything that wants to keep
+    /// hold of one particular body across time — a camera following a fragment down (docs/59 Stage B) —
+    /// needs to name it, not point at where it happens to sit.
+    pub id: u64,
     pub pos: DVec3,
     pub vel: DVec3,
     pub mass_kg: f64,
@@ -46,9 +53,10 @@ pub struct FlyingBody {
 }
 
 impl FlyingBody {
-    /// A body that has not been heated yet — the state anything is introduced in.
+    /// A body that has not been heated yet — the state anything is introduced in. `id` is stamped by
+    /// [`Flight::introduce`]; a body that has not been introduced yet has none, which is why this is 0.
     pub fn fresh(pos: DVec3, vel: DVec3, mass_kg: f64, material: usize, radius_m: f64, temp_k: f64) -> Self {
-        FlyingBody { pos, vel, mass_kg, material, radius_m, temp_k, skin_m: 0.0 }
+        FlyingBody { id: 0, pos, vel, mass_kg, material, radius_m, temp_k, skin_m: 0.0 }
     }
 }
 
@@ -100,13 +108,18 @@ pub struct Flight {
     bodies: Vec<FlyingBody>,
     trail: Trail,
     burned_up: usize,
+    /// Monotonic, so an id is never reused and a stale handle reads as "gone" rather than as some other
+    /// body that happens to have taken the number.
+    next_id: u64,
 }
 
 impl Flight {
     /// **Introduce matter on a trajectory.** This is the one door, and the only thing a scene does: it
     /// hands the engine a mass, a material, a place and a velocity. It cannot ask for an outcome.
-    pub fn introduce(&mut self, body: FlyingBody) {
-        self.bodies.push(body);
+    pub fn introduce(&mut self, body: FlyingBody) -> u64 {
+        self.next_id += 1;
+        self.bodies.push(FlyingBody { id: self.next_id, ..body });
+        self.next_id
     }
 
     /// Introduce a disrupted body's fragments (`damage::disrupt`) as a SWARM, placed relative to `origin`
@@ -133,6 +146,19 @@ impl Flight {
 
     pub fn bodies(&self) -> &[FlyingBody] {
         &self.bodies
+    }
+
+    /// The body with this id, if it is still in flight. `None` once it has arrived or been consumed — which
+    /// is the answer a follower needs, and the reason ids are never reused.
+    pub fn body(&self, id: u64) -> Option<&FlyingBody> {
+        self.bodies.iter().find(|b| b.id == id)
+    }
+
+    /// The most massive body still in flight. The natural one to FOLLOW (docs/59 Stage B): it is the one
+    /// the air takes least of, so it is the one that will still be there at the ground — and picking it
+    /// needs no dial, only a comparison.
+    pub fn heaviest(&self) -> Option<&FlyingBody> {
+        self.bodies.iter().max_by(|a, b| a.mass_kg.total_cmp(&b.mass_kg))
     }
 
     /// Resolve at most `n` trail parcels at once; beyond that the shed mass is booked into the air. The

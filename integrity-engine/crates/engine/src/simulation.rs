@@ -495,6 +495,7 @@ mod tests {
             let c = sim.world.center();
             let ground = sim.world.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
             sim.throw_meteor(Meteor {
+                id: 0,
                 pos: glam::DVec3::new(0.0, (ground + 60.0) as f64, 0.0),
                 vel: glam::DVec3::new(0.0, -speed as f64, 0.0),
                 mass_kg: mass_kg as f64,
@@ -536,6 +537,7 @@ mod tests {
             let c = sim.world.center();
             let ground = sim.world.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
             sim.throw_meteor(Meteor {
+                id: 0,
                 pos: glam::DVec3::new(-40.0, (ground + 40.0) as f64, 0.0),
                 vel: glam::DVec3::new(900.0, 0.0, 0.0), // supersonic, purely horizontal
                 mass_kg: 1000.0,
@@ -577,6 +579,7 @@ mod tests {
         // 5 kg iron (r ≈ 5 cm), thrown fast and horizontal high up so it stays aloft while it heats.
         let r = (3.0 * 5.0 / (4.0 * std::f32::consts::PI * 7870.0)).cbrt();
         sim.throw_meteor(Meteor {
+            id: 0,
             pos: glam::DVec3::new(-60.0, (ground + 60.0) as f64, 0.0),
             vel: glam::DVec3::new(5000.0, 0.0, 0.0),
             mass_kg: 5.0,
@@ -614,6 +617,7 @@ mod tests {
         // its own thermal skin depth).
         let r = (3.0 * 0.03 / (4.0 * std::f32::consts::PI * 7870.0)).cbrt();
         sim.throw_meteor(Meteor {
+            id: 0,
             pos: glam::DVec3::new(-400.0, (ground + 400.0) as f64, 0.0),
             vel: glam::DVec3::new(20_000.0, 0.0, 0.0),
             mass_kg: 0.03,
@@ -667,6 +671,7 @@ mod tests {
         let c = sim.world.center();
         let ground = sim.world.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
         sim.throw_meteor(Meteor {
+            id: 0,
             pos: glam::DVec3::new(0.0, (ground + 80.0) as f64, 0.0),
             vel: glam::DVec3::new(0.0, -20.0, 0.0),
             mass_kg: 800.0,
@@ -697,6 +702,7 @@ mod tests {
         let c = sim.world.center();
         let ground = sim.world.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
         sim.throw_meteor(Meteor {
+            id: 0,
             pos: glam::DVec3::new(0.0, (ground + 60.0) as f64, 0.0),
             vel: glam::DVec3::new(0.0, -50.0, 0.0),
             mass_kg: 800.0,

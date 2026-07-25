@@ -9,6 +9,21 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The engine renders from a camera POSE it is handed (docs/59 Stage B).** New
+  `Terra::set_camera_pose(eye, forward, up, fov_y)` / `clear_camera_pose` — the observer decides where to
+  stand and how wide to look; the universe holds the matter and renders what is observed. New
+  `FlyCamera::view_from_pose`, `fly_camera::DEFAULT_FOV_Y`, and `View::fov_y` so the field of view has ONE
+  definition (it was duplicated into the matter shader's billboard sizing). The near plane is now derived
+  from the closest matter the engine is holding rather than from altitude, bounded so one f32 depth range
+  can still hold the planet.
+- **New `Terra::heaviest_fragment()` / `Terra::fragment(id)`** and stable `FlyingBody::id`s, so something
+  outside the engine can keep hold of one particular body across time. `Flight::introduce` returns the id;
+  new `Flight::body(id)` and `Flight::heaviest()`.
+- **A "Follow fragment" button** on the Earth scene: rides the largest surviving fragment down and releases
+  the camera when it lands. The chase rule is entirely scene-side.
+- **Fixed:** `launch_swarm` computed its target direction with the opposite sign on z from
+  `geo::dir_from_lat_lon`, aiming the swarm at a mirrored longitude.
+
 - **Fixed: the engine could stall a scene's frame loop into unresponsiveness.** `Flight::step` now sizes its
   own substeps from the air's scale height (new `FlightEnvironment::air_scale_height_m`) instead of the
   caller doing it from frame time, which was a compounding loop — a slow frame asked for more substeps,

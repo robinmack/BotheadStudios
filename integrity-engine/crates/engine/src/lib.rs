@@ -4053,6 +4053,11 @@ mod app {
         last_frame_s: f64,
         /// The scene-agnostic renderer for whatever the engine is holding (`render::MatterField`).
         matter: MatterField,
+        /// **A camera pose supplied from OUTSIDE**, if anything is driving one (Robin: feed the engine
+        /// coordinates and FOV; let something else — another thread — decide position and framing). When
+        /// set it is the authority for this frame: `fly` is synced from it so the HUD, the ground cap and
+        /// the LOD blend all still read one altitude, and `None` hands control back to the fly camera.
+        cam_pose: Option<([f64; 3], [f64; 3], [f64; 3], f64, f64)>, // eye, forward, up, fov_y, alt_m
         /// Diagnostic: skip UPLOADING and DRAWING the engine's matter while still simulating it. The
         /// physics and the render path both scale with the same number, so measuring either one alone is
         /// impossible without a knob that moves one and not the other (the gpu-perf rule: price a stage,
@@ -4243,6 +4248,7 @@ mod app {
                 last_frame_s: 0.0,
                 matter,
                 flight_env,
+                cam_pose: None,
                 draw_matter: 2,
                 drawn_buf: Vec::new(),
                 inst_buf: Vec::new(),
@@ -4421,11 +4427,12 @@ mod app {
         /// measure what actually costs frame time instead of guessing.
         pub fn launch_swarm_n(&mut self, count: usize) {
             let iron = materials::index_of(&self.mats, "iron");
-            // Where the swarm is headed: the point on the surface under the camera.
-            let (lat, lon) = (self.fly.lat.to_radians(), self.fly.lon.to_radians());
-            let target = glam::DVec3::new(
-                lat.cos() * lon.cos(), lat.sin(), lat.cos() * lon.sin(),
-            ) * self.planet_radius;
+            // Where the swarm is headed: the point on the surface under the camera. THE shared conversion
+            // (`crate::geo`) — this was hand-rolled here with the opposite sign on z, so the swarm aimed at
+            // a MIRRORED longitude and arrived nowhere near where the camera was pointed. CLAUDE.md warns
+            // about exactly this: the tangent frame was once six hand-written copies, and the one sign they
+            // all shared was wrong.
+            let target = crate::geo::dir_from_lat_lon(self.fly.lat, self.fly.lon) * self.planet_radius;
             // Released 500 km above, offset so the path is a slanting entry rather than straight down —
             // a real Earth-crosser almost never arrives on the local vertical.
             let up = target.normalize();
@@ -4458,6 +4465,75 @@ mod app {
                 "swarm: {count} fragments of a {:.0} kg asteroid, entering at {:.1} km/s toward lat {:.1} lon {:.1}",
                 parent_m, approach.length() / 1000.0, self.fly.lat, self.fly.lon
             );
+        }
+
+        /// **Drive the camera from outside.** `eye` is in metres, planet-centred (the engine's own frame);
+        /// `forward`/`up` are directions; `fov_y` is the vertical field of view in radians. The engine
+        /// renders from exactly this and derives everything else — latitude, longitude, altitude, and
+        /// therefore the terrain LOD — from it, so a caller does not have to keep a second idea of where
+        /// the camera is. Call `clear_camera_pose` to hand control back to the built-in fly camera.
+        ///
+        /// This exists so camera placement can be computed by whatever is best placed to compute it,
+        /// including off the render thread: nothing here reads input, and nothing here decides framing.
+        #[allow(clippy::too_many_arguments)]
+        pub fn set_camera_pose(
+            &mut self,
+            eye_x: f64, eye_y: f64, eye_z: f64,
+            fwd_x: f64, fwd_y: f64, fwd_z: f64,
+            up_x: f64, up_y: f64, up_z: f64,
+            fov_y: f64,
+        ) {
+            let eye = glam::DVec3::new(eye_x, eye_y, eye_z);
+            let r = eye.length();
+            // Altitude above the LOCAL ground, so the LOD machinery sees the same altitude it would if the
+            // fly camera had been driven here.
+            let (lat, lon) = crate::geo::lat_lon_from_dir(eye.normalize_or(glam::DVec3::Y));
+            let ground_m = self.ground_disp_at(lat, lon) / DISPLAY_SCALE;
+            let alt_m = (r - self.planet_radius - ground_m).max(0.0);
+            // Keep the fly camera in step: it is what the HUD, the cap and the blend read, and a caller
+            // that later releases the pose should not find the camera somewhere else.
+            self.fly.lat = lat;
+            self.fly.lon = lon;
+            self.fly.alt_m = alt_m.clamp(self.fly.min_alt, self.fly.max_alt);
+            self.cam_pose = Some((
+                (eye * DISPLAY_SCALE).to_array(),
+                [fwd_x, fwd_y, fwd_z],
+                [up_x, up_y, up_z],
+                fov_y,
+                self.fly.alt_m,
+            ));
+        }
+
+        /// Hand the camera back to the built-in fly camera, where the pose left it.
+        pub fn clear_camera_pose(&mut self) {
+            self.cam_pose = None;
+        }
+
+        /// The heaviest body still in flight, as `[id, x, y, z, vx, vy, vz, radius_m, temp_k]` in metres —
+        /// or an empty array if nothing is in flight. This is what a follower needs and no more: the engine
+        /// says where its matter IS, and something else decides where to put a camera because of it
+        /// (docs/59 Stage B). The heaviest is the one the air takes least of, so it is the one that will
+        /// still be there at the ground.
+        pub fn heaviest_fragment(&self) -> Vec<f64> {
+            match self.flight.heaviest() {
+                Some(b) => vec![
+                    b.id as f64, b.pos.x, b.pos.y, b.pos.z,
+                    b.vel.x, b.vel.y, b.vel.z, b.radius_m, b.temp_k,
+                ],
+                None => Vec::new(),
+            }
+        }
+
+        /// The body with this id, in the same layout — empty once it has arrived or been consumed, which is
+        /// how a follower learns its fragment is gone rather than silently tracking a different one.
+        pub fn fragment(&self, id: f64) -> Vec<f64> {
+            match self.flight.body(id as u64) {
+                Some(b) => vec![
+                    b.id as f64, b.pos.x, b.pos.y, b.pos.z,
+                    b.vel.x, b.vel.y, b.vel.z, b.radius_m, b.temp_k,
+                ],
+                None => Vec::new(),
+            }
         }
 
         /// Diagnostic knob — see `draw_matter`. Simulation is unaffected.
@@ -4586,9 +4662,39 @@ mod app {
             // local ground (not sea level).
             let aspect = self.config.width as f64 / self.config.height.max(1) as f64;
             let ground_disp = self.ground_disp_at(self.fly.lat, self.fly.lon);
-            let view = self.fly.view(r_disp, DISPLAY_SCALE, aspect, ground_disp);
+            // An externally supplied pose is the authority when there is one; otherwise the fly camera.
+            let view = match self.cam_pose {
+                Some((eye, fwd, up, fov_y, alt_m)) => {
+                    // How close is the engine's OWN matter? The camera may be riding a metre-wide fragment
+                    // from eighty metres away while two hundred kilometres up, and a near plane derived
+                    // from altitude would clip it (measured: it did — a black screen with a working HUD).
+                    let eye_m = glam::DVec3::from_array(eye) / DISPLAY_SCALE;
+                    let nearest_m = self
+                        .flight
+                        .bodies()
+                        .iter()
+                        .map(|b| (b.pos - eye_m).length() - b.radius_m)
+                        .fold(f64::INFINITY, f64::min)
+                        .max(0.01);
+                    crate::terra::fly_camera::FlyCamera::view_from_pose(
+                        glam::DVec3::from_array(eye),
+                        glam::DVec3::from_array(fwd),
+                        glam::DVec3::from_array(up),
+                        fov_y,
+                        r_disp,
+                        DISPLAY_SCALE,
+                        aspect,
+                        alt_m,
+                        nearest_m,
+                    )
+                }
+                None => self.fly.view(r_disp, DISPLAY_SCALE, aspect, ground_disp),
+            };
             let view_proj = view.vp_abs;
             let eye = view.eye;
+            // Captured here because `view` is shadowed by a texture view further down; the FOV still has
+            // exactly one source (`View::fov_y`), which is the point.
+            let cam_fov_y = view.fov_y;
             // The REAL direction to the Sun for right now (orbit::solar_direction_earth_fixed). What stood
             // here was `DVec3::new(1.0, 0.45, 0.6)` — a fixed vector whose comment called it "a pleasant ¾
             // lighting" while claiming the terminator was emergent. It was not: the globe was already
@@ -4791,10 +4897,10 @@ mod app {
                     }
                 }
                 // The engine's matter, last: it is emissive and additive, so it brightens whatever it is
-                // in front of. The projection scales come from the same 0.9 rad vertical FOV the camera
-                // builds its frustum with, which is what lets the shader hold a sub-pixel mark at exactly
-                // one pixel instead of losing it.
-                let proj_y = 1.0 / (0.45_f32).tan();
+                // in front of. The projection scales come from the field of view THIS FRAME was built with
+                // (`View::fov_y`) — not a second copy of it, which is how a "one pixel" floor stops being
+                // one pixel the moment anyone changes the FOV.
+                let proj_y = 1.0 / (cam_fov_y * 0.5).tan() as f32;
                 let proj_x = proj_y / aspect.max(1e-3) as f32;
                 if self.draw_matter >= 2 {
                     self.matter.draw(

@@ -3,6 +3,57 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-24 (Stage B) — the observer and the universe
+
+**What.** docs/59 Stage B: ride a fragment down. Robin redirected it into something better than a follow —
+*"can we feed camera coordinates, FOV to engine? … a different thread could drive its position, framing"* —
+and then named the principle: **"This matches an observer/universe scenario. The universe handles all the
+physics, the viewer watches."**
+
+So there is no follow mode in the engine. `Terra::set_camera_pose(eye, forward, up, fov_y)` is the whole
+interface; the engine renders from exactly that and derives latitude, longitude, altitude and therefore the
+terrain LOD from it. The chase rule lives in the scene, where it is ~20 lines of vector arithmetic over two
+engine questions (`heaviest_fragment`, then `fragment(id)` each frame). Nothing in the engine learned what
+"following" means, and the same interface will take a script, a device, or code on another thread.
+
+Fragments gained stable `id`s, because an INDEX is not a handle: bodies leave the list when they arrive, so
+slot 7 is not the fragment that was at slot 7 a second ago.
+
+**Two things fell out of taking the split seriously instead of adding a mode.**
+
+1. **The FOV stopped being duplicated.** It was written in `fly_camera` and again in the matter shader's
+   billboard sizing — so the "one pixel" sampling floor silently stopped being one pixel if either moved.
+   The pose carries it, `View::fov_y` reports what the frame was built with, and the shader reads that.
+2. **The near plane became the engine's job.** The fly camera derives it from ALTITUDE — right when the
+   nearest visible thing is the ground below, badly wrong otherwise. Riding 82 m behind a fragment at 218 km
+   altitude put the near plane **104 km** away and clipped the very thing being followed: a starfield and a
+   working HUD with nothing in the middle. The engine knows how close its own matter is, so it answers that
+   now, which is precisely Robin's *"it gets to track what is observed"*.
+
+**And a hard limit, flagged rather than worked around.** One f32 depth range cannot hold an 80 m fragment
+AND a 6,371 km planet: dropping `near` to the fragment collapsed precision and the globe stopped drawing at
+all. So the ratio is bounded (`near` never below a ten-thousandth of the altitude) and the observer stands
+back proportionally as it climbs — the engine's one-pixel floor is what keeps the fragment visible when it
+does. The real fix is DEPTH PARTITIONING, named at the call site; `vp_rel` already exists for the same class
+of problem on the ground cap.
+
+**Verified** (`terra_follow.mjs`, paced to ~60 fps per CLAUDE.md rule 4b): a fragment ridden from **528.6 km
+to 0.1 km, 39 of 39 samples descending**, worst render ~3 ms, the fragment visibly incandescent at its own
+3,134 K with a cooling parcel beside it, daylit terrain filling the frame from ~30 km down, and the camera
+releasing itself the moment the fragment lands. 367/367 native.
+
+**NOT done — and it is the half the stage is named for.** The surface never gets FINER. At 70 m the ground is
+a flat green fill: right biome, no relief, no granularity. Altitude descends continuously and the globe→cap
+crossover happens, but "seeing better LOD as we descend" is unmet. docs/59 predicted this: the
+`surface_detail` LOD-tier blocker (docs/46), where Terra has no finer tier to fade into. It is also a
+prerequisite for Stage C — a crater that sharpens as you approach needs a surface that can sharpen at all.
+
+**Also fixed:** `launch_swarm` hand-rolled lat/lon→direction with the OPPOSITE sign on z from
+`crate::geo::dir_from_lat_lon`, so the swarm aimed at a mirrored longitude and landed nowhere near where the
+camera pointed. It cost me three rig runs believing the terrain was failing to render when I was simply
+looking at the night side each time. CLAUDE.md warns about exactly this: the tangent frame was once six
+hand-written copies, and the one sign they all shared was wrong.
+
 ## 2026-07-24 (late) — "we lose camera controls when the engine is working"
 
 **What.** Robin reported losing camera control during an entry. Two separate things turned out to be true:

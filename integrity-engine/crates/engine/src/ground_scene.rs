@@ -650,6 +650,7 @@ impl Ground {
         let start = target + Vec3::new(-140.0, 220.0, -90.0);
         let dir = (target - start).normalize_or(Vec3::new(0.0, -1.0, 0.0));
         self.sim.throw_meteor(crate::simulation::Meteor {
+            id: 0, // stamped by the engine when it takes the body
             pos: start.as_dvec3(),
             vel: (dir * speed_ms).as_dvec3(),
             mass_kg: mass_kg as f64,

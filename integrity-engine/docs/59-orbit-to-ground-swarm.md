@@ -164,7 +164,58 @@ visual has been claimed or rig-verified yet.
 - ✅ **The swarm's initial conditions.** `damage::disrupt` — a disintegrated asteroid, not N placed
   meteors. Dohnanyi mass shares, escape-speed separation, spread = v·t since breakup, golden-angle
   isotropy, and Σm·v = 0 exactly.
-- ⬜ **Features 3–5** (surface impact on Terra, JIT crater LOD, camera-follow) — Stages B and C, untouched.
+- ✅ **Feature 5, camera-follow** — and it arrived as something better than a follow, because Robin
+  redirected it: *"can we feed camera coordinates, FOV to engine? … a different thread could drive its
+  position, framing"*, and then named the principle — **"This matches an observer/universe scenario. The
+  universe handles all the physics, the viewer watches."**
+- ⬜ **Features 3–4** (surface impact on Terra, JIT crater LOD) — Stage C, untouched.
+
+## The observer and the universe (Robin, 2026-07-24) — the split this settled into
+
+> *"engine has enough going on; it gets to track what is observed (and render it) based on where it is told
+> camera pose/fov is"* … *"This matches an observer/universe scenario. The universe handles all the physics,
+> the viewer watches."*
+
+This is the sharpest statement of the architecture yet, and it replaces the vaguer "scenes are data":
+
+- **The universe** holds the matter and runs the laws. It does not know what a meteor is, what a camera is
+  for, or what "following" means. It answers two kinds of question: *what is there* (`Flight::bodies`,
+  `heaviest_fragment`, `Drawn`) and *what does it look like from here* (a pose in, a frame out).
+- **The observer** decides where to stand and how wide to look, and it is free to be anything: the built-in
+  fly camera, a script, a chase rule, or code on another thread. `Terra::set_camera_pose(eye, forward, up,
+  fov_y)` is the whole interface, and `clear_camera_pose` hands control back.
+
+Two things fell out of taking it seriously rather than adding a "follow mode":
+
+1. **The field of view stopped being duplicated.** It was written out in `fly_camera` and AGAIN in the
+   matter shader's billboard sizing — so the "one pixel" floor silently stopped being one pixel if either
+   changed. A pose carries the FOV, `View::fov_y` reports the one the frame was built with, and the shader
+   reads that.
+2. **The near plane became the engine's job, not the camera's.** The fly camera derives it from ALTITUDE,
+   which is right when the nearest visible thing is the ground below and badly wrong otherwise: riding 82 m
+   behind a fragment at 218 km altitude put the near plane 104 km away and clipped the very thing being
+   followed — a starfield and a working HUD with nothing in the middle. The engine knows how close its own
+   matter is, so it now answers that. Which is exactly *"it gets to track what is observed"*.
+
+### Stage B status: the ride works, the detail does not rise
+
+RIG-VERIFIED (`web/rig/terra_follow.mjs`, paced to ~60 fps): a fragment ridden from **528.6 km down to
+0.1 km, 39 of 39 samples descending**, worst render ~3 ms, the fragment visibly incandescent at its own
+3,134 K, the camera releasing itself when the fragment lands, and daylit terrain filling the frame from
+~30 km down.
+
+**What is NOT done, and it is the half this stage is named for.** The surface never resolves into visible
+DETAIL. At 70 m altitude the ground is a flat green fill — the right biome colour, no relief, no
+granularity. The altitude descends continuously and the globe→cap crossover happens, but nothing gets
+*finer*, so "seeing better LOD as we descend" (Robin's original ask) is unmet. This doc predicted it: the
+`surface_detail` LOD-tier blocker (docs/46), where wiring the finer tier reproduces a documented revert
+because Terra has no finer LOD tier to fade into. That is the next piece of work, and it is a prerequisite
+for Stage C's JIT crater — a crater that sharpens as you approach needs a surface that can sharpen at all.
+
+Also found and fixed on the way: `launch_swarm` hand-rolled its own lat/lon→direction with the OPPOSITE
+sign on z from `crate::geo::dir_from_lat_lon`, so the swarm aimed at a mirrored longitude and arrived
+nowhere near where the camera pointed. CLAUDE.md warns about this exact thing — the tangent frame was once
+six hand-written copies, and the one sign they all shared was wrong.
 
 ### Answers to the open decisions below, as built
 
