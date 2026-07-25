@@ -299,11 +299,13 @@ fn build_particle_pipeline(
 /// Near-clip distance. The camera shell's half-extent must be at least this, or the frustum's near
 /// plane can cross into matter even while the shell itself cannot — which is exactly how a camera ends
 /// up seeing under the skin.
-/// The ground scene's vertical field of view (radians) — 60°, named rather than written inline at the
-/// projection. Sean's `upstream-5-ground-ball` introduces the same constant independently; converging fixes.
-const FOV_Y: f32 = std::f32::consts::FRAC_PI_3;
-
 const NEAR_CLIP: f32 = 0.2;
+
+/// The ground scene's vertical field of view (radians) — 60°, named rather than written inline at the
+/// projection. One constant, used by the projection AND by the metres-per-pixel scale, so the two can
+/// never disagree about how much world a pixel spans. (We and Sean's `upstream-5-ground-ball` added this
+/// independently — converging fixes, one name kept.)
+const FOV_Y: f32 = std::f32::consts::FRAC_PI_3;
 
 /// The ground scene: a world defined by data, rendered and made destructible.
 #[wasm_bindgen]
@@ -615,7 +617,13 @@ impl Ground {
             // Start high and back, pitched down at the origin where meteors land — so the impact is in
             // frame from the first moment (Robin: "can see a flicker of a meteor falling but can't see the
             // actual impact"). Free to fly anywhere from there.
-            camera: Camera { yaw: 0.6, pitch: -0.55, zoom: 1.0, base_distance: eye_height_m * 3.0 },
+            camera: Camera {
+                yaw: 0.6,
+                pitch: -0.55,
+                zoom: 1.0,
+                base_distance: eye_height_m * 3.0,
+                pan: Vec3::ZERO,
+            },
             cam_eye: {
                 let g = eye_height_m; // a metre or two; used as the scene's length unit
                 Vec3::new(-24.0 * g, ground0 + 18.0 * g, -24.0 * g)
@@ -683,12 +691,39 @@ impl Ground {
         self.cam_eye += self.look_dir() * forward_m;
     }
 
-    /// The aim point projected to NORMALISED screen coordinates (`[x, y]`, 0..1, origin top-left) for the
-    /// HUD crosshair — where the camera is aimed at the ground, which is where a meteor will land. Returns
-    /// an EMPTY vec when the camera is not aimed at the ground (looking at the sky) or the point is behind
-    /// the near plane, so the crosshair hides.
+    /// Pan: translate the eye laterally in the view plane by a pointer delta in DEVICE pixels,
+    /// the same gesture the orbit band honours, expressed in this scene's free-fly rig. The eye
+    /// moves under the SAME law as `walk` (free movement; the matter shell in `eye_and_target`
+    /// keeps it out of the ground), only along the screen axes instead of the look axis.
+    ///
+    /// The scale is exact, not a feel dial: at the first matter the look ray meets (distance `d`),
+    /// one pixel of the `FOV_Y` frustum spans `2·d·tan(FOV_Y/2)/h` metres, so the terrain under
+    /// the pointer tracks it one-for-one, map-style (dragging right carries the eye left). Looking
+    /// at pure sky there is no aimed matter; the eye's height over the ground beneath it is the
+    /// nearest surface and stands in as the focal distance.
+    pub fn pan_view(&mut self, dx_px: f32, dy_px: f32) {
+        let (eye, _) = self.eye_and_target();
+        let d = self
+            .aim_first_matter()
+            .map(|(hit, _)| (hit - eye).length())
+            .unwrap_or_else(|| (eye.y - self.ground_at(eye.x, eye.z)).max(self.eye_height_m));
+        let per_px = 2.0 * d * (0.5 * FOV_Y).tan() / self.config.height.max(1) as f32;
+        let fwd = self.look_dir();
+        // Pitch is clamped short of the poles wherever it is set, so forward is never parallel to
+        // world up; the fallback only guards the degenerate zero-vector case.
+        let right = fwd.cross(Vec3::Y).normalize_or(Vec3::X);
+        let up = right.cross(fwd);
+        self.cam_eye += (right * -dx_px + up * dy_px) * per_px;
+    }
+
+    /// The aim point projected to NORMALISED screen coordinates (`[x, y, on_body]`, 0..1, origin
+    /// top-left) for the HUD crosshair - the first matter the camera's look ray meets, which is where
+    /// a meteor will land. `on_body` is 1 when that matter is a solid body's parcel rather than the
+    /// bulk terrain, so the crosshair (and a verification rig) can tell "aimed at the ball" from
+    /// "aimed at the slope behind it". Returns an EMPTY vec when the ray meets nothing or the point
+    /// is behind the near plane, so the crosshair hides.
     pub fn aim_screen(&self) -> Vec<f32> {
-        let Some(hit) = self.aim_ground_point() else { return Vec::new() };
+        let Some((hit, on_body)) = self.aim_first_matter() else { return Vec::new() };
         let (vp, _) = self.view_proj();
         let clip = vp * glam::Vec4::new(hit.x, hit.y, hit.z, 1.0);
         if clip.w <= 0.0 {
@@ -698,7 +733,7 @@ impl Ground {
         if ndc.x.abs() > 1.2 || ndc.y.abs() > 1.2 {
             return Vec::new();
         }
-        vec![ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5]
+        vec![ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5, if on_body { 1.0 } else { 0.0 }]
     }
 
 
@@ -710,6 +745,26 @@ impl Ground {
     }
 
     pub fn particle_count(&self) -> usize { self.sim.particle_count() }
+    /// The declared solid bodies, probed for the HUD and the verification rigs:
+    /// `[parcels, intact_bonds, com_y, ground_under_com]` for the first body, empty when none is
+    /// declared. The HUD showing the same numbers the physics runs on is what lets a rig assert
+    /// "the ball rests ON the ground" instead of eyeballing pixels.
+    pub fn body_probe(&self) -> Vec<f32> {
+        let Some(b) = self.sim.cohesive_bodies().first() else { return Vec::new() };
+        let c = b.agg.com();
+        vec![
+            b.agg.particles.len() as f32,
+            b.agg.active_bonds() as f32,
+            c.y as f32,
+            self.sim.world.ground_height(c.x as f32, c.z as f32),
+        ]
+    }
+    /// The declared body's one-word structural verdict ("intact" / "dented" / "shattered"), read
+    /// from the same bond state `body_probe` counts - so the HUD can LEAD with the state instead of
+    /// asking the viewer to interpret a raw bond number. Empty when no body is declared.
+    pub fn body_verdict(&self) -> String {
+        self.sim.cohesive_bodies().first().map(|b| b.verdict().to_string()).unwrap_or_default()
+    }
     pub fn created_total(&self) -> usize { self.sim.created_total() }
     pub fn world_name(&self) -> String { self.sim.name().to_string() }
     pub fn surface_material(&self) -> String { self.sim.surface_material().to_string() }
@@ -842,31 +897,70 @@ impl Ground {
         Vec3::new(cp * self.camera.yaw.sin(), self.camera.pitch.sin(), cp * self.camera.yaw.cos())
     }
 
-    /// **Where the camera is aimed at the ground** — the user-chosen impact point. March the view axis
-    /// from the eye until it crosses the bulk surface, then refine. `None` if it never meets the ground
-    /// (looking at or above the horizon), in which case there is nothing to aim at.
+    /// **Where the camera is aimed** - the user-chosen impact point: the FIRST MATTER the look ray
+    /// meets. That is the bulk terrain, or a solid body's parcels if they are nearer - the ball is
+    /// matter, so aiming at it must mean hitting it, not the slope behind its feet (which is exactly
+    /// how the first meteor sailed past a ball that filled the crosshair). `None` if the ray meets
+    /// nothing (looking at the sky with no body in the way).
     fn aim_ground_point(&self) -> Option<Vec3> {
+        self.aim_first_matter().map(|(p, _)| p)
+    }
+
+    /// [`Self::aim_ground_point`] plus WHAT was hit: `true` when the nearest matter on the ray is a
+    /// solid body's parcel, `false` when it is the bulk terrain.
+    fn aim_first_matter(&self) -> Option<(Vec3, bool)> {
         let (eye, _) = self.eye_and_target();
         let dir = self.look_dir();
-        if dir.y > -1.0e-3 {
-            return None; // not looking downward — the axis escapes to the sky
-        }
-        let (mut t, max_t, step) = (0.0f32, 4000.0f32, 0.5f32);
-        let mut above = eye.y - self.sim.world.bulk_height(eye.x, eye.z);
-        while t < max_t {
-            let nt = t + step;
-            let p = eye + dir * nt;
-            let below = p.y - self.sim.world.bulk_height(p.x, p.z);
-            if below <= 0.0 {
-                // Linear refine across the crossing (above > 0 >= below).
-                let f = above / (above - below);
-                let hit = eye + dir * (t + step * f);
-                return Some(Vec3::new(hit.x, self.sim.world.bulk_height(hit.x, hit.z), hit.z));
+        let mut best_t = f32::INFINITY;
+        let mut best: Option<(Vec3, bool)> = None;
+        if dir.y <= -1.0e-3 {
+            // March the view axis until it crosses the bulk surface, then refine.
+            let (mut t, max_t, step) = (0.0f32, 4000.0f32, 0.5f32);
+            let mut above = eye.y - self.sim.world.bulk_height(eye.x, eye.z);
+            while t < max_t {
+                let nt = t + step;
+                let p = eye + dir * nt;
+                let below = p.y - self.sim.world.bulk_height(p.x, p.z);
+                if below <= 0.0 {
+                    // Linear refine across the crossing (above > 0 >= below).
+                    let tf = t + step * (above / (above - below));
+                    let hit = eye + dir * tf;
+                    best_t = tf;
+                    best = Some((
+                        Vec3::new(hit.x, self.sim.world.bulk_height(hit.x, hit.z), hit.z),
+                        false,
+                    ));
+                    break;
+                }
+                above = below;
+                t = nt;
             }
-            above = below;
-            t = nt;
         }
-        None
+        // A body's parcels are matter on the same ray - nearest hit wins, terrain or parcel alike.
+        // Closed-form ray-sphere test per parcel, so a shattered ball's flying chunks still catch
+        // the aim where they actually are. The radius is the parcel cube's circumscribed sphere,
+        // so aiming anywhere on the drawn cube counts.
+        for b in self.sim.cohesive_bodies() {
+            let r = b.part_half as f32 * 3.0f32.sqrt();
+            for p in &b.agg.particles {
+                let c = Vec3::new(p.pos.x as f32, p.pos.y as f32, p.pos.z as f32);
+                let oc = c - eye;
+                let tca = oc.dot(dir);
+                if tca <= 0.0 || tca >= best_t {
+                    continue;
+                }
+                let d2 = oc.length_squared() - tca * tca;
+                if d2 > r * r {
+                    continue;
+                }
+                let t_hit = tca - (r * r - d2).sqrt();
+                if t_hit < best_t {
+                    best_t = t_hit;
+                    best = Some((eye + dir * t_hit, true));
+                }
+            }
+        }
+        best
     }
 
 
@@ -899,37 +993,13 @@ impl Ground {
     /// cannot cross the surface either.
     fn camera_shell_resolve(&self, desired: Vec3) -> Vec3 {
         use glam::DVec3;
-        /// ≥ `NEAR_CLIP` (0.2 m) so the near plane can never cross the surface the shell rests on.
-        const SHELL_HALF: f64 = 0.35;
-        /// Solver relaxation rate, not a tuned edge — the same role it plays for grains.
-        const MAX_CORR: f64 = 0.5;
-
-        let mut pos = DVec3::new(desired.x as f64, desired.y as f64, desired.z as f64);
+        let to = DVec3::new(desired.x as f64, desired.y as f64, desired.z as f64);
         // SWEPT: resolve along the path from last frame to here, so a fast camera cannot tunnel through
         // the thin surface skin in one frame (a grain needs this for the same reason).
         let from = DVec3::new(self.last_eye.x as f64, self.last_eye.y as f64, self.last_eye.z as f64);
-        let steps = ((pos - from).length() / (SHELL_HALF * 2.0)).ceil().clamp(1.0, 24.0) as usize;
-        for i in 1..=steps {
-            let t = i as f64 / steps as f64;
-            let mut p = from.lerp(pos, t);
-            let sample = Vec3::new(p.x as f32, p.y as f32, p.z as f32);
-            let (h, dhdx, dhdz) = self.sim.world.surface_bilinear_grad(sample);
-            let hit = crate::granular::terrain_contact_resolve(
-                p,
-                DVec3::ZERO, // the shell is carried by the rig, not ballistic: contact corrects POSITION
-                h as f64,
-                dhdx as f64,
-                dhdz as f64,
-                SHELL_HALF,
-                0.0,                // frictionless: the camera slides, it does not stick to hillsides
-                MAX_CORR,
-                f64::INFINITY,      // open sky above the camera
-            );
-            if hit.hit {
-                p += hit.dpos;
-            }
-            pos = p;
-        }
+        let pos = crate::granular::sweep_shell_resolve(from, to, |sample| {
+            self.sim.world.surface_bilinear_grad(sample)
+        });
         Vec3::new(pos.x as f32, pos.y as f32, pos.z as f32)
     }
 

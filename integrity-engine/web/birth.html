@@ -56,6 +56,9 @@
       #status {
         position: fixed;
         inset: 0;
+        /* A full-viewport overlay: it must never eat pointer input meant for the canvas
+           (it sits over the whole scene whenever any message is showing). */
+        pointer-events: none;
         display: flex;
         align-items: center;
         justify-content: center;

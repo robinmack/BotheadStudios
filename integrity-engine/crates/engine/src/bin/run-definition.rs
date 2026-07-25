@@ -48,6 +48,22 @@ fn main() {
     println!("definition : {path}");
     println!("after load : {} particles, {} analytic effect(s), {voxels_before} solid voxels",
              sim.particle_count(), sim.analytic_count());
+    // The declared solid bodies (docs/23 step 1): cohesive matter, reported so a definition author can
+    // see where each body starts relative to the ground it will fall onto.
+    let report_bodies = |sim: &engine::simulation::Simulation, when: &str| {
+        for (i, b) in sim.cohesive_bodies().iter().enumerate() {
+            let c = b.agg.com();
+            let g = sim.world.ground_height(c.x as f32, c.z as f32);
+            println!(
+                "body {i} {when}: {} particles, {} bonds, com y {:.2} m, ground beneath {:.2} m",
+                b.agg.particles.len(),
+                b.agg.active_bonds(),
+                c.y,
+                g
+            );
+        }
+    };
+    report_bodies(&sim, "at load");
     for i in 0..steps {
         let resolved = sim.step(1.0 / 60.0);
         if resolved > 0 {
@@ -77,4 +93,5 @@ fn main() {
         if created > 0 { 100.0 * lost as f64 / created as f64 } else { 0.0 }
     );
     println!("voxels     : {voxels_before} -> {voxels_after}");
+    report_bodies(&sim, "at end ");
 }
