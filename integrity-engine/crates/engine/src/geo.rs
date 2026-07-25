@@ -33,7 +33,10 @@ pub fn dir_from_lat_lon(lat_deg: f64, lon_deg: f64) -> DVec3 {
 #[inline]
 pub fn lat_lon_from_dir(dir: DVec3) -> (f64, f64) {
     let d = dir.normalize_or_zero();
-    (d.y.clamp(-1.0, 1.0).asin().to_degrees(), (-d.z).atan2(d.x).to_degrees())
+    (
+        d.y.clamp(-1.0, 1.0).asin().to_degrees(),
+        (-d.z).atan2(d.x).to_degrees(),
+    )
 }
 
 /// The local tangent frame at (`lat_deg`, `lon_deg`): unit `up`, `north`, `east`. Derived from
@@ -55,9 +58,18 @@ mod tests {
     /// A latitude/longitude must survive the round trip, and must land where the world says it does.
     #[test]
     fn geography_round_trips_and_east_is_east() {
-        for &(lat, lon) in &[(0.0, 0.0), (51.5, -0.13), (-33.9, 151.2), (35.7, 139.7), (89.0, 45.0)] {
+        for &(lat, lon) in &[
+            (0.0, 0.0),
+            (51.5, -0.13),
+            (-33.9, 151.2),
+            (35.7, 139.7),
+            (89.0, 45.0),
+        ] {
             let (a, b) = lat_lon_from_dir(dir_from_lat_lon(lat, lon));
-            assert!((a - lat).abs() < 1e-9 && (b - lon).abs() < 1e-9, "round trip {lat},{lon} → {a},{b}");
+            assert!(
+                (a - lat).abs() < 1e-9 && (b - lon).abs() < 1e-9,
+                "round trip {lat},{lon} → {a},{b}"
+            );
         }
         // Longitude 0 is +X; the north pole is +Y.
         assert!((dir_from_lat_lon(0.0, 0.0) - DVec3::X).length() < 1e-12);
@@ -75,7 +87,10 @@ mod tests {
             "10°E must appear on screen-right (got {east_of_us:?} vs right {screen_right:?})"
         );
         // ...and west on the other side.
-        assert!(dir_from_lat_lon(0.0, -10.0).dot(screen_right) < 0.0, "10°W must appear on screen-left");
+        assert!(
+            dir_from_lat_lon(0.0, -10.0).dot(screen_right) < 0.0,
+            "10°W must appear on screen-left"
+        );
     }
 
     /// The tangent frame must be orthonormal and actually point north/east at the place it claims.
@@ -84,13 +99,26 @@ mod tests {
         for &(lat, lon) in &[(0.0, 0.0), (45.0, 30.0), (-20.0, -120.0)] {
             let (up, north, east) = tangent_frame(lat, lon);
             for v in [up, north, east] {
-                assert!((v.length() - 1.0).abs() < 1e-12, "unit vectors at {lat},{lon}");
+                assert!(
+                    (v.length() - 1.0).abs() < 1e-12,
+                    "unit vectors at {lat},{lon}"
+                );
             }
-            assert!(up.dot(north).abs() < 1e-12 && up.dot(east).abs() < 1e-12 && north.dot(east).abs() < 1e-12);
-            assert!((up - dir_from_lat_lon(lat, lon)).length() < 1e-12, "up IS the position direction");
+            assert!(
+                up.dot(north).abs() < 1e-12
+                    && up.dot(east).abs() < 1e-12
+                    && north.dot(east).abs() < 1e-12
+            );
+            assert!(
+                (up - dir_from_lat_lon(lat, lon)).length() < 1e-12,
+                "up IS the position direction"
+            );
             // Stepping east must increase longitude.
             let (_, lon2) = lat_lon_from_dir((up + east * 1e-4).normalize());
-            assert!(lon2 > lon, "east increases longitude at {lat},{lon} ({lon2} vs {lon})");
+            assert!(
+                lon2 > lon,
+                "east increases longitude at {lat},{lon} ({lon2} vs {lon})"
+            );
             // Stepping north must increase latitude.
             let (lat2, _) = lat_lon_from_dir((up + north * 1e-4).normalize());
             assert!(lat2 > lat, "north increases latitude at {lat},{lon}");

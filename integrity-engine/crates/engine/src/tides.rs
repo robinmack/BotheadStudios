@@ -268,12 +268,24 @@ mod tests {
         let omega = 2.0 * std::f64::consts::PI / 86_164.0;
         let f = flattening_from_spin(omega, M_E, R_E);
         let j2 = j2_from_spin(omega, M_E, R_E);
-        println!("flattening 1/{:.0} (real 1/298) · J2 {j2:.4e} (real 1.0826e-3)", 1.0 / f);
-        assert!((f - 3.353e-3).abs() / 3.353e-3 < 0.05, "real flattening emerges (got {f:.3e})");
-        assert!((j2 - 1.0826e-3).abs() / 1.0826e-3 < 0.08, "real J2 emerges (got {j2:.3e})");
+        println!(
+            "flattening 1/{:.0} (real 1/298) · J2 {j2:.4e} (real 1.0826e-3)",
+            1.0 / f
+        );
+        assert!(
+            (f - 3.353e-3).abs() / 3.353e-3 < 0.05,
+            "real flattening emerges (got {f:.3e})"
+        );
+        assert!(
+            (j2 - 1.0826e-3).abs() / 1.0826e-3 < 0.08,
+            "real J2 emerges (got {j2:.3e})"
+        );
         // And the post-impact 3.8-h day squashes the planet visibly.
         let f_fast = flattening_from_spin(2.0 * std::f64::consts::PI / (3.8 * 3600.0), M_E, R_E);
-        assert!(f_fast > 0.08, "a 3.8-h day is dramatically oblate (got {f_fast:.3})");
+        assert!(
+            f_fast > 0.08,
+            "a 3.8-h day is dramatically oblate (got {f_fast:.3})"
+        );
     }
 
     #[test]
@@ -289,7 +301,10 @@ mod tests {
             (2.8..5.0).contains(&cm_per_year),
             "declared k₂/Q reproduces the measured recession (got {cm_per_year:.2} cm/yr)"
         );
-        assert!(da_dt > 0.0, "Earth spins faster than the Moon orbits ⇒ OUTWARD migration");
+        assert!(
+            da_dt > 0.0,
+            "Earth spins faster than the Moon orbits ⇒ OUTWARD migration"
+        );
     }
 
     #[test]
@@ -299,7 +314,10 @@ mod tests {
         let a = 2.0 * R_E; // close orbit: n large
         let slow_spin = 2.0 * std::f64::consts::PI / (30.0 * 86_400.0); // 30-day "day"
         let da_dt = tidal_da_dt(EARTH_K2_OVER_Q, M_MOON, M_E, R_E, a, slow_spin);
-        assert!(da_dt < 0.0, "slow spin ⇒ trailing bulge ⇒ inward migration (got {da_dt:.3e})");
+        assert!(
+            da_dt < 0.0,
+            "slow spin ⇒ trailing bulge ⇒ inward migration (got {da_dt:.3e})"
+        );
     }
 
     #[test]
@@ -324,39 +342,71 @@ mod tests {
         // one Moon (Hill instability), (b) migrate OUTWARD, (c) conserve total angular momentum —
         // the day lengthens as the orbit grows, exactly the real Earth–Moon history.
         let mut moonlets = vec![
-            Moonlet { a: 2.6 * R_E, mass: 0.3 * M_MOON },
-            Moonlet { a: 3.0 * R_E, mass: 0.4 * M_MOON },
-            Moonlet { a: 3.6 * R_E, mass: 0.3 * M_MOON },
+            Moonlet {
+                a: 2.6 * R_E,
+                mass: 0.3 * M_MOON,
+            },
+            Moonlet {
+                a: 3.0 * R_E,
+                mass: 0.4 * M_MOON,
+            },
+            Moonlet {
+                a: 3.6 * R_E,
+                mass: 0.3 * M_MOON,
+            },
         ];
         // Post-impact 4-h day.
         let mut spin = DVec3::new(0.0, 0.0, 1.0)
             * (moment_of_inertia(M_E, R_E) * 2.0 * std::f64::consts::PI / (4.0 * 3600.0));
-        let l_orbit0: f64 =
-            moonlets.iter().map(|m| m.mass * (G * M_E * m.a).sqrt()).sum();
+        let l_orbit0: f64 = moonlets
+            .iter()
+            .map(|m| m.mass * (G * M_E * m.a).sqrt())
+            .sum();
         let l_total0 = spin.length() + l_orbit0;
         let day0 = spin_period_s(spin, M_E, R_E);
 
         let year = 3.156e7;
         let mut years = 0.0f64;
         while moonlets.len() > 1 && years < 2.0e6 {
-            secular_step(&mut moonlets, &mut spin, M_E, R_E, EARTH_K2_OVER_Q, 50.0 * year);
+            secular_step(
+                &mut moonlets,
+                &mut spin,
+                M_E,
+                R_E,
+                EARTH_K2_OVER_Q,
+                50.0 * year,
+            );
             years += 50.0;
         }
-        assert_eq!(moonlets.len(), 1, "the moonlets merge into ONE Moon (after {years:.0} y)");
+        assert_eq!(
+            moonlets.len(),
+            1,
+            "the moonlets merge into ONE Moon (after {years:.0} y)"
+        );
         let a_at_merge = moonlets[0].a;
         for _ in 0..40_000 {
-            secular_step(&mut moonlets, &mut spin, M_E, R_E, EARTH_K2_OVER_Q, 500.0 * year);
+            secular_step(
+                &mut moonlets,
+                &mut spin,
+                M_E,
+                R_E,
+                EARTH_K2_OVER_Q,
+                500.0 * year,
+            );
         }
         let m = moonlets[0];
-        let l_total1 =
-            spin.length() + m.mass * (G * M_E * m.a).sqrt();
+        let l_total1 = spin.length() + m.mass * (G * M_E * m.a).sqrt();
         let day1 = spin_period_s(spin, M_E, R_E);
         println!(
             "one Moon: merged at {:.1} R⊕ · after 20 Myr more: a = {:.1} R⊕ · day {:.1} h → {:.1} h · L drift {:.2e}",
             a_at_merge / R_E, m.a / R_E, day0 / 3600.0, day1 / 3600.0,
             (l_total1 - l_total0).abs() / l_total0
         );
-        assert!(m.a > a_at_merge * 1.5, "the Moon migrates outward (got {:.1} R⊕)", m.a / R_E);
+        assert!(
+            m.a > a_at_merge * 1.5,
+            "the Moon migrates outward (got {:.1} R⊕)",
+            m.a / R_E
+        );
         assert!(day1 > day0 * 1.2, "the day lengthens as the orbit grows");
         assert!(
             (l_total1 - l_total0).abs() / l_total0 < 1.0e-6,
@@ -371,7 +421,10 @@ mod tests {
         // it is tidally SHREDDED at the Roche limit, its mass + angular momentum raining onto the planet.
         // Start a moonlet just outside Roche with a SLOW (24 h) day so it is sub-synchronous → migrates
         // inward → must disrupt, with mass and total angular momentum conserved.
-        let mut moonlets = vec![Moonlet { a: 3.2 * R_E, mass: 0.3 * M_MOON }];
+        let mut moonlets = vec![Moonlet {
+            a: 3.2 * R_E,
+            mass: 0.3 * M_MOON,
+        }];
         let mut spin = DVec3::new(0.0, 0.0, 1.0)
             * (moment_of_inertia(M_E, R_E) * 2.0 * std::f64::consts::PI / (24.0 * 3600.0));
         let l0 = spin.length() + moonlets[0].mass * (G * M_E * moonlets[0].a).sqrt();
@@ -379,18 +432,39 @@ mod tests {
         let year = 3.156e7;
         let mut shed_total = 0.0;
         for _ in 0..200_000 {
-            let (_m, shed) = secular_step(&mut moonlets, &mut spin, M_E, R_E, EARTH_K2_OVER_Q, 500.0 * year);
+            let (_m, shed) = secular_step(
+                &mut moonlets,
+                &mut spin,
+                M_E,
+                R_E,
+                EARTH_K2_OVER_Q,
+                500.0 * year,
+            );
             shed_total += shed;
             if moonlets.is_empty() {
                 break;
             }
         }
-        let d_roche = 2.44 * R_E * (M_E / (4.0 / 3.0 * std::f64::consts::PI * R_E.powi(3)) / 2_900.0).cbrt();
-        println!("Roche limit {:.2} R⊕; sub-synchronous moonlet disrupted, shed {:.3} M☾", d_roche / R_E, shed_total / M_MOON);
-        assert!(moonlets.is_empty(), "the sub-synchronous moonlet must DISRUPT, not survive on the surface");
-        assert!((shed_total - m0).abs() / m0 < 1.0e-9, "its full mass rains onto the planet (mass conserved)");
+        let d_roche =
+            2.44 * R_E * (M_E / (4.0 / 3.0 * std::f64::consts::PI * R_E.powi(3)) / 2_900.0).cbrt();
+        println!(
+            "Roche limit {:.2} R⊕; sub-synchronous moonlet disrupted, shed {:.3} M☾",
+            d_roche / R_E,
+            shed_total / M_MOON
+        );
+        assert!(
+            moonlets.is_empty(),
+            "the sub-synchronous moonlet must DISRUPT, not survive on the surface"
+        );
+        assert!(
+            (shed_total - m0).abs() / m0 < 1.0e-9,
+            "its full mass rains onto the planet (mass conserved)"
+        );
         let l1 = spin.length();
-        assert!((l1 - l0).abs() / l0 < 1.0e-5, "total angular momentum conserved through disruption ({l0:.3e} → {l1:.3e})");
+        assert!(
+            (l1 - l0).abs() / l0 < 1.0e-5,
+            "total angular momentum conserved through disruption ({l0:.3e} → {l1:.3e})"
+        );
     }
 
     #[test]
@@ -402,14 +476,24 @@ mod tests {
         };
         let spin_l = DVec3::new(0.0, 0.0, 1.0) * 3.0e34; // fast prograde spin (post-impact scale)
         let (kick, d_spin) = tidal_kick(
-            EARTH_K2_OVER_Q, &sat, DVec3::ZERO, DVec3::ZERO, M_E, R_E, spin_l, 100.0,
+            EARTH_K2_OVER_Q,
+            &sat,
+            DVec3::ZERO,
+            DVec3::ZERO,
+            M_E,
+            R_E,
+            spin_l,
+            100.0,
         );
         let d_l_orbit = sat.pos.cross(kick * sat.mass);
         assert!(
             (d_l_orbit + d_spin).length() < 1.0e-6 * d_l_orbit.length().max(1.0),
             "orbit gains exactly what the spin loses"
         );
-        assert!(kick.dot(sat.vel) > 0.0, "prograde fast spin accelerates the orbit (outward)");
+        assert!(
+            kick.dot(sat.vel) > 0.0,
+            "prograde fast spin accelerates the orbit (outward)"
+        );
     }
 
     /// **A DECLARED day length survives the emergent-inertia round-trip (docs/58).** A scene declares a
@@ -424,9 +508,16 @@ mod tests {
             let i = body.moment_of_inertia();
             let l = DVec3::new(0.0, 0.0, 1.0) * (i * 2.0 * std::f64::consts::PI / period);
             let read_back = spin_period_from_inertia(l, i);
-            assert!((read_back - period).abs() < 1e-3, "{}: declared day {period} reproduced (got {read_back})", body.name);
+            assert!(
+                (read_back - period).abs() < 1e-3,
+                "{}: declared day {period} reproduced (got {read_back})",
+                body.name
+            );
         }
         // A non-spinning body has no day (guards the zero-L branch).
-        assert!(spin_period_from_inertia(DVec3::ZERO, 1.0e37).is_infinite(), "no spin ⇒ no day");
+        assert!(
+            spin_period_from_inertia(DVec3::ZERO, 1.0e37).is_infinite(),
+            "no spin ⇒ no day"
+        );
     }
 }

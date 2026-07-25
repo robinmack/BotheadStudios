@@ -26,7 +26,8 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let mut sim = match engine::simulation::Simulation::from_json(&json, engine::materials::load()) {
+    let mut sim = match engine::simulation::Simulation::from_json(&json, engine::materials::load())
+    {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{path}: {e}");
@@ -46,8 +47,11 @@ fn main() {
     let voxels_before = solids(&sim.world);
 
     println!("definition : {path}");
-    println!("after load : {} particles, {} analytic effect(s), {voxels_before} solid voxels",
-             sim.particle_count(), sim.analytic_count());
+    println!(
+        "after load : {} particles, {} analytic effect(s), {voxels_before} solid voxels",
+        sim.particle_count(),
+        sim.analytic_count()
+    );
     // The declared solid bodies (docs/23 step 1): cohesive matter, reported so a definition author can
     // see where each body starts relative to the ground it will fall onto.
     let report_bodies = |sim: &engine::simulation::Simulation, when: &str| {

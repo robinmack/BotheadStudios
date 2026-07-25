@@ -33,7 +33,11 @@ pub struct NeighborGrid {
 
 #[inline]
 fn key(p: DVec3, cell: f64) -> (i32, i32, i32) {
-    ((p.x / cell).floor() as i32, (p.y / cell).floor() as i32, (p.z / cell).floor() as i32)
+    (
+        (p.x / cell).floor() as i32,
+        (p.y / cell).floor() as i32,
+        (p.z / cell).floor() as i32,
+    )
 }
 
 impl NeighborGrid {
@@ -133,13 +137,22 @@ mod tests {
                 seen_pairs += 1;
                 assert!(i < j, "pairs must be ordered and unique");
                 if (pos[i] - pos[j]).length() < cell {
-                    assert!(found.insert((i, j)), "grid emitted a duplicate pair ({i},{j})");
+                    assert!(
+                        found.insert((i, j)),
+                        "grid emitted a duplicate pair ({i},{j})"
+                    );
                 }
             });
-            assert_eq!(found, brute, "grid pair set (cell={cell}) must equal brute force");
+            assert_eq!(
+                found, brute,
+                "grid pair set (cell={cell}) must equal brute force"
+            );
             // And it must be doing far less work than O(N²) for a small cell (else it is pointless).
             if cell <= 7.5 {
-                assert!(seen_pairs < n * n / 4, "grid should cull most of the N² candidates");
+                assert!(
+                    seen_pairs < n * n / 4,
+                    "grid should cull most of the N² candidates"
+                );
             }
         }
     }

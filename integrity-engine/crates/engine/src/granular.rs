@@ -107,7 +107,12 @@ pub struct Contact {
 /// (co-moving) target — its along-surface part is the plough direction. A vertical strike (no tangential
 /// component) is a no-op. Requires the target mass to be PHYSICAL (ρ·V): if the target is over-massed the
 /// COM velocity collapses and nothing lofts — the reason this pairs with the docs/28 item-4 mass fix.
-pub fn plough_loft(particles: &mut [crate::orbit::Body], impactor: &[bool], n: DVec3, v_contact: DVec3) {
+pub fn plough_loft(
+    particles: &mut [crate::orbit::Body],
+    impactor: &[bool],
+    n: DVec3,
+    v_contact: DVec3,
+) {
     let tang = v_contact - n * v_contact.dot(n);
     let t = match tang.try_normalize() {
         Some(t) => t,
@@ -151,7 +156,13 @@ impl Contact {
     /// All are symmetric and idempotent on equal inputs. (Restitution enters through `normal_damp`, which is
     /// already derived from each material's restitution in [`contact_from_material`].)
     pub fn mix(&self, o: &Contact) -> Contact {
-        let hmean = |a: f64, b: f64| if a + b > 0.0 { 2.0 * a * b / (a + b) } else { 0.0 };
+        let hmean = |a: f64, b: f64| {
+            if a + b > 0.0 {
+                2.0 * a * b / (a + b)
+            } else {
+                0.0
+            }
+        };
         let gmean = |a: f64, b: f64| (a * b).max(0.0).sqrt();
         Contact {
             radius: 0.5 * (self.radius + o.radius),
@@ -194,8 +205,8 @@ pub fn contact_accel(pi: DVec3, vi: DVec3, pj: DVec3, vj: DVec3, c: &Contact) ->
         0.0
     };
     let sep = (-overlap).max(0.0); // separation beyond touch (0 while overlapping)
-    // Adhesion, tapered over the range. Guard coh_range>0 so a cohesionless contact (coh_range=0) can't
-    // divide 0/0 → NaN while overlapping.
+                                   // Adhesion, tapered over the range. Guard coh_range>0 so a cohesionless contact (coh_range=0) can't
+                                   // divide 0/0 → NaN while overlapping.
     let f_coh = if c.cohesion > 0.0 && c.coh_range > 0.0 {
         c.cohesion * (1.0 - sep / c.coh_range).clamp(0.0, 1.0)
     } else {
@@ -284,8 +295,16 @@ pub fn contact_force(
     let dist = d.length();
     let touch = ri + rj; // NOT 2*radius: this pair may be a pebble against a boulder
     let r_eff = effective_radius(ri, rj);
-    let m_h = if mi + mj > 0.0 { 2.0 * mi * mj / (mi + mj) } else { 0.0 };
-    let scale = if c.radius > 0.0 { r_eff / c.radius } else { 1.0 };
+    let m_h = if mi + mj > 0.0 {
+        2.0 * mi * mj / (mi + mj)
+    } else {
+        0.0
+    };
+    let scale = if c.radius > 0.0 {
+        r_eff / c.radius
+    } else {
+        1.0
+    };
     let coh_range = c.coh_range * scale;
     if dist >= touch + coh_range || dist < 1.0e-9 {
         return DVec3::ZERO;
@@ -347,7 +366,11 @@ pub fn contact_dissipation(pi: DVec3, vi: DVec3, pj: DVec3, vj: DVec3, c: &Conta
     let p_n = ((c.stiffness * overlap - f_rep) * v_n).max(0.0);
     // Tangential: Coulomb friction opposes the slip exactly — same load (repulsion + adhesion) as the
     // force law.
-    let f_coh = if c.cohesion > 0.0 && c.coh_range > 0.0 { c.cohesion } else { 0.0 };
+    let f_coh = if c.cohesion > 0.0 && c.coh_range > 0.0 {
+        c.cohesion
+    } else {
+        0.0
+    };
     let v_t = v_rel - n * v_n;
     let vt_mag = v_t.length();
     let p_t = if vt_mag > 1.0e-9 {
@@ -424,7 +447,11 @@ pub fn terrain_contact_resolve(
 ) -> TerrainContact {
     let penetration = h - (pos.y - part_half);
     if penetration <= 0.0 {
-        return TerrainContact { vel, dpos: DVec3::ZERO, hit: false };
+        return TerrainContact {
+            vel,
+            dpos: DVec3::ZERO,
+            hit: false,
+        };
     }
     let n = DVec3::new(-dhdx, 1.0, -dhdz).normalize(); // outward surface normal (continuous, never flips)
     let mut v = vel;
@@ -444,7 +471,11 @@ pub fn terrain_contact_resolve(
     }
     // 3. Position projection out of the surface — velocity-decoupled, bounded (stack-safe).
     let dpos = penetration.min(max_corr).min(headroom) * n;
-    TerrainContact { vel: v, dpos, hit: true }
+    TerrainContact {
+        vel: v,
+        dpos,
+        hit: true,
+    }
 }
 
 /// Sweep the camera's matter shell along the FIXED segment `from → to`, resolving each sample against
@@ -469,7 +500,9 @@ pub fn sweep_shell_resolve(
     /// Per-sample projection cap - solver relaxation rate, the same role it plays for grains.
     const MAX_CORR: f64 = 0.5;
 
-    let steps = ((to - from).length() / (SHELL_HALF * 2.0)).ceil().clamp(1.0, 24.0) as usize;
+    let steps = ((to - from).length() / (SHELL_HALF * 2.0))
+        .ceil()
+        .clamp(1.0, 24.0) as usize;
     let mut corr = DVec3::ZERO;
     for i in 1..=steps {
         let t = i as f64 / steps as f64;
@@ -482,7 +515,7 @@ pub fn sweep_shell_resolve(
             dhdx as f64,
             dhdz as f64,
             SHELL_HALF,
-            0.0,           // frictionless: the camera slides, it does not stick to hillsides
+            0.0, // frictionless: the camera slides, it does not stick to hillsides
             MAX_CORR,
             f64::INFINITY, // open sky above the camera
         );
@@ -551,7 +584,11 @@ pub fn repose_allowance_on(mu: f32, r: f32, quantum_m: f32) -> f32 {
 /// Cohesionless material (gravel, dry sand: `c = 0`) gets 0 and cannot stand a vertical face at any
 /// height; basalt gets ~510 m and keeps its cliffs. Given a home here because it was computed inline at a
 /// call site while its partner term ([`repose_allowance`]) lived here, which is half a law in each place.
-pub fn critical_bank_height(cohesive_strength_pa: f32, density_kg_m3: f32, gravity_m_s2: f32) -> f32 {
+pub fn critical_bank_height(
+    cohesive_strength_pa: f32,
+    density_kg_m3: f32,
+    gravity_m_s2: f32,
+) -> f32 {
     if cohesive_strength_pa <= 0.0 {
         return 0.0;
     }
@@ -603,7 +640,10 @@ mod sweep_shell_tests {
         let from = DVec3::new(0.0, 3.0, 0.0);
         let to = DVec3::new(0.0, -6.0, 0.0); // straight down through a flat floor at y = 0
         let got = sweep_shell_resolve(from, to, |_| (0.0, 0.0, 0.0));
-        assert!(got.y > to.y, "the contact must push the shell back toward the surface: {got}");
+        assert!(
+            got.y > to.y,
+            "the contact must push the shell back toward the surface: {got}"
+        );
 
         let grazing = sweep_shell_resolve(from, DVec3::new(6.0, 2.0, 0.0), |_| (0.0, 0.0, 0.0));
         assert!(
@@ -625,7 +665,10 @@ mod tests {
         // A tyre contact patch ~6 cm, needing ~4 grains across to develop a pressure distribution.
         let tyre = grain_radius_for(0.06, 4.0);
         assert!((tyre - 0.0075).abs() < 1.0e-12, "got {tyre}");
-        assert!(tyre < 0.28 / 2.0, "a wheel must be many grains, not a fraction of one");
+        assert!(
+            tyre < 0.28 / 2.0,
+            "a wheel must be many grains, not a fraction of one"
+        );
         // The same rule at metre scale returns what the debris path already uses, which is why this is
         // one rule rather than a special case bolted on for vehicles.
         let crater = grain_radius_for(4.0, 4.0);
@@ -688,7 +731,10 @@ mod tests {
         let dp = m_small * a_i + m_big * a_j;
         assert!(dp.length() < 1.0e-9, "momentum was not conserved: {dp:?}");
         // The pebble is flung and the boulder barely notices — the mass ratio, not a rule.
-        assert!(a_i.length() > 100.0 * a_j.length(), "the small grain must react far harder");
+        assert!(
+            a_i.length() > 100.0 * a_j.length(),
+            "the small grain must react far harder"
+        );
 
         // What the OLD law would have done in the same configuration: equal and opposite ACCELERATIONS,
         // so the momentum change is non-zero and scales with the mass difference.
@@ -712,7 +758,17 @@ mod tests {
         let c = contact_from_material(basalt, r_big, m_big);
         let at = |gap: f64| {
             let pi = DVec3::new(r_small + r_big + gap, 0.0, 0.0);
-            contact_force(pi, DVec3::ZERO, r_small, m_small, DVec3::ZERO, DVec3::ZERO, r_big, m_big, &c)
+            contact_force(
+                pi,
+                DVec3::ZERO,
+                r_small,
+                m_small,
+                DVec3::ZERO,
+                DVec3::ZERO,
+                r_big,
+                m_big,
+                &c,
+            )
         };
         // `gap` is measured from touch: negative = overlapping, positive = separated.
         assert!(at(-0.02).length() > 0.0, "overlapping ⇒ a real repulsion");
@@ -745,7 +801,10 @@ mod tests {
         // the claim `SLOPE_BASELINE_CELLS` is chosen against.
         let phi = mu.atan().to_degrees();
         let angle_at = |r: f32| (repose_allowance(mu, r) / r).atan().to_degrees();
-        assert!(angle_at(1.0) > 55.0, "one cell cannot resolve repose at all");
+        assert!(
+            angle_at(1.0) > 55.0,
+            "one cell cannot resolve repose at all"
+        );
         assert!(
             angle_at(8.0) - phi < 4.0,
             "an 8-cell baseline holds gravel within 4° of its 40° repose, got {:.1}°",
@@ -755,18 +814,30 @@ mod tests {
             angle_at(8.0) > phi,
             "the allowance must never fall BELOW repose — that would slump stable ground"
         );
-        assert!(angle_at(64.0) - phi < 0.6, "and it keeps converging on φ, not on some floor");
+        assert!(
+            angle_at(64.0) - phi < 0.6,
+            "and it keeps converging on φ, not on some floor"
+        );
     }
 
     #[test]
     fn either_mohr_coulomb_term_alone_holds_a_face() {
         // Cohesion is the other half, and it is what keeps rock cliffs standing: basalt's h_crit ≈ 510 m
         // holds a 50 m vertical face with no help from friction whatsoever.
-        assert!(face_stable(50.0, 1.0, 50.0, 0.7, 510.0), "a basalt cliff stands on cohesion alone");
+        assert!(
+            face_stable(50.0, 1.0, 50.0, 0.7, 510.0),
+            "a basalt cliff stands on cohesion alone"
+        );
         // Cohesionless gravel gets nothing from that term at any height — friction is all it has...
-        assert!(!face_stable(4.0, 1.0, 4.0, 0.84, 0.0), "gravel cannot stand a 4 m vertical face");
+        assert!(
+            !face_stable(4.0, 1.0, 4.0, 0.84, 0.0),
+            "gravel cannot stand a 4 m vertical face"
+        );
         // ...but the SAME gravel is perfectly stable once the slope is at repose. Both are docs/45 §3.
-        assert!(face_stable(6.0, 8.0, 6.0, 0.84, 0.0), "and is stable as a slope below its repose angle");
+        assert!(
+            face_stable(6.0, 8.0, 6.0, 0.84, 0.0),
+            "and is stable as a slope below its repose angle"
+        );
     }
 
     #[test]
@@ -800,21 +871,51 @@ mod tests {
         let cb = contact_from_material(basalt, 0.5, 1000.0);
         // Idempotent: mix(c, c) == c, field by field.
         let self_mix = ci.mix(&ci);
-        assert!((self_mix.stiffness - ci.stiffness).abs() < 1e-6 * ci.stiffness, "stiffness self-mix");
-        assert!((self_mix.normal_damp - ci.normal_damp).abs() < 1e-6 * ci.normal_damp.max(1.0), "damp self-mix");
-        assert!((self_mix.friction - ci.friction).abs() < 1e-9, "friction self-mix");
-        assert!((self_mix.radius - ci.radius).abs() < 1e-12, "radius self-mix");
-        assert!((self_mix.cohesion - ci.cohesion).abs() < 1e-6 * ci.cohesion.max(1.0), "cohesion self-mix");
+        assert!(
+            (self_mix.stiffness - ci.stiffness).abs() < 1e-6 * ci.stiffness,
+            "stiffness self-mix"
+        );
+        assert!(
+            (self_mix.normal_damp - ci.normal_damp).abs() < 1e-6 * ci.normal_damp.max(1.0),
+            "damp self-mix"
+        );
+        assert!(
+            (self_mix.friction - ci.friction).abs() < 1e-9,
+            "friction self-mix"
+        );
+        assert!(
+            (self_mix.radius - ci.radius).abs() < 1e-12,
+            "radius self-mix"
+        );
+        assert!(
+            (self_mix.cohesion - ci.cohesion).abs() < 1e-6 * ci.cohesion.max(1.0),
+            "cohesion self-mix"
+        );
         // Symmetric: mix(a, b) == mix(b, a).
         let ab = ci.mix(&cb);
         let ba = cb.mix(&ci);
-        assert!((ab.stiffness - ba.stiffness).abs() < 1e-9, "mix symmetric in stiffness");
-        assert!((ab.friction - ba.friction).abs() < 1e-9, "mix symmetric in friction");
+        assert!(
+            (ab.stiffness - ba.stiffness).abs() < 1e-9,
+            "mix symmetric in stiffness"
+        );
+        assert!(
+            (ab.friction - ba.friction).abs() < 1e-9,
+            "mix symmetric in friction"
+        );
         // Bounded between the constituents (harmonic mean of stiffness lies between the two).
-        let (lo, hi) = (ci.stiffness.min(cb.stiffness), ci.stiffness.max(cb.stiffness));
-        assert!(lo <= ab.stiffness && ab.stiffness <= hi, "mixed stiffness between iron & basalt");
+        let (lo, hi) = (
+            ci.stiffness.min(cb.stiffness),
+            ci.stiffness.max(cb.stiffness),
+        );
+        assert!(
+            lo <= ab.stiffness && ab.stiffness <= hi,
+            "mixed stiffness between iron & basalt"
+        );
         let (flo, fhi) = (ci.friction.min(cb.friction), ci.friction.max(cb.friction));
-        assert!(flo <= ab.friction && ab.friction <= fhi, "mixed friction between iron & basalt");
+        assert!(
+            flo <= ab.friction && ab.friction <= fhi,
+            "mixed friction between iron & basalt"
+        );
     }
 
     #[test]
@@ -830,32 +931,60 @@ mod tests {
         let t = DVec3::X;
         // 2 impactor grains (mass 3) + 2 cap grains (mass 1): m_cap/m_imp = 1/3, like the physical cap.
         let mut ps = vec![
-            Body { pos: DVec3::ZERO, vel: v_contact, mass: 3.0 },
-            Body { pos: DVec3::new(0.0, 1.0, 0.0), vel: v_contact, mass: 3.0 },
-            Body { pos: DVec3::new(1.0, -1.0, 0.0), vel: DVec3::ZERO, mass: 1.0 },
-            Body { pos: DVec3::new(2.0, -1.0, 0.0), vel: DVec3::ZERO, mass: 1.0 },
+            Body {
+                pos: DVec3::ZERO,
+                vel: v_contact,
+                mass: 3.0,
+            },
+            Body {
+                pos: DVec3::new(0.0, 1.0, 0.0),
+                vel: v_contact,
+                mass: 3.0,
+            },
+            Body {
+                pos: DVec3::new(1.0, -1.0, 0.0),
+                vel: DVec3::ZERO,
+                mass: 1.0,
+            },
+            Body {
+                pos: DVec3::new(2.0, -1.0, 0.0),
+                vel: DVec3::ZERO,
+                mass: 1.0,
+            },
         ];
         let imp = vec![true, true, false, false];
         let p_before: f64 = ps.iter().map(|b| b.mass * b.vel.dot(t)).sum();
         let imp_t0 = ps[0].vel.dot(t);
         plough_loft(&mut ps, &imp, n, v_contact);
         let p_after: f64 = ps.iter().map(|b| b.mass * b.vel.dot(t)).sum();
-        assert!((p_after - p_before).abs() < 1e-6 * p_before.abs(), "tangential momentum conserved");
+        assert!(
+            (p_after - p_before).abs() < 1e-6 * p_before.abs(),
+            "tangential momentum conserved"
+        );
         // COM tangential speed = (6·6000 + 2·0)/8 = 4500. Both populations meet there.
         let v_com = (6.0 * 6_000.0) / 8.0;
         assert!((ps[0].vel.dot(t) - v_com).abs() < 1e-6, "impactor → v_com");
-        assert!((ps[2].vel.dot(t) - v_com).abs() < 1e-6, "cap dragged to v_com");
+        assert!(
+            (ps[2].vel.dot(t) - v_com).abs() < 1e-6,
+            "cap dragged to v_com"
+        );
         assert!(ps[0].vel.dot(t) < imp_t0, "impactor slows");
         assert!(ps[2].vel.dot(t) > 0.0, "cap lofted downrange");
         // Radial (y) untouched — only the along-track component couples.
-        assert!((ps[0].vel.y - v_contact.y).abs() < 1e-9, "impactor radial untouched");
+        assert!(
+            (ps[0].vel.y - v_contact.y).abs() < 1e-9,
+            "impactor radial untouched"
+        );
         assert!(ps[2].vel.y.abs() < 1e-9, "cap radial untouched");
         // Vertical strike ⇒ no-op.
         let mut vert = ps.clone();
         let b0 = vert.clone();
         plough_loft(&mut vert, &imp, n, DVec3::new(0.0, -6_000.0, 0.0));
         for (a, b) in vert.iter().zip(b0.iter()) {
-            assert!((a.vel - b.vel).length() < 1e-9, "vertical strike: no plough");
+            assert!(
+                (a.vel - b.vel).length() < 1e-9,
+                "vertical strike: no plough"
+            );
         }
     }
 
@@ -870,12 +999,21 @@ mod tests {
         let cb = contact_from_material(&mats[idx("basalt")], 0.5, 1000.0);
         let law = ci.mix(&cb);
         // Two grains overlapping (centres 0.9·touch apart), approaching.
-        let (pi, pj) = (DVec3::new(0.0, 0.0, 0.0), DVec3::new(0.9 * 2.0 * law.radius, 0.0, 0.0));
+        let (pi, pj) = (
+            DVec3::new(0.0, 0.0, 0.0),
+            DVec3::new(0.9 * 2.0 * law.radius, 0.0, 0.0),
+        );
         let (vi, vj) = (DVec3::new(1.0, 0.0, 0.0), DVec3::new(-1.0, 0.0, 0.0));
         let fi = contact_accel(pi, vi, pj, vj, &law);
         let fj = contact_accel(pj, vj, pi, vi, &law);
-        assert!((fi + fj).length() < 1e-9, "pair forces must be equal & opposite (got {fi:?} + {fj:?})");
-        assert!(fi.x < 0.0, "the overtaken grain-i should be pushed back (−x), got {fi:?}");
+        assert!(
+            (fi + fj).length() < 1e-9,
+            "pair forces must be equal & opposite (got {fi:?} + {fj:?})"
+        );
+        assert!(
+            fi.x < 0.0,
+            "the overtaken grain-i should be pushed back (−x), got {fi:?}"
+        );
     }
 
     #[test]
@@ -885,7 +1023,10 @@ mod tests {
         let c_bouncy = damping_for_restitution(0.8, k);
         let c_dead = damping_for_restitution(0.2, k);
         assert!(c_dead > c_bouncy, "less-bouncy matter is damped harder");
-        assert!(damping_for_restitution(0.999, k) < 5.0, "≈elastic ⇒ ≈no damping");
+        assert!(
+            damping_for_restitution(0.999, k) < 5.0,
+            "≈elastic ⇒ ≈no damping"
+        );
         // Granite (e=0.80) reproduces the hand-calibrated c≈100 the contact was using — a sanity anchor.
         assert!(
             (c_bouncy - 100.0).abs() < 6.0,
@@ -926,7 +1067,10 @@ mod tests {
             )
         };
         assert_eq!(touching(0.0), DVec3::ZERO, "dry: no force at zero overlap");
-        assert!(touching(500.0).x < 0.0, "cohesive: net force pulls the pair together (−x)");
+        assert!(
+            touching(500.0).x < 0.0,
+            "cohesive: net force pulls the pair together (−x)"
+        );
 
         // Cohesion raises the friction load: a grain sliding tangentially on a just-touching cohesive
         // contact feels friction even with zero compression (closing the frictionless graze).
@@ -942,8 +1086,15 @@ mod tests {
             )
             .z
         };
-        assert_eq!(sliding(0.0), 0.0, "dry graze at zero overlap is frictionless");
-        assert!(sliding(500.0) < 0.0, "cohesive graze has friction opposing the slip");
+        assert_eq!(
+            sliding(0.0),
+            0.0,
+            "dry graze at zero overlap is frictionless"
+        );
+        assert!(
+            sliding(500.0) < 0.0,
+            "cohesive graze has friction opposing the slip"
+        );
     }
 
     #[test]
@@ -1124,7 +1275,8 @@ mod tests {
             let pos = DVec3::new(0.0, part_half, 0.0);
             let vel = DVec3::ZERO;
             // Surface steps up to h = Δ under the (stationary) grain — flat, so zero gradient.
-            let r = terrain_contact_resolve(pos, vel, d, 0.0, 0.0, part_half, 0.6, 0.01, f64::INFINITY);
+            let r =
+                terrain_contact_resolve(pos, vel, d, 0.0, 0.0, part_half, 0.6, 0.01, f64::INFINITY);
             assert!(r.hit, "penetrating after the surface stepped up");
             let ke = 0.5 * r.vel.length_squared();
             assert!(
@@ -1148,11 +1300,26 @@ mod tests {
         // substep) with the downward velocity gravity added this substep. h=0.
         let pos = DVec3::new(0.0, part_half - g * dt * dt, 0.0);
         let vel = DVec3::new(0.0, -g * dt, 0.0);
-        let r = terrain_contact_resolve(pos, vel, 0.0, 0.0, 0.0, part_half, 0.6, 0.01, f64::INFINITY);
-        assert!(r.hit, "a resting grain is in contact (slightly penetrating)");
-        assert!(r.vel.y >= 0.0, "into-surface velocity removed (supported, y-vel {:.4})", r.vel.y);
-        assert!(r.vel.y < 1.0e-9, "not launched upward (y-vel {:.4})", r.vel.y);
-        assert!(r.dpos.y > 0.0, "projected back up to the surface (does not sink)");
+        let r =
+            terrain_contact_resolve(pos, vel, 0.0, 0.0, 0.0, part_half, 0.6, 0.01, f64::INFINITY);
+        assert!(
+            r.hit,
+            "a resting grain is in contact (slightly penetrating)"
+        );
+        assert!(
+            r.vel.y >= 0.0,
+            "into-surface velocity removed (supported, y-vel {:.4})",
+            r.vel.y
+        );
+        assert!(
+            r.vel.y < 1.0e-9,
+            "not launched upward (y-vel {:.4})",
+            r.vel.y
+        );
+        assert!(
+            r.dpos.y > 0.0,
+            "projected back up to the surface (does not sink)"
+        );
     }
 
     #[test]
@@ -1172,7 +1339,17 @@ mod tests {
             vel.y -= g * dt;
             pos += vel * dt;
             // terrain constraint (flat surface at y=0)
-            let r = terrain_contact_resolve(pos, vel, 0.0, 0.0, 0.0, part_half, 0.6, 0.01, f64::INFINITY);
+            let r = terrain_contact_resolve(
+                pos,
+                vel,
+                0.0,
+                0.0,
+                0.0,
+                part_half,
+                0.6,
+                0.01,
+                f64::INFINITY,
+            );
             if r.hit {
                 vel = r.vel;
                 pos += r.dpos;
@@ -1187,7 +1364,11 @@ mod tests {
             e_prev = e;
         }
         // It came to rest supported at the surface (base ~0 ⇒ centre ~part_half), not sunk, not launched.
-        assert!((pos.y - part_half).abs() < 0.05, "rests at the surface (y {:.4})", pos.y);
+        assert!(
+            (pos.y - part_half).abs() < 0.05,
+            "rests at the surface (y {:.4})",
+            pos.y
+        );
         assert!(vel.length() < 0.05, "settled (speed {:.4})", vel.length());
     }
 }

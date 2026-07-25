@@ -80,7 +80,12 @@ pub fn fill_ground_cap(
             } else {
                 outward
             };
-            out.push(Vertex { pos: rel[j * res + i].to_array(), nrm: nrm.to_array(), col: cols[j * res + i], mat: mats[j * res + i] });
+            out.push(Vertex {
+                pos: rel[j * res + i].to_array(),
+                nrm: nrm.to_array(),
+                col: cols[j * res + i],
+                mat: mats[j * res + i],
+            });
         }
     }
 }
@@ -112,7 +117,9 @@ mod tests {
         let (east, north) = (DVec3::new(0.0, 0.0, -1.0), DVec3::Y);
         let eye = center * 1.001; // 0.001 display units up
         let mut v = Vec::new();
-        fill_ground_cap(&mut v, center, east, north, eye, 1.0, 0.02, res, |_| ([0.3, 0.4, 0.5], 0.0, 0));
+        fill_ground_cap(&mut v, center, east, north, eye, 1.0, 0.02, res, |_| {
+            ([0.3, 0.4, 0.5], 0.0, 0)
+        });
         assert_eq!(v.len(), res * res);
         let idx = cap_indices(res);
         assert_eq!(idx.len(), (res - 1) * (res - 1) * 6);
@@ -131,12 +138,22 @@ mod tests {
         let h = 0.004;
         let eye = center * (1.0 + h);
         let mut v = Vec::new();
-        fill_ground_cap(&mut v, center, east, north, eye, 1.0, 0.02, res, |_| ([0.0, 0.0, 0.0], 0.0, 0));
+        fill_ground_cap(&mut v, center, east, north, eye, 1.0, 0.02, res, |_| {
+            ([0.0, 0.0, 0.0], 0.0, 0)
+        });
         let mid = (res / 2) * res + res / 2;
         let c = v[mid].pos;
         let cv = Vec3::from_array(c);
-        assert!((cv.length() - h as f32).abs() < 1e-5, "centre vertex height {} != {}", cv.length(), h);
+        assert!(
+            (cv.length() - h as f32).abs() < 1e-5,
+            "centre vertex height {} != {}",
+            cv.length(),
+            h
+        );
         let down = Vec3::new(-center.x as f32, -center.y as f32, -center.z as f32);
-        assert!(cv.normalize().dot(down) > 0.999, "centre vertex points straight down from the eye");
+        assert!(
+            cv.normalize().dot(down) > 0.999,
+            "centre vertex points straight down from the eye"
+        );
     }
 }

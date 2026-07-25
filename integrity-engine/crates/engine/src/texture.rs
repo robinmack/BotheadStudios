@@ -274,8 +274,14 @@ mod tests {
         // granite: roughness 0.6, variance 0.40  |  sand: roughness 0.85, variance 0.25
         // Roughness says sand is the rougher surface; colour variance would say the opposite.
         let (granite, sand) = (pick("granite"), pick("sand"));
-        assert!(sand.roughness > granite.roughness, "premise: sand is the rougher SURFACE");
-        assert!(sand.color_variance < granite.color_variance, "premise: but the less varied COLOUR");
+        assert!(
+            sand.roughness > granite.roughness,
+            "premise: sand is the rougher SURFACE"
+        );
+        assert!(
+            sand.color_variance < granite.color_variance,
+            "premise: but the less varied COLOUR"
+        );
 
         let peak = |m: &crate::materials::Material| -> f32 {
             let t = generate(m);
@@ -319,7 +325,8 @@ mod tests {
         assert!(
             g > w * 2.0,
             "gravel (roughness {}) must be bumpier than water (roughness {}): {g} vs {w}",
-            gravel.roughness, water.roughness
+            gravel.roughness,
+            water.roughness
         );
     }
 
@@ -342,7 +349,9 @@ mod tests {
             for c in 0..3 {
                 assert!(
                     (l[c] as i32 - r[c] as i32).abs() < 40,
-                    "vertical seam at y={y}, channel {c}: {} vs {}", l[c], r[c]
+                    "vertical seam at y={y}, channel {c}: {} vs {}",
+                    l[c],
+                    r[c]
                 );
             }
         }
@@ -370,7 +379,9 @@ mod tests {
             let c = t.mips[0][i * 4] as f32 - mean;
             if h.abs() > 4.0 && c.abs() > 4.0 {
                 n += 1;
-                if (h > 0.0) == (c > 0.0) { agree += 1; }
+                if (h > 0.0) == (c > 0.0) {
+                    agree += 1;
+                }
             }
         }
         assert!(n > 50, "not enough varying texels to judge ({n})");

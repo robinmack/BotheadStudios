@@ -21,8 +21,7 @@ use crate::materials::Material;
 use glam::DVec3;
 
 /// One concentric layer: real material + observed mean density/temperature profile across it.
-#[derive(Clone, Debug)]
-#[derive(serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Layer {
     /// Material id in the catalog (`materials.json`).
@@ -37,8 +36,7 @@ pub struct Layer {
 }
 
 /// A layered body: layers ordered inside-out; `layers.last().outer_r` is the surface.
-#[derive(Clone, Debug)]
-#[derive(serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize)]
 pub struct LayeredBody {
     pub layers: Vec<Layer>,
     /// Total atmosphere mass (kg) — DECLARED (measured; Earth: 5.15e18 kg). The surface pressure is
@@ -76,7 +74,13 @@ impl LayeredBody {
     /// struct literal cannot be written outside this module, and a promoted body has no catalogue entry to
     /// deserialize from — it is matter the simulation produced, so it needs a constructor.
     pub fn from_layers(layers: Vec<Layer>) -> Self {
-        LayeredBody { layers, atmosphere_mass: 0.0, surface: None, name: String::new(), _comment: String::new() }
+        LayeredBody {
+            layers,
+            atmosphere_mass: 0.0,
+            surface: None,
+            name: String::new(),
+            _comment: String::new(),
+        }
     }
 
     pub fn radius(&self) -> f64 {
@@ -111,8 +115,8 @@ impl LayeredBody {
         for l in &self.layers {
             let ro = l.outer_r.min(r);
             if ro > inner_r {
-                m += l.density * (4.0 / 3.0) * std::f64::consts::PI
-                    * (ro.powi(3) - inner_r.powi(3));
+                m +=
+                    l.density * (4.0 / 3.0) * std::f64::consts::PI * (ro.powi(3) - inner_r.powi(3));
             }
             inner_r = l.outer_r;
             if inner_r >= r {
@@ -257,7 +261,6 @@ pub fn earth() -> LayeredBody {
     body("earth")
 }
 
-
 /// The MOON, declared as its real construction (GRAIL/Apollo seismology): small solid inner core,
 /// fluid outer core (the "hot molten core"), thick peridotite mantle, basalt crust. HONESTY NOTE: the
 /// real lunar core is an Fe–S alloy whose eutectic melts well BELOW pure iron — that's the physical
@@ -267,7 +270,6 @@ pub fn earth() -> LayeredBody {
 pub fn moon() -> LayeredBody {
     body("moon")
 }
-
 
 /// Earth's land/ocean mask at 10°×10° — matched to the ~9° angular spacing of the 512-grain render
 /// shell, so each grain samples one cell ("average area particles"). '#' = land, '.' = ocean. Rows from
@@ -324,14 +326,12 @@ pub fn sun() -> LayeredBody {
     body("sun")
 }
 
-
 /// THEIA — the Mars-sized impactor of the giant-impact hypothesis (docs/27: the birth of the Moon).
 /// Declared as a differentiated Mars-like body: iron core, peridotite mantle, hot from accretion.
 /// Layer masses integrate to ~6.5e23 kg (Mars-scale, the theorized impactor class).
 pub fn theia() -> LayeredBody {
     body("theia")
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -347,7 +347,10 @@ mod tests {
             "PREM layer densities integrate to Earth's real mass (got {m:.3e} kg)"
         );
         let g = e.gravity_at(e.radius());
-        assert!((g - 9.81).abs() < 0.3, "surface gravity ≈ 9.8 m/s² (got {g:.2})");
+        assert!(
+            (g - 9.81).abs() < 0.3,
+            "surface gravity ≈ 9.8 m/s² (got {g:.2})"
+        );
     }
 
     #[test]
@@ -359,22 +362,42 @@ mod tests {
         let c = DVec3::new(1.0e6, -2.0e6, 3.0e6); // arbitrary body centre
         let big_r = e.radius();
         let dir = DVec3::new(0.3, -0.5, 0.81).normalize();
-        for &r in &[0.05 * big_r, 0.2 * big_r, 0.5 * big_r, 0.9 * big_r, big_r, 1.5 * big_r, 5.0 * big_r] {
+        for &r in &[
+            0.05 * big_r,
+            0.2 * big_r,
+            0.5 * big_r,
+            0.9 * big_r,
+            big_r,
+            1.5 * big_r,
+            5.0 * big_r,
+        ] {
             let a = e.acceleration_at(c + dir * r, c);
             let g = e.gravity_at(r);
-            assert!((a.length() - g).abs() <= 1.0e-6 * g.max(1.0e-9), "|a| == gravity_at(r) at r={r:.3e}");
-            assert!(a.normalize().dot(-dir) > 1.0 - 1.0e-9, "gravity points toward the centre at r={r:.3e}");
+            assert!(
+                (a.length() - g).abs() <= 1.0e-6 * g.max(1.0e-9),
+                "|a| == gravity_at(r) at r={r:.3e}"
+            );
+            assert!(
+                a.normalize().dot(-dir) > 1.0 - 1.0e-9,
+                "gravity points toward the centre at r={r:.3e}"
+            );
         }
         // Exterior → the monopole G·M_total/r².
         let r_ext = 3.0 * big_r;
         let g_mono = G * e.total_mass() / (r_ext * r_ext);
         let a_ext = e.acceleration_at(c + dir * r_ext, c);
-        assert!((a_ext.length() - g_mono).abs() < 1.0e-6 * g_mono, "exterior is a monopole");
+        assert!(
+            (a_ext.length() - g_mono).abs() < 1.0e-6 * g_mono,
+            "exterior is a monopole"
+        );
         // Centre → exactly zero; and g falls toward the centre (Gauss interior, ∝ r in a uniform core).
         assert_eq!(e.acceleration_at(c, c), DVec3::ZERO);
         let deep = e.acceleration_at(c + dir * (0.04 * big_r), c).length();
         let mid = e.acceleration_at(c + dir * (0.10 * big_r), c).length();
-        assert!(deep < mid, "gravity falls toward the centre (got deep {deep:.3} ≥ mid {mid:.3})");
+        assert!(
+            deep < mid,
+            "gravity falls toward the centre (got deep {deep:.3} ≥ mid {mid:.3})"
+        );
     }
 
     #[test]
@@ -402,8 +425,16 @@ mod tests {
         // geotherm there. The outer core must come out MOLTEN, the mantle and crust SOLID.
         let mats = materials::load();
         let e = earth();
-        assert_eq!(e.phase_at(6.0e5, &mats), Phase::Solid, "inner core: solid (pressure-frozen iron)");
-        assert_eq!(e.phase_at(2.4e6, &mats), Phase::Molten, "outer core: molten iron");
+        assert_eq!(
+            e.phase_at(6.0e5, &mats),
+            Phase::Solid,
+            "inner core: solid (pressure-frozen iron)"
+        );
+        assert_eq!(
+            e.phase_at(2.4e6, &mats),
+            Phase::Molten,
+            "outer core: molten iron"
+        );
         assert_eq!(e.phase_at(5.0e6, &mats), Phase::Solid, "mantle: solid rock");
         assert_eq!(e.phase_at(6.36e6, &mats), Phase::Solid, "crust: solid");
     }
@@ -430,9 +461,21 @@ mod tests {
         let mats = materials::load();
         let water = &mats[materials::index_of(&mats, "water")];
         let p_earth = earth().surface_pressure();
-        assert_eq!(surface_phase(water, 288.0, p_earth), Phase::Molten, "ocean: liquid under 1 atm");
-        assert_eq!(surface_phase(water, 288.0, 0.0), Phase::Vapor, "vacuum: boils off at any temp");
-        assert_eq!(surface_phase(water, 250.0, p_earth), Phase::Solid, "cold: ice");
+        assert_eq!(
+            surface_phase(water, 288.0, p_earth),
+            Phase::Molten,
+            "ocean: liquid under 1 atm"
+        );
+        assert_eq!(
+            surface_phase(water, 288.0, 0.0),
+            Phase::Vapor,
+            "vacuum: boils off at any temp"
+        );
+        assert_eq!(
+            surface_phase(water, 250.0, p_earth),
+            Phase::Solid,
+            "cold: ice"
+        );
         // Below the triple-point pressure (~611 Pa) liquid water cannot exist even when warm.
         assert_eq!(
             surface_phase(water, 285.0, 300.0),
@@ -440,8 +483,15 @@ mod tests {
             "sub-triple-point pressure: no liquid regime"
         );
         // And the boiling point at altitude drops (why water boils cooler on a mountain): ~0.7 atm.
-        let tb = water.thermal.as_ref().unwrap().boil_point_at(0.7 * 101_325.0);
-        assert!((360.0..371.0).contains(&tb), "boils below 373 K at 0.7 atm (got {tb:.1} K)");
+        let tb = water
+            .thermal
+            .as_ref()
+            .unwrap()
+            .boil_point_at(0.7 * 101_325.0);
+        assert!(
+            (360.0..371.0).contains(&tb),
+            "boils below 373 K at 0.7 atm (got {tb:.1} K)"
+        );
     }
 
     #[test]
@@ -473,7 +523,10 @@ mod tests {
             }
         }
         let frac = land / total;
-        assert!((0.25..0.42).contains(&frac), "land fraction plausible (got {frac:.2})");
+        assert!(
+            (0.25..0.42).contains(&frac),
+            "land fraction plausible (got {frac:.2})"
+        );
     }
 
     #[test]
@@ -485,15 +538,26 @@ mod tests {
             "solar layers integrate to the real solar mass (got {m:.3e} kg)"
         );
         let g = s.gravity_at(s.radius());
-        assert!((g - 274.0).abs() < 12.0, "photospheric gravity ≈ 274 m/s² (got {g:.0})");
+        assert!(
+            (g - 274.0).abs() < 12.0,
+            "photospheric gravity ≈ 274 m/s² (got {g:.0})"
+        );
     }
 
     #[test]
     fn the_moons_outer_core_is_molten_but_its_mantle_is_not() {
         let mats = materials::load();
         let m = moon();
-        assert_eq!(m.phase_at(3.0e5, &mats), Phase::Molten, "lunar outer core: molten (hot, low P)");
-        assert_eq!(m.phase_at(1.0e6, &mats), Phase::Solid, "lunar mantle: solid");
+        assert_eq!(
+            m.phase_at(3.0e5, &mats),
+            Phase::Molten,
+            "lunar outer core: molten (hot, low P)"
+        );
+        assert_eq!(
+            m.phase_at(1.0e6, &mats),
+            Phase::Solid,
+            "lunar mantle: solid"
+        );
         let mass = m.total_mass();
         assert!(
             (mass - 7.342e22).abs() / 7.342e22 < 0.05,
@@ -509,24 +573,43 @@ mod tests {
     fn moment_of_inertia_emerges_from_the_mass_distribution() {
         // A UNIFORM sphere reduces to exactly the textbook 2/5 M R².
         let uniform = LayeredBody {
-            layers: vec![Layer { material: "granite".into(), outer_r: 1.0e6, density: 3000.0, t_inner: 300.0, t_outer: 300.0 }],
+            layers: vec![Layer {
+                material: "granite".into(),
+                outer_r: 1.0e6,
+                density: 3000.0,
+                t_inner: 300.0,
+                t_outer: 300.0,
+            }],
             atmosphere_mass: 0.0,
             surface: None,
             name: "uniform".into(),
             _comment: String::new(),
         };
         let uf = uniform.moment_of_inertia() / (uniform.total_mass() * uniform.radius().powi(2));
-        assert!((uf - 0.4).abs() < 1e-9, "a uniform sphere is exactly 2/5 M R² (got {uf:.6})");
+        assert!(
+            (uf - 0.4).abs() < 1e-9,
+            "a uniform sphere is exactly 2/5 M R² (got {uf:.6})"
+        );
 
         // Earth's and the Moon's declared layers reproduce the real factors — an emergent result.
-        let factor = |b: &LayeredBody| b.moment_of_inertia() / (b.total_mass() * b.radius().powi(2));
+        let factor =
+            |b: &LayeredBody| b.moment_of_inertia() / (b.total_mass() * b.radius().powi(2));
         let (ef, mf) = (factor(&earth()), factor(&moon()));
         println!("emergent MoI factor  Earth {ef:.4} (real 0.3307)  Moon {mf:.4} (real 0.393)");
-        assert!((0.30..0.36).contains(&ef), "Earth's MoI factor emerges near the real 0.3307 (got {ef:.4})");
-        assert!((0.36..0.41).contains(&mf), "the Moon's MoI factor emerges near the real 0.393 (got {mf:.4})");
+        assert!(
+            (0.30..0.36).contains(&ef),
+            "Earth's MoI factor emerges near the real 0.3307 (got {ef:.4})"
+        );
+        assert!(
+            (0.36..0.41).contains(&mf),
+            "the Moon's MoI factor emerges near the real 0.393 (got {mf:.4})"
+        );
         // The Moon is less centrally condensed than Earth, so its factor is higher — an ordering the
         // density profiles produce on their own.
-        assert!(ef < mf, "Earth is more centrally condensed than the Moon (ef {ef:.4} < mf {mf:.4})");
+        assert!(
+            ef < mf,
+            "Earth is more centrally condensed than the Moon (ef {ef:.4} < mf {mf:.4})"
+        );
     }
 }
 
@@ -554,15 +637,25 @@ mod body_definition_tests {
             assert!(!b.layers.is_empty(), "{id} declares no layers");
             // Layers must be ordered outward from the centre — the pressure integral walks them inward.
             for w in b.layers.windows(2) {
-                assert!(w[1].outer_r > w[0].outer_r, "{id}: layers must be ordered outward");
+                assert!(
+                    w[1].outer_r > w[0].outer_r,
+                    "{id}: layers must be ordered outward"
+                );
             }
             assert!(b.atmosphere_mass >= 0.0, "{id}: negative atmosphere mass");
         }
         // Earth must be Earth, from the file — the single definition every scene now shares.
         let e = super::earth();
-        assert!((e.radius() - 6.371e6).abs() < 1e3, "earth.json radius {} m", e.radius());
-        assert!((e.surface_pressure() / 101_325.0 - 1.0).abs() < 0.06,
-            "Earth's declared air must still weigh ~1 atm at the surface (got {:.0} Pa)", e.surface_pressure());
+        assert!(
+            (e.radius() - 6.371e6).abs() < 1e3,
+            "earth.json radius {} m",
+            e.radius()
+        );
+        assert!(
+            (e.surface_pressure() / 101_325.0 - 1.0).abs() < 0.06,
+            "Earth's declared air must still weigh ~1 atm at the surface (got {:.0} Pa)",
+            e.surface_pressure()
+        );
     }
 }
 
@@ -584,7 +677,10 @@ mod star_appearance_tests {
         );
         // And ~2× that from Mercury's perihelion (4.6e10 m) — the same sphere, no special case.
         let from_mercury = 2.0 * (r / 4.6e10).atan().to_degrees();
-        assert!(from_mercury > 1.6, "closer ⇒ bigger: {from_mercury:.2}° from Mercury");
+        assert!(
+            from_mercury > 1.6,
+            "closer ⇒ bigger: {from_mercury:.2}° from Mercury"
+        );
     }
 
     /// The Sun's COLOUR comes from its declared photosphere temperature, not from a hardcoded white. At
@@ -601,8 +697,14 @@ mod star_appearance_tests {
         // The renderer's incandescence law is wasm-gated, so reproduce its ramp here rather than
         // duplicating the constants: white above ~3200 K, red-dominant just above the 800 K glow floor.
         let ramp = |t: f64| ((t - 800.0) / (3200.0 - 800.0)).clamp(0.0, 1.0);
-        assert!(ramp(photosphere) >= 1.0, "a 5,772 K photosphere saturates the ramp ⇒ white");
-        assert!(ramp(1200.0) < 0.25, "a cool body stays down the red end of the ramp");
+        assert!(
+            ramp(photosphere) >= 1.0,
+            "a 5,772 K photosphere saturates the ramp ⇒ white"
+        );
+        assert!(
+            ramp(1200.0) < 0.25,
+            "a cool body stays down the red end of the ramp"
+        );
     }
 }
 
@@ -625,11 +727,17 @@ mod giant_impact_budget_tests {
 
         // Theia is Mars-class: the impactor of the hypothesis, ~0.1 M⊕.
         let theia_frac = theia / M_EARTH;
-        assert!((0.08..0.15).contains(&theia_frac), "Theia is Mars-class, got {theia_frac:.3} M⊕");
+        assert!(
+            (0.08..0.15).contains(&theia_frac),
+            "Theia is Mars-class, got {theia_frac:.3} M⊕"
+        );
 
         // Proto-Earth is ~0.9 M⊕ — the canonical value, and independently what the budget demands.
         let proto_frac = proto / M_EARTH;
-        assert!((0.85..0.95).contains(&proto_frac), "proto-Earth is ~0.9 M⊕, got {proto_frac:.3}");
+        assert!(
+            (0.85..0.95).contains(&proto_frac),
+            "proto-Earth is ~0.9 M⊕, got {proto_frac:.3}"
+        );
 
         // THE BUDGET: what goes in must account for what comes out, within the mass that escapes (a few
         // percent in the published simulations) and our own layer-density approximation.
@@ -647,8 +755,14 @@ mod giant_impact_budget_tests {
         assert!(before >= after * 0.99, "the impact cannot create mass");
 
         // The target must actually be the smaller, pre-impact planet — not modern Earth wearing its name.
-        assert!(proto < earth, "proto-Earth is lighter than the Earth it becomes");
-        assert!(super::body("proto-earth").radius() < super::body("earth").radius(), "and smaller");
+        assert!(
+            proto < earth,
+            "proto-Earth is lighter than the Earth it becomes"
+        );
+        assert!(
+            super::body("proto-earth").radius() < super::body("earth").radius(),
+            "and smaller"
+        );
         // It carries a great deal MORE atmosphere than modern Earth, not less — a magma ocean degasses a
         // ~100 bar steam/CO₂ envelope. This assertion used to read "carries no declared air", which was
         // the same mistake in miniature: "not modern air" is not "no air".
@@ -677,16 +791,26 @@ mod hadean_surface_tests {
         let mats = crate::materials::load();
 
         // No surface map, and none to be had — this is the answer, not an omission.
-        assert!(proto.surface.is_none(), "proto-Earth must carry no continents: there were none");
+        assert!(
+            proto.surface.is_none(),
+            "proto-Earth must carry no continents: there were none"
+        );
 
         // The surface is mantle rock, not crust. Continental and oceanic crust are both later products.
         let top = proto.layers.last().expect("layers");
-        assert_eq!(top.material, "peridotite", "no crust existed yet — the surface IS the mantle");
+        assert_eq!(
+            top.material, "peridotite",
+            "no crust existed yet — the surface IS the mantle"
+        );
 
         // MOLTEN, and emergent: the declared temperature exceeds the declared melt point. If either
         // number changes, this conclusion changes with it, which is the point.
         let rock = &mats[crate::materials::index_of(&mats, &top.material)];
-        let melt = rock.thermal.as_ref().expect("peridotite declares thermal properties").melt_point as f64;
+        let melt = rock
+            .thermal
+            .as_ref()
+            .expect("peridotite declares thermal properties")
+            .melt_point as f64;
         assert!(
             top.t_outer > melt,
             "proto-Earth's surface ({} K) must be above peridotite's melt point ({melt} K) — molten is \
@@ -704,7 +828,11 @@ mod hadean_surface_tests {
 
         // Hot enough to glow visibly, which is what makes it read as a magma ocean without any art:
         // the incandescence law starts at ~800 K.
-        assert!(top.t_outer > 800.0, "a magma ocean glows: {} K", top.t_outer);
+        assert!(
+            top.t_outer > 800.0,
+            "a magma ocean glows: {} K",
+            top.t_outer
+        );
     }
 }
 
@@ -732,17 +860,29 @@ mod hadean_atmosphere_tests {
         assert!(
             proto.atmosphere_mass > 50.0 * modern.atmosphere_mass,
             "proto-Earth's air far outweighs modern air ({:.2e} vs {:.2e} kg)",
-            proto.atmosphere_mass, modern.atmosphere_mass
+            proto.atmosphere_mass,
+            modern.atmosphere_mass
         );
         // And the modern planet still weighs in at ~1 atm — the same rule, two bodies, two answers.
         let modern_bar = modern.surface_pressure() / 1.0e5;
-        assert!((0.9..1.1).contains(&modern_bar), "modern Earth is ~1 bar, got {modern_bar:.2}");
+        assert!(
+            (0.9..1.1).contains(&modern_bar),
+            "modern Earth is ~1 bar, got {modern_bar:.2}"
+        );
 
         // The surface underneath it is molten, and hot enough to GLOW — which is what the renderer needs
         // to know, and all it needs to know.
         let top = proto.layers.last().unwrap();
-        assert!(top.t_outer > 1800.0, "a magma ocean surface, got {} K", top.t_outer);
+        assert!(
+            top.t_outer > 1800.0,
+            "a magma ocean surface, got {} K",
+            top.t_outer
+        );
         let glow = crate::blackbody::blackbody_srgb(top.t_outer);
-        assert!(glow[0] > glow[2], "at {} K it glows red-orange, got {glow:?}", top.t_outer);
+        assert!(
+            glow[0] > glow[2],
+            "at {} K it glows red-orange, got {glow:?}",
+            top.t_outer
+        );
     }
 }

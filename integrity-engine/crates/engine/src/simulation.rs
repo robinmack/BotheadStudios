@@ -139,8 +139,9 @@ fn build_cohesive_body(
     // SAME `zeta_for_restitution` the granular contact law uses, so a bond and a grain contact agree on
     // what "iron is this bouncy" means. `critically_damped` supplies the units with the coordination
     // correction that fixed the probe-detonation bug (docs/23).
-    agg.damping =
-        agg.critically_damped(crate::granular::zeta_for_restitution(mat.restitution as f64));
+    agg.damping = agg.critically_damped(crate::granular::zeta_for_restitution(
+        mat.restitution as f64,
+    ));
     if let Some(c) = mat.specific_heat() {
         agg = agg.with_specific_heat(c as f64);
     }
@@ -148,7 +149,11 @@ fn build_cohesive_body(
     // computed from the named planet (g = GM/R²), never a constant.
     let mut agg = agg.with_gravity(DVec3::new(0.0, -(surface_g as f64), 0.0));
     let acc = agg.accelerations();
-    Ok(CohesiveBody { agg, acc, part_half: 0.5 * l })
+    Ok(CohesiveBody {
+        agg,
+        acc,
+        part_half: 0.5 * l,
+    })
 }
 
 /// A running ground simulation built from a definition.
@@ -221,8 +226,12 @@ impl GroundAir<'_> {
         if self.bodies.is_empty() {
             return None;
         }
-        let strength_of =
-            |m: usize| self.materials.get(m).map(|mm| mm.fracture_strength as f64).unwrap_or(0.0);
+        let strength_of = |m: usize| {
+            self.materials
+                .get(m)
+                .map(|mm| mm.fracture_strength as f64)
+                .unwrap_or(0.0)
+        };
         let m_strength = strength_of(body.material);
         for cb in self.bodies {
             if cb.agg.particles.is_empty() {
@@ -230,7 +239,13 @@ impl GroundAir<'_> {
             }
             let com = cb.agg.com();
             let mass = cb.agg.total_mass();
-            let vel = cb.agg.particles.iter().map(|p| p.vel * p.mass).sum::<DVec3>() / mass;
+            let vel = cb
+                .agg
+                .particles
+                .iter()
+                .map(|p| p.vel * p.mass)
+                .sum::<DVec3>()
+                / mass;
             // The body's contact radius is its real extent: the farthest particle plus its half-width.
             let radius = cb
                 .agg
@@ -266,8 +281,11 @@ impl GroundAir<'_> {
                 if let crate::interaction::Response::ResolveMatter { .. } = h.response {
                     // The door reports the contact velocity as striker-relative-to-struck; the momentum
                     // the METEOR delivers flips sign if it is the more massive one.
-                    let v_meteor_rel =
-                        if h.striker == 1 { h.contact_velocity } else { -h.contact_velocity };
+                    let v_meteor_rel = if h.striker == 1 {
+                        h.contact_velocity
+                    } else {
+                        -h.contact_velocity
+                    };
                     // The door's site is the STRIKER's centre at contact — a striker-radius off the
                     // ball's skin. Report the point on the ball's own outermost matter instead, so the
                     // deposition couples to the matter actually struck rather than empty space beside it.
@@ -296,7 +314,13 @@ impl crate::flight::FlightEnvironment for GroundAir<'_> {
         // collides with, so the air a body flies through and the ground it lands on cannot disagree.
         let h = (pos.y - self.world.ground_height(pos.x as f32, pos.z as f32) as f64).max(0.0);
         Some((
-            crate::atmosphere::air_density_at(self.surface_pressure, air, AMBIENT_TEMP_K as f64, self.g, h),
+            crate::atmosphere::air_density_at(
+                self.surface_pressure,
+                air,
+                AMBIENT_TEMP_K as f64,
+                self.g,
+                h,
+            ),
             AMBIENT_TEMP_K as f64,
         ))
     }
@@ -324,10 +348,16 @@ impl crate::flight::FlightEnvironment for GroundAir<'_> {
         // The patch is attached to a planet, so the ground does not move: the reduced mass is the
         // arriving body's own and this is exactly the ½mv² the path used to compute inline.
         let (energy_j, momentum) = crate::flight::delivered(body, glam::DVec3::ZERO, None);
-        Some(crate::flight::Met { at, energy_j, momentum })
+        Some(crate::flight::Met {
+            at,
+            energy_j,
+            momentum,
+        })
     }
     fn air_scale_height_m(&self) -> f64 {
-        self.air.map_or(0.0, |a| crate::atmosphere::scale_height(a, AMBIENT_TEMP_K as f64, self.g))
+        self.air.map_or(0.0, |a| {
+            crate::atmosphere::scale_height(a, AMBIENT_TEMP_K as f64, self.g)
+        })
     }
 }
 
@@ -368,8 +398,8 @@ impl Simulation {
         // The surface sits at the patch's own ground height in centred coordinates, so the host's centre
         // is a planet-radius below that and "down" is a direction rather than an assumption.
         let surface_y = world.bulk_height(0.0, 0.0);
-        let field = MassField::build(&world, &materials, 8)
-            .on_host(planet_mass, planet_radius, surface_y);
+        let field =
+            MassField::build(&world, &materials, 8).on_host(planet_mass, planet_radius, surface_y);
         // The declared solid bodies, built as cohesive matter at the world's own grain scale.
         let bodies = ground
             .bodies
@@ -408,7 +438,11 @@ impl Simulation {
     fn apply_events(&mut self) {
         for ev in self.def.events.clone() {
             match ev {
-                GroundEvent::Impact { at_m, direction, energy_j } => {
+                GroundEvent::Impact {
+                    at_m,
+                    direction,
+                    energy_j,
+                } => {
                     // A declared impact is pure energy with no named impactor, so it carries no
                     // momentum of its own - the deposit is heat and excavation only.
                     self.created_total += self.deposit_event(
@@ -418,7 +452,13 @@ impl Simulation {
                         energy_j as f64,
                     );
                 }
-                GroundEvent::Ejecta { at_m, velocity_ms, radius_m, grain_radius_m, material } => {
+                GroundEvent::Ejecta {
+                    at_m,
+                    velocity_ms,
+                    radius_m,
+                    grain_radius_m,
+                    material,
+                } => {
                     self.resolution.add(Effect {
                         center: Vec3::from_array(at_m),
                         velocity: Vec3::from_array(velocity_ms),
@@ -523,7 +563,12 @@ impl Simulation {
     }
     /// The declared surface (skin) material id — what you are standing on.
     pub fn surface_material(&self) -> &str {
-        self.def.surface.strata.first().map(|s| s.material.as_str()).unwrap_or("?")
+        self.def
+            .surface
+            .strata
+            .first()
+            .map(|s| s.material.as_str())
+            .unwrap_or("?")
     }
     /// Did matter change the world since the last call (a crater dug, grains de-resolved)? Drives remesh.
     pub fn take_dirty(&mut self) -> bool {
@@ -687,10 +732,17 @@ impl Simulation {
         for a in arrivals {
             // Energy and momentum are what the ARRIVING matter actually carried, priced by the
             // environment against whatever it met. Not parameters.
-            let dir = a.body.vel.normalize_or(glam::DVec3::new(0.0, -1.0, 0.0)).as_vec3();
+            let dir = a
+                .body
+                .vel
+                .normalize_or(glam::DVec3::new(0.0, -1.0, 0.0))
+                .as_vec3();
             log::info!(
                 "impact: {:.0} kg at {:.0} m/s, {:.0} K surface = {:.2e} J through the one door",
-                a.body.mass_kg, a.body.vel.length(), a.body.temp_k, a.energy_j
+                a.body.mass_kg,
+                a.body.vel.length(),
+                a.body.temp_k,
+                a.energy_j
             );
             // ONE deposition door, whatever was struck: terrain voxels, a cohesive body's parcels and
             // debris grains all couple through the same walk (docs/60).
@@ -755,7 +807,11 @@ impl Simulation {
         {
             let center = self.world.center();
             let sv = site + center;
-            let (cx, cy, cz) = (sv.x.floor() as i32, sv.y.floor() as i32, sv.z.floor() as i32);
+            let (cx, cy, cz) = (
+                sv.x.floor() as i32,
+                sv.y.floor() as i32,
+                sv.z.floor() as i32,
+            );
             let ri = crate::matter::IMPACT_LOD_R;
             for dz in -ri..=ri {
                 for dy in -ri..=ri {
@@ -826,7 +882,8 @@ impl Simulation {
             );
             // The heat is what the impulse did not turn into bulk motion, same as every deposit.
             let heat = (energy_j * share - p_g.length_squared() / (2.0 * m_grains)).max(0.0);
-            self.matter.deposit_shock_heat(0, site, heat as f32, &self.materials);
+            self.matter
+                .deposit_shock_heat(0, site, heat as f32, &self.materials);
         }
 
         for (bi, b) in self.bodies.iter_mut().enumerate() {
@@ -834,7 +891,8 @@ impl Simulation {
                 continue;
             }
             let share = w_bodies[bi] / w_total;
-            b.agg.deposit_impact(&self.materials, sited, momentum * share, energy_j * share);
+            b.agg
+                .deposit_impact(&self.materials, sited, momentum * share, energy_j * share);
         }
 
         if w_terrain > 0.0 {
@@ -965,8 +1023,16 @@ mod tests {
                        "radius_m":3,"grain_radius_m":0.5}] }
         }"#;
         let mut sim = Simulation::from_json(json, mats()).expect("builds");
-        assert_eq!(sim.analytic_count(), 1, "the effect is TRACKED before it is ever seen");
-        assert_eq!(sim.particle_count(), 0, "and costs no particles while out of view");
+        assert_eq!(
+            sim.analytic_count(),
+            1,
+            "the effect is TRACKED before it is ever seen"
+        );
+        assert_eq!(
+            sim.particle_count(),
+            0,
+            "and costs no particles while out of view"
+        );
 
         let mut resolved_at = None;
         for i in 0..40 {
@@ -976,8 +1042,15 @@ mod tests {
             }
         }
         let i = resolved_at.expect("the effect must resolve once it enters view");
-        assert!(i > 0, "it must NOT resolve on the first step — it starts far outside the view radius");
-        assert_eq!(sim.analytic_count(), 0, "resolved effects leave analytic tracking");
+        assert!(
+            i > 0,
+            "it must NOT resolve on the first step — it starts far outside the view radius"
+        );
+        assert_eq!(
+            sim.analytic_count(),
+            0,
+            "resolved effects leave analytic tracking"
+        );
         assert_eq!(sim.resolved_total(), 1);
         // THE ASSERTION THIS TEST WAS MISSING. "It resolved" is a state change; the point is that matter
         // exists afterwards. Without this the hand-off can spawn grains that are culled in the same step
@@ -1003,8 +1076,16 @@ mod tests {
         for _ in 0..50 {
             sim.step(0.1);
         }
-        assert_eq!(sim.resolved_total(), 0, "it never entered view, so it was never simulated");
-        assert_eq!(sim.analytic_count(), 1, "but it is STILL TRACKED — looking away changes nothing");
+        assert_eq!(
+            sim.resolved_total(),
+            0,
+            "it never entered view, so it was never simulated"
+        );
+        assert_eq!(
+            sim.analytic_count(),
+            1,
+            "but it is STILL TRACKED — looking away changes nothing"
+        );
         assert_eq!(sim.particle_count(), 0);
     }
 
@@ -1012,21 +1093,32 @@ mod tests {
     /// one. Without this the terrain block could be ignored and every test would still pass.
     #[test]
     fn the_definition_shapes_the_ground_it_runs_on() {
-        let flat = Simulation::from_json(r#"{
+        let flat = Simulation::from_json(
+            r#"{
           "name":"flat","type":"ground",
           "ground":{ "surface":{ "amplitude_m":0.0, "sea_level_m":0.0 } }
-        }"#, mats()).expect("builds");
+        }"#,
+            mats(),
+        )
+        .expect("builds");
         let tops: Vec<i32> = (0..flat.world.w as i32)
             .map(|x| flat.world.surface_top_voxel(x, 0).unwrap_or(-1))
             .collect();
-        assert!(tops.windows(2).all(|p| p[0] == p[1]), "a declared flat world must be flat");
+        assert!(
+            tops.windows(2).all(|p| p[0] == p[1]),
+            "a declared flat world must be flat"
+        );
 
-        let rolling = Simulation::from_json(
-            r#"{"name":"rolling","type":"ground","ground":{}}"#, mats()).expect("builds");
+        let rolling =
+            Simulation::from_json(r#"{"name":"rolling","type":"ground","ground":{}}"#, mats())
+                .expect("builds");
         let tops: Vec<i32> = (0..rolling.world.w as i32)
             .map(|x| rolling.world.surface_top_voxel(x, 0).unwrap_or(-1))
             .collect();
-        assert!(tops.windows(2).any(|p| p[0] != p[1]), "the default world has real relief");
+        assert!(
+            tops.windows(2).any(|p| p[0] != p[1]),
+            "the default world has real relief"
+        );
     }
 
     /// **A meteor is MATTER, and its energy EMERGES.** The caller throws a rock; it must not be able
@@ -1037,7 +1129,8 @@ mod tests {
     /// number the host chose, at a site the host computed. That is a dial wearing a physics coat.
     #[test]
     fn a_thrown_meteor_digs_by_its_own_kinetic_energy() {
-        let world = r#"{"name":"g","type":"ground","ground":{"camera_m":[0,30,0],"view_radius_m":80}}"#;
+        let world =
+            r#"{"name":"g","type":"ground","ground":{"camera_m":[0,30,0],"view_radius_m":80}}"#;
         let iron = crate::materials::index_of(&mats(), "iron");
         let dig = |mass_kg: f32, speed: f32| -> usize {
             let mut sim = Simulation::from_json(world, mats()).expect("builds");
@@ -1051,7 +1144,7 @@ mod tests {
                 material: iron,
                 radius_m: 0.5,
                 temp_k: 288.0, // stamped to ambient by throw_meteor
-                skin_m: 0.0, // a fresh rock has no heated skin yet
+                skin_m: 0.0,   // a fresh rock has no heated skin yet
             });
             // The ENGINE flies it and lands it; the caller never computes an impact site.
             for _ in 0..600 {
@@ -1066,9 +1159,18 @@ mod tests {
         let small = dig(500.0, 40.0);
         let heavy = dig(4_000.0, 40.0);
         let fast = dig(500.0, 160.0);
-        assert!(small > 0, "a thrown meteor must actually excavate; got {small}");
-        assert!(heavy > small, "8x the MASS must dig more: {heavy} vs {small}");
-        assert!(fast > small, "4x the SPEED must dig more (v is squared): {fast} vs {small}");
+        assert!(
+            small > 0,
+            "a thrown meteor must actually excavate; got {small}"
+        );
+        assert!(
+            heavy > small,
+            "8x the MASS must dig more: {heavy} vs {small}"
+        );
+        assert!(
+            fast > small,
+            "4x the SPEED must dig more (v is squared): {fast} vs {small}"
+        );
     }
 
     /// A meteor flies through AIR, not vacuum (docs/48). Before this the flight loop was pure ballistics —
@@ -1078,7 +1180,8 @@ mod tests {
     /// density, and it is the analytic rung of the same primitive `AirField` resolves (the c_d IOU).
     #[test]
     fn a_meteor_feels_atmospheric_drag_as_it_flies() {
-        let world = r#"{"name":"g","type":"ground","ground":{"camera_m":[0,30,0],"view_radius_m":2000}}"#;
+        let world =
+            r#"{"name":"g","type":"ground","ground":{"camera_m":[0,30,0],"view_radius_m":2000}}"#;
         let iron = crate::materials::index_of(&mats(), "iron");
         // Horizontal flight, high enough that it does not land during the few steps we watch.
         let fly = |radius_m: f32| -> f32 {
@@ -1093,12 +1196,14 @@ mod tests {
                 material: iron,
                 radius_m: radius_m as f64,
                 temp_k: 288.0, // stamped to ambient by throw_meteor
-                skin_m: 0.0, // a fresh rock has no heated skin yet
+                skin_m: 0.0,   // a fresh rock has no heated skin yet
             });
             let v0 = sim.meteors()[0].vel.x;
             for _ in 0..4 {
                 sim.step(1.0 / 60.0);
-                if sim.meteors().is_empty() { break; }
+                if sim.meteors().is_empty() {
+                    break;
+                }
             }
             // Horizontal speed lost over the flight — gravity cannot touch it, so this is pure drag.
             (v0 - sim.meteors().first().map_or(v0, |m| m.vel.x)) as f32
@@ -1106,7 +1211,10 @@ mod tests {
 
         let compact = fly(0.3); // small cross-section
         let broad = fly(1.0); // ~11x the frontal area, same mass ⇒ much higher drag
-        assert!(compact > 0.0, "a meteor in atmosphere must lose horizontal speed to drag; lost {compact}");
+        assert!(
+            compact > 0.0,
+            "a meteor in atmosphere must lose horizontal speed to drag; lost {compact}"
+        );
         assert!(
             broad > compact * 3.0,
             "drag scales with frontal area: the broad meteor ({broad} m/s) must shed far more than the \
@@ -1120,7 +1228,8 @@ mod tests {
     /// generic `atmosphere::atmospheric_step`, and exposed for the renderer.
     #[test]
     fn a_meteor_heats_by_atmospheric_entry_in_flight() {
-        let world = r#"{"name":"g","type":"ground","ground":{"camera_m":[0,30,0],"view_radius_m":2000}}"#;
+        let world =
+            r#"{"name":"g","type":"ground","ground":{"camera_m":[0,30,0],"view_radius_m":2000}}"#;
         let iron = crate::materials::index_of(&mats(), "iron");
         let mut sim = Simulation::from_json(world, mats()).expect("builds");
         let c = sim.world.center();
@@ -1137,13 +1246,25 @@ mod tests {
             temp_k: 288.0,
             skin_m: 0.0, // a fresh rock has no heated skin yet
         });
-        assert_eq!(sim.meteors()[0].temp_k, AMBIENT_TEMP_K as f64, "a fresh meteor starts at ambient");
+        assert_eq!(
+            sim.meteors()[0].temp_k,
+            AMBIENT_TEMP_K as f64,
+            "a fresh meteor starts at ambient"
+        );
         for _ in 0..8 {
             sim.step(1.0 / 60.0);
-            if sim.meteors().is_empty() { break; }
+            if sim.meteors().is_empty() {
+                break;
+            }
         }
-        let hot = sim.meteors().first().map_or(AMBIENT_TEMP_K as f64, |m| m.temp_k);
-        assert!(hot > AMBIENT_TEMP_K as f64 + 5.0, "the meteor's surface must heat from entry, got {hot} K");
+        let hot = sim
+            .meteors()
+            .first()
+            .map_or(AMBIENT_TEMP_K as f64, |m| m.temp_k);
+        assert!(
+            hot > AMBIENT_TEMP_K as f64 + 5.0,
+            "the meteor's surface must heat from entry, got {hot} K"
+        );
     }
 
     /// **A scene never learns what a meteor is.** The engine reports everything it holds as `Drawn` —
@@ -1153,13 +1274,17 @@ mod tests {
     /// conditions and presents the result, and never decides what the result looks like.
     #[test]
     fn the_engine_reports_every_kind_of_matter_it_holds_as_one_list() {
-        let world = r#"{"name":"g","type":"ground","ground":{"camera_m":[0,30,0],"view_radius_m":2000}}"#;
+        let world =
+            r#"{"name":"g","type":"ground","ground":{"camera_m":[0,30,0],"view_radius_m":2000}}"#;
         let iron = crate::materials::index_of(&mats(), "iron");
         let mut sim = Simulation::from_json(world, mats()).expect("builds");
         let c = sim.world.center();
         let ground = sim.world.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
 
-        assert!(sim.drawn().is_empty(), "an untouched patch is holding nothing to draw");
+        assert!(
+            sim.drawn().is_empty(),
+            "an untouched patch is holding nothing to draw"
+        );
 
         // A grain-sized iron body at true meteor speed, high up and horizontal so it stays aloft and
         // ablates rather than landing — the regime `atmospheric_step` is honest in (a body thinner than
@@ -1177,7 +1302,11 @@ mod tests {
         });
         // The body in flight is matter, and is reported as such the moment it exists.
         let flying = sim.drawn();
-        assert_eq!(flying.len(), 1, "the meteor is drawn as matter, not as an effect");
+        assert_eq!(
+            flying.len(),
+            1,
+            "the meteor is drawn as matter, not as an effect"
+        );
         assert_eq!(flying[0].material, iron, "drawn as what it IS — iron");
 
         for _ in 0..40 {
@@ -1189,16 +1318,30 @@ mod tests {
 
         let drawn = sim.drawn();
         let parcels = sim.trail().parcels().len();
-        assert!(parcels > 0, "the meteor ablated: {parcels} parcels, {:.3e} kg", sim.trail().mass());
+        assert!(
+            parcels > 0,
+            "the meteor ablated: {parcels} parcels, {:.3e} kg",
+            sim.trail().mass()
+        );
         assert!(
             drawn.len() >= parcels,
-            "every shed parcel is in the draw list ({} drawn, {parcels} parcels)", drawn.len()
+            "every shed parcel is in the draw list ({} drawn, {parcels} parcels)",
+            drawn.len()
         );
         // The trail is drawn HOT and at a real size — both derived, neither assigned.
-        let hot: Vec<&crate::Drawn> = drawn.iter().filter(|d| d.temp_k > AMBIENT_TEMP_K + 100.0).collect();
-        assert!(!hot.is_empty(), "shed vapour glows because it IS hot, not because a trail is drawn glowing");
+        let hot: Vec<&crate::Drawn> = drawn
+            .iter()
+            .filter(|d| d.temp_k > AMBIENT_TEMP_K + 100.0)
+            .collect();
+        assert!(
+            !hot.is_empty(),
+            "shed vapour glows because it IS hot, not because a trail is drawn glowing"
+        );
         for d in &hot {
-            assert!(d.radius_m > 0.0, "a parcel has a real size (its expansion into the local air)");
+            assert!(
+                d.radius_m > 0.0,
+                "a parcel has a real size (its expansion into the local air)"
+            );
             assert_eq!(d.material, iron, "iron vapour is still iron");
         }
         // Settled grains are the TAIL, so a caller truncating to its instance budget loses those rather
@@ -1206,7 +1349,9 @@ mod tests {
         let grains = sim.particle_count();
         if grains > 0 {
             assert!(
-                drawn[drawn.len() - grains..].iter().all(|d| d.radius_m == 0.5 * sim.grain_size_m()),
+                drawn[drawn.len() - grains..]
+                    .iter()
+                    .all(|d| d.radius_m == 0.5 * sim.grain_size_m()),
                 "the {grains} grains are the tail of the list"
             );
         }
@@ -1216,7 +1361,10 @@ mod tests {
     #[test]
     fn the_engine_flies_the_meteor_the_caller_only_throws_it() {
         let mut sim = Simulation::from_json(
-            r#"{"name":"g","type":"ground","ground":{"camera_m":[0,30,0]}}"#, mats()).expect("builds");
+            r#"{"name":"g","type":"ground","ground":{"camera_m":[0,30,0]}}"#,
+            mats(),
+        )
+        .expect("builds");
         let c = sim.world.center();
         let ground = sim.world.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
         sim.throw_meteor(Meteor {
@@ -1227,15 +1375,20 @@ mod tests {
             material: crate::materials::index_of(&mats(), "iron"),
             radius_m: 0.5,
             temp_k: 288.0, // stamped to ambient by throw_meteor
-            skin_m: 0.0, // a fresh rock has no heated skin yet
+            skin_m: 0.0,   // a fresh rock has no heated skin yet
         });
         assert_eq!(sim.meteors().len(), 1, "it is in flight");
         let start_y = sim.meteors()[0].pos.y;
         sim.step(1.0 / 60.0);
-        assert!(sim.meteors()[0].pos.y < start_y, "gravity must pull it down without the caller helping");
+        assert!(
+            sim.meteors()[0].pos.y < start_y,
+            "gravity must pull it down without the caller helping"
+        );
         for _ in 0..600 {
             sim.step(1.0 / 60.0);
-            if sim.meteors().is_empty() { break; }
+            if sim.meteors().is_empty() {
+                break;
+            }
         }
         assert!(sim.meteors().is_empty(), "it must land on its own");
         assert!(sim.created_total() > 0, "landing must excavate real matter");
@@ -1247,7 +1400,10 @@ mod tests {
     #[test]
     fn created_total_counts_each_grain_exactly_once() {
         let mut sim = Simulation::from_json(
-            r#"{"name":"g","type":"ground","ground":{"camera_m":[0,30,0]}}"#, mats()).expect("builds");
+            r#"{"name":"g","type":"ground","ground":{"camera_m":[0,30,0]}}"#,
+            mats(),
+        )
+        .expect("builds");
         let c = sim.world.center();
         let ground = sim.world.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
         sim.throw_meteor(Meteor {
@@ -1258,14 +1414,16 @@ mod tests {
             material: crate::materials::index_of(&mats(), "iron"),
             radius_m: 0.5,
             temp_k: 288.0, // stamped to ambient by throw_meteor
-            skin_m: 0.0, // a fresh rock has no heated skin yet
+            skin_m: 0.0,   // a fresh rock has no heated skin yet
         });
         // Step to the frame the impact lands on, and check the count against the grains that exist.
         let mut peak = 0usize;
         for _ in 0..600 {
             sim.step(1.0 / 60.0);
             peak = peak.max(sim.particle_count());
-            if sim.meteors().is_empty() && peak > 0 { break; }
+            if sim.meteors().is_empty() && peak > 0 {
+                break;
+            }
         }
         assert!(peak > 0, "the meteor must excavate");
         assert_eq!(
@@ -1280,8 +1438,8 @@ mod tests {
     /// default scene — the failure mode where "it works" without the data driving anything.
     #[test]
     fn an_empty_ground_definition_does_nothing() {
-        let sim = Simulation::from_json(
-            r#"{"name":"empty","type":"ground","ground":{}}"#, mats()).expect("builds");
+        let sim = Simulation::from_json(r#"{"name":"empty","type":"ground","ground":{}}"#, mats())
+            .expect("builds");
         assert_eq!(sim.particle_count(), 0);
         assert_eq!(sim.analytic_count(), 0);
     }
@@ -1299,7 +1457,8 @@ mod tests {
             "surface":{ "amplitude_m":0.0 },
             "bodies":[{"material":"iron","radius_m":1.5,"at_m":[0.0,50.0,0.0]}] }
         }"#;
-        let mut sim = Simulation::from_json(json, mats()).expect("a world can declare a solid body");
+        let mut sim =
+            Simulation::from_json(json, mats()).expect("a world can declare a solid body");
         assert_eq!(sim.cohesive_bodies().len(), 1);
         let ground = sim.world.ground_height(0.0, 0.0) as f64;
         let ball = &sim.cohesive_bodies()[0];
@@ -1317,7 +1476,10 @@ mod tests {
             sim.step(1.0 / 60.0);
         }
         let y1 = sim.cohesive_bodies()[0].agg.com().y;
-        assert!(y1 < y0 - 1.0, "gravity pulls it down without help ({y0:.2} -> {y1:.2})");
+        assert!(
+            y1 < y0 - 1.0,
+            "gravity pulls it down without help ({y0:.2} -> {y1:.2})"
+        );
 
         // RESTS: give it time to land and ring down, then its lowest particle sits ON the surface.
         for _ in 0..840 {
@@ -1348,7 +1510,11 @@ mod tests {
             (ball.agg.com() - com1).length()
         );
         // Its own landing dents nothing: iron survives a few metres of fall.
-        assert_eq!(ball.agg.active_bonds(), bonds0, "landing does not shatter it");
+        assert_eq!(
+            ball.agg.active_bonds(),
+            bonds0,
+            "landing does not shatter it"
+        );
     }
 
     /// **The impact energy reaches the ball through the one door** (`interaction::detect_swept` /
@@ -1379,7 +1545,11 @@ mod tests {
             .fold(0.0f32, f32::max);
         let com_v0 = {
             let b = &sim.cohesive_bodies()[0];
-            b.agg.particles.iter().map(|p| p.vel * p.mass).sum::<glam::DVec3>()
+            b.agg
+                .particles
+                .iter()
+                .map(|p| p.vel * p.mass)
+                .sum::<glam::DVec3>()
                 / b.agg.total_mass()
         };
         let ground = sim.world.ground_height(0.0, 0.0);
@@ -1406,7 +1576,12 @@ mod tests {
             after_temp > before_temp + 0.5,
             "the door's deposit must HEAT the parcels: {before_temp:.1} K -> {after_temp:.1} K"
         );
-        let com_v1 = ball.agg.particles.iter().map(|p| p.vel * p.mass).sum::<glam::DVec3>()
+        let com_v1 = ball
+            .agg
+            .particles
+            .iter()
+            .map(|p| p.vel * p.mass)
+            .sum::<glam::DVec3>()
             / ball.agg.total_mass();
         assert!(
             (com_v1 - com_v0).length() > 0.05,
@@ -1433,7 +1608,12 @@ mod tests {
             sim.step(1.0 / 60.0); // let the ball settle 5 m from ground zero
         }
         let bonds0 = sim.cohesive_bodies()[0].agg.active_bonds();
-        let temp0 = sim.cohesive_bodies()[0].agg.temps.iter().cloned().fold(0.0f32, f32::max);
+        let temp0 = sim.cohesive_bodies()[0]
+            .agg
+            .temps
+            .iter()
+            .cloned()
+            .fold(0.0f32, f32::max);
         let ground = sim.world.ground_height(0.0, 0.0);
         sim.throw_meteor(Meteor {
             id: 0,
@@ -1452,7 +1632,10 @@ mod tests {
             }
         }
         assert!(sim.meteors().is_empty(), "the meteor arrived");
-        assert!(sim.created_total() > 0, "the terrain's share excavated a crater");
+        assert!(
+            sim.created_total() > 0,
+            "the terrain's share excavated a crater"
+        );
         let ball = &sim.cohesive_bodies()[0];
         let temp1 = ball.agg.temps.iter().cloned().fold(0.0f32, f32::max);
         assert!(
@@ -1482,7 +1665,9 @@ mod tests {
         let n0 = sim.particle_count();
         assert!(n0 > 0, "debris exists before the meteor arrives");
         assert!(
-            sim.particles().iter().all(|p| p.temp_k <= crate::matter::REF_TEMP_K + 0.01),
+            sim.particles()
+                .iter()
+                .all(|p| p.temp_k <= crate::matter::REF_TEMP_K + 0.01),
             "and it is cold"
         );
         let ground = sim.world.ground_height(0.0, 0.0);
@@ -1502,7 +1687,10 @@ mod tests {
                 break;
             }
         }
-        assert!(sim.meteors().is_empty(), "the meteor arrived while the grains were still airborne");
+        assert!(
+            sim.meteors().is_empty(),
+            "the meteor arrived while the grains were still airborne"
+        );
         let heated = sim
             .particles()
             .iter()
@@ -1565,7 +1753,11 @@ mod tests {
             bonds1 < bonds0 / 2,
             "iron's thresholds are exceeded: the structure fractures ({bonds0} -> {bonds1} bonds)"
         );
-        assert_eq!(ball.verdict(), "shattered", "the one-word verdict reports the same bond state");
+        assert_eq!(
+            ball.verdict(),
+            "shattered",
+            "the one-word verdict reports the same bond state"
+        );
         let spread1 = ball.agg.rms_radius();
         let tmax = ball.agg.temps.iter().cloned().fold(0.0f32, f32::max);
         // **The parcels are separating, and keep separating.**
@@ -1626,7 +1818,12 @@ mod tests {
         let spread0 = sim.cohesive_bodies()[0].agg.rms_radius();
         let com_v0 = {
             let b = &sim.cohesive_bodies()[0];
-            b.agg.particles.iter().map(|p| p.vel * p.mass).sum::<DVec3>() / b.agg.total_mass()
+            b.agg
+                .particles
+                .iter()
+                .map(|p| p.vel * p.mass)
+                .sum::<DVec3>()
+                / b.agg.total_mass()
         };
         let ground = sim.world.ground_height(0.0, 0.0);
         // 300 kg falling at 60 m/s - a boulder, not an asteroid. Under a thousandth of the energy
@@ -1650,11 +1847,19 @@ mod tests {
         assert!(sim.meteors().is_empty(), "the boulder arrived");
         let struck = {
             let b = &sim.cohesive_bodies()[0];
-            let v = b.agg.particles.iter().map(|p| p.vel * p.mass).sum::<DVec3>()
+            let v = b
+                .agg
+                .particles
+                .iter()
+                .map(|p| p.vel * p.mass)
+                .sum::<DVec3>()
                 / b.agg.total_mass();
             (v - com_v0).length()
         };
-        assert!(struck > 0.02, "the ball was really hit - its momentum changed ({struck:.3} m/s)");
+        assert!(
+            struck > 0.02,
+            "the ball was really hit - its momentum changed ({struck:.3} m/s)"
+        );
         for _ in 0..120 {
             sim.step(1.0 / 60.0);
         }
@@ -1664,7 +1869,11 @@ mod tests {
             bonds1 * 10 >= bonds0 * 9,
             "below iron's thresholds the structure holds ({bonds0} -> {bonds1} bonds)"
         );
-        assert_ne!(ball.verdict(), "shattered", "a surviving ball never reads as shattered");
+        assert_ne!(
+            ball.verdict(),
+            "shattered",
+            "a surviving ball never reads as shattered"
+        );
         let spread1 = ball.agg.rms_radius();
         assert!(
             spread1 < 1.3 * spread0,
@@ -1695,11 +1904,15 @@ mod tests {
     /// A world that is not a ground world must be REFUSED, not silently treated as an empty one.
     #[test]
     fn a_non_ground_world_is_refused() {
-        let err = match Simulation::from_json(r#"{"name":"x","type":"impact","impact":{}}"#, mats()) {
+        let err = match Simulation::from_json(r#"{"name":"x","type":"impact","impact":{}}"#, mats())
+        {
             Err(e) => e,
             Ok(_) => panic!("must not build a ground sim from an impact world"),
         };
-        assert!(err.contains("ground"), "the error should say what was wrong: {err}");
+        assert!(
+            err.contains("ground"),
+            "the error should say what was wrong: {err}"
+        );
     }
 }
 
@@ -1729,10 +1942,20 @@ mod gravity_audit_tests {
         let a = sim.probe_field_acceleration(probe);
 
         println!("planet surface gravity : {g_planet:.4} m/s²");
-        println!("patch field at the surface: {:?} (|a| = {:.6} m/s²)", a, a.length());
-        println!("ratio                  : {:.3e}", a.length() as f64 / g_planet as f64);
+        println!(
+            "patch field at the surface: {:?} (|a| = {:.6} m/s²)",
+            a,
+            a.length()
+        );
+        println!(
+            "ratio                  : {:.3e}",
+            a.length() as f64 / g_planet as f64
+        );
 
-        assert!(g_planet > 9.0, "the planet's own gravity is Earth-like: {g_planet}");
+        assert!(
+            g_planet > 9.0,
+            "the planet's own gravity is Earth-like: {g_planet}"
+        );
 
         // **Grains fall under the PLANET.** This test was written the other way round: it asserted the
         // defect, because the Ground scene stepped its grains under the self-gravity of the loaded patch
@@ -1753,7 +1976,9 @@ mod gravity_audit_tests {
         // And down is a DIRECTION, computed toward the host's centre, not an assumed −Y: on a patch this
         // small against Earth the two agree to a part in millions, which is exactly why it must be
         // derived rather than typed.
-        assert!(a.y < 0.0 && a.x.abs() < 1e-3 * a.length() && a.z.abs() < 1e-3 * a.length(),
-            "down points at the planet's centre: {a:?}");
+        assert!(
+            a.y < 0.0 && a.x.abs() < 1e-3 * a.length() && a.z.abs() < 1e-3 * a.length(),
+            "down points at the planet's centre: {a:?}"
+        );
     }
 }

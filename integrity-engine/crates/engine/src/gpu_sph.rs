@@ -15,7 +15,6 @@
 //! The kernels, layouts, and physics are IDENTICAL to `tools/impact-run` (which is verified against the CPU
 //! on the RTX 2070); this module is the WebGPU host for them, nothing more.
 
-
 // Spatial-hash grid sizing for the browser (smaller than the offline 2^16/256 to keep buffers modest).
 // grid_bucket = TABLE · BUCKET_K · 4 B = 32768 · 128 · 4 ≈ 16 MB. The cell-membership guard in the shader
 // keeps the grid EXACT regardless of bucket depth (a full cell just drops far duplicates, never neighbours).
@@ -114,10 +113,36 @@ impl SphEos {
     }
 
     pub fn basalt() -> Self {
-        SphEos { rho0: 2700.0, a: 0.5, b: 1.5, cap_a: 2.67e10, cap_b: 2.67e10, e0: 4.87e8, e_iv: 4.72e6, e_cv: 1.82e7, alpha: 5.0, beta: 5.0, _p0: 0.0, _p1: 0.0 }
+        SphEos {
+            rho0: 2700.0,
+            a: 0.5,
+            b: 1.5,
+            cap_a: 2.67e10,
+            cap_b: 2.67e10,
+            e0: 4.87e8,
+            e_iv: 4.72e6,
+            e_cv: 1.82e7,
+            alpha: 5.0,
+            beta: 5.0,
+            _p0: 0.0,
+            _p1: 0.0,
+        }
     }
     pub fn iron() -> Self {
-        SphEos { rho0: 7850.0, a: 0.5, b: 1.28, cap_a: 1.28e11, cap_b: 1.815e11, e0: 1.425e7, e_iv: 2.4e6, e_cv: 8.67e6, alpha: 5.0, beta: 5.0, _p0: 0.0, _p1: 0.0 }
+        SphEos {
+            rho0: 7850.0,
+            a: 0.5,
+            b: 1.28,
+            cap_a: 1.28e11,
+            cap_b: 1.815e11,
+            e0: 1.425e7,
+            e_iv: 2.4e6,
+            e_cv: 8.67e6,
+            alpha: 5.0,
+            beta: 5.0,
+            _p0: 0.0,
+            _p1: 0.0,
+        }
     }
 }
 pub const MAT_BASALT: u32 = 0;
@@ -152,11 +177,17 @@ pub struct SphCam {
 /// tractable, same as `tools/impact-run`). [`build_far_apart`] places them far apart for GPU relaxation.
 /// Back-compat: the far-apart relax set on the default (declared) initial conditions.
 pub fn build_far_apart(n_earth: usize, n_theia: usize) -> (Vec<SphParticle>, f32, f32) {
-    build_far_apart_from(&crate::terra::world_def::ImpactDef::default(), n_earth, n_theia)
+    build_far_apart_from(
+        &crate::terra::world_def::ImpactDef::default(),
+        n_earth,
+        n_theia,
+    )
 }
 
 /// Back-compat: assembly on the default (declared) initial conditions.
-pub fn assemble_from_relaxed(particles: &[SphParticle]) -> (Vec<SphParticle>, [SphEos; 2], f32, f32) {
+pub fn assemble_from_relaxed(
+    particles: &[SphParticle],
+) -> (Vec<SphParticle>, [SphEos; 2], f32, f32) {
     assemble_from_relaxed_with(&crate::terra::world_def::ImpactDef::default(), particles)
 }
 
@@ -169,7 +200,10 @@ pub fn build_impact_bodies_from(
 ) -> (crate::hydrostatic::HydroBody, crate::hydrostatic::HydroBody) {
     use crate::hydrostatic::HydroBody;
     const FTP: f64 = 4.0 / 3.0 * std::f64::consts::PI;
-    let (core, mantle) = (crate::eos::Tillotson::iron(), crate::eos::Tillotson::basalt());
+    let (core, mantle) = (
+        crate::eos::Tillotson::iron(),
+        crate::eos::Tillotson::basalt(),
+    );
     let (t, im) = (&def.target, &def.impactor);
     // Radii and core boundaries come from the BODY DEFINITIONS, never from the scene. Resolution (the
     // particle count) is the only compute knob left — a coarse simulation of the real Earth is honest;
@@ -189,10 +223,18 @@ pub fn build_impact_bodies_from(
     // Softening EMERGES from the resolution: half the fine-particle spacing, (m/ρ)^⅓. Declaring it (the
     // world file said 1.0e6 m) let a number that must track particle size sit still while the size moved.
     let softening = 0.5 * (m_fine / mantle.rho0).cbrt();
-    let earth = HydroBody::new_lod(core, mantle, t_core, t_r, softening, m_fine, TARGET_CORE_LOD);
+    let earth = HydroBody::new_lod(
+        core,
+        mantle,
+        t_core,
+        t_r,
+        softening,
+        m_fine,
+        TARGET_CORE_LOD,
+    );
     // The impactor: uniform-differentiated at the SAME fine particle mass (equal-mass across the system).
-    let m_theia = core.rho0 * FTP * im_core.powi(3)
-        + mantle.rho0 * FTP * (im_r.powi(3) - im_core.powi(3));
+    let m_theia =
+        core.rho0 * FTP * im_core.powi(3) + mantle.rho0 * FTP * (im_r.powi(3) - im_core.powi(3));
     let theia_n = (m_theia / m_fine).round().max(50.0) as usize;
     // The impactor is seeded uniformly at the SAME fine particle mass — equal-mass particles across
     // the system, so neither body's resolution biases the shared dynamics.
@@ -201,10 +243,12 @@ pub fn build_impact_bodies_from(
 }
 
 /// Back-compat shim: the default (declared) initial conditions.
-pub fn build_impact_bodies(n_earth: usize, _n_theia: usize) -> (crate::hydrostatic::HydroBody, crate::hydrostatic::HydroBody) {
+pub fn build_impact_bodies(
+    n_earth: usize,
+    _n_theia: usize,
+) -> (crate::hydrostatic::HydroBody, crate::hydrostatic::HydroBody) {
     build_impact_bodies_from(&crate::terra::world_def::ImpactDef::default(), n_earth)
 }
-
 
 /// Build the two UNRELAXED bodies as one SPH particle set for GPU relaxation: Earth at the origin, Theia far
 /// away (`RELAX_SEPARATION`× the contact radius), both at rest. The caller relaxes this on the GPU (`cs_relax`,
@@ -229,10 +273,21 @@ pub fn build_far_apart_n(
     let spacing = separation * 2.0 * r_max; // adjacent bodies this far apart along +x
     let mut asm = SphAssembly::default();
     for (k, hb) in hbs.iter().enumerate() {
-        asm.add_body(hb, k as u32, glam::DVec3::new(k as f64 * spacing, 0.0, 0.0), glam::DVec3::ZERO);
+        asm.add_body(
+            hb,
+            k as u32,
+            glam::DVec3::new(k as f64 * spacing, 0.0, 0.0),
+            glam::DVec3::ZERO,
+        );
     }
-    let softening = hbs.iter().map(|hb| hb.softening).fold(f64::INFINITY, f64::min) as f32;
-    let relax_dt = hbs.iter().map(|hb| hb.relax_dt(0.2)).fold(f64::INFINITY, f64::min) as f32;
+    let softening = hbs
+        .iter()
+        .map(|hb| hb.softening)
+        .fold(f64::INFINITY, f64::min) as f32;
+    let relax_dt = hbs
+        .iter()
+        .map(|hb| hb.relax_dt(0.2))
+        .fold(f64::INFINITY, f64::min) as f32;
     (asm.particles, asm.eos, softening, relax_dt)
 }
 
@@ -258,7 +313,12 @@ pub fn build_cap_relax(
     for (k, hb) in hbs.iter().enumerate() {
         let r = hb.pos.iter().map(|p| p.length()).fold(0.0_f64, f64::max);
         x += separation * 2.0 * r + r;
-        asm.add_body(hb, (k + 1) as u32, glam::DVec3::new(x, 0.0, 0.0), glam::DVec3::ZERO);
+        asm.add_body(
+            hb,
+            (k + 1) as u32,
+            glam::DVec3::new(x, 0.0, 0.0),
+            glam::DVec3::ZERO,
+        );
         x += r;
     }
     let softening = std::iter::once(cap.softening)
@@ -300,12 +360,17 @@ pub fn promote_ground_cap(
                 continue;
             }
             let (x, z) = (vx0 + dx, vz0 + dz);
-            let Some(top) = world.surface_top_voxel(x, z) else { continue };
+            let Some(top) = world.surface_top_voxel(x, z) else {
+                continue;
+            };
             for y in (top - depth).max(0)..=top {
-                let Some(mi) = world.material_at(x, y, z) else { continue };
+                let Some(mi) = world.material_at(x, y, z) else {
+                    continue;
+                };
                 let m = &mats[mi];
                 let density = (m.density as f64).max(1.0);
-                let t = crate::eos::Tillotson::for_material(&m.id).unwrap_or_else(crate::eos::Tillotson::basalt);
+                let t = crate::eos::Tillotson::for_material(&m.id)
+                    .unwrap_or_else(crate::eos::Tillotson::basalt);
                 let se = SphEos::from_tillotson(&t);
                 // Dedup this material into the shared table (by reference density, its identity).
                 let mat = match eos.iter().position(|e| e.rho0 == se.rho0) {
@@ -323,7 +388,7 @@ pub fn promote_ground_cap(
                     h: 2.0, // ~2× the 1 m grain spacing
                     vel: [0.0; 3],
                     u: (sh * 288.0) as f32, // ground temperature (flagged; a geotherm is the refinement)
-                    mass: density as f32, // 1 m³ voxel
+                    mass: density as f32,   // 1 m³ voxel
                     mat,
                     rho: density as f32,
                     prov: 0, // the ground is the target material
@@ -334,7 +399,11 @@ pub fn promote_ground_cap(
     (out, eos, floor_y)
 }
 
-pub fn build_far_apart_from(def: &crate::terra::world_def::ImpactDef, n_earth: usize, n_theia: usize) -> (Vec<SphParticle>, f32, f32) {
+pub fn build_far_apart_from(
+    def: &crate::terra::world_def::ImpactDef,
+    n_earth: usize,
+    n_theia: usize,
+) -> (Vec<SphParticle>, f32, f32) {
     let _ = n_theia; // the impactor's count follows from equal particle mass, not a caller knob
     let (earth, theia) = build_impact_bodies_from(def, n_earth);
     let far = def.relax_separation * (def.target.radius_m() + def.impactor.radius_m());
@@ -356,7 +425,13 @@ pub fn far_apart_pair(
     let ic = com(impactor);
     let mut out = Vec::with_capacity(target.pos.len() + impactor.pos.len());
     push_body(&mut out, target, 0, -tc, glam::DVec3::ZERO);
-    push_body(&mut out, impactor, 1, -ic + glam::DVec3::new(separation_m, 0.0, 0.0), glam::DVec3::ZERO);
+    push_body(
+        &mut out,
+        impactor,
+        1,
+        -ic + glam::DVec3::new(separation_m, 0.0, 0.0),
+        glam::DVec3::ZERO,
+    );
     let softening = target.softening.min(impactor.softening) as f32;
     // Relaxation Courant dt (cfl·min h / max c, as the working CPU relax used). Stable at cfl 0.2 PROVIDED the
     // caller zeroes the artificial viscosity during relax (`set_av(0,0)`) — AV stiffens the transient and would
@@ -380,20 +455,27 @@ pub fn body_bulk(particles: &[SphParticle], prov: u32) -> (glam::DVec3, f64, f64
     let m: f64 = ps.iter().map(|p| p.mass as f64).sum();
     let com = |sel: &[&SphParticle]| -> DVec3 {
         let mm: f64 = sel.iter().map(|p| p.mass as f64).sum();
-        if mm <= 0.0 { return DVec3::ZERO; }
+        if mm <= 0.0 {
+            return DVec3::ZERO;
+        }
         sel.iter().map(|p| pos(p) * p.mass as f64).sum::<DVec3>() / mm
     };
     // Radius enclosing 98% of the mass about `centre` (98 not 99: the impactor has few particles, so one
     // stray there is already ~1% of its mass -- a threshold a single particle can cross is not a threshold).
     let bulk_radius = |sel: &[&SphParticle], centre: DVec3| -> f64 {
         let mm: f64 = sel.iter().map(|p| p.mass as f64).sum();
-        let mut rr: Vec<(f64, f64)> = sel.iter().map(|p| ((pos(p) - centre).length(), p.mass as f64)).collect();
+        let mut rr: Vec<(f64, f64)> = sel
+            .iter()
+            .map(|p| ((pos(p) - centre).length(), p.mass as f64))
+            .collect();
         rr.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         let (mut cum, mut r) = (0.0, 0.0);
         for &(rad, mass) in &rr {
             cum += mass;
             r = rad;
-            if cum >= 0.98 * mm { break; }
+            if cum >= 0.98 * mm {
+                break;
+            }
         }
         r
     };
@@ -402,9 +484,14 @@ pub fn body_bulk(particles: &[SphParticle], prov: u32) -> (glam::DVec3, f64, f64
     let mut c = com(&ps);
     let mut r = bulk_radius(&ps, c);
     for _ in 0..2 {
-        let keep: Vec<&SphParticle> =
-            ps.iter().copied().filter(|p| (pos(p) - c).length() <= 1.5 * r).collect();
-        if keep.is_empty() { break; }
+        let keep: Vec<&SphParticle> = ps
+            .iter()
+            .copied()
+            .filter(|p| (pos(p) - c).length() <= 1.5 * r)
+            .collect();
+        if keep.is_empty() {
+            break;
+        }
         c = com(&keep);
         r = bulk_radius(&keep, c);
     }
@@ -433,10 +520,14 @@ pub fn assemble_from_relaxed_n(
     use glam::DVec3;
     let pos = |p: &SphParticle| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
     // Each source body's robust centre (surviving the strays a relax always leaves).
-    let coms: Vec<DVec3> = (0..placements.len()).map(|k| body_bulk(particles, k as u32).0).collect();
+    let coms: Vec<DVec3> = (0..placements.len())
+        .map(|k| body_bulk(particles, k as u32).0)
+        .collect();
     let mut out = Vec::with_capacity(particles.len());
     for p in particles {
-        let Some(pl) = placements.get(p.prov as usize) else { continue };
+        let Some(pl) = placements.get(p.prov as usize) else {
+            continue;
+        };
         let local = pos(p) - coms[p.prov as usize];
         let q = local + pl.offset;
         let v = pl.vel + pl.spin.cross(local); // ω × (r − com), full vector — any spin axis
@@ -449,7 +540,10 @@ pub fn assemble_from_relaxed_n(
     // softening = finest spacing (min_h/4). Shock-safe dt against the FASTEST approach among the bodies.
     let min_h = out.iter().map(|p| p.h).fold(f32::INFINITY, f32::min);
     let softening = 0.25 * min_h;
-    let max_speed = placements.iter().map(|pl| pl.vel.length()).fold(0.0, f64::max);
+    let max_speed = placements
+        .iter()
+        .map(|pl| pl.vel.length())
+        .fold(0.0, f64::max);
     let dt = (0.01 * min_h as f64 / (20_000.0 + max_speed)) as f32;
     (out, softening, dt)
 }
@@ -473,8 +567,8 @@ pub fn assemble_cap_impact(
     // The cap: the target's own near-surface matter, already centred on the target frame (origin).
     let mut asm = SphAssembly::default();
     asm.add_body(cap, 0, glam::DVec3::ZERO, glam::DVec3::ZERO); // prov 0 = target/Earth material
-    // Merge the tables: cap materials first, then the impactor's (shifted). Both were deduped within
-    // themselves; a duplicate across the two is a harmless extra slot (well within MAX_MATERIALS).
+                                                                // Merge the tables: cap materials first, then the impactor's (shifted). Both were deduped within
+                                                                // themselves; a duplicate across the two is a harmless extra slot (well within MAX_MATERIALS).
     let cap_mats = asm.eos.len() as u32;
     let mut eos = asm.eos;
     for e in impactor_eos {
@@ -517,8 +611,16 @@ pub fn assemble_from_relaxed_at(
     // docs/41 spin IOU — a spinning target flings its own mantle into a rotationally-sustained disk), the
     // impactor (prov 1) on the given geometry. A convenience wrapper for the scene's current 2-body callers.
     let placements = [
-        BodyPlacement { offset: DVec3::ZERO, vel: DVec3::ZERO, spin: DVec3::new(0.0, 0.0, target_spin) },
-        BodyPlacement { offset: impactor_offset, vel: impactor_vel, spin: DVec3::new(0.0, 0.0, impactor_spin) },
+        BodyPlacement {
+            offset: DVec3::ZERO,
+            vel: DVec3::ZERO,
+            spin: DVec3::new(0.0, 0.0, target_spin),
+        },
+        BodyPlacement {
+            offset: impactor_offset,
+            vel: impactor_vel,
+            spin: DVec3::new(0.0, 0.0, impactor_spin),
+        },
     ];
     let (out, softening, dt) = assemble_from_relaxed_n(particles, &placements);
     (out, [SphEos::basalt(), SphEos::iron()], softening, dt)
@@ -530,7 +632,10 @@ pub fn assemble_from_relaxed_at(
 /// inbound at `v_esc_multiple`*v_esc. This is the imposed-IC caller of [`assemble_from_relaxed_at`]; a body
 /// already in orbit uses its LIVE trajectory through the same primitive instead. Returns (particles,
 /// [basalt, iron], softening, the shock-safe impact dt).
-pub fn assemble_from_relaxed_with(def: &crate::terra::world_def::ImpactDef, particles: &[SphParticle]) -> (Vec<SphParticle>, [SphEos; 2], f32, f32) {
+pub fn assemble_from_relaxed_with(
+    def: &crate::terra::world_def::ImpactDef,
+    particles: &[SphParticle],
+) -> (Vec<SphParticle>, [SphEos; 2], f32, f32) {
     use glam::DVec3;
     let (_ec, m_earth, r_e) = body_bulk(particles, 0);
     let (_tc, m_theia, r_t) = body_bulk(particles, 1);
@@ -610,11 +715,15 @@ impl DiskView {
         let com: DVec3 = live.iter().map(|p| pos(p) * p.mass as f64).sum::<DVec3>() / m_total;
         let v_com: DVec3 = live.iter().map(|p| vel(p) * p.mass as f64).sum::<DVec3>() / m_total;
         // Remnant radius = smallest radius about the COM enclosing 85% of the mass.
-        let mut radii: Vec<(f64, f64)> = live.iter().map(|p| ((pos(p) - com).length(), p.mass as f64)).collect();
+        let mut radii: Vec<(f64, f64)> = live
+            .iter()
+            .map(|p| ((pos(p) - com).length(), p.mass as f64))
+            .collect();
         // `total_cmp` is a TOTAL order, so it cannot panic the way `partial_cmp(..).unwrap()` did when a
         // NaN reached it (rig, 2026-07-23: a retired particle's position went NaN and took the scene down).
         radii.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let (mut cum, mut r_remnant, mut m_remnant) = (0.0, radii.last().map_or(0.0, |x| x.0), m_total);
+        let (mut cum, mut r_remnant, mut m_remnant) =
+            (0.0, radii.last().map_or(0.0, |x| x.0), m_total);
         for &(r, m) in &radii {
             cum += m;
             if cum >= 0.85 * m_total {
@@ -628,7 +737,11 @@ impl DiskView {
         let mut idx: Vec<usize> = Vec::new();
         let (mut disk_prov0, mut disk_other, mut escaped) = (0.0f64, 0.0f64, 0.0f64);
         for (pi, pt) in particles.iter().enumerate() {
-            if !(pt.mass > 0.0 && pt.mass.is_finite() && pt.pos.iter().all(|c| c.is_finite()) && pt.vel.iter().all(|c| c.is_finite())) {
+            if !(pt.mass > 0.0
+                && pt.mass.is_finite()
+                && pt.pos.iter().all(|c| c.is_finite())
+                && pt.vel.iter().all(|c| c.is_finite()))
+            {
                 continue;
             }
             let m = pt.mass as f64;
@@ -640,7 +753,11 @@ impl DiskView {
                 continue;
             }
             if matches!(crate::orbit::perigee(rel_p, rel_v, mu), Some(pg) if pg > r_remnant) {
-                if pt.prov == 0 { disk_prov0 += m } else { disk_other += m }
+                if pt.prov == 0 {
+                    disk_prov0 += m
+                } else {
+                    disk_other += m
+                }
                 dp.push(pos(pt));
                 dv.push(vel(pt));
                 dm.push(m);
@@ -649,7 +766,22 @@ impl DiskView {
             }
         }
         let mean_h: f64 = live.iter().map(|p| p.h as f64).sum::<f64>() / live.len() as f64;
-        Some(DiskView { com, v_com, r_remnant, m_remnant, mu, dp, dv, dm, dr, idx, disk_prov0, disk_other, escaped, mean_h })
+        Some(DiskView {
+            com,
+            v_com,
+            r_remnant,
+            m_remnant,
+            mu,
+            dp,
+            dv,
+            dm,
+            dr,
+            idx,
+            disk_prov0,
+            disk_other,
+            escaped,
+            mean_h,
+        })
     }
 
     /// Total bound orbiting mass.
@@ -663,16 +795,26 @@ impl DiskView {
             return Vec::new();
         }
         crate::accretion::find_clumps(
-            &self.dp, &self.dv, &self.dm, &self.dr,
-            2.0 * self.mean_h, crate::orbit::G, 1.0e4,
-            self.com, self.m_remnant, self.r_remnant,
+            &self.dp,
+            &self.dv,
+            &self.dm,
+            &self.dr,
+            2.0 * self.mean_h,
+            crate::orbit::G,
+            1.0e4,
+            self.com,
+            self.m_remnant,
+            self.r_remnant,
         )
     }
 
     /// The clumps that are real accreting moonlets: self-bound, outside Roche (`accretes`), and resolved by
     /// at least `min_members` particles. An inside-Roche clump is tidal debris that shreds, not a moon.
     pub fn moonlets(&self, min_members: usize) -> Vec<crate::accretion::Clump> {
-        self.clumps().into_iter().filter(|c| c.accretes() && c.members.len() >= min_members).collect()
+        self.clumps()
+            .into_iter()
+            .filter(|c| c.accretes() && c.members.len() >= min_members)
+            .collect()
     }
 }
 
@@ -686,9 +828,18 @@ pub fn disk_stats_json(particles: &[SphParticle]) -> String {
         return String::from("null");
     };
     let disk = d.disk_mass();
-    let earth_pct = if disk > 0.0 { 100.0 * d.disk_prov0 / disk } else { 0.0 };
+    let earth_pct = if disk > 0.0 {
+        100.0 * d.disk_prov0 / disk
+    } else {
+        0.0
+    };
     // Moon candidate: the largest self-bound clump in the disk (the verified accretion operator).
-    let biggest = d.clumps().iter().filter(|c| c.accretes()).map(|c| c.mass).fold(0.0, f64::max);
+    let biggest = d
+        .clumps()
+        .iter()
+        .filter(|c| c.accretes())
+        .map(|c| c.mass)
+        .fold(0.0, f64::max);
     format!(
         "{{\"disk\":{:.3},\"earth_pct\":{:.0},\"remnant_km\":{:.0},\"escaped\":{:.3},\"moon\":{:.3}}}",
         disk / M_MOON,
@@ -708,25 +859,37 @@ pub fn moonlet_bodies(particles: &[SphParticle]) -> Vec<(glam::DVec3, f64, f64)>
     let Some(d) = DiskView::of(particles) else {
         return Vec::new();
     };
-    d.moonlets(3).iter().map(|c| (c.com_pos, c.radius, c.mass)).collect()
+    d.moonlets(3)
+        .iter()
+        .map(|c| (c.com_pos, c.radius, c.mass))
+        .collect()
 }
 
 /// docs/42 escape-check: the LARGEST self-bound disk clump's orbit about the remnant — distance, speed,
 /// specific orbital energy (bound iff < 0), semi-major axis, mass, eccentricity, in-plane angle. This tracks
 /// the actual proto-Moon's trajectory (is it receding / unbinding?) rather than aggregate disk mass.
-pub fn largest_moonlet_orbit(particles: &[SphParticle]) -> Option<(f64, f64, f64, f64, f64, f64, f64)> {
+pub fn largest_moonlet_orbit(
+    particles: &[SphParticle],
+) -> Option<(f64, f64, f64, f64, f64, f64, f64)> {
     if particles.len() < 2 {
         return None;
     }
     let d = DiskView::of(particles)?;
-    let biggest = d.moonlets(3).into_iter().max_by(|a, b| a.mass.total_cmp(&b.mass))?;
+    let biggest = d
+        .moonlets(3)
+        .into_iter()
+        .max_by(|a, b| a.mass.total_cmp(&b.mass))?;
     // Its orbit about the remnant (COM-relative).
     let rel_p = biggest.com_pos - d.com;
     let rel_v = biggest.com_vel - d.v_com;
     let r = rel_p.length();
     let v = rel_v.length();
     let energy = 0.5 * v * v - d.mu / r.max(1.0); // specific orbital energy: bound iff < 0
-    let a = if energy < 0.0 { -d.mu / (2.0 * energy) } else { f64::INFINITY };
+    let a = if energy < 0.0 {
+        -d.mu / (2.0 * energy)
+    } else {
+        f64::INFINITY
+    };
     // Angular momentum & eccentricity — does it actually ORBIT, or plunge/escape near-radially? e→1 = radial
     // (goes straight out, barely returns); e well below 1 = a real ellipse. h = |rel_p × rel_v|.
     let h = rel_p.cross(rel_v).length();
@@ -749,7 +912,10 @@ pub fn disk_moonlets(particles: &[SphParticle], earth_radius: f64) -> Vec<crate:
     let moonlets: Vec<crate::tides::Moonlet> = d
         .moonlets(2)
         .iter()
-        .map(|c| crate::tides::Moonlet { a: 3.8 * earth_radius, mass: c.mass })
+        .map(|c| crate::tides::Moonlet {
+            a: 3.8 * earth_radius,
+            mass: c.mass,
+        })
         .collect();
     if !moonlets.is_empty() {
         return moonlets;
@@ -758,12 +924,14 @@ pub fn disk_moonlets(particles: &[SphParticle], earth_radius: f64) -> Vec<crate:
     // so promote the whole bound-disk mass to one moonlet (the secular tidal law then circularises it).
     let disk_mass = d.disk_mass();
     if disk_mass > 0.0 {
-        vec![crate::tides::Moonlet { a: 3.8 * earth_radius, mass: disk_mass }]
+        vec![crate::tides::Moonlet {
+            a: 3.8 * earth_radius,
+            mass: disk_mass,
+        }]
     } else {
         Vec::new()
     }
 }
-
 
 /// Total energy of a read-back particle set: (kinetic, internal, gravitational-PE) in J. The direct signal of
 /// energy conservation — a giant impact should hold it to a few % (offline `impact-run`: 0.3–0.5 %); a
@@ -806,9 +974,19 @@ fn body_radius(b: &crate::hydrostatic::HydroBody) -> f64 {
 }
 // Emit `b`'s particles translated by `offset` with a uniform bulk `vel` (the body's own relax velocities are
 // internal settling motion, not shown — the collision IC is Earth-at-rest / Theia-infall).
-fn push_body(out: &mut Vec<SphParticle>, b: &crate::hydrostatic::HydroBody, prov: u32, offset: glam::DVec3, vel: glam::DVec3) {
+fn push_body(
+    out: &mut Vec<SphParticle>,
+    b: &crate::hydrostatic::HydroBody,
+    prov: u32,
+    offset: glam::DVec3,
+    vel: glam::DVec3,
+) {
     for i in 0..b.pos.len() {
-        let mat = if b.eos[i].rho0() > 5000.0 { MAT_IRON } else { MAT_BASALT };
+        let mat = if b.eos[i].rho0() > 5000.0 {
+            MAT_IRON
+        } else {
+            MAT_BASALT
+        };
         let p = b.pos[i] + offset;
         out.push(SphParticle {
             pos: [p.x as f32, p.y as f32, p.z as f32],
@@ -881,7 +1059,6 @@ impl SphAssembly {
     }
 }
 
-
 /// Recover each EOS slot's MATERIAL NAME by inverting the dedup (docs/58 promote-to-body).
 ///
 /// `material_index` dedups the shared table by reference density, because rho0 IS a material's identity —
@@ -939,7 +1116,11 @@ impl GpuSph {
     pub fn new(device: &wgpu::Device, capacity: u32) -> Self {
         let cap = capacity.max(1);
         let store = crate::gpu_store::ParticleStore::<SphParticle>::new(
-            device, cap, wgpu::BufferUsages::VERTEX, "sph-particles");
+            device,
+            cap,
+            wgpu::BufferUsages::VERTEX,
+            "sph-particles",
+        );
         let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("sph-params"),
             size: std::mem::size_of::<SphParams>() as u64,
@@ -952,14 +1133,49 @@ impl GpuSph {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let acc = device.create_buffer(&wgpu::BufferDescriptor { label: Some("sph-acc"), size: (cap as u64) * 16, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
-        let dudt = device.create_buffer(&wgpu::BufferDescriptor { label: Some("sph-dudt"), size: (cap as u64) * 4, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
-        let signal = device.create_buffer(&wgpu::BufferDescriptor { label: Some("sph-signal"), size: (cap as u64) * 4, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
-        let grid_count = device.create_buffer(&wgpu::BufferDescriptor { label: Some("sph-grid-count"), size: (SPH_TABLE_SIZE as u64) * 4, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
-        let grid_bucket = device.create_buffer(&wgpu::BufferDescriptor { label: Some("sph-grid-bucket"), size: (SPH_TABLE_SIZE as u64) * (SPH_BUCKET_K as u64) * 4, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
+        let acc = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sph-acc"),
+            size: (cap as u64) * 16,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let dudt = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sph-dudt"),
+            size: (cap as u64) * 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let signal = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sph-signal"),
+            size: (cap as u64) * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let grid_count = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sph-grid-count"),
+            size: (SPH_TABLE_SIZE as u64) * 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let grid_bucket = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sph-grid-bucket"),
+            size: (SPH_TABLE_SIZE as u64) * (SPH_BUCKET_K as u64) * 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
 
-        let ext_mass = device.create_buffer(&wgpu::BufferDescriptor { label: Some("sph-ext-mass"), size: (MAX_EXT_BODIES as u64) * 16, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-        let merge_target = device.create_buffer(&wgpu::BufferDescriptor { label: Some("sph-merge-target"), size: (cap as u64) * 4, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
+        let ext_mass = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sph-ext-mass"),
+            size: (MAX_EXT_BODIES as u64) * 16,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let merge_target = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sph-merge-target"),
+            size: (cap as u64) * 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("sph-step"),
@@ -968,13 +1184,26 @@ impl GpuSph {
         let storage = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only }, has_dynamic_offset: false, min_binding_size: None },
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
             count: None,
         };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("sph-layout"),
             entries: &[
-                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
                 storage(1, false), // particles
                 storage(2, true),  // eos
                 storage(3, false), // acc
@@ -986,37 +1215,118 @@ impl GpuSph {
                 storage(9, false), // merge_target — the de-resolution contact law (docs/08/44)
             ],
         });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("sph-pipeline-layout"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
-        let mk = |entry: &str| device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some(entry), layout: Some(&pipeline_layout), module: &shader, entry_point: Some(entry), compilation_options: Default::default(), cache: None });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sph-pipeline-layout"),
+            bind_group_layouts: &[&layout],
+            push_constant_ranges: &[],
+        });
+        let mk = |entry: &str| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&pipeline_layout),
+                module: &shader,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("sph-bind"),
             layout: &layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: params_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: store.buffer().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: eos_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: acc.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: dudt.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: grid_count.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 6, resource: grid_bucket.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 7, resource: signal.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 8, resource: ext_mass.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 9, resource: merge_target.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: store.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: eos_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: acc.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: dudt.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: grid_count.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: grid_bucket.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: signal.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: ext_mass.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: merge_target.as_entire_binding(),
+                },
             ],
         });
         GpuSph {
-            clear: mk("cs_grid_clear"), insert: mk("cs_grid_insert"), density: mk("cs_density"), forces: mk("cs_forces"),
-            kick_drift: mk("cs_kick_drift"), kick: mk("cs_kick"), relax_k: mk("cs_relax"),
-            merge_pick: mk("cs_merge_pick"), merge_apply: mk("cs_merge_apply"), merge_retire: mk("cs_merge_retire"),
-            store, params_buf, eos_buf, acc, dudt, signal, grid_count, grid_bucket, ext_mass, merge_target, bind,
-            params: SphParams { n: 0, softening: 0.0, av_alpha: 1.0, av_beta: 2.0, cell_size: 1.0, table_mask: SPH_TABLE_SIZE - 1, bucket_k: SPH_BUCKET_K, dt: 0.0, damp: 1.0, omega: 0.0, n_ext: 0, merge_budget: 0, bulk_cr: [0.0; 4], bulk_vm: [0.0; 4] },
+            clear: mk("cs_grid_clear"),
+            insert: mk("cs_grid_insert"),
+            density: mk("cs_density"),
+            forces: mk("cs_forces"),
+            kick_drift: mk("cs_kick_drift"),
+            kick: mk("cs_kick"),
+            relax_k: mk("cs_relax"),
+            merge_pick: mk("cs_merge_pick"),
+            merge_apply: mk("cs_merge_apply"),
+            merge_retire: mk("cs_merge_retire"),
+            store,
+            params_buf,
+            eos_buf,
+            acc,
+            dudt,
+            signal,
+            grid_count,
+            grid_bucket,
+            ext_mass,
+            merge_target,
+            bind,
+            params: SphParams {
+                n: 0,
+                softening: 0.0,
+                av_alpha: 1.0,
+                av_beta: 2.0,
+                cell_size: 1.0,
+                table_mask: SPH_TABLE_SIZE - 1,
+                bucket_k: SPH_BUCKET_K,
+                dt: 0.0,
+                damp: 1.0,
+                omega: 0.0,
+                n_ext: 0,
+                merge_budget: 0,
+                bulk_cr: [0.0; 4],
+                bulk_vm: [0.0; 4],
+            },
         }
     }
 
     /// Upload a particle set (≤ capacity) + the material EOS TABLE (≤ [`MAX_MATERIALS`]; each particle's `mat`
     /// indexes it), and set the physics params. `cell_size` is the max smoothing length (set here from the
     /// particles so the 27-cell grid scan stays exact). Was fixed at two materials — `[basalt, iron]`.
-    pub fn upload(&mut self, queue: &wgpu::Queue, particles: &[SphParticle], eos: &[SphEos], softening: f32) {
+    pub fn upload(
+        &mut self,
+        queue: &wgpu::Queue,
+        particles: &[SphParticle],
+        eos: &[SphEos],
+        softening: f32,
+    ) {
         // Clamp-to-capacity + write-at-0 + set-count IS the shared container's `replace` (docs/50).
         self.store.replace(queue, particles);
         let n = self.store.count() as usize;
@@ -1059,7 +1369,12 @@ impl GpuSph {
         vel: glam::DVec3,
         mass: f64,
     ) {
-        self.params.bulk_cr = [center.x as f32, center.y as f32, center.z as f32, r_core as f32];
+        self.params.bulk_cr = [
+            center.x as f32,
+            center.y as f32,
+            center.z as f32,
+            r_core as f32,
+        ];
         self.params.bulk_vm = [vel.x as f32, vel.y as f32, vel.z as f32, mass as f32];
         queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
     }
@@ -1069,9 +1384,20 @@ impl GpuSph {
     /// analogue of `set_bulk`'s planet sphere — a huge planet is locally flat, and a patch-local frame keeps
     /// f32 precision where the 1 m grains are (a huge-R sphere would form ~R-magnitude f32 coords and lose
     /// ~0.5 m ULP; docs/39 open-decision #4). Encoded as `bulk_cr.w = -1` (the planar marker).
-    pub fn set_bulk_planar(&mut self, queue: &wgpu::Queue, plane_point: glam::DVec3, up: glam::DVec3, g: f64) {
+    pub fn set_bulk_planar(
+        &mut self,
+        queue: &wgpu::Queue,
+        plane_point: glam::DVec3,
+        up: glam::DVec3,
+        g: f64,
+    ) {
         let n = up.normalize_or(glam::DVec3::Y);
-        self.params.bulk_cr = [plane_point.x as f32, plane_point.y as f32, plane_point.z as f32, -1.0];
+        self.params.bulk_cr = [
+            plane_point.x as f32,
+            plane_point.y as f32,
+            plane_point.z as f32,
+            -1.0,
+        ];
         self.params.bulk_vm = [n.x as f32, n.y as f32, n.z as f32, g as f32];
         queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
     }
@@ -1083,7 +1409,11 @@ impl GpuSph {
     ///
     /// Overflow past [`MAX_EXT_BODIES`] is DROPPED — flagged, not silent: the returned count is how many
     /// were actually uploaded, so a caller can see it lost one.
-    pub fn set_external_masses(&mut self, queue: &wgpu::Queue, bodies: &[(glam::DVec3, f64)]) -> usize {
+    pub fn set_external_masses(
+        &mut self,
+        queue: &wgpu::Queue,
+        bodies: &[(glam::DVec3, f64)],
+    ) -> usize {
         let n = bodies.len().min(MAX_EXT_BODIES);
         let packed: Vec<[f32; 4]> = bodies[..n]
             .iter()
@@ -1126,7 +1456,10 @@ impl GpuSph {
     }
 
     fn pass(&self, enc: &mut wgpu::CommandEncoder, pipe: &wgpu::ComputePipeline, threads: u32) {
-        let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
+        let mut p = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: None,
+            timestamp_writes: None,
+        });
         p.set_pipeline(pipe);
         p.set_bind_group(0, &self.bind, &[]);
         p.dispatch_workgroups(threads.div_ceil(64), 1, 1);
@@ -1201,7 +1534,8 @@ mod tests {
 
     #[test]
     fn sph_eos_matches_the_shader_field_for_field() {
-        let rust = offsets!(SphEos, rho0, a, b, cap_a, cap_b, e0, e_iv, e_cv, alpha, beta, _p0, _p1);
+        let rust =
+            offsets!(SphEos, rho0, a, b, cap_a, cap_b, e0, e_iv, e_cv, alpha, beta, _p0, _p1);
         assert_eq!(
             rust,
             wgsl_offsets(&wgsl_typed(SHADER, "Eos")),
@@ -1215,8 +1549,21 @@ mod tests {
     #[test]
     fn sph_params_matches_the_shader_field_for_field() {
         let rust = offsets!(
-            SphParams, n, softening, av_alpha, av_beta, cell_size, table_mask, bucket_k, dt, damp,
-            omega, n_ext, merge_budget, bulk_cr, bulk_vm,
+            SphParams,
+            n,
+            softening,
+            av_alpha,
+            av_beta,
+            cell_size,
+            table_mask,
+            bucket_k,
+            dt,
+            damp,
+            omega,
+            n_ext,
+            merge_budget,
+            bulk_cr,
+            bulk_vm,
         );
         assert_eq!(
             rust,
@@ -1278,20 +1625,34 @@ mod ground_cap_tests {
         let site = glam::Vec3::new(0.0, 0.0, 0.0); // impact at the patch centre (world origin)
         let (parts, eos, floor_y) = promote_ground_cap(&world, &mats, site, 3.0, 2.0);
 
-        assert!(!parts.is_empty(), "the impact region promotes to real particles");
+        assert!(
+            !parts.is_empty(),
+            "the impact region promotes to real particles"
+        );
         // LOCALIZED to the impact region (a patch, not the whole world).
         assert!(
-            parts.iter().all(|p| (p.pos[0] * p.pos[0] + p.pos[2] * p.pos[2]).sqrt() <= 3.5),
+            parts
+                .iter()
+                .all(|p| (p.pos[0] * p.pos[0] + p.pos[2] * p.pos[2]).sqrt() <= 3.5),
             "the promoted cap is localized to the impact region"
         );
         // PATCH-LOCAL frame: meter-scale coordinates, f32-clean (NOT planet-scale 6.4e6).
-        assert!(parts.iter().all(|p| p.pos[1].abs() < 10.0), "the frame is patch-local (meter scale)");
+        assert!(
+            parts.iter().all(|p| p.pos[1].abs() < 10.0),
+            "the frame is patch-local (meter scale)"
+        );
         // The terrain's OWN material — basalt's density + a single EOS, not a defaulted rock.
         assert_eq!(eos.len(), 1, "one material in the flat basalt patch");
         let density = mats[basalt].density;
-        assert!(parts.iter().all(|p| (p.mass - density).abs() < 1.0), "mass = voxel density × 1 m³");
+        assert!(
+            parts.iter().all(|p| (p.mass - density).abs() < 1.0),
+            "mass = voxel density × 1 m³"
+        );
         // The planar floor sits BELOW the impact surface (it's the un-seen base the cap rests on).
-        assert!(floor_y < 0.5, "the planar floor is below the surface, got {floor_y}");
+        assert!(
+            floor_y < 0.5,
+            "the planar floor is below the surface, got {floor_y}"
+        );
     }
 }
 
@@ -1317,19 +1678,35 @@ mod impact_geometry_tests {
         let (earth, theia) = build_impact_bodies_from(&def, 800);
         let mut field: Vec<SphParticle> = Vec::new();
         push_body(&mut field, &earth, 0, DVec3::ZERO, DVec3::ZERO);
-        push_body(&mut field, &theia, 1, DVec3::new(4.0e7, 0.0, 0.0), DVec3::ZERO);
+        push_body(
+            &mut field,
+            &theia,
+            1,
+            DVec3::new(4.0e7, 0.0, 0.0),
+            DVec3::ZERO,
+        );
 
         let closest_approach = |particles: &[SphParticle]| -> (f64, f64) {
             let (assembled, ..) = assemble_from_relaxed_with(&def, particles);
             let body = |prov: u32| {
                 let ps: Vec<&SphParticle> = assembled.iter().filter(|p| p.prov == prov).collect();
                 let m: f64 = ps.iter().map(|p| p.mass as f64).sum();
-                let c: DVec3 = ps.iter()
-                    .map(|p| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64) * p.mass as f64)
-                    .sum::<DVec3>() / m;
-                let v: DVec3 = ps.iter()
-                    .map(|p| DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64) * p.mass as f64)
-                    .sum::<DVec3>() / m;
+                let c: DVec3 = ps
+                    .iter()
+                    .map(|p| {
+                        DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64)
+                            * p.mass as f64
+                    })
+                    .sum::<DVec3>()
+                    / m;
+                let v: DVec3 = ps
+                    .iter()
+                    .map(|p| {
+                        DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64)
+                            * p.mass as f64
+                    })
+                    .sum::<DVec3>()
+                    / m;
                 (c, v, m)
             };
             let (ec, ev, me) = body(0);
@@ -1344,8 +1721,14 @@ mod impact_geometry_tests {
 
         // Clean field: a hit.
         let (q_clean, d_clean) = closest_approach(&field);
-        assert!(q_clean < contact, "the assembled approach must strike: q {q_clean:.3e} vs contact {contact:.3e}");
-        assert!(d_clean < 6.0 * contact, "and start near the bodies, not far away (d {d_clean:.3e})");
+        assert!(
+            q_clean < contact,
+            "the assembled approach must strike: q {q_clean:.3e} vs contact {contact:.3e}"
+        );
+        assert!(
+            d_clean < 6.0 * contact,
+            "and start near the bodies, not far away (d {d_clean:.3e})"
+        );
 
         // Now strand ONE particle of each body twenty radii out — exactly what a relax leaves behind.
         let mut strayed = field.clone();
@@ -1383,8 +1766,12 @@ mod impact_geometry_tests {
     fn a_moon_drop_builds_and_strikes_through_the_same_assembly() {
         use crate::terra::world_def::{ImpactBody, ImpactDef};
         let def = ImpactDef {
-            target: ImpactBody { body: "earth".into() },
-            impactor: ImpactBody { body: "moon".into() },
+            target: ImpactBody {
+                body: "earth".into(),
+            },
+            impactor: ImpactBody {
+                body: "moon".into(),
+            },
             ..ImpactDef::default()
         };
 
@@ -1393,8 +1780,18 @@ mod impact_geometry_tests {
         // "earth" and "moon" were loaded and not proto-Earth/Theia.
         let (earth, moon) = build_impact_bodies_from(&def, 1200);
         let (r_e, r_m) = (def.target.radius_m(), def.impactor.radius_m());
-        assert!((0.85 * r_e..=1.02 * r_e).contains(&body_radius(&earth)), "target is Earth-sized (built {:.3e} vs def {:.3e})", body_radius(&earth), r_e);
-        assert!((0.85 * r_m..=1.02 * r_m).contains(&body_radius(&moon)), "impactor is Moon-sized (built {:.3e} vs def {:.3e})", body_radius(&moon), r_m);
+        assert!(
+            (0.85 * r_e..=1.02 * r_e).contains(&body_radius(&earth)),
+            "target is Earth-sized (built {:.3e} vs def {:.3e})",
+            body_radius(&earth),
+            r_e
+        );
+        assert!(
+            (0.85 * r_m..=1.02 * r_m).contains(&body_radius(&moon)),
+            "impactor is Moon-sized (built {:.3e} vs def {:.3e})",
+            body_radius(&moon),
+            r_m
+        );
 
         // **Seeded mass is UNCOMPRESSED (EOS reference density), a flagged fidelity IOU.**
         // `build_impact_bodies_from` seeds from the Tillotson reference densities (basalt 2700, iron
@@ -1407,28 +1804,59 @@ mod impact_geometry_tests {
         // at a full Earth's resolution is unverified — tracked as the fidelity question for the wiring.
         let m_earth: f64 = earth.mass.iter().sum();
         let m_moon: f64 = moon.mass.iter().sum();
-        assert!((3.0e24..4.5e24).contains(&m_earth), "uncompressed seeded Earth mass (got {m_earth:.3e})");
-        assert!((4.0e22..8.0e22).contains(&m_moon), "uncompressed seeded Moon mass (got {m_moon:.3e})");
-        assert!((40.0..120.0).contains(&(m_earth / m_moon)), "and the real Earth:Moon proportion (got {:.0})", m_earth / m_moon);
+        assert!(
+            (3.0e24..4.5e24).contains(&m_earth),
+            "uncompressed seeded Earth mass (got {m_earth:.3e})"
+        );
+        assert!(
+            (4.0e22..8.0e22).contains(&m_moon),
+            "uncompressed seeded Moon mass (got {m_moon:.3e})"
+        );
+        assert!(
+            (40.0..120.0).contains(&(m_earth / m_moon)),
+            "and the real Earth:Moon proportion (got {:.0})",
+            m_earth / m_moon
+        );
 
         // Assemble as an (unrelaxed) field and confirm the geometry strikes — same helper the birth
         // geometry test uses, now driven by the Earth+Moon def.
         let mut field: Vec<SphParticle> = Vec::new();
         push_body(&mut field, &earth, 0, DVec3::ZERO, DVec3::ZERO);
-        push_body(&mut field, &moon, 1, DVec3::new(4.0e7, 0.0, 0.0), DVec3::ZERO);
+        push_body(
+            &mut field,
+            &moon,
+            1,
+            DVec3::new(4.0e7, 0.0, 0.0),
+            DVec3::ZERO,
+        );
         let (assembled, ..) = assemble_from_relaxed_with(&def, &field);
         let body = |prov: u32| {
             let ps: Vec<&SphParticle> = assembled.iter().filter(|p| p.prov == prov).collect();
             let m: f64 = ps.iter().map(|p| p.mass as f64).sum();
-            let c: DVec3 = ps.iter().map(|p| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64) * p.mass as f64).sum::<DVec3>() / m;
-            let v: DVec3 = ps.iter().map(|p| DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64) * p.mass as f64).sum::<DVec3>() / m;
+            let c: DVec3 = ps
+                .iter()
+                .map(|p| {
+                    DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64) * p.mass as f64
+                })
+                .sum::<DVec3>()
+                / m;
+            let v: DVec3 = ps
+                .iter()
+                .map(|p| {
+                    DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64) * p.mass as f64
+                })
+                .sum::<DVec3>()
+                / m;
             (c, v, m)
         };
         let (ec, ev, me) = body(0);
         let (mc, mv, mm) = body(1);
         let contact = def.target.radius_m() + def.impactor.radius_m();
         let q = crate::orbit::perigee(mc - ec, mv - ev, crate::orbit::G * (me + mm)).unwrap_or(0.0);
-        assert!(q < contact, "the moon-drop assembles into a real strike: perigee {q:.3e} vs contact {contact:.3e}");
+        assert!(
+            q < contact,
+            "the moon-drop assembles into a real strike: perigee {q:.3e} vs contact {contact:.3e}"
+        );
 
         // **WHY this belongs on the deformable-SPH path and not surface cratering.** The reduced-mass
         // impact energy dwarfs the Moon's own gravitational binding, so the impactor cannot survive as
@@ -1450,14 +1878,24 @@ mod impact_geometry_tests {
     fn assemble_at_honours_a_given_live_geometry() {
         use crate::terra::world_def::{ImpactBody, ImpactDef};
         let def = ImpactDef {
-            target: ImpactBody { body: "earth".into() },
-            impactor: ImpactBody { body: "moon".into() },
+            target: ImpactBody {
+                body: "earth".into(),
+            },
+            impactor: ImpactBody {
+                body: "moon".into(),
+            },
             ..ImpactDef::default()
         };
         let (earth, moon) = build_impact_bodies_from(&def, 800);
         let mut field: Vec<SphParticle> = Vec::new();
         push_body(&mut field, &earth, 0, DVec3::ZERO, DVec3::ZERO);
-        push_body(&mut field, &moon, 1, DVec3::new(4.0e7, 0.0, 0.0), DVec3::ZERO);
+        push_body(
+            &mut field,
+            &moon,
+            1,
+            DVec3::new(4.0e7, 0.0, 0.0),
+            DVec3::ZERO,
+        );
 
         // A live approach the N-body integrator might hand over — NOT the canonical b / d0 / v_esc.
         let offset = DVec3::new(1.5e7, 3.0e6, 0.0);
@@ -1467,19 +1905,46 @@ mod impact_geometry_tests {
         let com_vel = |prov: u32| -> (DVec3, DVec3) {
             let ps: Vec<&SphParticle> = out.iter().filter(|p| p.prov == prov).collect();
             let m: f64 = ps.iter().map(|p| p.mass as f64).sum();
-            let c: DVec3 = ps.iter().map(|p| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64) * p.mass as f64).sum::<DVec3>() / m;
-            let v: DVec3 = ps.iter().map(|p| DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64) * p.mass as f64).sum::<DVec3>() / m;
+            let c: DVec3 = ps
+                .iter()
+                .map(|p| {
+                    DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64) * p.mass as f64
+                })
+                .sum::<DVec3>()
+                / m;
+            let v: DVec3 = ps
+                .iter()
+                .map(|p| {
+                    DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64) * p.mass as f64
+                })
+                .sum::<DVec3>()
+                / m;
             (c, v)
         };
         let (ec, ev) = com_vel(0);
         let (mc, mv) = com_vel(1);
         let r_e = def.target.radius_m();
         // Target sits at the frame origin, at rest (spin 0 ⇒ zero COM velocity).
-        assert!(ec.length() < 0.02 * r_e, "target recentred to the origin (got {:.3e})", ec.length());
-        assert!(ev.length() < 1.0, "target at rest in the frame (got {:.3e} m/s)", ev.length());
+        assert!(
+            ec.length() < 0.02 * r_e,
+            "target recentred to the origin (got {:.3e})",
+            ec.length()
+        );
+        assert!(
+            ev.length() < 1.0,
+            "target at rest in the frame (got {:.3e} m/s)",
+            ev.length()
+        );
         // Impactor carries EXACTLY the requested live offset and relative velocity — no synthesized approach.
-        assert!((mc - ec - offset).length() < 0.02 * r_e, "impactor on the live offset ({:.3e} off)", (mc - ec - offset).length());
-        assert!((mv - ev - rel_vel).length() < 1.0, "impactor carries the live relative velocity");
+        assert!(
+            (mc - ec - offset).length() < 0.02 * r_e,
+            "impactor on the live offset ({:.3e} off)",
+            (mc - ec - offset).length()
+        );
+        assert!(
+            (mv - ev - rel_vel).length() < 1.0,
+            "impactor carries the live relative velocity"
+        );
     }
 
     /// **The live hand-off stages two PARTICALIZED bodies with no definition id.** The bodies are built
@@ -1515,8 +1980,14 @@ mod impact_geometry_tests {
             m_matter.total_mass()
         );
         let d = (ic - tc).length();
-        assert!((d - sep).abs() / sep < 0.02, "staged at the requested separation (got {d:.3e} vs {sep:.3e})");
-        assert!(out.iter().all(|p| p.vel == [0.0; 3]), "both bodies staged at rest");
+        assert!(
+            (d - sep).abs() / sep < 0.02,
+            "staged at the requested separation (got {d:.3e} vs {sep:.3e})"
+        );
+        assert!(
+            out.iter().all(|p| p.vel == [0.0; 3]),
+            "both bodies staged at rest"
+        );
         // The target's real differentiation reaches the GPU's material slots: an iron core AND a
         // rocky mantle, not one assumed material.
         let target_mats: Vec<u32> = out.iter().filter(|p| p.prov == 0).map(|p| p.mat).collect();
@@ -1543,19 +2014,34 @@ mod impact_geometry_tests {
             asm.eos.len()
         );
         // Every particle's `mat` is a valid index into that table.
-        assert!(asm.particles.iter().all(|p| (p.mat as usize) < asm.eos.len()), "every mat is a valid index");
+        assert!(
+            asm.particles
+                .iter()
+                .all(|p| (p.mat as usize) < asm.eos.len()),
+            "every mat is a valid index"
+        );
         // Both source bodies are present with distinct provenance.
         assert!(
             asm.particles.iter().any(|p| p.prov == 0) && asm.particles.iter().any(|p| p.prov == 1),
             "both bodies present with distinct source provenance"
         );
         // The iron-core particles index the iron EOS entry (ρ₀ 7850), not a defaulted material.
-        let iron = asm.eos.iter().position(|e| (e.rho0 - 7850.0).abs() < 50.0).expect("iron is in the table");
-        assert!(asm.particles.iter().any(|p| p.mat as usize == iron), "core particles index the iron EOS");
+        let iron = asm
+            .eos
+            .iter()
+            .position(|e| (e.rho0 - 7850.0).abs() < 50.0)
+            .expect("iron is in the table");
+        assert!(
+            asm.particles.iter().any(|p| p.mat as usize == iron),
+            "core particles index the iron EOS"
+        );
         // Mass is conserved to the two real bodies.
         let m: f64 = asm.particles.iter().map(|p| p.mass as f64).sum();
         let real = crate::planet::earth().total_mass() + crate::planet::moon().total_mass();
-        assert!((m - real).abs() / real < 0.03, "N-body mass conserved (got {m:.3e} vs {real:.3e})");
+        assert!(
+            (m - real).abs() / real < 0.03,
+            "N-body mass conserved (got {m:.3e} vs {real:.3e})"
+        );
     }
 
     /// **`assemble_from_relaxed_n` places EVERY body at its own live geometry, and spins about ANY axis
@@ -1572,17 +2058,41 @@ mod impact_geometry_tests {
 
         let placements = [
             // Target at the origin, spun about the X axis — an off-axis spin a +z-only path cannot express.
-            BodyPlacement { offset: DVec3::ZERO, vel: DVec3::ZERO, spin: DVec3::new(3.0e-4, 0.0, 0.0) },
-            BodyPlacement { offset: DVec3::new(1.5e7, 2.0e6, 0.0), vel: DVec3::new(-8000.0, 0.0, 0.0), spin: DVec3::ZERO },
-            BodyPlacement { offset: DVec3::new(0.0, 1.6e7, 0.0), vel: DVec3::new(0.0, -7000.0, 0.0), spin: DVec3::ZERO },
+            BodyPlacement {
+                offset: DVec3::ZERO,
+                vel: DVec3::ZERO,
+                spin: DVec3::new(3.0e-4, 0.0, 0.0),
+            },
+            BodyPlacement {
+                offset: DVec3::new(1.5e7, 2.0e6, 0.0),
+                vel: DVec3::new(-8000.0, 0.0, 0.0),
+                spin: DVec3::ZERO,
+            },
+            BodyPlacement {
+                offset: DVec3::new(0.0, 1.6e7, 0.0),
+                vel: DVec3::new(0.0, -7000.0, 0.0),
+                spin: DVec3::ZERO,
+            },
         ];
         let (out, _, _) = assemble_from_relaxed_n(&asm.particles, &placements);
 
         let com_vel = |prov: u32| -> (DVec3, DVec3) {
             let ps: Vec<&SphParticle> = out.iter().filter(|p| p.prov == prov).collect();
             let mm: f64 = ps.iter().map(|p| p.mass as f64).sum();
-            let c = ps.iter().map(|p| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64) * p.mass as f64).sum::<DVec3>() / mm;
-            let v = ps.iter().map(|p| DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64) * p.mass as f64).sum::<DVec3>() / mm;
+            let c = ps
+                .iter()
+                .map(|p| {
+                    DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64) * p.mass as f64
+                })
+                .sum::<DVec3>()
+                / mm;
+            let v = ps
+                .iter()
+                .map(|p| {
+                    DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64) * p.mass as f64
+                })
+                .sum::<DVec3>()
+                / mm;
             (c, v)
         };
         let (c0, v0) = com_vel(0);
@@ -1590,14 +2100,36 @@ mod impact_geometry_tests {
         let (c2, v2) = com_vel(2);
         let r_e = crate::planet::earth().radius();
         assert!(c0.length() < 0.02 * r_e, "target recentred to the origin");
-        assert!((c1 - c0 - placements[1].offset).length() < 0.02 * r_e, "moon 1 at its own offset");
-        assert!((c2 - c0 - placements[2].offset).length() < 0.02 * r_e, "moon 2 at its own offset");
-        assert!((v1 - v0 - placements[1].vel).length() < 1.0, "moon 1 carries its own velocity");
-        assert!((v2 - v0 - placements[2].vel).length() < 1.0, "moon 2 carries its own velocity");
+        assert!(
+            (c1 - c0 - placements[1].offset).length() < 0.02 * r_e,
+            "moon 1 at its own offset"
+        );
+        assert!(
+            (c2 - c0 - placements[2].offset).length() < 0.02 * r_e,
+            "moon 2 at its own offset"
+        );
+        assert!(
+            (v1 - v0 - placements[1].vel).length() < 1.0,
+            "moon 1 carries its own velocity"
+        );
+        assert!(
+            (v2 - v0 - placements[2].vel).length() < 1.0,
+            "moon 2 carries its own velocity"
+        );
         // An X-axis spin gives the target particles a Z velocity — impossible for a +z-only spin.
-        let max_vz = out.iter().filter(|p| p.prov == 0).map(|p| p.vel[2].abs()).fold(0.0f32, f32::max);
-        assert!(max_vz > 1.0, "an off-axis spin produces vz — spin is a VECTOR, not +z (max vz {max_vz})");
-        assert!(v0.length() < 1.0, "spin is internal — no net bulk velocity on the target");
+        let max_vz = out
+            .iter()
+            .filter(|p| p.prov == 0)
+            .map(|p| p.vel[2].abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_vz > 1.0,
+            "an off-axis spin produces vz — spin is a VECTOR, not +z (max vz {max_vz})"
+        );
+        assert!(
+            v0.length() < 1.0,
+            "spin is internal — no net bulk velocity on the target"
+        );
     }
 
     /// **`build_far_apart_n` particalizes any bodies and separates them for relax (docs/58 #7).** Earth + Moon
@@ -1606,15 +2138,30 @@ mod impact_geometry_tests {
     fn build_far_apart_n_particalizes_and_separates_the_bodies() {
         let (earth, moon) = (crate::planet::earth(), crate::planet::moon());
         let (parts, eos, soft, dt) = build_far_apart_n(&[(&earth, 1500), (&moon, 300)], 40.0);
-        assert!(eos.len() >= 3, "shared N-material EOS table (got {})", eos.len());
-        assert!(soft > 0.0 && dt > 0.0, "positive softening ({soft:.2e}) and relax dt ({dt:.2e})");
+        assert!(
+            eos.len() >= 3,
+            "shared N-material EOS table (got {})",
+            eos.len()
+        );
+        assert!(
+            soft > 0.0 && dt > 0.0,
+            "positive softening ({soft:.2e}) and relax dt ({dt:.2e})"
+        );
         let com = |prov: u32| {
             let ps: Vec<&SphParticle> = parts.iter().filter(|p| p.prov == prov).collect();
             let m: f64 = ps.iter().map(|p| p.mass as f64).sum();
-            ps.iter().map(|p| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64) * p.mass as f64).sum::<DVec3>() / m
+            ps.iter()
+                .map(|p| {
+                    DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64) * p.mass as f64
+                })
+                .sum::<DVec3>()
+                / m
         };
         let sep = (com(1) - com(0)).length();
-        assert!(sep > 10.0 * earth.radius(), "bodies placed far apart for relax (sep {sep:.2e})");
+        assert!(
+            sep > 10.0 * earth.radius(),
+            "bodies placed far apart for relax (sep {sep:.2e})"
+        );
     }
 
     /// **The LIVE hand-off's whole chain: generic staging, then assembly on a live geometry, N materials
@@ -1634,7 +2181,11 @@ mod impact_geometry_tests {
         let n_i = ((m_matter.total_mass() / m_particle).round() as usize).max(50);
         let (staged, eos, softening, relax_dt) =
             build_far_apart_n(&[(&e_matter, n_t), (&m_matter, n_i)], 40.0);
-        assert!((3..=MAX_MATERIALS).contains(&eos.len()), "a shared N-material table (got {})", eos.len());
+        assert!(
+            (3..=MAX_MATERIALS).contains(&eos.len()),
+            "a shared N-material table (got {})",
+            eos.len()
+        );
         assert!(softening > 0.0 && relax_dt > 0.0, "usable relax parameters");
 
         // A live approach the N-body integrator might hand over, plus a target spin whose axis is NOT
@@ -1642,14 +2193,25 @@ mod impact_geometry_tests {
         let offset = DVec3::new(1.5e7, 3.0e6, 0.0);
         let rel_vel = DVec3::new(-9000.0, 500.0, 0.0);
         let placements = [
-            BodyPlacement { offset: DVec3::ZERO, vel: DVec3::ZERO, spin: DVec3::new(2.0e-5, 0.0, 7.0e-5) },
-            BodyPlacement { offset, vel: rel_vel, spin: DVec3::ZERO },
+            BodyPlacement {
+                offset: DVec3::ZERO,
+                vel: DVec3::ZERO,
+                spin: DVec3::new(2.0e-5, 0.0, 7.0e-5),
+            },
+            BodyPlacement {
+                offset,
+                vel: rel_vel,
+                spin: DVec3::ZERO,
+            },
         ];
         let (out, _, _) = assemble_from_relaxed_n(&staged, &placements);
 
         // The assembly repositions; the materials ride the particles.
         assert_eq!(out.len(), staged.len(), "no particle lost on the hand-off");
-        assert!(out.iter().all(|p| (p.mat as usize) < eos.len()), "every mat still indexes the kept table");
+        assert!(
+            out.iter().all(|p| (p.mat as usize) < eos.len()),
+            "every mat still indexes the kept table"
+        );
         let (tc, tm, _) = body_bulk(&out, 0);
         let (ic, im, _) = body_bulk(&out, 1);
         assert!(
@@ -1660,16 +2222,34 @@ mod impact_geometry_tests {
             (im - m_matter.total_mass()).abs() / m_matter.total_mass() < 0.03,
             "impactor keeps its matter's real mass (got {im:.3e})"
         );
-        assert!((ic - tc - offset).length() < 0.02 * e_matter.radius(), "impactor on the live offset");
+        assert!(
+            (ic - tc - offset).length() < 0.02 * e_matter.radius(),
+            "impactor on the live offset"
+        );
         let mean_vel = |prov: u32| -> DVec3 {
             let ps: Vec<&SphParticle> = out.iter().filter(|p| p.prov == prov).collect();
             let mm: f64 = ps.iter().map(|p| p.mass as f64).sum();
-            ps.iter().map(|p| DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64) * p.mass as f64).sum::<DVec3>() / mm
+            ps.iter()
+                .map(|p| {
+                    DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64) * p.mass as f64
+                })
+                .sum::<DVec3>()
+                / mm
         };
-        assert!((mean_vel(1) - mean_vel(0) - rel_vel).length() < 1.0, "impactor carries the live relative velocity");
+        assert!(
+            (mean_vel(1) - mean_vel(0) - rel_vel).length() < 1.0,
+            "impactor carries the live relative velocity"
+        );
         // The spin's x component gives target particles a vz no +z-only spin could produce.
-        let max_vz = out.iter().filter(|p| p.prov == 0).map(|p| p.vel[2].abs()).fold(0.0f32, f32::max);
-        assert!(max_vz > 1.0, "the off-axis spin component reaches the target (max vz {max_vz})");
+        let max_vz = out
+            .iter()
+            .filter(|p| p.prov == 0)
+            .map(|p| p.vel[2].abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_vz > 1.0,
+            "the off-axis spin component reaches the target (max vz {max_vz})"
+        );
     }
 
     /// **The dropped-moon physics pin, ported from the retired CPU `Aggregate` path (docs/58 #7,
@@ -1725,8 +2305,14 @@ mod impact_geometry_tests {
         // from the shared table its `mat` indexes (the exact reverse of `SphEos::from_tillotson`).
         let to_hydro = |parts: &[SphParticle], soft: f32| -> HydroBody {
             HydroBody {
-                pos: parts.iter().map(|p| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64)).collect(),
-                vel: parts.iter().map(|p| DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64)).collect(),
+                pos: parts
+                    .iter()
+                    .map(|p| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64))
+                    .collect(),
+                vel: parts
+                    .iter()
+                    .map(|p| DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64))
+                    .collect(),
                 mass: parts.iter().map(|p| p.mass as f64).collect(),
                 u: parts.iter().map(|p| p.u as f64).collect(),
                 eos: parts
@@ -1734,10 +2320,16 @@ mod impact_geometry_tests {
                     .map(|p| {
                         let e = &eos_table[p.mat as usize];
                         crate::eos::Eos::Tillotson(crate::eos::Tillotson {
-                            rho0: e.rho0 as f64, a: e.a as f64, b: e.b as f64,
-                            cap_a: e.cap_a as f64, cap_b: e.cap_b as f64, e0: e.e0 as f64,
-                            e_iv: e.e_iv as f64, e_cv: e.e_cv as f64,
-                            alpha: e.alpha as f64, beta: e.beta as f64,
+                            rho0: e.rho0 as f64,
+                            a: e.a as f64,
+                            b: e.b as f64,
+                            cap_a: e.cap_a as f64,
+                            cap_b: e.cap_b as f64,
+                            e0: e.e0 as f64,
+                            e_iv: e.e_iv as f64,
+                            e_cv: e.e_cv as f64,
+                            alpha: e.alpha as f64,
+                            beta: e.beta as f64,
                         })
                     })
                     .collect(),
@@ -1756,8 +2348,16 @@ mod impact_geometry_tests {
             .iter()
             .enumerate()
             .map(|(i, p)| SphParticle {
-                pos: [field.pos[i].x as f32, field.pos[i].y as f32, field.pos[i].z as f32],
-                vel: [field.vel[i].x as f32, field.vel[i].y as f32, field.vel[i].z as f32],
+                pos: [
+                    field.pos[i].x as f32,
+                    field.pos[i].y as f32,
+                    field.pos[i].z as f32,
+                ],
+                vel: [
+                    field.vel[i].x as f32,
+                    field.vel[i].y as f32,
+                    field.vel[i].z as f32,
+                ],
                 u: field.u[i] as f32,
                 rho: field.rho[i] as f32,
                 ..*p
@@ -1774,13 +2374,25 @@ mod impact_geometry_tests {
         let d0 = 1.35 * contact;
         let v0 = (2.0 * mu * (1.0 / d0 - 1.0 / 3.844e8)).sqrt();
         let placements = [
-            BodyPlacement { offset: DVec3::ZERO, vel: DVec3::ZERO, spin: DVec3::ZERO },
-            BodyPlacement { offset: DVec3::new(0.0, d0, 0.0), vel: DVec3::new(0.0, -v0, 0.0), spin: DVec3::ZERO },
+            BodyPlacement {
+                offset: DVec3::ZERO,
+                vel: DVec3::ZERO,
+                spin: DVec3::ZERO,
+            },
+            BodyPlacement {
+                offset: DVec3::new(0.0, d0, 0.0),
+                vel: DVec3::new(0.0, -v0, 0.0),
+                spin: DVec3::ZERO,
+            },
         ];
         let (assembled, soft2, _shock_dt) = assemble_from_relaxed_n(&relaxed, &placements);
 
         let temp_of = |p: &SphParticle| p.u as f64 / sh_by_mat[p.mat as usize];
-        let t_moon_before = assembled.iter().filter(|p| p.prov == 1).map(&temp_of).fold(0.0, f64::max);
+        let t_moon_before = assembled
+            .iter()
+            .filter(|p| p.prov == 1)
+            .map(&temp_of)
+            .fold(0.0, f64::max);
 
         // The collision plays out on the CPU KDK twin with the adaptive Courant dt (the shock
         // compresses, c rises, dt shrinks; same discipline as every native impact run here).
@@ -1799,8 +2411,16 @@ mod impact_geometry_tests {
             .iter()
             .enumerate()
             .map(|(i, p)| SphParticle {
-                pos: [body.pos[i].x as f32, body.pos[i].y as f32, body.pos[i].z as f32],
-                vel: [body.vel[i].x as f32, body.vel[i].y as f32, body.vel[i].z as f32],
+                pos: [
+                    body.pos[i].x as f32,
+                    body.pos[i].y as f32,
+                    body.pos[i].z as f32,
+                ],
+                vel: [
+                    body.vel[i].x as f32,
+                    body.vel[i].y as f32,
+                    body.vel[i].z as f32,
+                ],
                 u: body.u[i] as f32,
                 rho: body.rho[i] as f32,
                 ..*p
@@ -1818,7 +2438,11 @@ mod impact_geometry_tests {
             .map(|p| p.mass as f64)
             .sum();
         let f_bound = bound_m / m_total;
-        let t_moon_after = snap.iter().filter(|p| p.prov == 1).map(&temp_of).fold(0.0, f64::max);
+        let t_moon_after = snap
+            .iter()
+            .filter(|p| p.prov == 1)
+            .map(&temp_of)
+            .fold(0.0, f64::max);
         let stats = disk_stats_json(&snap);
         println!(
             "SPH drop: bound {:.0}% · impactor hottest {t_moon_before:.0} K -> {t_moon_after:.0} K · v0 {v0:.0} m/s · {stats}",
@@ -1840,7 +2464,10 @@ mod impact_geometry_tests {
         // (3) The converged consumer seam: the read-back measurement the HUD uses answers, and its
         // remnant is a body, not a dispersal (radius pinned loosely; the exact figure is printed
         // above and recorded in the JOURNAL against Earth's 6,371 km).
-        assert_ne!(stats, "null", "the SPH disk measurement must answer on this snapshot");
+        assert_ne!(
+            stats, "null",
+            "the SPH disk measurement must answer on this snapshot"
+        );
         let remnant_km: f64 = stats
             .split("\"remnant_km\":")
             .nth(1)
@@ -1859,7 +2486,16 @@ mod disk_view_tests {
     use super::*;
 
     fn p(pos: [f32; 3], vel: [f32; 3], mass: f32, prov: u32) -> SphParticle {
-        SphParticle { pos, h: 1.0e6, vel, u: 1.0e5, mass, mat: 0, rho: 3000.0, prov }
+        SphParticle {
+            pos,
+            h: 1.0e6,
+            vel,
+            u: 1.0e5,
+            mass,
+            mat: 0,
+            rho: 3000.0,
+            prov,
+        }
     }
 
     // The bug the four duplicated copies had: only `disk_stats_json` tested boundedness BEFORE geometry, so
@@ -1882,7 +2518,11 @@ mod disk_view_tests {
         ];
         let d = DiskView::of(&parts).expect("a field with mass measures");
 
-        assert_eq!(d.dp.len(), 1, "exactly one particle is on a bound orbit outside the remnant");
+        assert_eq!(
+            d.dp.len(),
+            1,
+            "exactly one particle is on a bound orbit outside the remnant"
+        );
         assert!(
             (d.disk_mass() - 1.0e20).abs() / 1.0e20 < 1.0e-6,
             "disk mass should be the single bound orbiter, got {}",
@@ -1894,6 +2534,9 @@ mod disk_view_tests {
             d.escaped
         );
         // Provenance split rides on the same pass: the orbiter is prov 1, so none of the disk is prov 0.
-        assert_eq!(d.disk_prov0, 0.0, "the only disk member came from source body 1");
+        assert_eq!(
+            d.disk_prov0, 0.0,
+            "the only disk member came from source body 1"
+        );
     }
 }

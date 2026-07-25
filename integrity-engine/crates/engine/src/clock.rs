@@ -33,7 +33,10 @@ pub struct StepBudget {
 
 impl StepClock {
     pub fn new() -> Self {
-        StepClock { last: now_seconds(), accumulator: 0.0 }
+        StepClock {
+            last: now_seconds(),
+            accumulator: 0.0,
+        }
     }
 
     pub fn tick(&mut self) -> StepBudget {
@@ -69,7 +72,6 @@ fn now_seconds() -> f64 {
     }
 }
 
-
 #[cfg(test)]
 mod step_clock_tests {
     use super::{StepClock, MAX_STEPS_PER_FRAME, PHYSICS_DT};
@@ -86,7 +88,10 @@ mod step_clock_tests {
     fn the_same_elapsed_time_advances_the_same_physics_at_any_frame_rate() {
         // Drive one second of wall time at three very different frame rates.
         let simulate = |fps: u32| -> f32 {
-            let mut clock = StepClock { last: 0.0, accumulator: 0.0 };
+            let mut clock = StepClock {
+                last: 0.0,
+                accumulator: 0.0,
+            };
             let frame = 1.0 / fps as f32;
             let mut simulated = 0.0f32;
             for _ in 0..fps {
@@ -109,11 +114,16 @@ mod step_clock_tests {
             );
         }
         // And they must agree with EACH OTHER — that is the property that was broken.
-        assert!((slow - fast).abs() <= PHYSICS_DT * 2.0,
-            "20 fps and 240 fps must simulate the same world ({slow:.4} vs {fast:.4})");
+        assert!(
+            (slow - fast).abs() <= PHYSICS_DT * 2.0,
+            "20 fps and 240 fps must simulate the same world ({slow:.4} vs {fast:.4})"
+        );
 
         // The remainder is carried, never dropped: many tiny frames still add up.
-        let mut clock = StepClock { last: 0.0, accumulator: 0.0 };
+        let mut clock = StepClock {
+            last: 0.0,
+            accumulator: 0.0,
+        };
         let mut simulated = 0.0f32;
         for _ in 0..1000 {
             clock.accumulator += 0.001; // 1 ms frames — far below one physics step
@@ -121,17 +131,25 @@ mod step_clock_tests {
             clock.accumulator -= steps as f32 * PHYSICS_DT;
             simulated += steps as f32 * PHYSICS_DT;
         }
-        assert!((simulated - 1.0).abs() <= PHYSICS_DT * 1.5,
-            "1000 × 1 ms frames still advance ~1 s, got {simulated:.4}");
+        assert!(
+            (simulated - 1.0).abs() <= PHYSICS_DT * 1.5,
+            "1000 × 1 ms frames still advance ~1 s, got {simulated:.4}"
+        );
     }
 
     /// A long stall must not be repaid all at once. Without a cap, the steps owed after a pause take
     /// longer than a frame to run, which owes more steps — the spiral of death.
     #[test]
     fn a_long_stall_is_admitted_rather_than_chased() {
-        let mut clock = StepClock { last: 0.0, accumulator: 0.0 };
+        let mut clock = StepClock {
+            last: 0.0,
+            accumulator: 0.0,
+        };
         clock.accumulator += 30.0; // a tab asleep for half a minute
         let steps = ((clock.accumulator / PHYSICS_DT) as u32).min(MAX_STEPS_PER_FRAME);
-        assert_eq!(steps, MAX_STEPS_PER_FRAME, "the frame runs its cap, not 1,800 steps");
+        assert_eq!(
+            steps, MAX_STEPS_PER_FRAME,
+            "the frame runs its cap, not 1,800 steps"
+        );
     }
 }

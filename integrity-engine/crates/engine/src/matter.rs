@@ -42,12 +42,12 @@ const SLOPE_BASELINE_CELLS: i32 = 8;
 // `gpu-verify` F7a now proves a vacuum particle keeps its speed EXACTLY, which is what the old flagged
 // "DRAG DEBT" scene existed to make visible until it could be paid.
 pub const CONTACT_DAMP: f32 = 0.15; // fraction of velocity kept after touching ground. Loose rock rubble
-//                                    is highly inelastic (coefficient of restitution ~0.1–0.2); 0.35 was
-//                                    too bouncy and, combined with Earth g, left grains jittering forever.
+                                    //                                    is highly inelastic (coefficient of restitution ~0.1–0.2); 0.35 was
+                                    //                                    too bouncy and, combined with Earth g, left grains jittering forever.
 pub const SETTLE_SPEED: f32 = 0.02; // below this HORIZONTAL speed, a grounded particle deposits into the
-//                                    grid. NB the check is on horizontal speed only: a grounded grain's
-//                                    vertical velocity is the explicit snap-contact's numerical jitter
-//                                    (~g·dt residual), NOT real motion, so it must not block deposition.
+                                    //                                    grid. NB the check is on horizontal speed only: a grounded grain's
+                                    //                                    vertical velocity is the explicit snap-contact's numerical jitter
+                                    //                                    (~g·dt residual), NOT real motion, so it must not block deposition.
 /// ...or after this long resting on the ground. **In SECONDS, not frames.**
 ///
 /// This was `SETTLE_FRAMES: u32 = 10` — ten consecutive grounded STEPS — which made the instant matter
@@ -314,7 +314,11 @@ impl MatterSim {
         let center = world.center();
         let sv = site + center; // voxel space
         let ri = radius.ceil() as i32;
-        let (cx, cy, cz) = (sv.x.floor() as i32, sv.y.floor() as i32, sv.z.floor() as i32);
+        let (cx, cy, cz) = (
+            sv.x.floor() as i32,
+            sv.y.floor() as i32,
+            sv.z.floor() as i32,
+        );
         let start = self.particles.len();
         for dz in -ri..=ri {
             for dy in -ri..=ri {
@@ -375,14 +379,22 @@ impl MatterSim {
         let center = world.center();
         let c64 = glam::DVec3::new(center.x as f64, center.y as f64, center.z as f64);
         let up = furrow.n; // outward surface normal (flat terrain: +y under uniform gravity)
-        // Scan the voxel bounding box the bowl can reach: it spans ±(l_along) about a centre `downrange`
-        // along-track, ±l_lat across, and l_depth into the surface — bound by the largest of these.
+                           // Scan the voxel bounding box the bowl can reach: it spans ±(l_along) about a centre `downrange`
+                           // along-track, ±l_lat across, and l_depth into the surface — bound by the largest of these.
         let reach = (furrow.l_along + furrow.downrange.abs())
             .max(furrow.l_lat)
             .max(furrow.l_depth);
-        let sv = Vec3::new(furrow.site.x as f32, furrow.site.y as f32, furrow.site.z as f32) + center;
+        let sv = Vec3::new(
+            furrow.site.x as f32,
+            furrow.site.y as f32,
+            furrow.site.z as f32,
+        ) + center;
         let ri = (reach.ceil() as i32).max(1);
-        let (cx, cy, cz) = (sv.x.floor() as i32, sv.y.floor() as i32, sv.z.floor() as i32);
+        let (cx, cy, cz) = (
+            sv.x.floor() as i32,
+            sv.y.floor() as i32,
+            sv.z.floor() as i32,
+        );
         let start = self.particles.len();
         // Excavate the crater as a bowl DRAPED INTO THE LOCAL SURFACE — each column dug from its OWN
         // pre-impact surface DOWN to the bowl floor — so the crater is always OPEN TO THE SKY and its rim
@@ -420,8 +432,7 @@ impl MatterSim {
                 // is one past the deepest we EXCAVATE (`exc_depth`).
                 let lo = top_solid - (furrow.exc_depth.ceil() as i32) - 1;
                 for y in (lo..=top_solid).rev() {
-                    let vc =
-                        glam::DVec3::new(x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5) - c64;
+                    let vc = glam::DVec3::new(x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5) - c64;
                     // Draped depth: metres below the column's top-solid voxel centre (0 at the surface,
                     // growing downward), NOT the flat-datum `−(vc − site)·up`.
                     let below = (top_solid - y) as f64;
@@ -472,8 +483,9 @@ impl MatterSim {
         // LOCAL, versus the km/s spring launch it removes. Matter is still conserved (1 grain per voxel).
         if self.particles.len() > start {
             const PART_HALF: f32 = 0.5; // DEBRIS_PART_HALF (lib.rs) — a grain's collision half-extent
-            // Per-column lift = how far the column's lowest grain sits below the bilinear collision surface.
-            let mut lift: std::collections::HashMap<(i32, i32), f32> = std::collections::HashMap::new();
+                                        // Per-column lift = how far the column's lowest grain sits below the bilinear collision surface.
+            let mut lift: std::collections::HashMap<(i32, i32), f32> =
+                std::collections::HashMap::new();
             for p in &self.particles[start..] {
                 let key = ((p.pos.x + center.x) as i32, (p.pos.z + center.z) as i32);
                 let surf = world.surface_height_bilinear(p.pos);
@@ -715,7 +727,8 @@ impl MatterSim {
                         continue; // a void in the face; `collapse` owns unsupported overhangs (docs/45 §4)
                     };
                     let m = &materials[mat];
-                    let h_crit = crate::granular::critical_bank_height(m.fracture_strength, m.density, 9.81);
+                    let h_crit =
+                        crate::granular::critical_bank_height(m.fracture_strength, m.density, 9.81);
                     let stable = nbrs.iter().all(|&(r, nt)| {
                         granular::face_stable(
                             (lo + idx as i32 - nt) as f32,
@@ -785,7 +798,10 @@ impl MatterSim {
         if core.is_empty() {
             return 0;
         }
-        let m_total: f32 = core.iter().map(|&i| self.particles[i].mass.max(1.0e-6)).sum();
+        let m_total: f32 = core
+            .iter()
+            .map(|&i| self.particles[i].mass.max(1.0e-6))
+            .sum();
         let dv = momentum / m_total; // uniform Δv ⇒ Σ mᵢ·Δv = momentum (conserved)
         for &i in &core {
             self.particles[i].vel += dv;
@@ -893,7 +909,7 @@ impl MatterSim {
         //    outward push, capped at what we can resolve.
         const V_MAX: f32 = 200.0; // ≈0.2 m/substep — within the implicit contact's deep-overlap range
         let m_needed = 2.0 * e_expand / (V_MAX * V_MAX); // mass over which E_expand gives exactly V_MAX
-        // Gather the nearest grains (from the contact outward) until we've collected `m_needed`.
+                                                         // Gather the nearest grains (from the contact outward) until we've collected `m_needed`.
         let mut idx: Vec<usize> = (since..self.particles.len())
             .filter(|&i| (self.particles[i].pos - site).length() > 0.5)
             .collect();
@@ -1191,7 +1207,10 @@ mod tests {
         let iron = materials::index_of(&mats, "iron"); //   ~4.4e8 Pa
         let soft_sigma = mats[grass].fracture_strength;
         let hard_sigma = mats[iron].fracture_strength;
-        assert!(soft_sigma < hard_sigma, "grass is far weaker than iron (real DB)");
+        assert!(
+            soft_sigma < hard_sigma,
+            "grass is far weaker than iron (real DB)"
+        );
         // A tool strictly between the two real strengths (geometric mean).
         let tool = (soft_sigma * hard_sigma).sqrt();
         assert!(
@@ -1207,8 +1226,15 @@ mod tests {
             let mut sim = MatterSim::new(64);
             sim.dig(&mut w, &mats, hit, 1.5, tool)
         };
-        assert!(dig_one(grass) > 0, "the soft grass voxel fractures under the tool");
-        assert_eq!(dig_one(iron), 0, "the hard iron voxel resists the same tool");
+        assert!(
+            dig_one(grass) > 0,
+            "the soft grass voxel fractures under the tool"
+        );
+        assert_eq!(
+            dig_one(iron),
+            0,
+            "the hard iron voxel resists the same tool"
+        );
     }
 
     /// The SHARED de-resolution primitive [`MatterSim::deposit_resting_grain`] — the single law used by
@@ -1225,7 +1251,11 @@ mod tests {
         w.set_voxel(4, 3, 4, Some(basalt));
         let before = w.solid_count();
         let c = w.center();
-        assert_eq!(w.surface_top_voxel(4, 4), Some(4), "air-start above the one solid voxel");
+        assert_eq!(
+            w.surface_top_voxel(4, 4),
+            Some(4),
+            "air-start above the one solid voxel"
+        );
 
         // A grain resting on that column (centered coords of the air-start cell).
         let grain = Vec3::new(4.5, 4.5, 4.5) - c;
@@ -1238,22 +1268,37 @@ mod tests {
             !sim.deposit_resting_grain(&mut w, grain, basalt, std::slice::from_ref(&body)),
             "a grain must NOT deposit inside a dynamic body — it stays a grain"
         );
-        assert_eq!(w.solid_count(), before, "blocked deposit conjures no matter");
+        assert_eq!(
+            w.solid_count(),
+            before,
+            "blocked deposit conjures no matter"
+        );
 
         // 2. With no body it deposits into the air-start voxel — one grain becomes one voxel.
         assert!(
             sim.deposit_resting_grain(&mut w, grain, basalt, &[]),
             "an unobstructed resting grain deposits into its column"
         );
-        assert_eq!(w.solid_count(), before + 1, "exactly one voxel gained (matter conserved)");
+        assert_eq!(
+            w.solid_count(),
+            before + 1,
+            "exactly one voxel gained (matter conserved)"
+        );
         assert_eq!(
             w.material_at(4, 4, 4),
             Some(basalt),
             "the deposited voxel carries the grain's material, in the air-start cell"
         );
-        assert!(sim.take_dirty(), "a deposit marks the world dirty (it must remesh)");
+        assert!(
+            sim.take_dirty(),
+            "a deposit marks the world dirty (it must remesh)"
+        );
         // The column grew by one — a second grain would stack on top, never overwrite.
-        assert_eq!(w.surface_top_voxel(4, 4), Some(5), "air-start rose after the deposit");
+        assert_eq!(
+            w.surface_top_voxel(4, 4),
+            Some(5),
+            "air-start rose after the deposit"
+        );
     }
 
     #[test]
@@ -1319,11 +1364,13 @@ mod tests {
         for p in &sim.particles {
             let v = p.pos + center;
             assert!(
-                (v.x - (v.x.floor() + 0.5)).abs() < 1e-4 && (v.y - (v.y.floor() + 0.5)).abs() < 1e-4,
+                (v.x - (v.x.floor() + 0.5)).abs() < 1e-4
+                    && (v.y - (v.y.floor() + 0.5)).abs() < 1e-4,
                 "grain sits at its former voxel centre"
             );
             assert!(
-                w.material_at(v.x.floor() as i32, v.y.floor() as i32, v.z.floor() as i32).is_none(),
+                w.material_at(v.x.floor() as i32, v.y.floor() as i32, v.z.floor() as i32)
+                    .is_none(),
                 "the voxel it came from is now air"
             );
         }
@@ -1341,8 +1388,8 @@ mod tests {
         let c = w.center();
         let (px, pz) = (c.x as i32, c.z as i32);
         let surf = w.surface_top_voxel(px, pz).unwrap() as f32 - c.y; // centered surface height
-        // Impact just under the surface at the patch centre; oblique 45° in x–y → downrange +x; local up
-        // +y (the surface normal under uniform surface gravity).
+                                                                      // Impact just under the surface at the patch centre; oblique 45° in x–y → downrange +x; local up
+                                                                      // +y (the surface normal under uniform surface gravity).
         let site = glam::DVec3::new(0.0, surf as f64 - 0.5, 0.0);
         let v_impact = glam::DVec3::new(1.0, -1.0, 0.0).normalize() * 17_000.0;
         let furrow = crate::impact::Furrow::new(site, glam::DVec3::Y, v_impact, 0.3, 8.0, 9.88);
@@ -1361,7 +1408,10 @@ mod tests {
         // A 1000 kg Fe-Ni meteor → the impact-energy cap (docs/28); its ½·m·v² bounds the ejecta KE.
         let impactor_mass = 1_000.0;
         let n = sim.materialize_furrow(&mut w, &mats, &furrow, Vec3::ZERO, impactor_mass);
-        assert!(n > 0, "solid terrain inside the furrow materializes into grains");
+        assert!(
+            n > 0,
+            "solid terrain inside the furrow materializes into grains"
+        );
         assert_eq!(n, sim.particle_count());
         // Matter conserved: the world lost exactly n voxels, now held as n grains.
         assert_eq!(w.solid_count() + sim.particle_count(), before);
@@ -1399,10 +1449,20 @@ mod tests {
             span(&across)
         );
         let cx = along.iter().sum::<f32>() / along.len() as f32;
-        assert!(cx > 0.0, "furrow centroid downrange of contact, got {cx:.2}");
+        assert!(
+            cx > 0.0,
+            "furrow centroid downrange of contact, got {cx:.2}"
+        );
         // Ejecta lofted: some grains carry upward velocity from the shared ejection (not all at rest).
-        let max_up = sim.particles.iter().map(|p| p.vel.y).fold(f32::MIN, f32::max);
-        assert!(max_up > 0.0, "some grains are lofted upward (shared shock ejection), got {max_up:.3}");
+        let max_up = sim
+            .particles
+            .iter()
+            .map(|p| p.vel.y)
+            .fold(f32::MIN, f32::max);
+        assert!(
+            max_up > 0.0,
+            "some grains are lofted upward (shared shock ejection), got {max_up:.3}"
+        );
         // EXACT ENERGY CONSERVATION (docs/28): a SMALL meteor's raw H-H ejecta KE exceeds the impact
         // energy ½·m·v² (the debris storm) — the cap scales it back so the total ejecta KE ≤ E_i. With
         // ground_vel = 0 the ejecta KE equals the absolute grain KE.
@@ -1420,7 +1480,11 @@ mod tests {
         // (grass cap over rock) — each keeps its OWN, not a bulk proxy.
         let distinct: std::collections::HashSet<usize> =
             sim.particles.iter().map(|p| p.material).collect();
-        assert!(distinct.len() >= 2, "furrow cuts through layered strata (got {} materials)", distinct.len());
+        assert!(
+            distinct.len() >= 2,
+            "furrow cuts through layered strata (got {} materials)",
+            distinct.len()
+        );
     }
 
     #[test]
@@ -1434,7 +1498,14 @@ mod tests {
         let (px, pz) = (c.x as i32, c.z as i32);
         let surf = w.surface_top_voxel(px, pz).unwrap() as f32 - c.y;
         let site = glam::DVec3::new(0.0, surf as f64 - 0.5, 0.0);
-        let furrow = crate::impact::Furrow::new(site, glam::DVec3::Y, -glam::DVec3::Y * 17_000.0, 0.3, 8.0, 9.88);
+        let furrow = crate::impact::Furrow::new(
+            site,
+            glam::DVec3::Y,
+            -glam::DVec3::Y * 17_000.0,
+            0.3,
+            8.0,
+            9.88,
+        );
 
         let mut sim = MatterSim::new(200_000);
         let n = sim.materialize_furrow(&mut w, &mats, &furrow, Vec3::ZERO, 1_000.0);
@@ -1442,7 +1513,8 @@ mod tests {
         assert_eq!(w.solid_count() + sim.particle_count(), before);
         let span = |sel: &dyn Fn(&Particle) -> f32| {
             let vals: Vec<f32> = sim.particles.iter().map(sel).collect();
-            vals.iter().cloned().fold(f32::MIN, f32::max) - vals.iter().cloned().fold(f32::MAX, f32::min)
+            vals.iter().cloned().fold(f32::MIN, f32::max)
+                - vals.iter().cloned().fold(f32::MAX, f32::min)
         };
         let (sx, sz) = (span(&|p| p.pos.x), span(&|p| p.pos.z));
         assert!(
@@ -1474,7 +1546,8 @@ mod tests {
             let c = w.center();
             let surf = w.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
             let site = glam::DVec3::new(0.0, surf as f64 - 0.5, 0.0);
-            let furrow = crate::impact::Furrow::new(site, glam::DVec3::Y, v_impact, 0.31, 12.0, 9.88);
+            let furrow =
+                crate::impact::Furrow::new(site, glam::DVec3::Y, v_impact, 0.31, 12.0, 9.88);
             let mut sim = MatterSim::new(200_000);
             sim.materialize_furrow(&mut w, &mats, &furrow, Vec3::ZERO, f64::INFINITY);
             sim.particles
@@ -1505,7 +1578,10 @@ mod tests {
             (ke - e_impact).abs() / e_impact < 1e-3,
             "capped ejecta KE {ke:.3e} J == impact energy {e_impact:.3e} J (exact conservation)"
         );
-        assert!(ke < raw_ke, "the cap actually reduced the ejecta KE ({ke:.3e} < raw {raw_ke:.3e})");
+        assert!(
+            ke < raw_ke,
+            "the cap actually reduced the ejecta KE ({ke:.3e} < raw {raw_ke:.3e})"
+        );
 
         // And the REAL 1000 kg meteor is within budget → the cap leaves it untouched (the honest finding).
         let e_1000kg = 0.5 * 1000.0 * v_impact.length_squared();
@@ -1536,7 +1612,7 @@ mod tests {
         let (px, pz) = (c.x as i32, c.z as i32);
         let surf_top_before = w.surface_top_voxel(px, pz).unwrap();
         let surf_before = surf_top_before as f32 - c.y; // centered surface height at the column
-        // A vertical strike at the patch centre → a symmetric bowl straight down the column.
+                                                        // A vertical strike at the patch centre → a symmetric bowl straight down the column.
         let site = glam::DVec3::new(0.0, surf_before as f64 - 0.5, 0.0);
         let furrow = crate::impact::Furrow::new(
             site,
@@ -1664,12 +1740,18 @@ mod tests {
         let mut sim = MatterSim::new(200_000);
         let site = Vec3::new(0.0, surf as f32 - c.y, 0.0);
         let first = sim.materialize_steep_terrain(&mut w, &mats, site, 28.0);
-        assert!(first > 0, "vertical walls in a cohesionless horizon are unstable and must slump");
+        assert!(
+            first > 0,
+            "vertical walls in a cohesionless horizon are unstable and must slump"
+        );
 
         // The fixpoint. Stabilising an already-relaxed surface must produce NOTHING — the property that
         // separates "relaxed to repose" from "still sliding, just slower".
         let second = sim.materialize_steep_terrain(&mut w, &mats, site, 28.0);
-        assert_eq!(second, 0, "terrain already at repose is stable; it shed {second} more grains");
+        assert_eq!(
+            second, 0,
+            "terrain already at repose is stable; it shed {second} more grains"
+        );
 
         // Bounded by GEOMETRY rather than by a pass limit — the distinction that matters. The slide can
         // only re-grade what the talus ramp reaches: the ramp climbs at most one voxel per cell (the
@@ -1703,12 +1785,7 @@ mod tests {
         let c = w.center();
         let (px, pz) = (c.x as i32, c.z as i32);
         let mut sim = MatterSim::new(200_000);
-        sim.materialize_steep_terrain(
-            &mut w,
-            &mats,
-            Vec3::new(0.0, surf as f32 - c.y, 0.0),
-            28.0,
-        );
+        sim.materialize_steep_terrain(&mut w, &mats, Vec3::new(0.0, surf as f32 - c.y, 0.0), 28.0);
 
         let mu = mats[materials::index_of(&mats, "gravel")].friction_coefficient;
         let r = 8.0_f32; // the baseline the engine claims to enforce over (SLOPE_BASELINE_CELLS)
@@ -1740,7 +1817,6 @@ mod tests {
             "the test terrain never developed a real slope ({worst:.1} m), so it proves nothing"
         );
     }
-
 
     #[test]
     fn materialize_steep_terrain_turns_unstable_cliffs_into_grains_conserving_mass() {
@@ -1865,7 +1941,10 @@ mod tests {
         let mut sim = MatterSim::new(50_000);
         let site = Vec3::new(0.0, surf as f32 - c.y, 0.0);
         let n = sim.materialize_steep_terrain(&mut w, &mats, site, 6.0);
-        assert_eq!(n, 0, "a supported veneer on a standing rock wall is not loose matter");
+        assert_eq!(
+            n, 0,
+            "a supported veneer on a standing rock wall is not loose matter"
+        );
     }
 
     #[test]
@@ -1880,8 +1959,15 @@ mod tests {
         let before = w.solid_count();
         let mut sim = MatterSim::new(200_000);
         let n = sim.materialize_steep_terrain(&mut w, &mats, Vec3::new(0.0, surf, 0.0), 28.0);
-        assert_eq!(n, 0, "undisturbed terrain shed {n} grains — stability is over-firing");
-        assert_eq!(w.solid_count(), before, "and the terrain itself is untouched");
+        assert_eq!(
+            n, 0,
+            "undisturbed terrain shed {n} grains — stability is over-firing"
+        );
+        assert_eq!(
+            w.solid_count(),
+            before,
+            "and the terrain itself is untouched"
+        );
     }
 
     #[test]
@@ -1951,15 +2037,11 @@ mod tests {
         // Hottest grain is near the impact, coolest near the rim (radial gradient, not uniform).
         let nearest = sim.particles[start..]
             .iter()
-            .min_by(|a, b| {
-                (a.pos - site).length().total_cmp(&(b.pos - site).length())
-            })
+            .min_by(|a, b| (a.pos - site).length().total_cmp(&(b.pos - site).length()))
             .unwrap();
         let farthest = sim.particles[start..]
             .iter()
-            .max_by(|a, b| {
-                (a.pos - site).length().total_cmp(&(b.pos - site).length())
-            })
+            .max_by(|a, b| (a.pos - site).length().total_cmp(&(b.pos - site).length()))
             .unwrap();
         assert!(
             nearest.temp_k > farthest.temp_k,
@@ -1996,7 +2078,10 @@ mod tests {
                 .sum()
         };
         let ke = |sim: &MatterSim| -> f32 {
-            sim.particles[start..].iter().map(|p| 0.5 * p.mass * p.vel.length_squared()).sum()
+            sim.particles[start..]
+                .iter()
+                .map(|p| 0.5 * p.mass * p.vel.length_squared())
+                .sum()
         };
         let (th0, ke0) = (thermal(&sim), ke(&sim));
 
@@ -2017,7 +2102,10 @@ mod tests {
         // The vapor pushes only its BUBBLE WALL outward (radially — pure geometry, no assigned
         // direction). Most grains stay put at t=0; the crater bowl + up-and-out curtain EMERGE from
         // contact over time on the GPU (we don't impose them here).
-        let pushed: Vec<_> = sim.particles[start..].iter().filter(|p| p.vel.length() > 1.0).collect();
+        let pushed: Vec<_> = sim.particles[start..]
+            .iter()
+            .filter(|p| p.vel.length() > 1.0)
+            .collect();
         assert!(!pushed.is_empty(), "the vapor pushes its bubble wall");
         assert!(
             pushed
@@ -2044,8 +2132,10 @@ mod tests {
         let hv = hit + w.center();
         let hit_mat = w.material_at(hv.x as i32, hv.y as i32, hv.z as i32);
         let strength = hit_mat.map_or(1.2e7, |m| mats[m].fracture_strength);
-        let crater_r =
-            crate::damage::crater_radius(crate::damage::crater_volume(energy as f64, strength as f64));
+        let crater_r = crate::damage::crater_radius(crate::damage::crater_volume(
+            energy as f64,
+            strength as f64,
+        ));
         let mat_r = (crater_r as f32).min(14.0);
         let _ = hit_mat;
 
@@ -2054,8 +2144,10 @@ mod tests {
         let momentum = Vec3::new(0.0, -1.0, 0.0) * (mmass * mspeed);
         let core_r = (mat_r * 0.35).max(2.0);
         sim.deposit_impulse(start, hit, momentum, core_r);
-        let bulk_ke: f32 =
-            sim.particles[start..].iter().map(|p| 0.5 * p.mass * p.vel.length_squared()).sum();
+        let bulk_ke: f32 = sim.particles[start..]
+            .iter()
+            .map(|p| 0.5 * p.mass * p.vel.length_squared())
+            .sum();
         sim.deposit_shock_heat(start, hit, (energy - bulk_ke).max(0.0), &mats);
         let e_expand = sim.deposit_vapor_expansion(start, hit, &mats);
 
@@ -2068,27 +2160,36 @@ mod tests {
             .iter()
             .filter(|p| mats[p.material].thermal.is_some())
             .count();
-        let hottest = sim.particles[start..].iter().map(|p| p.temp_k).fold(0.0f32, f32::max);
+        let hottest = sim.particles[start..]
+            .iter()
+            .map(|p| p.temp_k)
+            .fold(0.0f32, f32::max);
         let vaporized = sim.particles[start..]
             .iter()
             .filter(|p| {
-                crate::damage::vapor_energy_density(&mats[p.material])
-                    .map_or(false, |ev| {
-                        let m = &mats[p.material];
-                        let c = m.thermal.as_ref().map_or(1000.0, |t| t.specific_heat);
-                        (m.density * c * (p.temp_k - REF_TEMP_K)) as f64 >= ev
-                    })
+                crate::damage::vapor_energy_density(&mats[p.material]).map_or(false, |ev| {
+                    let m = &mats[p.material];
+                    let c = m.thermal.as_ref().map_or(1000.0, |t| t.specific_heat);
+                    (m.density * c * (p.temp_k - REF_TEMP_K)) as f64 >= ev
+                })
             })
             .count();
-        let moving_up = sim.particles[start..].iter().filter(|p| p.vel.y > 1.0).count();
+        let moving_up = sim.particles[start..]
+            .iter()
+            .filter(|p| p.vel.y > 1.0)
+            .count();
         let outward = sim.particles[start..]
             .iter()
             .filter(|p| {
                 let h = Vec3::new(p.pos.x - hit.x, 0.0, p.pos.z - hit.z);
-                h.length() > 0.5 && Vec3::new(p.vel.x, 0.0, p.vel.z).dot(h.normalize_or_zero()) > 1.0
+                h.length() > 0.5
+                    && Vec3::new(p.vel.x, 0.0, p.vel.z).dot(h.normalize_or_zero()) > 1.0
             })
             .count();
-        let max_speed = sim.particles[start..].iter().map(|p| p.vel.length()).fold(0.0f32, f32::max);
+        let max_speed = sim.particles[start..]
+            .iter()
+            .map(|p| p.vel.length())
+            .fold(0.0f32, f32::max);
 
         println!("\n=== METEOR IMPACT DIAGNOSTIC (server-side) ===");
         println!("energy {energy:.2e} J, crater_r {crater_r:.1} m (capped to mat_r {mat_r:.1} m)");
@@ -2100,7 +2201,9 @@ mod tests {
         println!(
             "ejection: {moving_up} grains moving UP (>1 m/s), {outward} moving OUTWARD, max speed {max_speed:.1} m/s"
         );
-        println!("=== NB: this is the t=0 SETUP. The vapor pushes only its bubble wall; the crater bowl");
+        println!(
+            "=== NB: this is the t=0 SETUP. The vapor pushes only its bubble wall; the crater bowl"
+        );
         println!("    and up-and-out curtain EMERGE from contact over ~10 s on the GPU (forward sim). ===\n");
 
         // Regression guard. NOT an assumption that meteors vaporize — a CONSEQUENCE we observe: at
@@ -2116,7 +2219,10 @@ mod tests {
              emerges (a consequence, not an assumption)"
         );
         assert!(e_expand > 0.0, "the vaporized core has superheat to expand");
-        assert!(outward > 0 && max_speed > 50.0, "the vapor push drives an excavation front");
+        assert!(
+            outward > 0 && max_speed > 50.0,
+            "the vapor push drives an excavation front"
+        );
     }
 
     #[test]
@@ -2186,8 +2292,16 @@ mod tests {
         let n = sim.collapse(&mut w, &mats, g);
         assert!(n > 0, "the undercut grass overhang collapses");
         // Matter conserved: exactly n voxels removed, n particles spawned.
-        assert_eq!(n, sim.particle_count(), "one particle spawned per collapsed voxel");
-        assert_eq!(w.solid_count() + sim.particle_count(), before, "matter conserved");
+        assert_eq!(
+            n,
+            sim.particle_count(),
+            "one particle spawned per collapsed voxel"
+        );
+        assert_eq!(
+            w.solid_count() + sim.particle_count(),
+            before,
+            "matter conserved"
+        );
         // After collapse the standing matter is self-consistently supported (fixpoint reached).
         assert!(
             w.find_structurally_unsupported(&mats, g).is_empty(),
@@ -2438,7 +2552,13 @@ mod settle_timing_tests {
                 w.bulk_height(0.0, 0.0) + c.y - c.y
             };
             let mut sim = super::MatterSim::new(20_000);
-            sim.dig(&mut w, &mats, glam::Vec3::new(0.0, surf - 1.5, 0.0), 3.0, 1.0e6);
+            sim.dig(
+                &mut w,
+                &mats,
+                glam::Vec3::new(0.0, surf - 1.5, 0.0),
+                3.0,
+                1.0e6,
+            );
             let start = sim.particles.len();
             let mut t = 0.0f32;
             for _ in 0..steps {
@@ -2453,7 +2573,10 @@ mod settle_timing_tests {
 
         let (n_a, t_a) = run(1.0 / 60.0, 600);
         let (n_b, t_b) = run(1.0 / 240.0, 2400);
-        assert!(n_a > 0 && n_b > 0, "the dig must produce grains ({n_a}, {n_b})");
+        assert!(
+            n_a > 0 && n_b > 0,
+            "the dig must produce grains ({n_a}, {n_b})"
+        );
 
         // The SIMULATED time to settle must agree — that is the property. (It need not be identical:
         // contact resolution is stepwise, so a finer step resolves the approach slightly differently.)

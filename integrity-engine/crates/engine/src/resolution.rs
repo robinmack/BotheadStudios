@@ -18,8 +18,8 @@
 //! silently loses physics, over-resolving only costs frame time, so every threshold biases toward
 //! resolving.
 
-use glam::Vec3;
 use crate::materials::Material;
+use glam::Vec3;
 
 /// **Boussinesq axial stress** under the centre of a circular contact patch (`docs/44` §4b).
 ///
@@ -198,7 +198,9 @@ impl ResolutionController {
         }
         grain = grain.min(self.camera_grain_radius(q.distance_to_camera));
         grain = grain.clamp(self.min_grain_radius, self.bulk_grain_radius);
-        ResolutionMode::Resolved { grain_radius: grain }
+        ResolutionMode::Resolved {
+            grain_radius: grain,
+        }
     }
 }
 
@@ -253,7 +255,10 @@ pub struct ResolutionField {
 
 impl ResolutionField {
     pub fn new(controller: ResolutionController) -> Self {
-        ResolutionField { controller, effects: Vec::new() }
+        ResolutionField {
+            controller,
+            effects: Vec::new(),
+        }
     }
 
     /// Register an analytic effect (e.g. the off-camera ejecta a far-side impact just launched).
@@ -321,15 +326,31 @@ mod tests {
     #[test]
     fn the_worked_car_table_matches_docs44() {
         let (p, a) = contact_patch(1500.0 * 9.81 / 4.0, 0.02);
-        assert!((p - 183_937.5).abs() < 1.0, "contact pressure {p:.0} Pa (doc ~184 kPa)");
-        assert!((a - 0.0798).abs() < 1.0e-3, "patch radius {a:.4} m (doc ~0.080 m)");
+        assert!(
+            (p - 183_937.5).abs() < 1.0,
+            "contact pressure {p:.0} Pa (doc ~184 kPa)"
+        );
+        assert!(
+            (a - 0.0798).abs() < 1.0e-3,
+            "patch radius {a:.4} m (doc ~0.080 m)"
+        );
 
         // Basalt: competent rock, p far below yield ⇒ resolve NOTHING, exactly.
-        assert_eq!(resolved_depth(p, a, 10.0e6), 0.0, "a car on basalt must resolve zero particles");
+        assert_eq!(
+            resolved_depth(p, a, 10.0e6),
+            0.0,
+            "a car on basalt must resolve zero particles"
+        );
 
         // Packed regolith (~100 kPa) and loose sand (~10 kPa): the doc's depths, to the millimetre.
-        assert!((resolved_depth(p, a, 100.0e3) - 0.096).abs() < 2.0e-3, "regolith z* ≈ 0.096 m");
-        assert!((resolved_depth(p, a, 10.0e3) - 0.409).abs() < 5.0e-3, "sand z* ≈ 0.409 m");
+        assert!(
+            (resolved_depth(p, a, 100.0e3) - 0.096).abs() < 2.0e-3,
+            "regolith z* ≈ 0.096 m"
+        );
+        assert!(
+            (resolved_depth(p, a, 10.0e3) - 0.409).abs() < 5.0e-3,
+            "sand z* ≈ 0.409 m"
+        );
     }
 
     /// The monotone shape docs/44 §4b calls out: weaker material ⇒ deeper resolution, and the derivation
@@ -338,11 +359,17 @@ mod tests {
     fn weaker_material_resolves_deeper_and_the_root_is_exact() {
         let (p, a) = contact_patch(3679.0, 0.02);
         let (soft, hard) = (resolved_depth(p, a, 10.0e3), resolved_depth(p, a, 150.0e3)); // both yields < p = 184 kPa
-        assert!(soft > hard && hard > 0.0, "lower yield must resolve deeper: soft {soft}, hard {hard}");
+        assert!(
+            soft > hard && hard > 0.0,
+            "lower yield must resolve deeper: soft {soft}, hard {hard}"
+        );
         // At z*, the Boussinesq stress equals the yield it was solved for (the root is real).
         for y in [10.0e3, 50.0e3, 150.0e3] {
             let z = resolved_depth(p, a, y);
-            assert!((boussinesq_axial_stress(p, a, z) - y).abs() < 1.0, "σ_z(z*) must equal yield {y}");
+            assert!(
+                (boussinesq_axial_stress(p, a, z) - y).abs() < 1.0,
+                "σ_z(z*) must equal yield {y}"
+            );
         }
     }
 
@@ -354,7 +381,11 @@ mod tests {
         let (p, a) = contact_patch(500.0, 0.05); // a light load, p = 10 kPa
         assert_eq!(resolved_depth(p, a, p), 0.0, "at exactly yield ⇒ zero");
         assert_eq!(resolved_depth(p, a, p * 2.0), 0.0, "below yield ⇒ zero");
-        assert_eq!(admission_depth(p, a, p * 2.0), 0.0, "and the margin does not resurrect it");
+        assert_eq!(
+            admission_depth(p, a, p * 2.0),
+            0.0,
+            "and the margin does not resurrect it"
+        );
     }
 
     /// The inclusion margin (docs/44 §5) expands a real footprint but never a null one. Over-resolving
@@ -364,15 +395,30 @@ mod tests {
         let (p, a) = contact_patch(3679.0, 0.02);
         let bare = resolved_depth(p, a, 100.0e3);
         let admitted = admission_depth(p, a, 100.0e3);
-        assert!(admitted > bare, "the margin must expand a real footprint (bias toward inclusion)");
-        assert!((admitted - (bare + a)).abs() < 1.0e-9, "the margin is exactly one patch radius");
-        assert_eq!(admission_depth(p, a, 10.0e6), 0.0, "but basalt is still exactly zero");
+        assert!(
+            admitted > bare,
+            "the margin must expand a real footprint (bias toward inclusion)"
+        );
+        assert!(
+            (admitted - (bare + a)).abs() < 1.0e-9,
+            "the margin is exactly one patch radius"
+        );
+        assert_eq!(
+            admission_depth(p, a, 10.0e6),
+            0.0,
+            "but basalt is still exactly zero"
+        );
     }
 
     // ---- the core resolution controller (docs/49, three modes) ----
 
     fn q(dist: f64, in_view: bool, necessity: f64, grain: Option<f64>) -> RegionQuery {
-        RegionQuery { distance_to_camera: dist, in_view, necessity_depth: necessity, interaction_grain: grain }
+        RegionQuery {
+            distance_to_camera: dist,
+            in_view,
+            necessity_depth: necessity,
+            interaction_grain: grain,
+        }
     }
 
     /// **Camera drives granularity — the screen-space bound (docs/13).** Linear in distance; floored.
@@ -380,9 +426,19 @@ mod tests {
     fn camera_granularity_is_the_screen_space_bound() {
         let c = ResolutionController::default();
         let (near, far) = (c.camera_grain_radius(2.0), c.camera_grain_radius(200.0));
-        assert!((far / near - 100.0).abs() < 1.0e-6, "grain is LINEAR in distance");
-        assert!((near - 2.0 * c.angular_resolution).abs() < 1.0e-12, "grain = distance * angular_res");
-        assert_eq!(c.camera_grain_radius(0.0), c.min_grain_radius, "floored at the surface");
+        assert!(
+            (far / near - 100.0).abs() < 1.0e-6,
+            "grain is LINEAR in distance"
+        );
+        assert!(
+            (near - 2.0 * c.angular_resolution).abs() < 1.0e-12,
+            "grain = distance * angular_res"
+        );
+        assert_eq!(
+            c.camera_grain_radius(0.0),
+            c.min_grain_radius,
+            "floored at the surface"
+        );
     }
 
     /// No active physics => Bulk, at ANY distance. Static undisturbed ground is not simulated just
@@ -391,8 +447,16 @@ mod tests {
     #[test]
     fn no_active_physics_is_always_bulk() {
         let c = ResolutionController::default();
-        assert_eq!(c.decide(q(10_000.0, false, 0.0, None)), ResolutionMode::Bulk, "far, nothing happening");
-        assert_eq!(c.decide(q(0.5, true, 0.0, None)), ResolutionMode::Bulk, "camera at the surface, but static");
+        assert_eq!(
+            c.decide(q(10_000.0, false, 0.0, None)),
+            ResolutionMode::Bulk,
+            "far, nothing happening"
+        );
+        assert_eq!(
+            c.decide(q(0.5, true, 0.0, None)),
+            ResolutionMode::Bulk,
+            "camera at the surface, but static"
+        );
     }
 
     /// **The invariant: the camera does not gate EXISTENCE, only representation (docs/44 §1, docs/30).**
@@ -402,8 +466,16 @@ mod tests {
     fn active_physics_off_camera_is_analytic_not_bulk() {
         let c = ResolutionController::default();
         let m = c.decide(q(100_000.0, false, 0.1, Some(0.01)));
-        assert_eq!(m, ResolutionMode::Analytic, "an unwatched sinking wheel is COMPUTED, not ignored");
-        assert_ne!(m, ResolutionMode::Bulk, "camera absence must never turn active physics into nothing");
+        assert_eq!(
+            m,
+            ResolutionMode::Analytic,
+            "an unwatched sinking wheel is COMPUTED, not ignored"
+        );
+        assert_ne!(
+            m,
+            ResolutionMode::Bulk,
+            "camera absence must never turn active physics into nothing"
+        );
     }
 
     /// **The Moon example (Robin, 2026-07-20).** The Moon slams the FAR side of the planet — real impact,
@@ -414,7 +486,10 @@ mod tests {
     fn a_far_side_impact_is_analytic_and_its_ejecta_resolves_as_it_enters_view() {
         let c = ResolutionController::default();
         // Far side of the impact: active, not in view.
-        assert_eq!(c.decide(q(6_000_000.0, false, 500.0, None)), ResolutionMode::Analytic);
+        assert_eq!(
+            c.decide(q(6_000_000.0, false, 500.0, None)),
+            ResolutionMode::Analytic
+        );
         // The ejecta blanket, now arriving in the camera's view a few km away: active AND in view.
         match c.decide(q(3_000.0, true, 500.0, Some(0.5))) {
             ResolutionMode::Resolved { grain_radius } => {
@@ -431,14 +506,20 @@ mod tests {
         // Physics wants 1 cm; camera at 100 m tolerates 10 cm. The finer (1 cm) wins.
         match c.decide(q(100.0, true, 0.05, Some(0.01))) {
             ResolutionMode::Resolved { grain_radius } => {
-                assert!((grain_radius - 0.01).abs() < 1.0e-9, "the 1 cm physics need wins")
+                assert!(
+                    (grain_radius - 0.01).abs() < 1.0e-9,
+                    "the 1 cm physics need wins"
+                )
             }
             other => panic!("expected Resolved, got {other:?}"),
         }
         // Physics wants 20 cm; camera at 5 m tolerates 5 mm. The camera is stricter and wins.
         match c.decide(q(5.0, true, 0.05, Some(0.20))) {
             ResolutionMode::Resolved { grain_radius } => {
-                assert!((grain_radius - c.camera_grain_radius(5.0)).abs() < 1.0e-9, "a close camera refines")
+                assert!(
+                    (grain_radius - c.camera_grain_radius(5.0)).abs() < 1.0e-9,
+                    "a close camera refines"
+                )
             }
             other => panic!("expected Resolved, got {other:?}"),
         }
@@ -450,11 +531,15 @@ mod tests {
     fn resolved_granularity_stays_between_floor_and_bulk() {
         let c = ResolutionController::default();
         match c.decide(q(200.0, true, 0.05, Some(100.0))) {
-            ResolutionMode::Resolved { grain_radius } => assert!(grain_radius <= c.bulk_grain_radius + 1e-12),
+            ResolutionMode::Resolved { grain_radius } => {
+                assert!(grain_radius <= c.bulk_grain_radius + 1e-12)
+            }
             other => panic!("{other:?}"),
         }
         match c.decide(q(0.0, true, 0.05, Some(1.0e-9))) {
-            ResolutionMode::Resolved { grain_radius } => assert!(grain_radius >= c.min_grain_radius - 1e-15),
+            ResolutionMode::Resolved { grain_radius } => {
+                assert!(grain_radius >= c.min_grain_radius - 1e-15)
+            }
             other => panic!("{other:?}"),
         }
     }
@@ -499,14 +584,28 @@ mod tests {
             let n = field.update(&mut matter, &mats, cam, Vec3::ZERO, 1.0 / 60.0, in_view);
             if n > 0 {
                 materialised_at = Some(step);
-                assert!(matter.particle_count() > before, "resolve must create grains via the shared path");
+                assert!(
+                    matter.particle_count() > before,
+                    "resolve must create grains via the shared path"
+                );
                 break;
             }
-            assert_eq!(matter.particle_count(), before, "OFF-camera: cheap math only, ZERO particles");
+            assert_eq!(
+                matter.particle_count(),
+                before,
+                "OFF-camera: cheap math only, ZERO particles"
+            );
         }
         let step = materialised_at.expect("the effect should have entered view and resolved");
-        assert!(step > 0, "it must have propagated analytically for a while before entering view");
-        assert_eq!(field.analytic_count(), 0, "resolved ⇒ handed to the sim, no longer tracked analytically");
+        assert!(
+            step > 0,
+            "it must have propagated analytically for a while before entering view"
+        );
+        assert_eq!(
+            field.analytic_count(),
+            0,
+            "resolved ⇒ handed to the sim, no longer tracked analytically"
+        );
     }
 
     /// An effect that never enters view is NEVER materialised — it stays analytic, costing only math. The
@@ -529,8 +628,16 @@ mod tests {
             let n = field.update(&mut matter, &mats, cam, Vec3::ZERO, 1.0 / 60.0, in_view);
             assert_eq!(n, 0);
         }
-        assert_eq!(matter.particle_count(), 0, "never seen ⇒ never simulated (only cheap math ran)");
-        assert_eq!(field.analytic_count(), 1, "but it is still TRACKED — existence is not gated by the camera");
+        assert_eq!(
+            matter.particle_count(),
+            0,
+            "never seen ⇒ never simulated (only cheap math ran)"
+        );
+        assert_eq!(
+            field.analytic_count(),
+            1,
+            "but it is still TRACKED — existence is not gated by the camera"
+        );
     }
 
     /// Analytic propagation is real (ballistic under gravity), so an effect's arrival is physically timed,
@@ -552,7 +659,14 @@ mod tests {
         let dt = 1.0 / 60.0;
         // One second of free fall ⇒ ~½·g·t² = ~4.9 m drop, v ≈ 9.8 m/s down.
         for _ in 0..60 {
-            field.update(&mut matter, &mats, cam, Vec3::new(0.0, -9.81, 0.0), dt, |_, _| false);
+            field.update(
+                &mut matter,
+                &mats,
+                cam,
+                Vec3::new(0.0, -9.81, 0.0),
+                dt,
+                |_, _| false,
+            );
         }
         // The effect is private; assert via re-adding logic is impossible, so check the observable: it
         // fell (materialise it now by forcing view and confirming it's below its start).
@@ -562,6 +676,9 @@ mod tests {
         let ys: Vec<f32> = matter.particles.iter().map(|p| p.pos.y).collect();
         assert!(!ys.is_empty(), "grains were created");
         let max_y = ys.iter().cloned().fold(f32::MIN, f32::max);
-        assert!(max_y < 100.0, "the effect fell under gravity before resolving (max grain y {max_y:.1} < 100)");
+        assert!(
+            max_y < 100.0,
+            "the effect fell under gravity before resolving (max grain y {max_y:.1} < 100)"
+        );
     }
 }

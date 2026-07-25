@@ -305,14 +305,20 @@ impl Material {
     /// silently makes a material unvaporizable, so shock-heated debris of unknown composition could never
     /// turn to gas no matter how much energy it absorbed.
     pub fn boil_point(&self) -> Option<f64> {
-        self.thermal.as_ref().map(|t| t.boil_point as f64).filter(|v| *v > 0.0)
+        self.thermal
+            .as_ref()
+            .map(|t| t.boil_point as f64)
+            .filter(|v| *v > 0.0)
     }
 
     /// Latent heat of vaporization (J/kg, liquid → gas), or `None` when unsourced — the energy per unit
     /// mass an ablating body sheds once its surface reaches the boiling point.
     /// Thermal conductivity k (W/(m·K)), or `None` if this material's heat transport is uncharacterised.
     pub fn thermal_conductivity(&self) -> Option<f64> {
-        let k = self.thermal.as_ref().map_or(0.0, |t| t.thermal_conductivity) as f64;
+        let k = self
+            .thermal
+            .as_ref()
+            .map_or(0.0, |t| t.thermal_conductivity) as f64;
         (k > 0.0).then_some(k)
     }
 
@@ -332,17 +338,26 @@ impl Material {
     }
 
     pub fn latent_vaporization(&self) -> Option<f64> {
-        self.thermal.as_ref().map(|t| t.latent_vaporization as f64).filter(|v| *v > 0.0)
+        self.thermal
+            .as_ref()
+            .map(|t| t.latent_vaporization as f64)
+            .filter(|v| *v > 0.0)
     }
 
     /// Melting point (K), or `None` when unsourced.
     pub fn melt_point(&self) -> Option<f64> {
-        self.thermal.as_ref().map(|t| t.melt_point as f64).filter(|v| *v > 0.0)
+        self.thermal
+            .as_ref()
+            .map(|t| t.melt_point as f64)
+            .filter(|v| *v > 0.0)
     }
 
     /// The temperature at which this material breaks down irreversibly instead of melting, if it does.
     pub fn decomposition_point(&self) -> Option<f64> {
-        self.thermal.as_ref().map(|t| t.decomposes_k as f64).filter(|v| *v > 0.0)
+        self.thermal
+            .as_ref()
+            .map(|t| t.decomposes_k as f64)
+            .filter(|v| *v > 0.0)
     }
 
     /// Does this material break down at `pressure_pa`, or melt? Decomposition that releases a gas is
@@ -399,9 +414,9 @@ pub fn load() -> Vec<Material> {
                     simon_a: t.simon_a,
                     simon_c: t.simon_c,
                     molar_mass: t.molar_mass,
-                                    decomposes_k: t.decomposes_k,
-                                    thermal_conductivity: t.thermal_conductivity,
-                                    decomposition_suppressed_pa: t.decomposition_suppressed_pa,
+                    decomposes_k: t.decomposes_k,
+                    thermal_conductivity: t.thermal_conductivity,
+                    decomposition_suppressed_pa: t.decomposition_suppressed_pa,
                 }),
                 tillotson: m.tillotson,
             }
@@ -420,7 +435,10 @@ pub fn catalogue() -> &'static [Material] {
 /// EOS. This is the door `eos::Tillotson` reads through, making `data/materials.json` the single source of
 /// truth for the parameters (previously constants in `eos.rs`).
 pub fn tillotson_block(id: &str) -> Option<&'static TillotsonBlock> {
-    catalogue().iter().find(|m| m.id == id).and_then(|m| m.tillotson.as_ref())
+    catalogue()
+        .iter()
+        .find(|m| m.id == id)
+        .and_then(|m| m.tillotson.as_ref())
 }
 
 /// Find the index of a material by id. Panics if a required material is missing (Phase 1 relies
@@ -541,8 +559,16 @@ mod thermal_data_tests {
 
         // Specific heat is measurable for everything, so everything has one.
         for m in &mats {
-            assert!(m.specific_heat().is_some(), "{} must declare a specific heat", m.id);
-            assert!(m.specific_heat().unwrap() > 0.0, "{} has a positive specific heat", m.id);
+            assert!(
+                m.specific_heat().is_some(),
+                "{} must declare a specific heat",
+                m.id
+            );
+            assert!(
+                m.specific_heat().unwrap() > 0.0,
+                "{} has a positive specific heat",
+                m.id
+            );
         }
 
         // MELTERS carry real, citable numbers.
@@ -552,20 +578,35 @@ mod thermal_data_tests {
             assert!((g - want).abs() < 0.01, "{what}: got {g}, want {want}");
         };
         near(get("copper").melt_point(), 1357.77, "copper melts (CRC)");
-        near(get("aluminium").melt_point(), 933.47, "aluminium melts (CRC)");
+        near(
+            get("aluminium").melt_point(),
+            933.47,
+            "aluminium melts (CRC)",
+        );
         near(get("ice").melt_point(), 273.15, "ice melts");
         near(get("ice").boil_point(), 373.15, "water boils");
 
         // DECOMPOSERS declare where they break down.
         for id in ["oak", "pine", "rubber", "limestone", "concrete"] {
-            assert!(get(id).decomposition_point().is_some(), "{id} must declare where it breaks down");
+            assert!(
+                get(id).decomposition_point().is_some(),
+                "{id} must declare where it breaks down"
+            );
         }
         // The organics have no melting point at all, at any pressure.
         for id in ["oak", "pine", "rubber"] {
-            assert_eq!(get(id).melt_point(), None, "{id} does not melt — it pyrolyses");
+            assert_eq!(
+                get(id).melt_point(),
+                None,
+                "{id} does not melt — it pyrolyses"
+            );
         }
         // Limestone calcines above 825 °C — CaCO₃ → CaO + CO₂, verified against the calcium-oxide data.
-        near(get("limestone").decomposition_point(), 1098.0, "limestone calcines");
+        near(
+            get("limestone").decomposition_point(),
+            1098.0,
+            "limestone calcines",
+        );
         // Wood pyrolyses far below any rock's melting point; that ordering must survive.
         assert!(
             get("oak").decomposition_point().unwrap() < get("copper").melt_point().unwrap(),
@@ -577,24 +618,50 @@ mod thermal_data_tests {
         // and the reaction is pushed back, the breakdown temperature climbs past the melting curve, and
         // the same rock melts near 1,612 K. That is the regime inside any impact.
         let lime = get("limestone");
-        assert!(lime.decomposition_point().is_some() && lime.melt_point().is_some(), "limestone does both");
-        assert!(lime.decomposes_at(super::super::damage::ONE_ATM_PA), "at 1 atm it calcines");
-        assert!(!lime.decomposes_at(1.0e9), "under a kilobar it melts instead");
+        assert!(
+            lime.decomposition_point().is_some() && lime.melt_point().is_some(),
+            "limestone does both"
+        );
+        assert!(
+            lime.decomposes_at(super::super::damage::ONE_ATM_PA),
+            "at 1 atm it calcines"
+        );
+        assert!(
+            !lime.decomposes_at(1.0e9),
+            "under a kilobar it melts instead"
+        );
         // Concrete likewise — concrete melts are observed in real fires and accidents.
-        assert!(!get("concrete").decomposes_at(1.0e9), "concrete melts under pressure");
+        assert!(
+            !get("concrete").decomposes_at(1.0e9),
+            "concrete melts under pressure"
+        );
 
         // But a material that decomposes with NO suppression pressure does so at any pressure: wood
         // chars however hard you squeeze it, because pyrolysis is not a pressure-reversible reaction the
         // way calcination is.
         for id in ["oak", "pine", "rubber"] {
-            assert!(get(id).decomposes_at(1.0e11), "{id} pyrolyses at any pressure");
-            assert_eq!(get(id).melt_point(), None, "{id} has no melting point at all");
+            assert!(
+                get(id).decomposes_at(1.0e11),
+                "{id} pyrolyses at any pressure"
+            );
+            assert_eq!(
+                get(id).melt_point(),
+                None,
+                "{id} has no melting point at all"
+            );
         }
 
         // Crude oil is a MIXTURE: it fractionates across a range, so it has no single boiling point and
         // none was invented for it.
-        assert_eq!(get("crude_oil").boil_point(), None, "a mixture has no one boiling point");
-        assert!(get("crude_oil").specific_heat().is_some(), "but its heat capacity is still known");
+        assert_eq!(
+            get("crude_oil").boil_point(),
+            None,
+            "a mixture has no one boiling point"
+        );
+        assert!(
+            get("crude_oil").specific_heat().is_some(),
+            "but its heat capacity is still known"
+        );
     }
 }
 
@@ -613,25 +680,46 @@ mod atmospheric_gas_tests {
         let mats = super::load();
         let get = |id: &str| &mats[super::index_of(&mats, id)];
 
-        for id in ["carbon_dioxide", "sulfur_dioxide", "nitrogen", "methane", "hydrogen"] {
+        for id in [
+            "carbon_dioxide",
+            "sulfur_dioxide",
+            "nitrogen",
+            "methane",
+            "hydrogen",
+        ] {
             let m = get(id);
             // (the catalogue records phase as data; here we only need the physical numbers)
-            assert!(m.specific_heat().is_some(), "{id} must carry sourced thermal data");
+            assert!(
+                m.specific_heat().is_some(),
+                "{id} must carry sourced thermal data"
+            );
             assert!(m.density > 0.0, "{id} must have a density");
         }
 
         // Molar masses, against the values everyone can check.
         let molar = |id: &str| get(id).thermal.as_ref().unwrap().molar_mass as f64;
-        assert!((molar("carbon_dioxide") - 0.044).abs() < 0.001, "CO₂ is 44 g/mol");
+        assert!(
+            (molar("carbon_dioxide") - 0.044).abs() < 0.001,
+            "CO₂ is 44 g/mol"
+        );
         assert!((molar("nitrogen") - 0.028).abs() < 0.001, "N₂ is 28 g/mol");
         assert!((molar("hydrogen") - 0.002).abs() < 0.0005, "H₂ is 2 g/mol");
 
         // The consequence that matters: scale height goes as 1/molar mass, so at one temperature and one
         // gravity a CO₂ atmosphere hugs the ground and a hydrogen one puffs out. Same law, different gas.
         let h = |id: &str| crate::atmosphere::scale_height(get(id), 288.0, 9.81);
-        assert!(h("carbon_dioxide") < h("air"), "CO₂ is heavier than air, so its atmosphere is shallower");
-        assert!(h("hydrogen") > 10.0 * h("air"), "hydrogen puffs out — 14× air's scale height");
-        assert!(h("nitrogen") > h("air"), "N₂ alone is slightly lighter than air (which carries O₂ and Ar)");
+        assert!(
+            h("carbon_dioxide") < h("air"),
+            "CO₂ is heavier than air, so its atmosphere is shallower"
+        );
+        assert!(
+            h("hydrogen") > 10.0 * h("air"),
+            "hydrogen puffs out — 14× air's scale height"
+        );
+        assert!(
+            h("nitrogen") > h("air"),
+            "N₂ alone is slightly lighter than air (which carries O₂ and Ar)"
+        );
 
         // CO₂ has NO liquid phase at one atmosphere — it sublimes. That is why Mars grows frost, not rain.
         let co2 = get("carbon_dioxide");

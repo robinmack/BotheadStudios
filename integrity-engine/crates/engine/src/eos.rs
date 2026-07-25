@@ -132,10 +132,9 @@ impl Tillotson {
     /// The catalogue's Tillotson set for a material id; panics if the id names no material or it has no
     /// EOS block (a build-data invariant for the named constructors below).
     fn from_catalogue(id: &str) -> Self {
-        Self::from_block(
-            crate::materials::tillotson_block(id)
-                .unwrap_or_else(|| panic!("material '{id}' has no tillotson block in data/materials.json")),
-        )
+        Self::from_block(crate::materials::tillotson_block(id).unwrap_or_else(|| {
+            panic!("material '{id}' has no tillotson block in data/materials.json")
+        }))
     }
 
     /// Granite (PROVISIONAL — see the catalogue block's `status`/`source`). Continental-crust analog.
@@ -238,7 +237,10 @@ mod tests {
         // zero-pressure cold reference state is the definition of ρ₀; a nonzero P here is a sign error.
         for (name, t) in all_tillotson() {
             let p = t.pressure(t.rho0, 0.0);
-            assert!(p.abs() < 1.0, "{name}: cold reference P must be ~0, got {p:.3e} Pa");
+            assert!(
+                p.abs() < 1.0,
+                "{name}: cold reference P must be ~0, got {p:.3e} Pa"
+            );
         }
     }
 
@@ -253,7 +255,11 @@ mod tests {
             let dp_drho = (t.pressure(t.rho0 + dr, u) - t.pressure(t.rho0 - dr, u)) / (2.0 * dr);
             let k = t.rho0 * dp_drho;
             let rel = (k - t.cap_a).abs() / t.cap_a;
-            assert!(rel < 0.02, "{name}: cold bulk modulus {k:.3e} must match A={:.3e} (rel {rel:.3})", t.cap_a);
+            assert!(
+                rel < 0.02,
+                "{name}: cold bulk modulus {k:.3e} must match A={:.3e} (rel {rel:.3})",
+                t.cap_a
+            );
         }
     }
 
@@ -265,10 +271,16 @@ mod tests {
             let u = 1.0;
             let p10 = t.pressure(t.rho0 * 1.10, u); // 10% compression
             let p30 = t.pressure(t.rho0 * 1.30, u); // 30% compression
-            assert!(p10 > 0.0 && p30 > p10, "{name}: P must rise with compression ({p10:.2e} → {p30:.2e})");
+            assert!(
+                p10 > 0.0 && p30 > p10,
+                "{name}: P must rise with compression ({p10:.2e} → {p30:.2e})"
+            );
             // 30% compression reaches GPa scale (≈ A·μ + B·μ²) — the giant-impact regime. Loose absolute
             // bound: the exact value scales with each material's A (granite ~7 GPa, iron/peridotite ~100+).
-            assert!(p30 > 1.0e9, "{name}: 30% compression must reach >1 GPa, got {p30:.2e}");
+            assert!(
+                p30 > 1.0e9,
+                "{name}: 30% compression must reach >1 GPa, got {p30:.2e}"
+            );
         }
     }
 
@@ -320,9 +332,15 @@ mod tests {
         for (name, t) in all_tillotson() {
             let c = t.sound_speed_sq(t.rho0, 1.0).sqrt();
             let c_bulk = (t.cap_a / t.rho0).sqrt();
-            assert!(c > 1.0e3 && c < 1.5e4, "{name}: bar sound speed {c:.0} m/s out of range");
+            assert!(
+                c > 1.0e3 && c < 1.5e4,
+                "{name}: bar sound speed {c:.0} m/s out of range"
+            );
             let rel = (c - c_bulk).abs() / c_bulk;
-            assert!(rel < 0.1, "{name}: c {c:.0} must match √(A/ρ₀) {c_bulk:.0} (rel {rel:.2})");
+            assert!(
+                rel < 0.1,
+                "{name}: c {c:.0} must match √(A/ρ₀) {c_bulk:.0} (rel {rel:.2})"
+            );
         }
     }
 
@@ -333,7 +351,10 @@ mod tests {
         let air = Eos::IdealGas { rs_t };
         for &rho in &[0.5, 1.2, 5.0] {
             for &u in &[0.0, 1.0e5, 1.0e7] {
-                assert!((air.pressure(rho, u) - rho * rs_t).abs() < 1e-6, "ideal-gas P = ρ·rs_t");
+                assert!(
+                    (air.pressure(rho, u) - rho * rs_t).abs() < 1e-6,
+                    "ideal-gas P = ρ·rs_t"
+                );
             }
         }
         assert_eq!(air.sound_speed_sq(1.2, 0.0), rs_t);
@@ -356,9 +377,17 @@ mod tests {
         let b = Tillotson::basalt();
         assert_eq!((b.rho0, b.a, b.b), (2700.0, 0.5, 1.5), "basalt rho0/a/b");
         assert_eq!((b.cap_a, b.cap_b), (2.67e10, 2.67e10), "basalt A/B");
-        assert_eq!((b.e0, b.e_iv, b.e_cv), (4.87e8, 4.72e6, 1.82e7), "basalt energies");
+        assert_eq!(
+            (b.e0, b.e_iv, b.e_cv),
+            (4.87e8, 4.72e6, 1.82e7),
+            "basalt energies"
+        );
         let fe = Tillotson::iron();
-        assert_eq!((fe.rho0, fe.cap_a, fe.cap_b), (7850.0, 1.28e11, 1.815e11), "iron rho0/A/B");
+        assert_eq!(
+            (fe.rho0, fe.cap_a, fe.cap_b),
+            (7850.0, 1.28e11, 1.815e11),
+            "iron rho0/A/B"
+        );
         let per = Tillotson::peridotite();
         assert_eq!(
             (per.rho0, per.cap_b, per.e0),
@@ -369,10 +398,22 @@ mod tests {
         // Characterized materials resolve through `for_material`; an uncharacterized one is honestly
         // `None` (no invented EOS), the fallback signal the callers rely on.
         for id in ["granite", "basalt", "peridotite", "iron", "water", "ice"] {
-            assert!(Tillotson::for_material(id).is_some(), "{id} has a catalogue EOS block");
+            assert!(
+                Tillotson::for_material(id).is_some(),
+                "{id} has a catalogue EOS block"
+            );
         }
-        assert!(Tillotson::for_material("air").is_none(), "gases use the ideal-gas closure, not Tillotson");
-        assert!(Tillotson::for_material("oak").is_none(), "wood has no condensed-matter EOS");
-        assert!(Tillotson::for_material("not_a_material").is_none(), "an unknown id is None, not a panic");
+        assert!(
+            Tillotson::for_material("air").is_none(),
+            "gases use the ideal-gas closure, not Tillotson"
+        );
+        assert!(
+            Tillotson::for_material("oak").is_none(),
+            "wood has no condensed-matter EOS"
+        );
+        assert!(
+            Tillotson::for_material("not_a_material").is_none(),
+            "an unknown id is None, not a panic"
+        );
     }
 }

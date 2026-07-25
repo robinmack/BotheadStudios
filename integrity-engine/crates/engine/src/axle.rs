@@ -111,7 +111,10 @@ pub fn resolve(wheel: &mut [Body], anchor: DVec3, anchor_vel: DVec3, axis: DVec3
             p.vel += dv;
         }
     }
-    let mut reaction = AxleReaction { impulse: m * dv, angular_impulse: DVec3::ZERO };
+    let mut reaction = AxleReaction {
+        impulse: m * dv,
+        angular_impulse: DVec3::ZERO,
+    };
 
     // 3. ANGULAR — keep the spin the axle exists to allow, refuse the rest.
     let Some(omega) = angular_velocity(wheel, anchor, anchor_vel) else {
@@ -145,19 +148,32 @@ mod tests {
     fn wheel(n: usize, radius: f64, mass: f64, hub: DVec3, axis: DVec3, omega: f64) -> Vec<Body> {
         let n_hat = axis.normalize();
         // Any two unit vectors spanning the wheel's plane.
-        let e1 = if n_hat.x.abs() < 0.9 { DVec3::X } else { DVec3::Y }.cross(n_hat).normalize();
+        let e1 = if n_hat.x.abs() < 0.9 {
+            DVec3::X
+        } else {
+            DVec3::Y
+        }
+        .cross(n_hat)
+        .normalize();
         let e2 = n_hat.cross(e1);
         (0..n)
             .map(|i| {
                 let t = i as f64 / n as f64 * std::f64::consts::TAU;
                 let r = (e1 * t.cos() + e2 * t.sin()) * radius;
-                Body { pos: hub + r, vel: (n_hat * omega).cross(r), mass: mass / n as f64 }
+                Body {
+                    pos: hub + r,
+                    vel: (n_hat * omega).cross(r),
+                    mass: mass / n as f64,
+                }
             })
             .collect()
     }
 
     fn kinetic(cloud: &[Body]) -> f64 {
-        cloud.iter().map(|p| 0.5 * p.mass * p.vel.length_squared()).sum()
+        cloud
+            .iter()
+            .map(|p| 0.5 * p.mass * p.vel.length_squared())
+            .sum()
     }
 
     /// **THE test an axle has to pass: it must not brake the wheel.** A wheel already spinning freely
@@ -174,14 +190,26 @@ mod tests {
         let ke = kinetic(&w);
         let r = resolve(&mut w, hub, DVec3::ZERO, axis);
         for (a, b) in w.iter().zip(before.iter()) {
-            assert!((a.pos - b.pos).length() < 1.0e-12, "the axle moved a compliant wheel");
-            assert!((a.vel - b.vel).length() < 1.0e-9, "the axle changed a compliant wheel's motion");
+            assert!(
+                (a.pos - b.pos).length() < 1.0e-12,
+                "the axle moved a compliant wheel"
+            );
+            assert!(
+                (a.vel - b.vel).length() < 1.0e-9,
+                "the axle changed a compliant wheel's motion"
+            );
         }
-        assert!((kinetic(&w) - ke).abs() < 1.0e-9, "the axle bled energy from a free spin");
+        assert!(
+            (kinetic(&w) - ke).abs() < 1.0e-9,
+            "the axle bled energy from a free spin"
+        );
         assert!(r.impulse.length() < 1.0e-12 && r.angular_impulse.length() < 1.0e-9);
         // And the spin it was given is the spin it reports: ω recovered from linear momenta alone.
         let omega = angular_velocity(&w, hub, DVec3::ZERO).unwrap();
-        assert!((omega - axis.normalize() * 37.0).length() < 1.0e-9, "got {omega:?}");
+        assert!(
+            (omega - axis.normalize() * 37.0).length() < 1.0e-9,
+            "got {omega:?}"
+        );
     }
 
     /// The joint holds the hub on its anchor — and does it WITHOUT injecting energy. A penalty spring
@@ -196,7 +224,10 @@ mod tests {
         resolve(&mut w, hub, DVec3::ZERO, axis);
         let m: f64 = w.iter().map(|p| p.mass).sum();
         let com: DVec3 = w.iter().map(|p| p.mass * p.pos).sum::<DVec3>() / m;
-        assert!((com - hub).length() < 1.0e-12, "the hub did not return to its anchor");
+        assert!(
+            (com - hub).length() < 1.0e-12,
+            "the hub did not return to its anchor"
+        );
         assert!(
             kinetic(&w) <= ke + 1.0e-9,
             "re-seating the hub INJECTED energy ({} → {}) — that is a penalty spring, not a constraint",
@@ -225,11 +256,23 @@ mod tests {
         let r = resolve(&mut w, hub, DVec3::ZERO, axis);
 
         let after = angular_velocity(&w, hub, DVec3::ZERO).unwrap();
-        assert!((after.z - 25.0).abs() < 1.0e-9, "the axle braked its own free axis: {after:?}");
-        assert!((after.length() - 25.0).abs() < 1.0e-6, "wobble survived the constraint: {after:?}");
-        assert!(kinetic(&w) < ke, "refusing wobble must dissipate from the wheel, not add");
+        assert!(
+            (after.z - 25.0).abs() < 1.0e-9,
+            "the axle braked its own free axis: {after:?}"
+        );
+        assert!(
+            (after.length() - 25.0).abs() < 1.0e-6,
+            "wobble survived the constraint: {after:?}"
+        );
+        assert!(
+            kinetic(&w) < ke,
+            "refusing wobble must dissipate from the wheel, not add"
+        );
         // The reaction is the angular momentum the wheel lost, so the chassis can receive it.
-        assert!(r.angular_impulse.x < 0.0, "the wobble reaction opposes the wobble: {r:?}");
+        assert!(
+            r.angular_impulse.x < 0.0,
+            "the wobble reaction opposes the wobble: {r:?}"
+        );
         assert!(
             r.angular_impulse.z.abs() < 1.0e-6,
             "the axle must exert no reaction about its own free axis: {r:?}"
@@ -271,7 +314,10 @@ mod tests {
         let hub = DVec3::ZERO;
         let axis = DVec3::Z;
         let mut w = wheel(4, 0.14, 8.0, hub, axis, 0.0);
-        assert!(angular_velocity(&w, hub, DVec3::ZERO).unwrap().length() < 1.0e-12, "starts at rest");
+        assert!(
+            angular_velocity(&w, hub, DVec3::ZERO).unwrap().length() < 1.0e-12,
+            "starts at rest"
+        );
 
         // One substep of a couple: +F tangential at particle 0, −F at the opposite rim particle 2.
         let dt = 1.0e-3;
@@ -282,12 +328,18 @@ mod tests {
         let tangent = |p: &Body| axis.normalize().cross((p.pos - hub).normalize());
         let (t0, m0) = (tangent(&w[0]), w[0].mass);
         let (t2, m2) = (tangent(&w[2]), w[2].mass);
-        assert!((t0 + t2).length() < 1.0e-12, "particles 0 and 2 must be diametrically opposite");
+        assert!(
+            (t0 + t2).length() < 1.0e-12,
+            "particles 0 and 2 must be diametrically opposite"
+        );
         w[0].vel += t0 * (f / m0 * dt);
         w[2].vel += t2 * (f / m2 * dt);
 
         let omega = angular_velocity(&w, hub, DVec3::ZERO).unwrap();
-        assert!(omega.z > 0.0, "the couple produced no spin about the axle: {omega:?}");
+        assert!(
+            omega.z > 0.0,
+            "the couple produced no spin about the axle: {omega:?}"
+        );
         assert!(
             omega.truncate().length() < 1.0e-9,
             "a pure couple about the axle produced off-axis spin: {omega:?}"
@@ -295,7 +347,13 @@ mod tests {
         // ...and the axle passes it through untouched, because that is the axis it frees.
         let r = resolve(&mut w, hub, DVec3::ZERO, axis);
         let after = angular_velocity(&w, hub, DVec3::ZERO).unwrap();
-        assert!((after.z - omega.z).abs() < 1.0e-9, "the axle ate the drive torque");
-        assert!(r.angular_impulse.length() < 1.0e-9, "and had nothing to refuse");
+        assert!(
+            (after.z - omega.z).abs() < 1.0e-9,
+            "the axle ate the drive torque"
+        );
+        assert!(
+            r.angular_impulse.length() < 1.0e-9,
+            "and had nothing to refuse"
+        );
     }
 }

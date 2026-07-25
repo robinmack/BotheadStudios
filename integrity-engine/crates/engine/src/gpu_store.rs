@@ -134,16 +134,20 @@ impl<T: Pod> ParticleStore<T> {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let mut enc =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         enc.copy_buffer_to_buffer(&self.buf, 0, &staging, 0, size);
         queue.submit(std::iter::once(enc.finish()));
-        self.ready.store(false, std::sync::atomic::Ordering::Release);
+        self.ready
+            .store(false, std::sync::atomic::Ordering::Release);
         let flag = self.ready.clone();
-        staging.slice(..).map_async(wgpu::MapMode::Read, move |res| {
-            if res.is_ok() {
-                flag.store(true, std::sync::atomic::Ordering::Release);
-            }
-        });
+        staging
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |res| {
+                if res.is_ok() {
+                    flag.store(true, std::sync::atomic::Ordering::Release);
+                }
+            });
         self.readback_count = self.count;
         self.staging = Some(staging);
     }
@@ -158,7 +162,8 @@ impl<T: Pod> ParticleStore<T> {
         let out = bytemuck::cast_slice::<u8, T>(&data).to_vec();
         drop(data);
         staging.unmap();
-        self.ready.store(false, std::sync::atomic::Ordering::Release);
+        self.ready
+            .store(false, std::sync::atomic::Ordering::Release);
         Some(out)
     }
 }
@@ -171,20 +176,44 @@ mod tests {
     /// silently drops matter. Neither surfaces as an error at runtime.
     #[test]
     fn append_clamps_to_the_room_that_is_actually_left() {
-        assert_eq!(append_span(0, 100, 10), (10, 0), "empty store takes all, at 0");
+        assert_eq!(
+            append_span(0, 100, 10),
+            (10, 0),
+            "empty store takes all, at 0"
+        );
         assert_eq!(append_span(90, 100, 10), (10, 90), "exactly fills");
-        assert_eq!(append_span(95, 100, 10), (5, 95), "partial: only the room left");
-        assert_eq!(append_span(100, 100, 10), (0, 100), "full store takes nothing");
-        assert_eq!(append_span(0, 0, 10), (0, 0), "zero-capacity store takes nothing");
+        assert_eq!(
+            append_span(95, 100, 10),
+            (5, 95),
+            "partial: only the room left"
+        );
+        assert_eq!(
+            append_span(100, 100, 10),
+            (0, 100),
+            "full store takes nothing"
+        );
+        assert_eq!(
+            append_span(0, 0, 10),
+            (0, 0),
+            "zero-capacity store takes nothing"
+        );
         // A count past capacity must not underflow into a huge `room` (saturating_sub is load-bearing).
-        assert_eq!(append_span(120, 100, 10), (0, 120), "over-full cannot wrap to enormous room");
+        assert_eq!(
+            append_span(120, 100, 10),
+            (0, 120),
+            "over-full cannot wrap to enormous room"
+        );
     }
 
     #[test]
     fn replace_clamps_to_capacity() {
         assert_eq!(replace_span(100, 10), 10);
         assert_eq!(replace_span(100, 100), 100);
-        assert_eq!(replace_span(100, 250), 100, "excess is dropped, not written past the end");
+        assert_eq!(
+            replace_span(100, 250),
+            100,
+            "excess is dropped, not written past the end"
+        );
         assert_eq!(replace_span(0, 5), 0);
     }
 
@@ -208,6 +237,9 @@ mod tests {
                 covered[i] += 1;
             }
         }
-        assert!(covered.iter().all(|&c| c == 1), "gap or overlap in the tiling");
+        assert!(
+            covered.iter().all(|&c| c == 1),
+            "gap or overlap in the tiling"
+        );
     }
 }
