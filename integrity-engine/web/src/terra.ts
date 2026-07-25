@@ -163,7 +163,24 @@ async function main(): Promise<void> {
     const shareSlot = document.createElement("div");
     Object.assign(shareSlot.style, { position: "fixed", left: "16px", bottom: "16px", zIndex: "5" });
     shareSlot.appendChild(share.button);
+    // **The meteor-swarm button.** The whole of the scene's contribution to the event: it declares the
+    // initial conditions (a mass, on a trajectory) and the engine does the rest — entry, ablation, the
+    // trail, the arrival. The same button belongs on any scene that hands the engine its bodies.
+    const swarm = document.createElement("button");
+    swarm.textContent = "Meteor swarm";
+    swarm.title = "Release a disintegrated asteroid on an entry trajectory toward the point below the camera";
+    Object.assign(swarm.style, {
+      marginLeft: "8px", padding: "8px 14px", borderRadius: "999px", cursor: "pointer",
+      border: "1px solid rgba(255,255,255,0.25)", background: "rgba(20,22,30,0.72)", color: "#eee",
+      font: "600 13px system-ui, sans-serif",
+    });
+    swarm.addEventListener("click", () => {
+      terra.launch_swarm();
+      setStatus("swarm released — entering the atmosphere");
+    });
+    shareSlot.appendChild(swarm);
     document.body.appendChild(shareSlot);
+    (window as unknown as { launchSwarm?: () => void }).launchSwarm = () => terra.launch_swarm();
 
     const hud = createSimHud("earth");
     const frame = () => {
@@ -196,6 +213,12 @@ async function main(): Promise<void> {
             `alt <b>${fmtAlt(terra.altitude_m())}</b> · lat <b>${terra.latitude().toFixed(2)}°</b> ` +
               `lon <b>${terra.longitude().toFixed(2)}°</b>`,
             `standing on <b>${terra.ground_biome()}</b>`,
+            ...(terra.flight_count() > 0 || terra.trail_mass_kg() > 0
+              ? [
+                  `in flight <b>${terra.flight_count()}</b> · drawn <b>${terra.drawn_count()}</b> · ` +
+                    `ablated <b>${terra.trail_mass_kg().toFixed(1)} kg</b>`,
+                ]
+              : []),
           ],
           timeScale: 1,
           fps: Math.round(fps),

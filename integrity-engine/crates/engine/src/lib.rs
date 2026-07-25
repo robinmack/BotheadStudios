@@ -4045,6 +4045,40 @@ mod app {
         landcover: Option<crate::terra::raster::Raster>,
         elev_range: [f64; 2],
         biome_mats: Vec<usize>, // biome index → index into `mats`
+        // **Matter in flight — the ENGINE's operation, not a Terra feature** (docs/59). Terra's whole
+        // contribution is the button that declares initial conditions and the draw that presents the
+        // result; everything between is `flight::Flight` running the same code the ground patch runs.
+        flight: crate::flight::Flight,
+        /// Wall-clock stamp of the last frame, so the flight advances in real seconds.
+        last_frame_s: f64,
+        /// The scene-agnostic renderer for whatever the engine is holding (`render::MatterField`).
+        matter: MatterField,
+    }
+
+    /// **A planet as a world to fly through** — the whole of what Terra contributes to entry physics:
+    /// gravity is this body's own layered mass, the air is its emergent hydrostatic column, and hard
+    /// matter is its surface. A flat ground patch answers the same three questions from a heightfield
+    /// (`simulation::GroundAir`), and the flight physics between them is the same code.
+    struct PlanetAir {
+        matter: crate::planet::LayeredBody,
+        air: crate::atmosphere::AirShell,
+        radius_m: f64,
+    }
+
+    impl crate::flight::FlightEnvironment for PlanetAir {
+        fn gravity_at(&self, pos: glam::DVec3) -> glam::DVec3 {
+            // Gauss's law over the body's REAL differentiated mass profile — not a declared surface g.
+            self.matter.acceleration_at(pos, glam::DVec3::ZERO)
+        }
+        fn air_at(&self, pos: glam::DVec3) -> Option<(f64, f64)> {
+            if !self.air.exists() {
+                return None; // an airless body: real vacuum, and its bodies fly ballistically
+            }
+            Some((self.air.density_at(pos.length() - self.radius_m), self.air.ambient_temp_k))
+        }
+        fn arrival(&self, _from: glam::DVec3, to: glam::DVec3) -> Option<glam::DVec3> {
+            (to.length() <= self.radius_m).then_some(to)
+        }
     }
 
     #[wasm_bindgen]
@@ -4168,8 +4202,12 @@ mod app {
             let fly = crate::terra::fly_camera::FlyCamera::new(
                 20.0, 0.0, 12_000_000.0, 0.0, -1.2, 2.0, 40_000_000.0,
             );
+            let matter = MatterField::new(&device, config.format, 200_000);
             Ok(Terra {
                 detail: Default::default(),
+                flight: crate::flight::Flight::default(),
+                last_frame_s: 0.0,
+                matter,
                 surface,
                 device,
                 queue,
@@ -4315,6 +4353,113 @@ mod app {
             Ok(())
         }
 
+        /// **Launch a meteor swarm at this world.** The whole of the scene's contribution: a mass, a
+        /// material, a place and a velocity — INITIAL CONDITIONS, which is what a scene is for. Everything
+        /// after this (falling, meeting the air, ablating, trailing, arriving) is
+        /// `flight::Flight`, the same engine operation the ground patch runs (docs/59).
+        ///
+        /// The ICs, and why each is a declared fact rather than a chosen outcome:
+        /// - **A disintegrated asteroid.** `damage::disrupt` divides the parent by Dohnanyi's measured
+        ///   mass law and separates the pieces at the parent's own escape speed; the swarm's spread is
+        ///   how long ago it came apart. Nobody picks a fragment size or a scatter width.
+        /// - **17 km/s**, within the real 11–30 km/s range for an Earth-crossing body and comfortably
+        ///   above escape (11.2 km/s) — a declared approach speed, not a consequence.
+        /// - **Released 500 km up**, which is not a round number chosen to look right: it is above the
+        ///   altitude the engine itself derives for where the air can still change the answer
+        ///   (`atmosphere::air_reaches` puts that at ~296–354 km for bodies like these). Starting there
+        ///   means the swarm arrives through the whole atmosphere, with nothing skipped.
+        /// - **Aimed where the camera is looking**, exactly as the ground scene's crosshair IS the impact
+        ///   point. That is the USER aiming, not the camera deciding physics — the fragments fall, ablate
+        ///   and arrive whether or not anyone watches (Law IV).
+        pub fn launch_swarm(&mut self) {
+            let iron = materials::index_of(&self.mats, "iron");
+            // Where the swarm is headed: the point on the surface under the camera.
+            let (lat, lon) = (self.fly.lat.to_radians(), self.fly.lon.to_radians());
+            let target = glam::DVec3::new(
+                lat.cos() * lon.cos(), lat.sin(), lat.cos() * lon.sin(),
+            ) * self.planet_radius;
+            // Released 500 km above, offset so the path is a slanting entry rather than straight down —
+            // a real Earth-crosser almost never arrives on the local vertical.
+            let up = target.normalize();
+            let east = glam::DVec3::Y.cross(up).normalize_or(glam::DVec3::X);
+            let start = target + up * 500_000.0 - east * 900_000.0;
+            let approach = (target - start).normalize() * 17_000.0;
+            // A half-metre iron body — a ~4 tonne bolide — that came apart a day ago, resolved into 600
+            // pieces. Both numbers are declared, and they are different KINDS of declaration:
+            //
+            // - The parent SIZE is an initial condition, and it is chosen inside the regime the entry
+            //   model is honest in. `atmospheric_step` heats a body at its bulk heat capacity, which is
+            //   only true below the thermal skin depth (~1.5 cm for iron over ten seconds), so metre-scale
+            //   iron neither glows nor ablates in this engine — MEASURED: a first pass with a 2 m parent
+            //   flew a perfectly correct entry in which nothing reached 800 K and nothing ablated, because
+            //   every fragment was metre-scale. That is docs/46 row 21, and picking a parent whose pieces
+            //   are centimetres is staying inside the model rather than papering over it.
+            // - The fragment COUNT is a RESOLUTION choice, not physics (docs/44): the same mass, divided
+            //   more finely. 600 puts the pieces between ~2 cm and ~31 cm, which straddles the size where
+            //   the air consumes a fragment — so the small ones burn and the large ones reach the ground,
+            //   which is what a real fall does.
+            let parent_r = 0.5_f64;
+            let parent_m =
+                self.mats[iron].density as f64 * (4.0 / 3.0) * std::f64::consts::PI * parent_r.powi(3);
+            // The trail resolves up to a fraction of the instance budget; past that the shed mass is
+            // booked into the air (same mass, coarser). Law IV: representation, not existence.
+            self.flight.set_trail_budget(120_000);
+            self.flight.introduce_swarm(
+                start, approach, parent_m, parent_r, iron, 600, 86_400.0, 250.0,
+            );
+            log::info!(
+                "swarm: 600 fragments of a {:.0} kg body, entering at {:.1} km/s toward lat {:.1} lon {:.1}",
+                parent_m, approach.length() / 1000.0, self.fly.lat, self.fly.lon
+            );
+        }
+
+        /// How many pieces of matter the engine is holding in flight — for a HUD, and so a rig can assert
+        /// that something is actually there rather than trusting a picture.
+        pub fn flight_count(&self) -> usize {
+            self.flight.bodies().len()
+        }
+
+        /// How many marks of matter were drawn last frame (bodies + shed vapour).
+        pub fn drawn_count(&self) -> u32 {
+            self.matter.drawn_count()
+        }
+
+        /// Mass the entry has ablated away so far (kg) — the trail, on the books.
+        pub fn trail_mass_kg(&self) -> f64 {
+            self.flight.trail().mass()
+        }
+
+        /// The lowest altitude (km) anything in flight has reached, and the fastest speed (km/s) — so a
+        /// rig can tell "descending" from "stuck" without trusting a picture, and a HUD can say how far
+        /// the entry has got.
+        pub fn swarm_min_alt_km(&self) -> f64 {
+            self.flight
+                .bodies()
+                .iter()
+                .map(|b| (b.pos.length() - self.planet_radius) / 1000.0)
+                .fold(f64::INFINITY, f64::min)
+        }
+
+        pub fn swarm_speed_kms(&self) -> f64 {
+            self.flight.bodies().iter().map(|b| b.vel.length() / 1000.0).fold(0.0, f64::max)
+        }
+
+        /// How the trail is FADING: parcels still resolved, the hottest and mass-mean temperature of
+        /// what is left, and the mass that has finished cooling into the air. A trail dissipating is
+        /// exactly these numbers moving — so they are readable rather than inferred from a picture.
+        pub fn trail_parcels(&self) -> usize {
+            self.flight.trail().parcels().len()
+        }
+        pub fn trail_hot_k(&self) -> f64 {
+            self.flight.trail().temperature_range_k().0
+        }
+        pub fn trail_mean_k(&self) -> f64 {
+            self.flight.trail().temperature_range_k().1
+        }
+        pub fn trail_merged_kg(&self) -> f64 {
+            self.flight.trail().merged_kg()
+        }
+
         pub fn world_name(&self) -> String {
             self.world_name.clone()
         }
@@ -4412,6 +4557,58 @@ mod app {
             };
             if cap_fade > 0.0 && self.globe_mesh.is_some() {
                 self.build_cap(&view, sun_light, cap_fade);
+            }
+
+            // **The engine advances its own matter.** Terra's part is a wall-clock dt and the environment
+            // this world presents; the flight law itself is `flight::Flight::step` — the same code the
+            // ground patch runs, and the reason the swarm needs no Terra-specific physics (docs/59).
+            {
+                let now = crate::orbit::unix_now_seconds();
+                // First frame, or a tab that was backgrounded: take one frame's worth rather than a gap.
+                let dt = if self.last_frame_s <= 0.0 { 1.0 / 60.0 } else { (now - self.last_frame_s).clamp(0.0, 0.25) };
+                self.last_frame_s = now;
+                if !self.flight.bodies().is_empty() || self.flight.trail().parcels().len() > 0 {
+                    let body = crate::planet::body(&self.body_id);
+                    let air_mat = self.mats.iter().find(|m| m.id == "air");
+                    let env = PlanetAir {
+                        air: match air_mat {
+                            Some(a) => crate::atmosphere::AirShell::new(
+                                body.surface_pressure(), a, 288.0, body.gravity_at(body.radius()),
+                            ),
+                            None => crate::atmosphere::AirShell {
+                                rho_surface: 0.0, scale_height_m: 0.0, ambient_temp_k: 288.0,
+                            },
+                        },
+                        radius_m: self.planet_radius,
+                        matter: body,
+                    };
+                    // SUBSTEP so a hypervelocity body cannot cross the atmosphere between two frames. At
+                    // 17 km/s a 60 Hz frame is 280 m, already small against the ~8.4 km scale height, but a
+                    // slow frame is not — so the count follows the distance actually travelled, not a
+                    // chosen number: keep each substep under a tenth of a scale height.
+                    let fastest = self.flight.bodies().iter().map(|b| b.vel.length()).fold(0.0_f64, f64::max);
+                    let span = (fastest * dt).max(1.0);
+                    let n = ((span / (0.1 * env.air.scale_height_m.max(1.0))).ceil() as usize).clamp(1, 256);
+                    let sub = dt / n as f64;
+                    for _ in 0..n {
+                        for a in self.flight.step(&env, &self.mats, sub) {
+                            log::info!(
+                                "arrival: {:.1} kg at {:.1} km/s, {:.0} K = {:.2e} J",
+                                a.body.mass_kg, a.body.vel.length() / 1000.0, a.body.temp_k, a.energy_j
+                            );
+                        }
+                    }
+                    // What the engine is holding, as it must be drawn — mapped once, by the engine's rule.
+                    let inst: Vec<GpuParticle> = self
+                        .flight
+                        .drawn(&env, |p| (p * DISPLAY_SCALE).as_vec3())
+                        .iter()
+                        .map(|d| GpuParticle::of_matter(d, &self.mats))
+                        .collect();
+                    self.matter.upload(&self.queue, &inst);
+                } else {
+                    self.matter.upload(&self.queue, &[]);
+                }
             }
 
             let air = self.air();
@@ -4552,6 +4749,20 @@ mod app {
                         draw(&mut pass, uni, &self.sphere_gpu);
                     }
                 }
+                // The engine's matter, last: it is emissive and additive, so it brightens whatever it is
+                // in front of. The projection scales come from the same 0.9 rad vertical FOV the camera
+                // builds its frustum with, which is what lets the shader hold a sub-pixel mark at exactly
+                // one pixel instead of losing it.
+                let proj_y = 1.0 / (0.45_f32).tan();
+                let proj_x = proj_y / aspect.max(1e-3) as f32;
+                self.matter.draw(
+                    &mut pass,
+                    &self.queue,
+                    view_proj,
+                    DISPLAY_SCALE as f32,
+                    (proj_x, proj_y),
+                    self.config.height as f32,
+                );
             }
             self.queue.submit(std::iter::once(encoder.finish()));
             output.present();

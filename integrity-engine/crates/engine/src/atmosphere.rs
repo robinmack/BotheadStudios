@@ -341,6 +341,9 @@ pub struct VaporParcel {
     /// Its temperature (K). The glow is [`crate::blackbody::blackbody_srgb`] of THIS, not a colour chosen
     /// for a trail: physics drives the render.
     pub temp_k: f64,
+    /// The temperature it was SHED at — the heat it started with, kept so that "has it finished cooling?"
+    /// can be asked about this parcel's own history instead of against an absolute number.
+    pub shed_temp_k: f64,
 }
 
 impl VaporParcel {
@@ -361,8 +364,31 @@ impl VaporParcel {
     /// Has it finished being a trail? A parcel that has cooled to the air around it IS the air around it:
     /// its mass has joined the atmosphere, which is where ablated mass really goes. Retiring it is
     /// bookkeeping reaching its end, not mass being dropped.
+    ///
+    /// **This asked `temp_k <= ambient`, which is a test that can never pass.** Radiative cooling is
+    /// asymptotic — `p_rad ∝ T⁴ − T_amb⁴` vanishes as the parcel approaches ambient — so a parcel creeps
+    /// toward the air temperature and never arrives. MEASURED before the fix: 3,734 parcels of one entry
+    /// sat at 288.00 K indefinitely, holding 9.1 kg permanently "aloft" and costing a draw every frame.
+    /// Found by asking whether the trail dissipates (Robin, 2026-07-24) — the fade was real and the
+    /// retirement was not.
+    ///
+    /// So the question is asked about the parcel's OWN history: it is air once it has radiated all but a
+    /// hundredth of the heat it was shed with. That is an e-folding statement, not an absolute
+    /// temperature, so it scales with whatever the parcel started at and with any world's ambient.
+    ///
+    /// Robin (2026-07-24) on why this is not a fudge: *"calculus teaches us that some limits may never be
+    /// reached, but we can get 'close enough' as to dismiss the difference without fear of fudge."* The
+    /// distinction that matters is that the tolerance is RELATIVE to the quantity being resolved, so it
+    /// converges with it and states its own error — unlike a dial, which states nothing.
+    /// *Flagged:* the honest criterion is MIXING — a real trail disperses turbulently, it does not sit
+    /// still radiating — and the resolved computation for that is [`AirField`].
     pub fn merged_into_air(&self, ambient_temp_k: f64) -> bool {
-        self.temp_k <= ambient_temp_k
+        const RADIATED_AWAY: f64 = 0.01; // the last hundredth of the excess is no longer a trail
+        let excess = self.temp_k - ambient_temp_k;
+        if excess <= 0.0 {
+            return true;
+        }
+        excess <= RADIATED_AWAY * (self.shed_temp_k - ambient_temp_k).max(0.0)
     }
 }
 
@@ -434,16 +460,32 @@ pub fn vapor_step(
 pub struct Trail {
     parcels: Vec<VaporParcel>,
     merged_kg: f64,
+    /// How many parcels are worth RESOLVING at once. Past this, shed mass is booked instead — the same
+    /// mass, the coarse representation (Robin: tracking follows the scale it is viewed at). Zero means
+    /// "no limit". The number is not a guess about physics: a caller sets it from its instance budget,
+    /// which is a real hardware bound, and the choice is which representation to spend it on.
+    resolve_budget: usize,
 }
 
 impl Trail {
+    /// Resolve at most `n` parcels at a time; shed mass beyond that is booked into the air. Zero = no
+    /// limit. Nothing about EXISTENCE changes with this (Law IV) — only how finely the same mass is held.
+    pub fn set_resolve_budget(&mut self, n: usize) {
+        self.resolve_budget = n;
+    }
+
     /// The body shed this much mass, here, at this velocity and temperature.
     pub fn shed(
         &mut self, mass_kg: f64, material: usize, pos: glam::DVec3, vel: glam::DVec3, temp_k: f64,
     ) {
-        if mass_kg > 0.0 {
-            self.parcels.push(VaporParcel { mass_kg, material, pos, vel, temp_k });
+        if mass_kg <= 0.0 {
+            return;
         }
+        if self.resolve_budget > 0 && self.parcels.len() >= self.resolve_budget {
+            self.book(mass_kg); // over budget: same mass, coarser representation
+            return;
+        }
+        self.parcels.push(VaporParcel { mass_kg, material, pos, vel, temp_k, shed_temp_k: temp_k });
     }
 
     /// Shed mass without resolving it — the coarse representation, for a trail nothing is close enough to
@@ -463,6 +505,18 @@ impl Trail {
     /// Mass that has cooled into the atmosphere.
     pub fn merged_kg(&self) -> f64 {
         self.merged_kg
+    }
+
+    /// The hottest parcel still resolved (K), and the mass-weighted mean temperature — how the trail is
+    /// FADING, in the only terms it can honestly be described in. Zero when nothing is left aloft.
+    pub fn temperature_range_k(&self) -> (f64, f64) {
+        let mass: f64 = self.parcels.iter().map(|p| p.mass_kg).sum();
+        if mass <= 0.0 {
+            return (0.0, 0.0);
+        }
+        let hottest = self.parcels.iter().map(|p| p.temp_k).fold(0.0, f64::max);
+        let mean = self.parcels.iter().map(|p| p.temp_k * p.mass_kg).sum::<f64>() / mass;
+        (hottest, mean)
     }
 
     /// The parcels still hot enough to be worth resolving — what a renderer draws, glowing at their own
@@ -947,6 +1001,7 @@ mod tests {
             pos: DVec3::ZERO,
             vel: DVec3::new(0.0, -1.0e4, 0.0),
             temp_k: 3134.0, // iron's boiling point: the temperature ablation sheds it at
+            shed_temp_k: 3134.0,
         };
         // Size is set by the air it expands into: 1 kg at sea level vs at 80 km.
         let (rho_low, rho_high) = (1.2, 1.0e-5);
@@ -959,6 +1014,20 @@ mod tests {
         }
         assert!(hot.temp_k < p.temp_k, "a hot parcel radiates its heat away ({:.0} K)", hot.temp_k);
         assert!(hot.temp_k >= 288.0, "and never cools below the air it is in");
+        // **And it must FINISH.** Radiative cooling is asymptotic, so "has it reached ambient?" is a test
+        // that never passes — a trail of parcels crept to 288.00 K and sat there permanently. A parcel is
+        // air once it has radiated all but a hundredth of the heat it was shed with.
+        let mut fading = p;
+        let mut steps = 0;
+        while !fading.merged_into_air(288.0) && steps < 100_000 {
+            fading = vapor_step(fading, rho_low, 288.0, iron, 0.01);
+            steps += 1;
+        }
+        assert!(
+            fading.merged_into_air(288.0),
+            "a shed parcel must eventually BE air, not approach it forever ({:.4} K after {steps} steps)",
+            fading.temp_k
+        );
 
         // And it is slowed by the air, like anything else moving through a fluid.
         assert!(hot.vel.length() < p.vel.length(), "the parcel is dragged to a stop, not left at 10 km/s");

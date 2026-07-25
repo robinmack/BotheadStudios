@@ -118,6 +118,12 @@ impl Flight {
         &self.bodies
     }
 
+    /// Resolve at most `n` trail parcels at once; beyond that the shed mass is booked into the air. The
+    /// mass is identical either way — this is how finely it is held, not whether it exists.
+    pub fn set_trail_budget(&mut self, n: usize) {
+        self.trail.set_resolve_budget(n);
+    }
+
     /// What the bodies have ablated away — still on the books (docs/59).
     pub fn trail(&self) -> &Trail {
         &self.trail
@@ -154,7 +160,21 @@ impl Flight {
                 if s.ablated_mass > 0.0 {
                     self.trail.shed(s.ablated_mass, b.material, b.pos, b.vel, s.temp_k);
                 }
-                b.vel += s.drag_accel * dt;
+                // Integrate the drag EXACTLY over the substep instead of sampling it. An entry
+                // decelerates at hundreds of g, and `v += a·dt` at that stiffness overshoots — the same
+                // failure the vapour parcels hit, where a step long enough to stop a parcel reversed it.
+                // Quadratic drag has a closed form: dv/dt = −k|v|v ⇒ |v| = |v₀|/(1 + k|v₀|·t), and k|v₀|
+                // is just |a|/|v₀|, which the operator has already told us. Direction is unchanged (drag
+                // is along −v̂), so scaling the vector is the whole update. Exact for constant density;
+                // the remaining error is ρ varying along the step, which vanishes with dt like every
+                // other explicit term.
+                let speed = b.vel.length();
+                let decel = s.drag_accel.length();
+                if speed > 0.0 && decel > 0.0 {
+                    b.vel /= 1.0 + (decel / speed) * dt;
+                } else {
+                    b.vel += s.drag_accel * dt;
+                }
                 b.temp_k = s.temp_k;
                 b.mass_kg = (b.mass_kg - s.ablated_mass).max(0.0);
                 b.radius_m = s.radius_m;
@@ -402,6 +422,86 @@ mod tests {
         }
         assert!(f[0] > 0.9, "millimetre pieces are almost entirely consumed ({:.1}%)", f[0] * 100.0);
         assert_eq!(f[4], 0.0, "decimetre iron reaches the ground intact — iron meteorites do");
+    }
+
+    /// **Nothing is left aloft forever** (Robin, 2026-07-24: *"we should be certain the particles
+    /// eventually reach the ground/merge so they can safely be 'forgotten'"*).
+    ///
+    /// An entry that never finishes is a leak: bodies hovering at a hundred metres, parcels creeping
+    /// toward ambient, both drawn every frame for the rest of the session. So this runs a whole swarm to
+    /// completion and asserts the books close and then EMPTY — every fragment either arrived or was
+    /// consumed by the air, every parcel became air, and the mass adds up at the end exactly as it did at
+    /// the start.
+    ///
+    /// The measured version of this in the browser is the reason it exists: 3,734 parcels sat at 288.00 K
+    /// indefinitely, because `merged_into_air` asked whether a radiatively-cooling parcel had REACHED
+    /// ambient — which it never can.
+    #[test]
+    fn an_entry_finishes_and_nothing_is_left_aloft() {
+        let (planet, mats) = earth_planet();
+        let iron = crate::materials::index_of(&mats, "iron");
+        let parent_r = 0.5_f64;
+        let parent_m = mats[iron].density as f64 * (4.0 / 3.0) * std::f64::consts::PI * parent_r.powi(3);
+
+        let mut flight = Flight::default();
+        flight.introduce_swarm(
+            glam::DVec3::new(0.0, planet.matter.radius() + 500_000.0, 0.0),
+            glam::DVec3::new(0.0, -17_000.0, 0.0),
+            parent_m, parent_r, iron, 40, 86_400.0, 250.0,
+        );
+        let launched = flight.bodies().len();
+        let launched_mass: f64 = flight.bodies().iter().map(|b| b.mass_kg).sum();
+
+        let (mut arrived, mut arrived_mass) = (0usize, 0.0);
+        let dt = 0.02;
+        let mut steps = 0usize;
+        // Dark flight is genuinely slow — a centimetre fragment falls the last tens of km at ~80 m/s — so
+        // the budget is generous. What matters is that it TERMINATES, not that it terminates quickly.
+        while steps < 200_000 {
+            for a in flight.step(&planet, &mats, dt) {
+                arrived += 1;
+                arrived_mass += a.body.mass_kg;
+            }
+            steps += 1;
+            if flight.bodies().is_empty() && flight.trail().parcels().is_empty() {
+                break;
+            }
+        }
+
+        println!(
+            "entry finished after {:.1} s ({steps} steps): {arrived} arrived ({arrived_mass:.1} kg), {} burned up, trail {:.2} kg",
+            steps as f64 * dt, flight.burned_up(), flight.trail().mass()
+        );
+        // Guards against a VACUOUS pass: the entry has to have actually taken place. An empty sim also
+        // satisfies "nothing is left aloft".
+        assert!(arrived > 0, "some fragments must reach the ground");
+        assert!(flight.trail().mass() > 0.0, "and the air must have taken some of them");
+        assert!(steps > 1_000, "the entry must have taken real time, not exited immediately ({steps} steps)");
+        assert!(
+            flight.bodies().is_empty(),
+            "every fragment must arrive or be consumed — {} still aloft after {:.0} s",
+            flight.bodies().len(), steps as f64 * dt
+        );
+        assert!(
+            flight.trail().parcels().is_empty(),
+            "every parcel must become air — {} still resolved after {:.0} s",
+            flight.trail().parcels().len(), steps as f64 * dt
+        );
+        assert_eq!(
+            arrived + flight.burned_up(), launched,
+            "{arrived} arrived + {} burned up must account for all {launched}", flight.burned_up()
+        );
+        // And the mass is the mass: what landed, plus what the air took, is what was launched.
+        let booked = arrived_mass + flight.trail().mass();
+        assert!(
+            (booked / launched_mass - 1.0).abs() < 1e-9,
+            "mass closes at the end too: {booked:.6e} vs {launched_mass:.6e} launched"
+        );
+        // Everything the air took has finished cooling — no resolved remainder hiding in the total.
+        assert!(
+            (flight.trail().merged_kg() - flight.trail().mass()).abs() < 1e-12,
+            "all trail mass has become air"
+        );
     }
 
     /// An airless world flies its bodies ballistically — no drag, no heating, no trail. Vacuum honestly,
