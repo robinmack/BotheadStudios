@@ -6644,8 +6644,26 @@ mod app {
                     // into buffers that persist across frames.
                     if self.draw_matter >= 1 {
                         let (drawn, inst) = (&mut self.drawn_buf, &mut self.inst_buf);
+                        // **CAMERA-RELATIVE, like every other draw in this scene.** The eye is subtracted
+                        // HERE, per particle, in f64 — the convention's "already subtracted per-vertex"
+                        // case (the ground cap is the other one). `MatterField::draw` is handed `vp_rel`,
+                        // which puts the eye at the ORIGIN, so an absolute position would be rendered a
+                        // whole eye-vector away: at the surface that is ~1.0 display unit, an entire
+                        // planet radius off screen.
+                        //
+                        // That is exactly what happened. Adopting the camera-relative convention
+                        // (upstream-7) switched `view_proj` from `vp_abs` to `vp_rel` and gave the static
+                        // meshes a −eye model matrix, but this upload still emitted absolute positions —
+                        // his branch predates the MatterField, so there was nothing here to convert and
+                        // nothing flagged it. MEASURED: a followed fragment at 1553 K with 1,778 items
+                        // drawn rendered a completely black frame.
+                        //
+                        // Subtracting in f64 before the f32 cast also buys back precision the absolute
+                        // form never had: raw f32 at Earth's radius has ~0.6 m ULP, which is larger than
+                        // the fragments this camera exists to sit behind.
+                        let eye_disp = eye;
                         self.flight.drawn_into(drawn, &self.flight_env, |p| {
-                            (p * display_scale()).as_vec3()
+                            (p * display_scale() - eye_disp).as_vec3()
                         });
                         inst.clear();
                         inst.extend(drawn.iter().map(|d| GpuParticle::of_matter(d, &self.mats)));

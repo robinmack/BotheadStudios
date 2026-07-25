@@ -199,7 +199,7 @@ async function main(): Promise<void> {
     });
     swarm.addEventListener("click", () => {
       terra.launch_swarm();
-      setStatus("swarm released — entering the atmosphere");
+      hud.notify("swarm released — entering the atmosphere");
     });
     hud.add("actions", swarm);
 
@@ -216,7 +216,7 @@ async function main(): Promise<void> {
     const stopFollowing = (why: string) => {
       followId = null;
       terra.clear_camera_pose();
-      setStatus(why);
+      hud.notify(why);
     };
     hud.cameras([
       {
@@ -238,12 +238,11 @@ async function main(): Promise<void> {
           if (f.length === 0) {
             // Nothing to ride. Say so and hand the wheel straight back, rather than sitting in a mode
             // that silently does nothing.
-            setStatus("nothing in flight to follow", true);
+            hud.notify("nothing in flight to follow");
             hud.selectCamera("fly");
             return;
           }
           followId = f[0];
-          setStatus("following the largest fragment");
         },
         release: () => {
           followId = null;
@@ -264,7 +263,27 @@ async function main(): Promise<void> {
     // 219 km, closing to a few tens of metres near the ground — and the fragment stays visible the whole
     // way down because the engine draws matter smaller than a pixel AS a pixel. Depth partitioning is what
     // would let the camera sit right on its shoulder at any altitude.
-    const CHASE_BACK = 40, CHASE_UP = 12, CHASE_SIDE = 16;
+    // **Trail RIGHT BEHIND it.** Was 40 back / 12 up / 16 to the SIDE — the side offset put the camera
+    // beside the fragment looking across at it, and 40 radii back made it a speck in its own shot.
+    // Directly behind now, close, with just enough lift to keep it off the horizon line rather than
+    // silhouetted on it.
+    //
+    // The ALTITUDE FLOOR still governs the real standoff and is untouched: `scale` below takes the larger
+    // of the fragment's own radius and `alt·ALT_STANDOFF/CHASE_BACK`, so the eye distance
+    // `CHASE_BACK·scale` can never fall below `alt·ALT_STANDOFF` whatever CHASE_BACK is. That is the f32
+    // depth-range constraint (docs/59: one depth range cannot hold an 80 m fragment AND a 6,371 km
+    // planet). Shrinking CHASE_BACK therefore closes the gap only where the fragment's OWN size
+    // dominates — the low, close, fast part of the descent this camera exists for.
+    // CHASE_SIDE stays 0 — MEASURED, not assumed. The worry was that the ablation trail, which streams
+    // backwards along −v straight into the lens, would obscure the shot. Photographed at peak density
+    // (2.7 km, fragment 2853 K, 7,814 trail parcels at 2616 K, 11,288 items drawn): the fragment reads
+    // bright and clear at frame centre, and the parcels are sparse scattered points rather than a
+    // curtain. A side offset was trialled at 4 radii and is not needed to see the subject.
+    //
+    // What sitting on the axis DOES mean is that the camera flies THROUGH the wake rather than alongside
+    // it — parcels all around instead of a streak beside you. That is a framing preference, not a
+    // visibility problem, and it is left at 0 because nothing measured argues for moving it.
+    const CHASE_BACK = 14, CHASE_UP = 3, CHASE_SIDE = 0;
     const ALT_STANDOFF = 1 / 1000;
     const driveFollowCamera = (): boolean => {
       if (followId === null) return false;
@@ -273,7 +292,7 @@ async function main(): Promise<void> {
         // The producer ENDS ITSELF here: the fragment it was riding has landed. Route the hand-back
         // through the HUD rather than calling stopFollowing directly, or the selector goes on showing
         // "Follow fragment" as the active driver while the fly rig is actually in control.
-        setStatus("the fragment is down — camera released");
+        hud.notify("the fragment is down — camera released");
         hud.selectCamera("fly");
         return false;
       }
