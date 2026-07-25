@@ -77,6 +77,27 @@ Also superseded: a stale untracked `.github/workflows/ci.yml` from 2026-07-08 po
 - **Sean: if the pool genuinely should track resolution, say so and we will derive it.** We left it
   independent because we could not establish that it should.
 
+### upstream-4-gpu-gravity — "dispatch the GPU kernels; race-free COM sweep for Metal" (PR #87)
+
+7 files, **2 conflicts**, both `CHANGELOG.md` / `JOURNAL.md`, unioned. **No judgement calls needed — but two
+Law checks were run before concluding that, and both are worth recording as things that were NOT wrong.**
+
+1. **Is this a second answer to "what is the gravitational acceleration"?** (Law II) No. He adds a GPU
+   Barnes–Hut (`GravityField`, `accelerations_tree`) and wires it into the CPU `aggregate` path, and he pins
+   it the way CLAUDE.md rule 3 requires: `the_gpu_tree_matches_the_cpu_tree_within_the_theta_bound` and
+   `the_gpu_tree_opened_fully_recovers_the_direct_sum`. That makes it an ACCELERATION of the CPU tree, pinned
+   to its exact reference, not a rival implementation. The SPH self-gravity in `sph_step.wgsl` is a different
+   container and legitimately specialized (docs/46 §1).
+2. **Is `theta` duplicated between Rust and WGSL?** (Law V / `laws::SINGLE_SOURCE`) No, and the design is
+   better than ours was: the shader reads `P.theta` from its params, `THETA` exists only as a Rust-side
+   default, and `accelerations_tree_with` takes it explicitly. Theta has one home and flows to the GPU as a
+   uniform. The worry was real — a kernel hardcoding an opening angle would silently ignore a caller's theta —
+   it simply was not what he did.
+
+Also confirmed: his rewritten `bh_gravity.wgsl` still satisfies
+`pinned_constant_tests::the_shaders_gravitational_constant_matches_the_engines`, the guard added the same day
+for the shader copies of `G`. `379/379`.
+
 ## Open questions for Sean
 
 1. **Two camera-control APIs.** His branch adds `arc_press`/`arc_stop`/`arc_distance_m`/`camera_state`/
