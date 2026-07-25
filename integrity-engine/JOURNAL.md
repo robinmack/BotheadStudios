@@ -680,6 +680,212 @@ prerequisite is an O(N log N) binding energy: `bhtree::BarnesHut` exists and is 
 `accelerations`, no POTENTIAL traversal. Adding one (same tree, same opening criterion, sum `Gm/r`), pinned
 to the exact O(N²) sum, is the next step — then the pass hooks in where `sph_snapshot` lands.
 
+## 2026-07-23: the site enters dynamics, and the drop breaks its ball
+
+**What.** The remaining core of the zoom hand-down (docs/59): the materialized fine site now
+STEPS, and a landed drop's arriving energy moves and breaks its matter. Two pieces. (1) The
+release gate resolved on real relief with a DERIVED bound, not a declared one. Measured first:
+the site's relax plateau is a true fixed point (oscillates around 4.9e-2 all the way to the
+5000-iteration cap, never converging toward the strict 5e-3), and the cause is the release
+criterion's own reference - the children's sum smooths at the child scale h_c while the target
+is the coarse field read at the interface scale (h_c + h_p)/2, and near rough relief the coarse
+field genuinely answers the density question differently at those two scales. The rung now
+judges a PROVEN stall against that disagreement, measured from the coarse field at the
+children's own sites with the same denominator as the release error (`refine::scale_mismatch`),
+and releases with the residual and the derived bound both stated (`RelaxReport::release_bound`).
+Measured: the relief lattice's 5.1e-2 plateau under its 1.2e-1 mismatch; the site's 4.8e-2 under
+9.1e-2; a uniform interior reads ~4.5e-2 across the same interval (the coarse lattice's own
+discreteness at the finer read scale - stated as the floor it is); the strict bound remains the
+criterion for every converging run and an unguarded truncation still refuses. (2) The released
+parcels are cohesive matter through the ground scene's own machinery: a new
+`CohesiveBody::from_parcels` carries the ONE builder law (bond k = E*L capped, break strain,
+restitution-derived damping, catalogue specific heat, planet gravity) for both the ground
+scene's lattice balls and the site's split children; `site::SiteDynamics` steps them under
+bonds, gravity and the one terrain-contact law (the ball rests on the declared surface exactly
+as the ground scene's ball rests on its voxels; buried patch matter meets the bowl wall through
+the same non-injecting resolve in the wall's local frame). During a live event the guard band's
+booked step-to-step delta - the coarse field's per-kilogram statement of what arrived at this
+sub-resolution ground - is delivered through the one door (`Aggregate::deposit_impact`,
+entering from the up-shock side); fate is `damage::classify`'s per parcel, the ball's verdict
+is the ground scene's word, the fold stays gated by the docs/61 gauge, and the release gate
+still keeps an UNRELEASED patch out of dynamics.
+
+**Why.** The demo's final beat is the declared ball shattering from the drop seen from space -
+one event read from one file at two scales. Everything ahead of it existed (trigger, guards,
+window, gate); what was missing was the site actually being matter that moves. Law II bound the
+build: no new laws, the ground scene's contact, deposition, fracture, settle and re-cohere
+machinery reused with the site as its second consumer.
+
+**Verified.** Red first at the seams: the relief test was rewritten to expect release under the
+derived bound and failed against the refusing rung; the dynamics tests were written against the
+missing API and driven green. Native: the quiescent site's ball falls, rests and stays intact
+with every parcel classifying Intact, the gauge settles and the fold returns the declared mass;
+the demo beat at the seam - a moon-magnitude boundary pulse (u jump 4.8e6 J/kg, bulk 2.2 km/s)
+- shatters the ball by classify alone (fate 0 solid / 42 fractured / 171 molten / 60 vapor,
+delivered J equal to the booked arrival to 1e-9, mass conserved, mid-event fold refused); an
+artificially unreleased site is refused dynamics with the rung's own residual quoted. Full
+suite 403 green, wasm32 check clean at the baseline warning count. Watched headed on the Mac
+(mac_shot pattern, port 7199, `web/rig/mac_site_dynamics.mjs` on the Ground Zero page,
+screenshots viewed): at load the HUD reads the audit plus "released 4.8e-2 (bound 9.1e-2, the
+field's own scale mismatch at the stall)" and "ball INTACT (72/72 bonds) · parcels 273 solid";
+Drop arms for the launch window and fires itself; the boundary window opens as the shock
+reaches the site (measured on the HUD: arrived IE +1.67e15 J at the band, peak boundary 6019
+m/s); the verdict flips to "ball SHATTERED (0/72 bonds)" with the fate mix running to
+"272 vapor" and "boundary delivered 1.12e14 J over 18 steps" - the moon-drop's energy density
+vaporizes the whole patch, which is the honest outcome, reported as such. Zero console errors
+across the arc.
+
+## 2026-07-23: the event reaches ground zero as boundary state, booked
+
+**What.** The hand-down design's three decisions, implemented. (1) The Ground Zero world's
+declared site pre-resolves in `load_site_world`, before any event exists, and the HUD carries
+the audit from the first frame; the descent trigger stays as the general path, and the only one
+when a mid-event load refuses with its measured speeds. (2) During a live impact the guard band
+re-samples the coarse SPH field once per coarse readback (`site::resample_guards`): each guard's
+velocity, specific internal energy and density become the field's own Shepard interpolation at
+the guard's position, positions and masses untouched, so the guards ARE the coarse field at the
+boundary and no parcel is counted twice; `site::EventWindow` books the boundary state at open,
+latest and peak, drift against an independent audit bounded at 1e-6, and the docs/61 gauge now
+sees the boundary's real speeds, so a hot site refuses to fold. The sampled state inheriting the
+coarse field's collapsed EOS set is the stated IOU on the window's own line. (3) Cold mid-event
+materialization keeps refusing with measured speeds, unchanged. The pi-scaling gate gained its
+end-to-end consumer: the prediction freezes from the measured contact state (barycentric closing
+speed, measured impactor mass), `refine::measure_crater_rim` reads the rim off the field in
+rings of the field's own quantum, and the verdict, or the stated refusal when the quantum cannot
+carry one, renders next to the window with the coefficient vintage named.
+
+**Why.** The trigger half landed a site that could exist; the event's energy never reached it,
+and the literature's rule (no refinement inside a shock) means the energy must arrive as
+boundary state at a site that already exists, not as a mid-shock hand-off. The window's booked
+drift bound is the conservation statement the LOD bridge owed, and the crater cross-check is the
+validation gate docs/59 prescribed instead of eyeballing.
+
+**Verified.** 391 native tests green (388 baseline plus 3). The window book: a quiet-hot-quiet
+pulse across the shipped site's 477-guard boundary books arrived KE/IE equal to an independent
+f64 audit within 1e-6, returns to zero when the pulse leaves, guards carry exactly the uniform
+field's state, fine children bitwise untouched, mass single-owner at 1.313357e8 kg through the
+whole window. The rim measurement: a synthetic bowl of angular radius 0.3 rad measures its rim
+within one quantum of the true 30 m and passes the gate; a one-ring dimple refuses sub-quantum
+with the quantum named; an intact shell refuses as no-depression; the demo drop's prediction
+(Luna into basalt crust at the mutual escape speed, hand-computed rim 1.41e6 m) sits in the
+plain factor-of-two regime. Headed on the Mac (mac_shot pattern, port 6899,
+`web/rig/mac_event_handdown.mjs` on the Ground Zero page): at load the HUD reads the full audit
+line plus "pre-resolved at load, before any event" with the camera at 646,242 km inside the
+952,220 km threshold; after Drop Moon the event window opens on the HUD with all 477 guards
+covered and books the boundary energy arriving, from an early arrived KE -6.6e10 J / IE +6.8e10 J
+at peak 304 m/s through to KE +7.7e12 J / IE +8.0e14 J at peak 1,088 m/s after 337 coarse steps,
+the EOS-collapse IOU on the same line; the pi gate renders live and lands on its honest verdict,
+"rim 5838 km measured at the 1168 km quantum vs 1396 km predicted from the 9.7 km/s contact:
+SANITY PASS (ratio 4.18; the crater rivals the body, so only the order-of-magnitude bound is
+honest)" (the first run of the rig measured this exact case as a plain 2x FAIL, which is what
+widened the gate's degrade condition to the measured rim; the quantum itself balloons to 1,168 km
+mid-event because decompressed ejecta are the widest thing one particle answers for - measured,
+stated, not smoothed); zero console errors across the run; screenshots in the rig's output
+directory, viewed.
+
+## 2026-07-23: the camera crossing its view threshold materializes ground zero
+
+**What.** The first camera-driven resolution-by-necessity trigger (docs/59 order-of-work item 2's
+trigger half, plus the entry point of item 3), wired into the space band and deliberately
+mirroring the moon-drop's resolution-distance idiom: one derived distance, one crossing check per
+frame, one materialization pattern. `crate::site` derives the view-necessity threshold as the
+distance where one coarse SPH particle's matter share, `s = (m/rho)^(1/3)`, subtends the docs/49
+angular budget (the one declared fidelity dial): `d* = s / theta`, the inversion of the
+camera-granularity law. For the 2400-particle Earth statement at the crust's in-situ density that
+is 9.52e8 m; when a live celestial field exists the quantum is measured from its own particles
+instead. The bidirectional `SiteTrigger` demands Materialize below the threshold and Deresolve
+above it, and a demand stands until the crossing actually executes, so refusals stay on screen
+and the trigger re-arms on ascent for the out-and-back demo arc. Materialization reads the Ground
+Zero world's own `ground` block (the shared Earth's `surface_strata` at the declared lat/lon, the
+declared iron ball) and goes through the refine rung: equal-mass coarse parents (the ball's real
+mass sets the rung) in a guarded bowl under the real free surface, split toward release, ledger
+surfaced to the HUD. The downward crossing goes through the docs/61 criterion (`SettleGauge`):
+settled folds back to the summary with the fold audited; unsettled honestly stays. The smallest
+honest energy hand-down: a quiescent live field's specific internal energy is sampled at the site
+(quiescence is `recohere::quiescent_speed` at the coarse quantum); a mid-event field refuses with
+the measured speeds stated; the full mid-event hand-down is the next milestone. The refine rung
+was fixed where its first consumer broke it: the density error is now denominated by
+`max(target, the particle's own in-situ density)` so a coarse-vacuum fringe cannot read an
+infinite error, and a stall guard turns a measured convergence plateau into a prompt stated
+refusal (thresholds an order below the slowest releasing run's flattest window, so nothing that
+released before is refused now).
+
+**Why.** The demo arc is out-and-back (open at the ball, pull out, witness the impact, descend to
+the aftermath), which puts this trigger and its bidirectionality on the critical path; and the
+engine must not grow a second materialization idiom when the moon-drop already has the right
+shape (Law II). Law IV bounds it: the camera changes representation, never existence, and the
+ledger is what proves the change conserved.
+
+**Honest limits, stated where they bind.** This site's relief stalls the relax at a measured
+4.8e-2 plateau (an order over the 5e-3 release bound; the flat and free-surface lattice cases
+release fine at 171 to 1415 iterations), so the patch materializes as the EXACT conserving split
+with the residual quoted on the HUD; the release remains the gate between the site and any entry
+into dynamics. The ball splits exactly but does not relax: an isolated sub-resolution body has no
+uniform coarse environment to relax against (measured divergent). The fine site enters no
+dynamics this milestone, and the 1 m grass skin is sub-quantum at this rung. docs/46 row 18
+carries all of it.
+
+**Verified.** Red first at the pure seams: the trigger and threshold tests were written against
+stubs returning nothing and failed; the materialize, hand-down, column-agreement and fold tests
+failed against a stub returning a refusal, then went green as the physics landed
+(`site::tests`, 6 tests). The rung's new behaviour is pinned at the refine level red-first too:
+the free-floating slab measured `achieved: inf` before the metric change and now refuses with a
+finite stated error; the relief stall test would catch a silent release. Full native suite
+388/388 green, wasm32 check clean at the baseline warning count. Watched headed on the Mac
+(mac_shot pattern, port 6499, `web/rig/mac_site_materialize.mjs` on the Ground Zero page): at
+zoom 1.0 the camera sits at 648,696 km, inside the 952,220 km threshold, and the site
+materializes on load with the HUD reading the full audit (ball 13 + patch 260 fine, 477 coarse
+guards, 1.3134e8 kg in and 1.3134e8 kg out, zero angular-momentum drift); the particle cluster is
+visible on the disc at the declared site (screenshot, magnified crop); zooming out to
+2,668,401 km folds it (750 particles, 1.3134e8 kg returned, drift +0.0e0 kg) and the cluster
+leaves the disc; zooming back to 187,222 km re-materializes it. Zero console errors across the
+whole arc.
+
+## 2026-07-23: the descent camera holds precision from orbit to the ground
+
+**What.** Terra renders under one camera-relative-eye convention (docs/59 order-of-work item 2:
+the descent camera that holds f32 precision to 2 m). The convention lives in `terra::fly_camera`:
+`View` now carries ONLY the eye-at-origin view·projection (`vp_abs` is gone; an absolute-eye
+matrix at planet radius IS the precision bug, so the type no longer offers one), and everything
+Terra draws goes through it. The ground cap already subtracted the eye per-vertex in f64; the
+static globe and grain-shell meshes now draw with a model translation of −eye built in f64 and
+cast once, and the star billboards hang around the origin. The triplanar relief textures stay
+surface-fixed across the change through an anchor: the eye folded modulo the 8 m texture tile
+(tiny, so f32-safe) re-added in `globe.wgsl` before projection; this also ends the cap and globe
+disagreeing about texture phase across the cross-fade. In the final metres: the coarse globe is
+skipped entirely once the cap fully covers the view (`ground_cap::CAP_FULL_ALT_M`, 15 km; below
+that the depth buffer's ~50 m resolution at the horizon cannot separate two copies of the same
+surface, so one of them must not be there); the cap's depth-separation lift scales with altitude
+(`ground_cap::cap_lift_disp`; full 20 m wherever the globe is co-drawn, shrinking below so it
+can never reach the eye; the old fixed 20 m sat ABOVE a camera standing 2 m up, showing the cap's
+underside); and the near-plane floor drops from 1e-6 display units (~6.4 m; it clipped the
+ground underfoot at standing height) to 5e-9 (~3 cm).
+
+**Why.** One continuous camera from celestial view to standing at ground zero, no scene switch
+(Law IV: the camera changes representation, never existence). Raw f32 at Earth's radius has
+~0.4 m ULP; naive world-space rendering re-rolls that error every frame as the eye moves, which
+is ground-level jitter; the fix is representational, not physical, so it belongs entirely to the
+camera/render layer.
+
+**Verified.** Four new native tests pin the scheme's stated bounds: relative-eye round trip
+< 1 mm at planet radius with the naive absolute-f32 path measurably losing centimetres
+(`camera_relative_eye_round_trip_is_submillimetre_at_planet_radius`); the globe's model-relative
+residual < 1.5 m and < 0.1 pixel at its nearest visible distance
+(`globe_model_translation_stays_subpixel_where_the_coarse_globe_is_drawn`); texture phase
+surface-fixed to < 0.1 mm (`triplanar_anchor_restores_surface_fixed_texture_phase`); and the lift
+below the eye at every altitude while reaching full depth separation wherever the globe is
+co-drawn (`cap_lift_stays_below_the_eye_and_reaches_full_depth_separation_with_the_globe`). Full
+native suite 357/357 green; wasm32 check clean. Visually (headed Chromium on the Mac,
+`web/rig/mac_descent.mjs`, real Metal WebGPU): a stepped descent over the Himalaya at 12,000 km /
+2,000 km / 25 km (the cross-fade band where cap and globe co-draw) / 12 km / 100 m / 2 m, plus a
+2 m look-down over Sahara sand; no z-fighting bands in the blend band, no cap underside at 2 m,
+horizon and stars correct, sand relief texture resolving at standing height. Sub-metre smoothness
+probed by stepping the camera sideways 0.25 m at a time at 2 m altitude and diffing consecutive
+frames: per-step image change uniform to under 1% across seven steps (quantized eye handling
+would alternate no-change/double-change at ~0.4 m ULP). The stair-step horizon silhouette at low
+altitude is the elevation raster's own blockiness, present identically on main before this
+change (compared side by side), and is the known missing finer LOD tier, not a regression.
+
 ## 2026-07-23: one Earth serves the orbit and the ground
 
 **What.** The three shipped scenes stopped carrying private Earths (docs/59 order-of-work item 1;

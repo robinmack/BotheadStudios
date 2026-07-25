@@ -89,9 +89,10 @@ mod mesher;
 mod neighbors;
 mod orbit;
 pub mod recohere; // docs/61 — the batch downward rung: a settled particle field re-coheres to ground
-pub mod refine; // docs/59, the upward rung: the celestial field initializes the local patch, conserved
+pub mod refine; // docs/62, the upward rung: the celestial field initializes the local patch, conserved
 pub mod resolution; // docs/44 — resolution by necessity: the quasi-static admission test
 pub mod simulation;
+pub mod site; // docs/62, the camera-driven materialization trigger and its site (wires refine.rs)
 /// docs/49 — surface detail that follows the camera CONTINUOUSLY. The consumer
 /// `ResolutionController::camera_grain_radius` never had.
 mod sky;
@@ -1137,6 +1138,50 @@ mod app {
         gpu_crater_r_frac: f64,
         /// Last reported bowl depth (quantised) so the diagnostic logs on CHANGE, not every frame.
         gpu_crater_logged: i32,
+        // --- docs/59: the declared site and its camera-driven materialization trigger. ---
+        /// The declared ground-zero site (from the ground world definition), armed once the host
+        /// loads it. `None` = no site declared; the trigger never fires.
+        site_spec: Option<crate::site::SiteSpec>,
+        /// The bidirectional trigger - the camera's mirror of the moon-drop's
+        /// resolution-distance crossing (one materialization pattern, docs/59).
+        site_trigger: crate::site::SiteTrigger,
+        site: Option<crate::site::MaterializedSite>,
+        /// The docs/61 settle gauge gating the downward (fold) crossing.
+        site_gauge: crate::recohere::SettleGauge,
+        /// The honest one-line site state for the HUD: the audit when materialized, the refusal
+        /// and its reason when refused, the fold report when folded.
+        site_status: String,
+        /// A refine-level refusal at the current descent is remembered so the standing demand
+        /// does not rebuild (and re-refuse) every frame; cleared when the camera re-arms by
+        /// ascending back past the threshold.
+        site_refused: bool,
+        /// Instance buffer for the site's particles (billboards through `sph_render.wgsl`),
+        /// rewritten per frame with Earth-relative positions (the site co-rotates with the
+        /// crust, exactly like the shell grains and the crater mask).
+        site_buf: Option<wgpu::Buffer>,
+        site_cam: UniformSlot,
+        /// Live trigger inputs, kept for the HUD: the camera's distance to the site and the
+        /// derived view-necessity threshold (both metres, updated every `advance`).
+        site_dist_m: f64,
+        site_resolve_at_m: f64,
+        // --- docs/59 "The hand-down, made concrete": the mid-event boundary hand-down. ---
+        /// Counts coarse-field readbacks, so the guard band re-samples once per COARSE step
+        /// (each new snapshot), never redundantly per render frame.
+        sph_snapshot_gen: u64,
+        /// The snapshot generation the guard band last re-sampled.
+        site_sampled_gen: u64,
+        /// The event window the audit ledger books: boundary state at open, latest, and peak,
+        /// so what arrived at the site is a measured delta on the HUD.
+        site_window: crate::site::EventWindow,
+        /// The RELEASED site's dynamics (docs/59): the fine parcels as cohesive matter, stepped
+        /// each frame, driven by the guard band's boundary deltas during an event. `None` while
+        /// no site is materialized or the release gate refused dynamics.
+        site_dyn: Option<crate::site::SiteDynamics>,
+        /// The pi-scaling prediction, frozen from the MEASURED contact state (rim metres,
+        /// contact speed m/s) the moment the impact direction freezes. `None` until contact.
+        pi_prediction: Option<(f64, f64)>,
+        /// The latest pi-gate readout (measured rim vs prediction, or the stated refusal).
+        pi_line: String,
     }
 
     /// Earth rendered as a shell of particles (the honest low-res look, docs/15): a smooth sphere is a
@@ -1316,15 +1361,15 @@ mod app {
                     )],
                 });
             let sph_pipeline = build_sph_pipeline(&device, &particle_bind_layout, config.format);
-            let sph_cam = {
+            let make_particle_cam = |label: &str| {
                 let buf = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("sph-cam"),
+                    label: Some(label),
                     size: std::mem::size_of::<crate::gpu_sph::SphCam>() as u64,
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 });
                 let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("sph-cam-bind"),
+                    label: Some(label),
                     layout: &particle_bind_layout,
                     entries: &[wgpu::BindGroupEntry {
                         binding: 0,
@@ -1333,6 +1378,10 @@ mod app {
                 });
                 UniformSlot { buf, bind }
             };
+            let sph_cam = make_particle_cam("sph-cam");
+            // The declared site's particles render through the SAME billboard pipeline (one
+            // particle look, not two), with their own camera slot.
+            let site_cam = make_particle_cam("site-cam");
 
             // The real three-body system in SI units: [Sun, Earth, Moon] (orbit.rs). The Earth carries
             // its true heliocentric velocity and the Moon co-moves with it plus its own orbital speed,
@@ -1486,6 +1535,22 @@ mod app {
                 gpu_crater_depth_frac: 0.0,
                 gpu_crater_r_frac: 0.0,
                 gpu_crater_logged: -1,
+                site_spec: None,
+                site_trigger: crate::site::SiteTrigger::new(),
+                site: None,
+                site_gauge: crate::recohere::SettleGauge::new(),
+                site_status: String::new(),
+                site_refused: false,
+                site_buf: None,
+                site_cam,
+                site_dist_m: 0.0,
+                site_resolve_at_m: 0.0,
+                sph_snapshot_gen: 0,
+                site_sampled_gen: 0,
+                site_window: crate::site::EventWindow::default(),
+                site_dyn: None,
+                pi_prediction: None,
+                pi_line: String::new(),
             })
         }
 
@@ -2296,6 +2361,343 @@ mod app {
             Ok(())
         }
 
+        /// docs/59 - arm the declared site: load a `"ground"` world (the SAME file the ground
+        /// scene runs) and derive the trigger's spec from it and the one shared body. Until this
+        /// is called no site exists and the trigger never fires.
+        ///
+        /// A DECLARED site then PRE-RESOLVES right here, at load, before any event exists
+        /// (docs/59 "The hand-down, made concrete", decision 1): no code hands off state
+        /// mid-shock, so refinement happens ahead of where the shock will arrive, and a site
+        /// that wants to witness an event exists before it. The descent trigger stays armed as
+        /// the general path - and the only path when this pre-resolve refuses (a mid-event
+        /// load refuses with the measured speeds, exactly like a mid-event descent).
+        pub fn load_site_world(&mut self, world_json: &str) -> Result<(), JsValue> {
+            let w = crate::terra::world_def::World::parse(world_json)
+                .map_err(|e| JsValue::from_str(&e))?;
+            let spec =
+                crate::site::SiteSpec::from_ground_world(&w).map_err(|e| JsValue::from_str(&e))?;
+            self.site_trigger = crate::site::SiteTrigger::new();
+            self.site = None;
+            self.site_dyn = None;
+            self.site_buf = None;
+            self.site_refused = false;
+            self.site_window.reset();
+            self.site_sampled_gen = self.sph_snapshot_gen;
+            self.pi_prediction = None;
+            self.pi_line.clear();
+            // The hand-down at load: the definition answers when no live field exists; a live
+            // field is sampled through the one law (quiescent samples, mid-event refuses).
+            let live = self.sph_active
+                && matches!(self.sph_phase, SphPhase::Dynamics)
+                && !self.sph_snapshot.is_empty();
+            let hand = if live {
+                let site_dir = crate::geo::dir_from_lat_lon(spec.lat_deg, spec.lon_deg);
+                let r_p = spec.body_radius_m;
+                match crate::site::sample_hand_down(&self.sph_snapshot, site_dir * r_p, spec.g_ms2)
+                {
+                    Ok(h) => Some(h),
+                    Err(r) => {
+                        self.site_status = format!(
+                            "site armed at ({:.0}, {:.0}); pre-resolve refused: {r}",
+                            spec.lat_deg, spec.lon_deg
+                        );
+                        self.site_spec = Some(spec);
+                        return Ok(());
+                    }
+                }
+            } else {
+                Some(crate::site::HandDown::Declared)
+            };
+            match crate::site::materialize_site(&spec, &hand.expect("set above"), &self.mats) {
+                Ok(site) => {
+                    self.site_trigger
+                        .confirm(crate::site::SiteCrossing::Materialize);
+                    self.site_gauge.reset();
+                    self.site_status = format!(
+                        "{} · pre-resolved at load, before any event",
+                        site_audit_line(&site)
+                    );
+                    // The released site ENTERS DYNAMICS (docs/59); the release gate refusing
+                    // keeps the patch static, standing and stated.
+                    self.site_dyn = match crate::site::SiteDynamics::new(&site, &spec, &self.mats) {
+                        Ok(d) => Some(d),
+                        Err(r) => {
+                            self.site_status
+                                .push_str(&format!(" · dynamics gated: {r}"));
+                            None
+                        }
+                    };
+                    self.site = Some(site);
+                }
+                Err(r) => {
+                    self.site_status = format!(
+                        "site armed at ({:.0}, {:.0}); pre-resolve refused: {r}",
+                        spec.lat_deg, spec.lon_deg
+                    );
+                }
+            }
+            self.site_spec = Some(spec);
+            Ok(())
+        }
+
+        /// The site's honest HUD line: the standing state (armed / materialized with its audit /
+        /// refused with the reason / folded with the fold audit) plus the live camera-vs-threshold
+        /// numbers the trigger is watching. Empty when no site is armed.
+        pub fn site_status(&self) -> String {
+            if self.site_spec.is_none() {
+                return String::new();
+            }
+            let (d, at) = (self.site_dist_m, self.site_resolve_at_m);
+            let mut s = format!(
+                "{} · camera {:.0} km / threshold {:.0} km",
+                self.site_status,
+                d / 1.0e3,
+                at / 1.0e3
+            );
+            // The event window's book and the pi-gate readout ride the same honest line.
+            if self.site_window.is_open() {
+                s.push_str(" · ");
+                s.push_str(&self.site_window.hud_line());
+            }
+            // The dynamics readout: the ball's verdict word, the classify fate mix, the
+            // boundary's delivered energy and the site clock.
+            if let Some(d) = &self.site_dyn {
+                s.push_str(" · ");
+                s.push_str(&d.hud_line(&self.mats));
+            }
+            if !self.pi_line.is_empty() {
+                s.push_str(" · ");
+                s.push_str(&self.pi_line);
+            }
+            s
+        }
+
+        /// docs/59 - the per-frame site check: the camera's mirror of the moon-drop's
+        /// resolution-distance crossing (`live_resolution_crossing`), so the engine has ONE
+        /// materialization pattern. Derives the view-necessity threshold from the coarse quantum
+        /// (measured from the live field when one exists, the declared celestial statement
+        /// otherwise) and the docs/49 angular budget; executes whatever crossing the trigger
+        /// demands; keeps the refusals and the audit on the HUD.
+        fn update_site(&mut self, dt: f64) {
+            let Some(spec) = self.site_spec.as_ref() else {
+                return;
+            };
+            let p = self.planet_idx();
+            let r_p = self
+                .body_meta
+                .get(p)
+                .map_or(earth_radius_m(), |m| m.radius_m);
+            // The site rides the rotating crust, exactly like the shell grains and the crater.
+            let spin_axis = self.spin_l.try_normalize().unwrap_or(glam::DVec3::Z);
+            let spin_rot = glam::DQuat::from_axis_angle(
+                spin_axis,
+                self.spin_angle % (2.0 * std::f64::consts::PI),
+            );
+            let site_dir = spin_rot * crate::geo::dir_from_lat_lon(spec.lat_deg, spec.lon_deg);
+            let site_w = self.bodies[p].pos + site_dir * r_p;
+            // The camera eye in world metres: the focus body plus the display-space eye offset
+            // (the same construction as `view_proj`).
+            let focus_w = self
+                .bodies
+                .get(self.focus)
+                .map_or(self.bodies[p].pos, |b| b.pos);
+            let eye_disp = self.camera.eye_dir().as_dvec3()
+                * (self.camera.base_distance * self.camera.zoom) as f64
+                + self.camera.pan.as_dvec3();
+            let eye_w = focus_w + eye_disp / display_scale();
+            let dist = (eye_w - site_w).length();
+            // The coarse quantum this site is currently represented at.
+            let live = self.sph_active
+                && matches!(self.sph_phase, SphPhase::Dynamics)
+                && !self.sph_snapshot.is_empty();
+            let extent = if live {
+                crate::site::measured_coarse_extent_m(&self.sph_snapshot)
+            } else {
+                spec.declared_coarse_extent_m()
+            };
+            let theta = crate::resolution::ResolutionController::default().angular_resolution;
+            let resolve_at = crate::site::view_resolution_distance(extent, theta);
+            self.site_dist_m = dist;
+            self.site_resolve_at_m = resolve_at;
+
+            if let Some(site) = self.site.as_mut() {
+                // docs/59 decision 2 - the mid-event boundary hand-down: while a live event
+                // runs, the guard band re-samples the coarse field once per COARSE step (each
+                // new readback), so the guards ARE the coarse field at the boundary and the
+                // impact's energy arrives at the site as real boundary state, booked by the
+                // event window. Ownership stays single: guards mirror state, never matter.
+                // (The tangent frame co-rotates with the crust while the coarse field does
+                // not spin; the omega-cross-r difference, under ~0.5 km/s, is sub-resolution
+                // against the coarse quantum's own quiescent speed of several km/s.)
+                if live && self.site_sampled_gen != self.sph_snapshot_gen {
+                    self.site_sampled_gen = self.sph_snapshot_gen;
+                    let (up, north, east) = crate::geo::tangent_frame(spec.lat_deg, spec.lon_deg);
+                    let frame = crate::site::SiteFrame {
+                        origin_rel_m: site_dir * r_p,
+                        east: spin_rot * east,
+                        up: spin_rot * up,
+                        north: spin_rot * north,
+                    };
+                    // The window's previous book is the baseline this coarse step's ARRIVAL is
+                    // measured against; the first book of an event is the baseline itself.
+                    let prev = self
+                        .site_window
+                        .is_open()
+                        .then(|| self.site_window.last_state());
+                    let state = crate::site::resample_guards(site, &self.sph_snapshot, &frame);
+                    self.site_window.book(state);
+                    // The arrival drives the site's dynamics through the one door (docs/59):
+                    // the guard band's step-to-step delta, delivered per aggregate by
+                    // Aggregate::deposit_impact - the ground scene's own operator.
+                    if let (Some(prev), Some(d)) = (prev, self.site_dyn.as_mut()) {
+                        d.deliver_boundary(&prev, &state, &self.mats);
+                    }
+                    // The pi-scaling cross-check (docs/59): once contact froze the impact
+                    // direction and the measured-state prediction, read the crater off the
+                    // coarse field at the field's own quantum and gate it - or carry the
+                    // stated refusal when the quantum cannot hold a verdict.
+                    if let (Some(dir), Some((rim_pred, speed))) =
+                        (self.gpu_impact_site, self.pi_prediction)
+                    {
+                        self.pi_line = match crate::refine::measure_crater_rim(
+                            &self.sph_snapshot,
+                            dir,
+                            r_p,
+                            extent,
+                        ) {
+                            Ok(m) => format!(
+                                "pi gate ({}): rim {:.0} km measured at the {:.0} km quantum \
+                                 vs {:.0} km predicted from the {:.1} km/s contact: {}",
+                                crate::refine::HARD_ROCK.name,
+                                m.rim_radius_m / 1.0e3,
+                                extent / 1.0e3,
+                                rim_pred / 1.0e3,
+                                speed / 1.0e3,
+                                crate::refine::pi_scaling_gate(m.rim_radius_m, rim_pred, r_p)
+                            ),
+                            Err(r) => {
+                                format!("pi gate ({}): {r}", crate::refine::HARD_ROCK.name)
+                            }
+                        };
+                    }
+                }
+                // The site STEPS: its parcels evolve under the existing laws each frame, on the
+                // site's own real-second clock (a compute statement the HUD quotes; verdicts
+                // are deposit-driven and land at the coarse step regardless).
+                if let (Some(site), Some(d)) = (self.site.as_mut(), self.site_dyn.as_mut()) {
+                    d.step(site, dt, &self.mats);
+                }
+                let site = self.site.as_ref().expect("checked above");
+                // Feed the docs/61 gauge the site's own peak speed (the boundary now carries
+                // the field's speeds mid-event, so a hot site honestly refuses to fold; the
+                // gauge is the law, not a shortcut past it).
+                self.site_gauge.observe(
+                    crate::site::site_peak_speed(site),
+                    spec.g_ms2 as f32,
+                    dt as f32,
+                );
+                // The standing contamination check while a live celestial field exists: a coarse
+                // particle penetrating the fine site invalidates it, and the screen says so.
+                if live {
+                    let fine_mass = site.particles[site.fine_start..]
+                        .iter()
+                        .map(|q| q.mass)
+                        .fold(f32::INFINITY, f32::min);
+                    let region = crate::refine::Region {
+                        center: (site_dir * r_p).as_vec3(),
+                        radius: site.extent_m as f32,
+                    };
+                    if let Err(r) =
+                        crate::refine::contamination_check(&self.sph_snapshot, &region, fine_mass)
+                    {
+                        self.site_status = format!("SITE INVALID: {r}");
+                        return;
+                    }
+                }
+            }
+
+            match self.site_trigger.observe(dist, resolve_at) {
+                Some(crate::site::SiteCrossing::Materialize) => {
+                    if self.site_refused {
+                        return; // the standing refusal is on the HUD; re-arms on ascent
+                    }
+                    // The smallest honest hand-down: sample a quiescent live field, refuse a
+                    // mid-event one (a cheap check, retried every frame so the demand stands),
+                    // or take the definition when no field exists.
+                    let hand = if live {
+                        match crate::site::sample_hand_down(
+                            &self.sph_snapshot,
+                            site_dir * r_p,
+                            spec.g_ms2,
+                        ) {
+                            Ok(h) => h,
+                            Err(r) => {
+                                self.site_status = format!("{r}");
+                                return;
+                            }
+                        }
+                    } else {
+                        crate::site::HandDown::Declared
+                    };
+                    match crate::site::materialize_site(spec, &hand, &self.mats) {
+                        Ok(site) => {
+                            self.site_trigger
+                                .confirm(crate::site::SiteCrossing::Materialize);
+                            self.site_gauge.reset();
+                            self.site_status = site_audit_line(&site);
+                            // Released -> the site enters dynamics; gated -> static, stated.
+                            self.site_dyn =
+                                match crate::site::SiteDynamics::new(&site, spec, &self.mats) {
+                                    Ok(d) => Some(d),
+                                    Err(r) => {
+                                        self.site_status
+                                            .push_str(&format!(" · dynamics gated: {r}"));
+                                        None
+                                    }
+                                };
+                            self.site = Some(site);
+                            self.site_buf = None; // sized on first draw
+                        }
+                        Err(r) => {
+                            // A build-level refusal is deterministic at this descent: latch it
+                            // (the demand stands, stated) instead of re-refusing every frame.
+                            self.site_refused = true;
+                            self.site_status = format!("{r}");
+                        }
+                    }
+                }
+                Some(crate::site::SiteCrossing::Deresolve) => {
+                    let Some(site) = self.site.as_ref() else {
+                        return;
+                    };
+                    match crate::site::fold_site(site, &self.site_gauge, spec.g_ms2 as f32) {
+                        Ok(rep) => {
+                            self.site_trigger
+                                .confirm(crate::site::SiteCrossing::Deresolve);
+                            self.site = None;
+                            self.site_dyn = None;
+                            self.site_buf = None;
+                            self.site_status = format!(
+                                "site folded to the summary: {} particles, {:.4e} kg returned \
+                                 (drift {:+.1e} kg)",
+                                rep.folded, rep.audit.mass, rep.mass_drift_kg
+                            );
+                        }
+                        Err(r) => {
+                            // Not settled: it honestly stays resolved; the demand stands.
+                            self.site_status = format!("{r}");
+                        }
+                    }
+                }
+                None => {
+                    // Ascended past the threshold un-materialized: the next descent retries.
+                    if !self.site_trigger.is_resolved() {
+                        self.site_refused = false;
+                    }
+                }
+            }
+        }
+
         /// Set up the GPU SPH relaxation for a collision of the given bodies (docs/58 #7 — the ONE engine).
         /// Each is particalized from its MATTER (real mass, per-material EOS from the catalogue) and relaxed
         /// PROMOTE a settled clump out of the particle set into a layered body (docs/58, docs/44).
@@ -2529,7 +2931,10 @@ mod app {
             self.gpu_crater_frac = 0.0;
             self.gpu_crater_depth_frac = 0.0;
             self.gpu_crater_r_frac = 0.0;
-            self.sph_promoted.clear();
+            self.site_window.reset(); // a new event opens its own boundary window (docs/59)
+            self.site_sampled_gen = self.sph_snapshot_gen;
+            self.pi_prediction = None;
+            self.pi_line.clear();
             self.sph_substeps = 6; // start conservative; the frame-budget controller adapts up (docs/42)
         }
 
@@ -2571,7 +2976,10 @@ mod app {
             self.gpu_crater_frac = 0.0;
             self.gpu_crater_depth_frac = 0.0;
             self.gpu_crater_r_frac = 0.0;
-            self.sph_promoted.clear();
+            self.site_window.reset(); // a new event opens its own boundary window (docs/59)
+            self.site_sampled_gen = self.sph_snapshot_gen;
+            self.pi_prediction = None;
+            self.pi_line.clear();
             self.sph_substeps = 6;
         }
 
@@ -2643,7 +3051,10 @@ mod app {
             self.gpu_crater_frac = 0.0;
             self.gpu_crater_depth_frac = 0.0;
             self.gpu_crater_r_frac = 0.0;
-            self.sph_promoted.clear();
+            self.site_window.reset(); // a new event opens its own boundary window (docs/59)
+            self.site_sampled_gen = self.sph_snapshot_gen;
+            self.pi_prediction = None;
+            self.pi_line.clear();
             self.sph_substeps = 6; // start conservative; the frame-budget controller adapts up (docs/42)
             self.focus = 1; // centre on Earth (the particle system sits at the display origin)
             self.camera.zoom = 0.4; // frame the impact (the Earth–Moon default zoom shows it as a speck)
@@ -2702,10 +3113,13 @@ mod app {
         /// the physics with an oversized step — time slows before truth breaks.
         pub fn advance(&mut self, real_dt: f64) {
             let real_dt = real_dt.clamp(0.0, 0.25); // tab-sleep / hiccup guard
-                                                    // docs/42 — ADAPTIVE GPU-load control: keep each frame's encoded work inside a wall-clock budget so
-                                                    // the sim can never monopolize the GPU and freeze the tab / OS. `real_dt` is the previous frame's
-                                                    // total time; a slow frame shrinks the substep count (multiplicative, down to 1), headroom grows it
-                                                    // by one (additive, capped). The heavy direct-sum O(N²) step is exactly what this throttles.
+                                                    // docs/59 - the declared site's camera trigger runs every frame, whichever machine
+                                                    // owns the physics below (the SPH phases early-return out of this function).
+            self.update_site(real_dt);
+            // docs/42 — ADAPTIVE GPU-load control: keep each frame's encoded work inside a wall-clock budget so
+            // the sim can never monopolize the GPU and freeze the tab / OS. `real_dt` is the previous frame's
+            // total time; a slow frame shrinks the substep count (multiplicative, down to 1), headroom grows it
+            // by one (additive, capped). The heavy direct-sum O(N²) step is exactly what this throttles.
             if self.sph_active {
                 if real_dt > 0.060 {
                     self.sph_substeps = (self.sph_substeps * 3 / 4).max(1);
@@ -2983,6 +3397,9 @@ mod app {
                             self.queue.submit(std::iter::once(enc.finish()));
                             if let Some(snap) = sph.take_readback() {
                                 self.sph_snapshot = snap;
+                                // One coarse step the CPU can see: the guard-band resample
+                                // and the pi-gate read key off this (docs/59).
+                                self.sph_snapshot_gen += 1;
                             }
                             sph.begin_readback(&self.device, &self.queue);
                         }
@@ -3277,17 +3694,97 @@ mod app {
             let coherence = target.map_or(1.0, |(_, _, c)| c);
             let pretty_fade = crate::accretion::surface_weight(coherence, 0.55);
             self.render_blend = 1.0 - pretty_fade as f64; // particles take over as the surface loses meaning
-                                                          // **The impactor, by the same rule.** Measured position, measured radius, drawn as a solid
-                                                          // body for as long as it IS one — and it is one, all the way in, because nothing has touched
-                                                          // it yet. Its own declared geotherm decides whether it glows: Theia's mantle is 1,200 K, hot
-                                                          // from accretion, so it does.
-                                                          // Where the impactor is, and how big — from its PARTICLES once they exist, and from the body
-                                                          // itself before that. The first cut asked only the particles, so during the approach (when
-                                                          // there are none, by design) it drew nothing at all and Theia was invisible until it came
-                                                          // apart. A body is drawn as a body from the moment the scene places it.
-                                                          // THE shared representation rule (accretion::representation) — the same call a droplet
-                                                          // striking a petal would make. The scene supplies this body's particles (if any) and its
-                                                          // declared place and size; the engine decides whether that is a surface or a debris field.
+
+            // docs/59 - the materialized site: rebuild its instances in the lagged render frame
+            // (site-local particles mapped through the rotating tangent frame onto Earth-relative
+            // metres - the site rides the crust like the shell grains and the crater) and push
+            // its camera slot; drawn later in the pass through the ONE billboard pipeline. The
+            // radial anchor is the DRAWN surface (body radius plus the raster's local elevation),
+            // so the site sits on the planet the viewer actually sees; procedural-patch relief vs
+            // raster elevation converging into one surface is docs/54's noted seam.
+            let site_count = {
+                let Self {
+                    site,
+                    site_spec,
+                    site_buf,
+                    site_cam,
+                    device,
+                    queue,
+                    earth_surface,
+                    spin_l,
+                    spin_angle,
+                    ..
+                } = &mut *self;
+                if let (Some(site), Some(spec)) = (site.as_ref(), site_spec.as_ref()) {
+                    let spin_axis = spin_l.try_normalize().unwrap_or(glam::DVec3::Z);
+                    let spin_rot = glam::DQuat::from_axis_angle(
+                        spin_axis,
+                        *spin_angle % (2.0 * std::f64::consts::PI),
+                    );
+                    let (up, north, east) = crate::geo::tangent_frame(spec.lat_deg, spec.lon_deg);
+                    let (up, north, east) = (spin_rot * up, spin_rot * north, spin_rot * east);
+                    let elev = earth_surface
+                        .as_ref()
+                        .and_then(|s| {
+                            s.elevation.as_ref().map(|r| {
+                                r.elevation_m_at(
+                                    spec.lat_deg,
+                                    spec.lon_deg,
+                                    s.elev_range[0],
+                                    s.elev_range[1],
+                                )
+                                .max(0.0)
+                                    * s.relief_exag
+                            })
+                        })
+                        .unwrap_or(0.0);
+                    let base = up * (pretty_r_surf + elev);
+                    let mut inst = Vec::with_capacity(site.particles.len());
+                    for q in &site.particles {
+                        let w = base
+                            + east * q.pos[0] as f64
+                            + up * q.pos[1] as f64
+                            + north * q.pos[2] as f64;
+                        let mut qq = *q;
+                        qq.pos = w.as_vec3().to_array();
+                        inst.push(qq);
+                    }
+                    let bytes: Vec<u8> = bytemuck::cast_slice(&inst).to_vec();
+                    let need = bytes.len() as u64;
+                    if site_buf.as_ref().map_or(true, |b| b.size() < need) {
+                        *site_buf = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("site-particles"),
+                            size: need,
+                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                            mapped_at_creation: false,
+                        }));
+                    }
+                    queue.write_buffer(site_buf.as_ref().unwrap(), 0, &bytes);
+                    let origin = ((earth_center - focus) * display_scale()).as_vec3();
+                    let cam = crate::gpu_sph::SphCam {
+                        view_proj: view_proj.to_cols_array_2d(),
+                        origin: [origin.x, origin.y, origin.z, 0.0],
+                        // The same mote half-size the SPH ejecta use (one particle look); the
+                        // ejecta-radius param is pushed out so that ramp never fires for ground.
+                        params: [display_scale() as f32, 0.006, 1.0e12, 0.0],
+                    };
+                    queue.write_buffer(&site_cam.buf, 0, bytemuck::bytes_of(&cam));
+                    inst.len() as u32
+                } else {
+                    0
+                }
+            };
+            // **The impactor, by the same rule.** Measured position, measured radius, drawn as a solid
+            // body for as long as it IS one — and it is one, all the way in, because nothing has touched
+            // it yet. Its own declared geotherm decides whether it glows: Theia's mantle is 1,200 K, hot
+            // from accretion, so it does.
+            // Where the impactor is, and how big — from its PARTICLES once they exist, and from the body
+            // itself before that. The first cut asked only the particles, so during the approach (when
+            // there are none, by design) it drew nothing at all and Theia was invisible until it came
+            // apart. A body is drawn as a body from the moment the scene places it.
+            // THE shared representation rule (accretion::representation) — the same call a droplet
+            // striking a petal would make. The scene supplies this body's particles (if any) and its
+            // declared place and size; the engine decides whether that is a surface or a debris field.
             let impactor = {
                 let (pos, mass) = self.body_particles(1);
                 let declared = self
@@ -3361,21 +3858,52 @@ mod app {
             if self.sph_active && !self.sph_snapshot.is_empty() {
                 let (mut ec, mut me, mut tc, mut mt) =
                     (glam::DVec3::ZERO, 0.0f64, glam::DVec3::ZERO, 0.0f64);
+                let (mut ev, mut tv) = (glam::DVec3::ZERO, glam::DVec3::ZERO);
                 for p in &self.sph_snapshot {
                     let pos = glam::DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
+                    let vel = glam::DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64);
                     let m = p.mass as f64;
                     if p.prov == 0 {
                         ec += pos * m;
                         me += m;
+                        ev += vel * m;
                     } else {
                         tc += pos * m;
                         mt += m;
+                        tv += vel * m;
                     }
                 }
                 if me > 0.0 && mt > 0.0 {
                     let (ec, tc) = (ec / me, tc / mt);
                     if self.gpu_impact_site.is_none() && (tc - ec).length() < 1.3e7 {
                         self.gpu_impact_site = (tc - ec).try_normalize(); // contact ≈ r_e + r_t (sub-scale)
+                                                                          // Freeze the pi-scaling prediction from the MEASURED contact state
+                                                                          // (docs/59): the barycentric closing speed the field actually carries,
+                                                                          // the impactor's measured particle mass over its declared radius, and
+                                                                          // the site body's own outer-layer density and surface gravity. Only a
+                                                                          // world with a declared site runs the cross-check (the gate reads the
+                                                                          // site HUD).
+                        if let Some(spec) = self.site_spec.as_ref() {
+                            let speed = (tv / mt - ev / me).length();
+                            let a = self.impactor_radius;
+                            if speed > 0.0 && a > 0.0 {
+                                let s = crate::refine::ImpactSpec {
+                                    impactor_radius_m: a,
+                                    impactor_density: mt
+                                        / (4.0 / 3.0 * std::f64::consts::PI * a.powi(3)),
+                                    speed_ms: speed,
+                                    target_density: spec.coarse_density,
+                                    gravity: spec.g_ms2,
+                                };
+                                self.pi_prediction = Some((
+                                    crate::refine::rim_radius_gravity_m(
+                                        &s,
+                                        &crate::refine::HARD_ROCK,
+                                    ),
+                                    speed,
+                                ));
+                            }
+                        }
                     }
                     if self.gpu_impact_site.is_some() {
                         self.gpu_crater_frac = (self.gpu_crater_frac + 0.03).min(1.0);
@@ -3904,6 +4432,17 @@ mod app {
                         }
                     }
                 }
+                // docs/59 - the materialized site's fine matter (the declared ball and its
+                // ground patch), instanced through the SAME billboard pipeline: one particle
+                // representation, wherever fine matter comes from.
+                if site_count > 0 {
+                    if let Some(buf) = self.site_buf.as_ref() {
+                        pass.set_pipeline(&self.sph_pipeline);
+                        pass.set_bind_group(0, &self.site_cam.bind, &[]);
+                        pass.set_vertex_buffer(0, buf.slice(..));
+                        pass.draw(0..6, 0..site_count);
+                    }
+                }
             }
             self.queue.submit(std::iter::once(encoder.finish()));
             output.present();
@@ -4112,6 +4651,63 @@ mod app {
 
     /// Earth's DEFINITIVE surface, handed over by the host once and reused by every draw. The scene
     /// does not own these continents — the body definition does; this is just the decoded copy.
+    /// The one-line conservation audit of a materialized site for the HUD (docs/59: the ledger
+    /// is surfaced, not implied): mass in and out, the release state or its stated residual,
+    /// the angular-momentum drift against the relax's own bound, and where the thermal state
+    /// came from.
+    fn site_audit_line(site: &crate::site::MaterializedSite) -> String {
+        let l = &site.ledger;
+        let release = match site.release {
+            crate::site::SiteRelease::Released(r) => format!(
+                "released {:.1e} (bound {:.1e}{}) in {} iters",
+                r.released_max_density_error,
+                r.release_bound,
+                if r.release_bound > crate::refine::RELEASE_DENSITY_ERROR {
+                    ", the field's own scale mismatch at the stall"
+                } else {
+                    ""
+                },
+                r.iterations
+            ),
+            crate::site::SiteRelease::Unreleased {
+                achieved,
+                bound,
+                iterations,
+            } => format!(
+                "UNRELEASED: exact split, density residual {achieved:.1e} over the {bound:.0e} \
+                 bound after {iterations} iters (static site; the release gates dynamics)"
+            ),
+        };
+        let hand = match site.hand_down {
+            crate::site::HandDown::Declared => String::from("state from the definition"),
+            crate::site::HandDown::Sampled {
+                u_j_kg,
+                peak_speed_ms,
+                quiescent_speed_ms,
+            } => {
+                format!(
+                    "u sampled from the quiet field: {u_j_kg:.2e} J/kg (peak {peak_speed_ms:.0} \
+                     < v_q {quiescent_speed_ms:.0} m/s)"
+                )
+            }
+        };
+        let n_fine = site.particles.len() - site.fine_start;
+        let am_drift = (l.after_relax.angular_momentum - l.before.angular_momentum).length();
+        format!(
+            "SITE MATERIALIZED: ball {} + patch {} fine, {} coarse guards · mass {:.4e} kg in, \
+             {:.4e} kg out · |dL| {:.1e} (bound {:.1e}) · {} · {}",
+            site.ball_children,
+            n_fine - site.ball_children,
+            site.fine_start,
+            l.before.mass,
+            l.after_relax.mass,
+            am_drift,
+            l.relax_am_bound,
+            release,
+            hand
+        )
+    }
+
     struct EarthSurface {
         landmask: Option<crate::terra::raster::Raster>,
         elevation: Option<crate::terra::raster::Raster>,
@@ -5331,11 +5927,30 @@ mod app {
                 }
                 None => self.fly.view(r_disp, display_scale(), aspect, ground_disp),
             };
-            let view_proj = view.vp_abs;
-            let eye = view.eye;
             // Captured here because `view` is shadowed by a texture view further down; the FOV still has
             // exactly one source (`View::fov_y`), which is the point.
             let cam_fov_y = view.fov_y;
+            // THE CAMERA-RELATIVE-EYE CONVENTION (terra::fly_camera module doc): every draw in this
+            // scene uses `vp_rel` (eye at the origin). The eye leaves f64 only as a model translation
+            // of −eye (static meshes) or already subtracted per-vertex (the cap); never as an
+            // absolute f32 position, which cannot hold the final metres at planet radius.
+            let view_proj = view.vp_rel;
+            let eye = view.eye;
+            // Static meshes are world-absolute; this f64-built translation makes their draw
+            // camera-relative. Residual: ~2 f32 ULPs at planet radius, sub-pixel at the ≥15 km
+            // distances where the coarse globe is visible (see the fly_camera precision tests).
+            let rel_model = glam::DMat4::from_translation(-eye).as_mat4();
+            // Triplanar texture anchor: the relief textures must stay glued to the SURFACE while
+            // positions are camera-relative, so the shader re-adds the eye folded modulo the texture
+            // tile period (8 m; globe.wgsl GLOBE_TEX_SCALE). Folded in f64, it is tiny in f32; the
+            // full eye would just re-lose the precision the subtraction bought.
+            let tile_p = 8.0 * display_scale();
+            let anchor = glam::DVec3::new(
+                eye.x.rem_euclid(tile_p),
+                eye.y.rem_euclid(tile_p),
+                eye.z.rem_euclid(tile_p),
+            )
+            .as_vec3();
             // The REAL direction to the Sun for right now (orbit::solar_direction_earth_fixed). What stood
             // here was `DVec3::new(1.0, 0.45, 0.6)` — a fixed vector whose comment called it "a pleasant ¾
             // lighting" while claiming the terminator was emergent. It was not: the globe was already
@@ -5347,16 +5962,14 @@ mod app {
             let sun_light = Vec3::new(sun_dir.x as f32, sun_dir.y as f32, sun_dir.z as f32);
 
             // docs/43 Phase 5 — build the fine ground cap under the camera and cross-fade it in as we descend.
-            // `cap_fade`: 0 above ~40 km, 1 below ~15 km (smoothstep). Only build when it will show and a surface
-            // is loaded.
+            // The fade/lift rules live in `terra::ground_cap` (natively tested). At full fade the cap covers
+            // the whole view out past the horizon, so the coarse globe is not drawn at all; that removal is
+            // what keeps the final metres free of the cap-vs-globe depth fight.
             let alt_m = self.fly.alt_m;
-            let cap_fade = {
-                let (hi, lo) = (40_000.0, 15_000.0);
-                let t = ((alt_m - lo) / (hi - lo)).clamp(0.0, 1.0);
-                (1.0 - t * t * (3.0 - 2.0 * t)) as f32
-            };
+            let cap_fade = crate::terra::ground_cap::cap_fade(alt_m) as f32;
+            let draw_globe = cap_fade < 1.0;
             if cap_fade > 0.0 && self.globe_mesh.is_some() {
-                self.build_cap(&view, sun_light, cap_fade);
+                self.build_cap(&view, sun_light, cap_fade, anchor);
             }
 
             // **The engine advances its own matter.** Terra's part is a wall-clock dt and the environment
@@ -5411,18 +6024,18 @@ mod app {
 
             let air = self.air();
             if self.globe_mesh.is_some() {
-                // docs/43 Phase 3 — the displaced globe: one draw. Identity model (the mesh is already in
-                // display units, Earth-centred at the origin); white tint (the mesh carries the per-vertex biome
-                // colour); emissive.xyz = camera eye (display units), .w = atmosphere strength (the globe.wgsl
-                // Rayleigh limb). The per-vertex Rayleigh ground veil is a Phase-5 refinement.
+                // docs/43 Phase 3: the displaced globe: one draw. Camera-relative model (the mesh is in
+                // display units, Earth-centred; `rel_model` moves the eye to the origin); white tint (the
+                // mesh carries the per-vertex biome colour); emissive.xyz = the triplanar texture anchor
+                // (the eye folded modulo the tile; see above), .w unused.
                 write_space_uniform(
                     &self.queue,
                     &self.globe_uni,
                     view_proj,
-                    Mat4::IDENTITY,
+                    rel_model,
                     sun_light,
                     [1.0, 1.0, 1.0, 1.0],
-                    [eye.x as f32, eye.y as f32, eye.z as f32, 1.0],
+                    [anchor.x, anchor.y, anchor.z, 1.0],
                     air,
                     // Terra draws whichever body the world names, so the glow is that body's.
                     glow_of(&crate::planet::body(&self.body_id)),
@@ -5463,7 +6076,8 @@ mod app {
                     };
                     let m = &self.mats[mat_idx];
                     let pos = dir * (r_disp + elev_m * display_scale() * EXAG);
-                    let spos = pos.as_vec3();
+                    // Camera-relative translation (the convention above): subtracted in f64, cast small.
+                    let spos = (pos - eye).as_vec3();
                     // Rayleigh atmosphere (docs/26): blue veil (added light) + two-way transmittance on the ground.
                     let v_dir = (eye - pos).normalize_or_zero();
                     let mu_v = dir.dot(v_dir);
@@ -5547,7 +6161,9 @@ mod app {
                         &mut pass,
                         view_proj,
                         Mat4::from_rotation_y(-gmst as f32),
-                        eye.as_vec3(),
+                        // Camera-relative: `view_proj` has the eye at the origin, so the billboards
+                        // hang around the origin too; same sky, none of the absolute-eye rounding.
+                        Vec3::ZERO,
                         // Terra does not carry a heliocentric position, so the observer is taken as Sol.
                         // The error is Earth's 1 AU baseline: at most 1 arcsecond of parallax for the
                         // nearest star, against a ~4 arcminute pixel — a thousandth of a pixel. FLAGGED,
@@ -5562,10 +6178,15 @@ mod app {
                     );
                 }
                 if let Some(globe) = &self.globe_mesh {
-                    pass.set_pipeline(&self.globe_pipeline);
-                    draw(&mut pass, &self.globe_uni, globe);
-                    // docs/43 Phase 5 — the fine ground cap over the globe (alpha-blended cross-fade). Drawn only
-                    // when it was built this frame (cap_fade > 0); it covers the foreground out past the horizon.
+                    // At full cap fade the globe is SKIPPED: the cap covers the view out past the
+                    // horizon, and near the ground the depth buffer cannot separate two copies of the
+                    // same surface (see ground_cap::CAP_FULL_ALT_M).
+                    if draw_globe {
+                        pass.set_pipeline(&self.globe_pipeline);
+                        draw(&mut pass, &self.globe_uni, globe);
+                    }
+                    // docs/43 Phase 5: the fine ground cap (alpha-blended cross-fade). Drawn only when it
+                    // was built this frame (cap_fade > 0); it covers the foreground out past the horizon.
                     if cap_fade > 0.0 {
                         pass.set_pipeline(&self.cap_pipeline);
                         // OUTERMOST first: each finer tier is drawn over the coarser one it sits inside,
@@ -5675,15 +6296,25 @@ mod app {
             view: &crate::terra::fly_camera::View,
             sun_light: Vec3,
             cap_fade: f32,
+            anchor: Vec3,
         ) {
             let r_disp = self.planet_radius * display_scale();
             let exag = self.relief_exag;
             let ds = display_scale();
             let res = TERRA_CAP_RES;
-            let alt_m = self.fly.alt_m.max(0.1);
-            // Cover ~1.3× the horizon angle so the OUTERMOST patch reaches past the visible horizon (its far
-            // edge then sits below the horizon / is occluded — no visible cap boundary).
-            let outer_angle = (1.3 * view.horizon / r_disp).clamp(1e-4, 0.6);
+            // Cover ~1.3× the horizon angle so the patch reaches past the visible horizon (its far edge then sits
+            // below the horizon / is occluded — no visible cap boundary).
+            // NOTE (2026-07-21): sizing this to the camera-resolvable texel instead of the horizon was
+            // tried and REVERTED — it shrank the fine cap ~46x while the coarse globe is cross-faded out
+            // at low altitude, leaving nothing drawn at any altitude below orbital. The diagnosis stands
+            // (at 2 m a horizon-sized cap is ~34 m/cell while the eye resolves ~2 mm), but the fix has to
+            // add a finer LOD tier, not shrink the only one. See `surface_detail` and docs/08's tiers.
+            let cap_angle = (1.3 * view.horizon / r_disp).clamp(1e-4, 0.6);
+            // The radial lift that wins the depth fight against the coarse globe while both are drawn.
+            // Altitude-scaled (rule + tests in terra::ground_cap): full 20 m through the fade band, and
+            // shrinking with the descent below it so it can never reach a camera standing 2 m up; the
+            // old fixed 20 m put the cap above the eye there, showing its underside.
+            let lift = crate::terra::ground_cap::cap_lift_disp(self.fly.alt_m, ds);
             let water_idx = materials::index_of(&self.mats, "water");
             let water_alb = self.mats[water_idx].albedo;
             // The elevation raster's own ground resolution — where MEASUREMENT runs out and anything finer
@@ -5694,6 +6325,9 @@ mod app {
             let elev_lo = self.elev_range[0];
             let elev_hi = self.elev_range[1];
 
+            // The cap's angular span: 1.3x the horizon so its edge is never visible, clamped so a
+            // near-surface camera still gets a patch and an orbital one does not wrap the planet.
+            let outer_angle = (1.3 * view.horizon / r_disp).clamp(1e-4, 0.6);
             let mut verts = std::mem::take(&mut self.cap_verts);
             for tier in 0..self.cap_tiers.clamp(1, TERRA_CAP_TIERS) {
                 // Each tier covers a quarter of the span of the one outside it, so its cells are 4× finer.
@@ -5705,7 +6339,7 @@ mod app {
                 // 20 m exceeded the eye height at low altitude and put the ground ABOVE the camera, which
                 // is the documented bug this replaces. A depth-precision allowance, flagged as such — it is
                 // about the depth buffer, not about the world, and it vanishes proportionally as you descend.
-                let lift = alt_m * 1.0e-3 * (tier as f64 + 1.0) * ds;
+                let lift = lift * (tier as f64 + 1.0);
                 let octave_budget = self.cap_octave_budget;
                 // The local measured slope, sampled ONCE for the tier rather than at every vertex. A tier is
                 // small compared with a 19.55 km raster pixel, so its ground sits inside one measurement:
@@ -5810,7 +6444,9 @@ mod app {
                     Mat4::IDENTITY,
                     sun_light,
                     [1.0, 1.0, 1.0, cap_fade],
-                    [0.0, 0.0, 0.0, 1.0],
+                    // emissive.xyz = the triplanar anchor (his), so the relief textures stay glued to
+                    // the surface under the camera-relative draw instead of swimming with the eye.
+                    [anchor.x, anchor.y, anchor.z, 1.0],
                     self.air(),
                     NO_GLOW,
                 );

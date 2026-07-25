@@ -1,0 +1,17 @@
+# nextest configuration.
+#
+# **A test that asserts a WALL-CLOCK budget must not share the machine.** `texture::tests::
+# generation_is_fast_enough_to_run_at_scene_startup` asserts that generating the 29 material textures
+# stays under 4 s, because it runs before the first frame of every scene and a browser does it on one
+# thread. Measured alone it takes ~2.9 s. Run concurrently with ~430 other tests it took 4010 ms and
+# 4107 ms on two consecutive full runs — it went red not because generation got slower but because
+# step 7 added 19 tests and the machine got busier.
+#
+# Raising the 4 s bound would have been the easy fix and the wrong one: it would tune the threshold to
+# today's contention and quietly stop meaning "fast enough at scene startup". This is the same mistake
+# CLAUDE.md rule 4b records for the rig — *a number from a contended environment is a number about the
+# contention*. So the ENVIRONMENT is corrected instead: nextest reserves the whole machine for it, and
+# the assertion is untouched.
+[[profile.default.overrides]]
+filter = 'test(generation_is_fast_enough_to_run_at_scene_startup)'
+threads-required = "num-cpus"
