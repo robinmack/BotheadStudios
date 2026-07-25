@@ -9,6 +9,16 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The ground generates sub-raster relief (docs/08 tiers, docs/46 `surface_detail`).** Terra's cap adds
+  detail below the elevation raster, bounded by `granular`'s Mohr-Coulomb and scaled by the locally measured
+  slope, so a plain stays flat. Nested tier capacity (`TERRA_CAP_TIERS`) plus `Terra::set_cap_ladder(tiers,
+  octaves)` for pricing it; **one tier by default**, because 2 tiers measured 126 ms/frame and 4 measured
+  642 ms while 15 octaves cost 14% over zero — the mesh is the budget, not the maths.
+- **Fixed:** the cap's `lift` was a constant 20 m, which at low altitude exceeded the eye height and put the
+  ground above the camera. It now scales with altitude.
+- **PROCESS (CLAUDE.md):** the repo is no longer single-developer — merges go through review, `--admin` is
+  retired, and branches that are not yours are not yours to prune.
+
 - **The engine renders from a camera POSE it is handed (docs/59 Stage B).** New
   `Terra::set_camera_pose(eye, forward, up, fov_y)` / `clear_camera_pose` — the observer decides where to
   stand and how wide to look; the universe holds the matter and renders what is observed. New

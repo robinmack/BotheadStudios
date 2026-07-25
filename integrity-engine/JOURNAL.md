@@ -3,6 +3,53 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-24 (tier wired) — the mesh is the budget, not the maths
+
+**What.** `surface_detail` now has a consumer: Terra's ground cap generates sub-raster relief, bounded by
+what `granular`'s Mohr–Coulomb says the material can stand and scaled by how steep the ground already
+measures. The tier ladder is built (nested caps, each covering a quarter of the span of the one outside it,
+all from ONE builder), and the `lift` bug is fixed — it was a constant 20 m that exceeded the eye height at
+low altitude and put the ground ABOVE the camera; it now scales with altitude and is flagged as a
+depth-precision allowance rather than anything physical.
+
+**The measurement that decided the design, and it inverted my assumption.** I expected the generated octaves
+to be the cost. Priced at 2 km over the Himalaya, paced to ~60 fps (`web/rig/terra_lod_cost.mjs`):
+
+| tiers | octaves | p50 frame |
+|---|---|---|
+| 1 | 0 | **45.2 ms** ← the ladder as it shipped, before any of this |
+| 1 | 2 | 51.2 ms |
+| 1 | 6 | 50.1 ms |
+| 1 | 15 | **51.6 ms** ← fifteen octaves cost 14% over zero |
+| 2 | 4 | 126.5 ms |
+| 3 | 4 | 159.2 ms |
+| 4 | 4 | 642.5 ms |
+
+**Generated relief is nearly free; TIERS are expensive.** What costs frame time is rebuilding and
+re-uploading a 192² camera-relative mesh — which Terra was already doing once per frame for **45 ms** before
+this work, a pre-existing cost nobody had measured. So the octave budget is generous (16) and the default
+tier count is **1**, with the capacity and the knob left in place because the nesting is right and priced.
+
+**Also measured, and it reframes the whole feature: the elevation raster is 2048×1024 — 19.55 km per pixel.**
+Everest is one pixel. So below ~20 km altitude essentially ALL visible terrain relief is generated rather
+than measured, and reaching metre scale needs ~15 halvings. That is legitimate — it is bounded by the
+material's own slope law, deterministic, and flagged — but it must be said plainly rather than described as
+"micro-detail on top of real data".
+
+**Verified.** 371/371. A/B'd with the knob at fixed camera and altitude (`terra_lod_ab.mjs`): at 500 m the
+skyline is a straight line with octaves off and visibly undulating with them on. So the rule reaches the
+picture.
+
+**NOT done, and the measurement is what names it.** Standing on detailed ground still is not there: one
+tier's cells are ~540 m at 500 m altitude and ~59 m at 6 m altitude, so the relief you can see is
+hundred-metre-scale shape, not texture underfoot. **The mesh is the limit, not the maths** — and the fix is
+the one Robin gave when she set this task: *"we don't have to make things renderable at planetary scale while
+viewing subset of surface; we have the math — we can rebuild it if the camera moves again."* A tier is a
+cache of the VIEW. Anchor each tier's mesh to a fixed point and carry the eye offset in the model matrix
+(`fill_ground_cap` currently bakes `surface - eye`, so every camera motion invalidates every vertex), and a
+tier then only needs rebuilding when the camera leaves it. That is what makes tiers 2–4 affordable, and it is
+the next piece of work.
+
 ## 2026-07-24 (surface detail) — Robin caught me writing a second answer to a settled question
 
 **What happened.** Starting the `surface_detail` LOD tier, I needed "how rough can this ground be?", and I
