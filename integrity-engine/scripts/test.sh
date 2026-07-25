@@ -12,7 +12,8 @@
 # essentially the entire ~24s wall-time). It never weakens or drops any assertion — it is a subset
 # for the "edit → test → repeat" loop. ALWAYS run the full suite (no --fast) before deploying.
 # The five excluded: the three giant-impact disk-lofting tests (an_oblique_theia / the_birth_scene /
-# provenance), the SPH hydrostatic-balance test (sph_air_field), and the dropped-moon impact test.
+# provenance), the SPH hydrostatic-balance test (sph_air_field), and the dropped-moon impact test
+# (the SPH-side pin in gpu_sph, ~9s; it replaced the CPU Aggregate one when that path retired).
 #
 # Prefers cargo-nextest when installed (parallel execution + per-test timing); falls back to
 # `cargo test` otherwise. nextest does not run doctests; this crate currently has none, so there is
