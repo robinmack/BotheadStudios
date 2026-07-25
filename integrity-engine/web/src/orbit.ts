@@ -11,6 +11,7 @@ import { attachCameraInput, CAMERA_HINT } from "./camera-input";
 import "./scene-nav";
 import { createSimHud } from "./sim-hud";
 import { createShareView } from "./share-view";
+import { withBase } from "./base-url";
 
 const statusEl = document.getElementById("status");
 function setStatus(html: string, isError = false): void {
@@ -42,7 +43,8 @@ async function main(): Promise<void> {
   // impact geometry (1.15·v_esc, b≈R_e, d₀=1.6·contact) — come from `/worlds/birth/world.json` instead of
   // Rust constants. It was the last scene whose setup was compiled in. Resolve
   // the identity now so the banner stamps before WASM loads (a stale Safari cache is obvious at a glance).
-  const worldUrl = document.body.getAttribute("data-world");
+  const worldAttr = document.body.getAttribute("data-world");
+  const worldUrl = worldAttr ? withBase(worldAttr) : null;
   const birthScene = document.body.getAttribute("data-scene") === "birth";
   let world: { name?: string; bodies?: Array<{ role?: string }> } | null = null;
   let worldJson = "";
@@ -103,7 +105,7 @@ async function main(): Promise<void> {
     // planet, nor of a scene: it is the universe everything here is inside. A scene contributes only where
     // the observer stands. Failure is non-fatal: you lose the stars, never the scene.
     try {
-      const bytes = new Uint8Array(await fetch("/sky/stars.bin").then((r) => r.arrayBuffer()));
+      const bytes = new Uint8Array(await fetch(withBase("/sky/stars.bin")).then((r) => r.arrayBuffer()));
       demo.load_star_catalog(bytes);
       report("info", `sky: ${bytes.length / 16} catalogued stars`);
     } catch (e) {
@@ -118,7 +120,7 @@ async function main(): Promise<void> {
       const urls: string[] = JSON.parse(body_surface_urls("earth"));
       const decode = async (url: string) => {
         if (!url) return { data: new Uint8Array(0), w: 0, h: 0 };
-        const bmp = await fetch(url).then((r) => r.blob()).then((b) => createImageBitmap(b));
+        const bmp = await fetch(withBase(url)).then((r) => r.blob()).then((b) => createImageBitmap(b));
         const cv = new OffscreenCanvas(bmp.width, bmp.height);
         const ctx = cv.getContext("2d", { willReadFrequently: true }) as OffscreenCanvasRenderingContext2D;
         ctx.drawImage(bmp, 0, 0);
