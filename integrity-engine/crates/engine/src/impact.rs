@@ -604,32 +604,10 @@ pub fn build_impact_debris_scaled(
     (agg, acc0)
 }
 
-/// The moon-into-Earth case (the space-band Drop scene) — the general builder with those profiles.
-#[allow(clippy::too_many_arguments)]
-pub fn build_impact_debris(
-    mats: &[Material],
-    site: DVec3,
-    earth_pos: DVec3,
-    earth_vel: DVec3,
-    moon_mass: f64,
-    v_contact: DVec3,
-    _moon_r: f64,
-    earth_mass: f64,
-    earth_radius: f64,
-) -> (Aggregate, Vec<DVec3>) {
-    build_impact_debris_between(
-        mats,
-        site,
-        earth_pos,
-        earth_vel,
-        moon_mass,
-        v_contact,
-        &crate::planet::moon(),
-        &crate::planet::earth(),
-        earth_mass,
-        earth_radius,
-    )
-}
+// `build_impact_debris` (the moon-into-Earth convenience wrapper) is retired with its last caller,
+// the space band's CPU debris path (docs/58 #7): a dropped moon resolves through the SPH machine
+// now. The general builders stay: `build_impact_debris_between`/`_scaled` are the shared
+// excavation/ploughing physics the tests below still measure.
 
 #[cfg(test)]
 mod tests {
@@ -644,21 +622,6 @@ mod tests {
     const EARTH_G: f64 = G * EARTH_MASS / (EARTH_RADIUS_M * EARTH_RADIUS_M);
     /// The terrain scene's emergent surface gravity (`Engine::surface_g`).
     const TERRAIN_G: f64 = 9.88;
-
-    /// Specific orbital energy of a fragment about the planet: ½v² − GM/r. Negative ⇒ BOUND.
-    fn bound_fraction(agg: &Aggregate, earth_pos: DVec3, earth_vel: DVec3) -> f64 {
-        let mu = G * EARTH_MASS;
-        let bound = agg
-            .particles
-            .iter()
-            .filter(|p| {
-                let r = (p.pos - earth_pos).length().max(1.0);
-                let v2 = (p.vel - earth_vel).length_squared();
-                0.5 * v2 - mu / r < 0.0
-            })
-            .count();
-        bound as f64 / agg.particles.len() as f64
-    }
 
     #[test]
     fn an_oblique_theia_impact_lofts_bound_material_the_protolunar_disk() {
@@ -1973,52 +1936,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_dropped_moon_impact_leaves_most_debris_gravitationally_bound() {
-        // A dropped Moon strikes at ~escape speed (~11.2 km/s at contact). The impact energy
-        // ½μΔv² ≈ 4.3e30 J over the combined Earth+Moon cloud (3 lunar masses) is ~2e7 J/kg —
-        // BELOW the ~6.3e7 J/kg needed to unbind matter from Earth's surface. So the DECLARED
-        // physics says: most of the cloud must stay bound (fall back / stay down). If the model
-        // launches "a large percentage" past escape, the energy partition is dishonest.
-        let mats = materials::load();
-        let earth_pos = DVec3::ZERO;
-        let earth_vel = DVec3::ZERO;
-        let contact_r = EARTH_RADIUS_M + MOON_RADIUS_M;
-        let site = earth_pos + DVec3::new(0.0, contact_r, 0.0);
-
-        // True impact speed of a Moon dropped from the real Earth–Moon distance (energy conservation:
-        // v² = 2μ(1/r_contact − 1/d)) — the impactor CARRIES it; contact does the rest.
-        let mu = G * (EARTH_MASS + MOON_MASS);
-        let d = 3.844e8;
-        let v_imp = (2.0 * mu * (1.0 / contact_r - 1.0 / d)).sqrt();
-        let v_contact = DVec3::new(0.0, -v_imp, 0.0);
-
-        let (mut agg, mut acc) = build_impact_debris(
-            &mats, site, earth_pos, earth_vel, MOON_MASS, v_contact,
-            MOON_RADIUS_M, EARTH_MASS, EARTH_RADIUS_M,
-        );
-
-        let f0 = bound_fraction(&agg, earth_pos, earth_vel);
-        // Let the collision play out (the browser's observable rate): the impactor ploughs into the cap,
-        // contact transfers momentum and DISSIPATES energy into heat.
-        for _ in 0..400 {
-            agg.step(&mut acc, 0.75);
-        }
-        let f1 = bound_fraction(&agg, earth_pos, earth_vel);
-        let hottest = agg.temps.iter().cloned().fold(0.0f32, f32::max);
-        println!(
-            "bound fraction: initial {f0:.2}, after contact {f1:.2} · v_imp {v_imp:.0} m/s · hottest {hottest:.0} K"
-        );
-
-        assert!(
-            f1 > 0.6,
-            "most of the impact cloud must stay gravitationally bound (got {:.0}% bound)",
-            f1 * 100.0
-        );
-        // Incandescence is EMERGENT: contact dissipation heats the matter past visible glow (~800 K).
-        assert!(
-            hottest > 800.0,
-            "the impact must heat matter to incandescence via contact dissipation (hottest {hottest:.0} K)"
-        );
-    }
+    // The dropped-moon pin (most debris gravitationally bound, contact heating past visible glow)
+    // moved to the SPH machine with the moon-drop itself:
+    // `gpu_sph::a_dropped_moon_impact_leaves_most_matter_bound_on_the_sph_path` (docs/58 #7,
+    // docs/46 rows 1/3).
 }
