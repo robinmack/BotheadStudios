@@ -1,5 +1,8 @@
 {
   "worktree": {
     "bgIsolation": "none"
+  },
+  "enabledPlugins": {
+    "qdrant-skills@claude-plugins-official": true
   }
 }
