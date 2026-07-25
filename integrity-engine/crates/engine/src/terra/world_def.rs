@@ -38,6 +38,20 @@ pub struct World {
     /// and the resolution field from DATA rather than from a scene struct.
     #[serde(default)]
     pub ground: Option<GroundDef>,
+    /// The out-and-back demo arc's declared pacing (`crate::arc`). A world that declares this
+    /// gets the arc control; one that doesn't, doesn't.
+    #[serde(default)]
+    pub arc: Option<ArcDef>,
+}
+
+/// **The demo arc's one declared number**: real seconds of screen time per octave (×2) of camera
+/// distance. A viewing-pace statement of the same kind as `time.scale`, it drives the camera
+/// and the observable clock, never any matter. Everything else about the arc is derived
+/// (`crate::arc` module doc).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ArcDef {
+    pub octave_s: f64,
 }
 
 /// **A ground world: matter events, declared** (`docs/53`).

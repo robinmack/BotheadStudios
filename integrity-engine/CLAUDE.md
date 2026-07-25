@@ -224,5 +224,13 @@ computation it defers** (Law V) — recorded in `docs/46`'s ledger, not a quiet 
    the impunity is spent: open a PR, mark it ready for review, and let the ruleset do its job. Do **not**
    merge with `--admin`, and do not self-approve. A draft PR is the right state for work in progress; the
    right action when it is finished is `gh pr ready N`, not `gh pr merge`.
-8. **Commit** `area: imperative subject (docs/NN)` (lowercase area). **Deploy only when asked:**
+8. **Commit with `bash scripts/commit.sh <message-file>`** — write the message to a FILE first (an editor
+   or a file-writing tool), never inline in a shell command. Messages here are long and full of the exact
+   characters a shell eats: backticks around identifiers, `$`, `!`, quotes. A heredoc *looks* safe and is
+   not — an unquoted one still does command substitution. That has bitten twice; the second time it
+   silently deleted the subject of a sentence from a merge commit on its way to `main` (``​`pub mod arc;`
+   was never declared`` became `" was never declared"`) and it was pushed before anyone read it back.
+   The script also appends the `Co-Authored-By` trailer if missing and prints `parents=[a b]`, so a merge
+   commit can be confirmed to still be a merge. `--amend` and `--no-trailer` are supported.
+   Subject style: `area: imperative subject (docs/NN)` (lowercase area). **Deploy only when asked:**
    `./scripts/deploy.sh` (full suite green first) → integrity.bothead.net (PUBLIC).

@@ -51,9 +51,17 @@ a blame-ignored commit is one nobody will ever be shown.
 ## 5. Before you push
 
 ```bash
-bash scripts/test.sh          # the full gate: the suite AND `mod app` compiled for wasm32
-cargo fmt                     # stock rustfmt defaults; there is no rustfmt.toml, deliberately
+bash scripts/test.sh              # the full gate: the suite AND `mod app` compiled for wasm32
+cargo fmt                         # stock rustfmt defaults; there is no rustfmt.toml, deliberately
+bash scripts/commit.sh MSG.txt    # commit — the message comes from a FILE, never from the shell
 ```
+
+★ **Write the commit message to a file, always.** Messages here are long and explain reasoning, so they are
+full of the characters a shell eats — backticks around identifiers, `$`, `!`, quotes. A heredoc *looks* safe
+and is not; an unquoted one still performs command substitution. It has happened twice, and the second time
+it silently deleted the subject of a sentence from a merge commit that was already pushed. `scripts/commit.sh`
+removes the shell from the path, adds the co-author trailer if missing, and prints `parents=[a b]` so a merge
+commit can be confirmed to still be a merge.
 
 ★ **A native `cargo check` is green for code that does not build.** The scene structs live behind
 `#[cfg(target_arch = "wasm32")]`, so they are invisible to it. The full `scripts/test.sh` run compiles them;
