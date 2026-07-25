@@ -2,14 +2,21 @@
 // uses the PER-VERTEX colour (biome albedo, baked into the cube-sphere mesh) instead of a single body tint,
 // and adds a cheap view-dependent atmospheric limb (a blue Fresnel rim on the day side) so it reads as a
 // blue-marble. `tint` multiplies the vertex colour (so the ocean sphere can be tinted water-blue with a white
-// mesh); `emissive.xyz` carries the camera eye (display units) and `emissive.w` the atmosphere strength.
+// mesh).
+//
+// CAMERA-RELATIVE-EYE: every position reaching this shader has the eye at the ORIGIN (the convention in
+// terra::fly_camera); the cap's vertices are emitted eye-relative in f64, the globe's model matrix carries a
+// −eye translation built in f64. So the view direction is simply -wpos, and `emissive.xyz` is free to carry
+// the TRIPLANAR ANCHOR: the eye folded modulo the 8 m texture tile, re-added before texture projection so the
+// relief stays glued to the surface (an unanchored camera-relative position would drag the texture with the
+// camera). Folding keeps it small enough that adding it back costs no precision.
 
 struct U {
     view_proj : mat4x4<f32>,
     model     : mat4x4<f32>,
     light_dir : vec4<f32>,  // xyz = direction TO the sun, w = twilight half-angle (rad)
     tint      : vec4<f32>,  // multiplies the vertex colour
-    emissive  : vec4<f32>,  // xyz = camera eye (display units)
+    emissive  : vec4<f32>,  // xyz = triplanar anchor (the eye mod the 8 m texture tile, display units)
     atm       : vec4<f32>,  // xyz = Rayleigh optical depth per band (docs/26), w = sun gain
     glow      : vec4<f32>,  // rgb = Planck colour of the surface's own temperature, w = its radiance gain
 };
@@ -50,9 +57,9 @@ const GLOBE_TEX_SCALE : f32 = EARTH_RADIUS_M / 8.0;
 @fragment
 fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     // Relief from the material's own sub-resolution surface statistic (the shared chunk). `i.wpos` is
-    // camera-relative for the cap and world-space for the globe; either way it is a continuous position
-    // on the surface, which is what the triplanar projection needs.
-    let n = surface_normal_triplanar(i.wpos, normalize(i.normal), i.mat, GLOBE_TEX_SCALE);
+    // camera-relative (globe AND cap; one convention, so the relief cannot mismatch across the
+    // cross-fade); the anchor restores surface-fixed texture coordinates modulo the tile period.
+    let n = surface_normal_triplanar(i.wpos + u.emissive.xyz, normalize(i.normal), i.mat, GLOBE_TEX_SCALE);
     let l = normalize(u.light_dir.xyz);
     let ndl = max(dot(n, l), 0.0);
     // Reflected sunlight (albedo × illumination), same SUN_GAIN + Reinhard as the space band; black night side.
@@ -73,11 +80,10 @@ fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     // There is no "atmosphere strength" dial any more: the brightness is whatever the declared air's
     // optical depth scatters at the shared exposure. A body with no declared atmosphere carries tau = 0
     // and gets exactly nothing — the airless case needs no branch.
-    let view = normalize(u.emissive.xyz - i.wpos);
+    // Positions are camera-relative (eye at the origin), so the direction back to the eye is -wpos.
+    let view = normalize(-i.wpos);
     radiance += rayleigh_veil(dot(n, view), dot(n, l), dot(view, l), u.atm.xyz, u.atm.w, u.light_dir.w);
     let mapped = tonemap(radiance); // the shared display law — compresses brightness, keeps hue
-    // Alpha = tint.a: 1.0 for the opaque globe, the cross-fade factor for the ground cap. `emissive.xyz`
-    // is the eye for the globe (world space) and the ORIGIN for the camera-relative cap, so `view` holds
-    // in both.
+    // Alpha = tint.a: 1.0 for the opaque globe, the cross-fade factor for the ground cap.
     return vec4<f32>(mapped, u.tint.a);
 }

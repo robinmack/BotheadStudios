@@ -10,6 +10,30 @@
 use crate::mesher::Vertex;
 use glam::{DVec3, Vec3};
 
+/// Altitude (m) at/below which the cap has fully replaced the coarse globe in the foreground. Below
+/// this the renderer SKIPS the globe draw entirely: the cap covers the view out past the horizon, and
+/// not drawing the coarse mesh is what removes the cap-vs-globe depth fight in the final metres, where
+/// the tight near plane leaves the f32 depth buffer only ~tens of metres of resolution at the horizon.
+pub const CAP_FULL_ALT_M: f64 = 15_000.0;
+/// Altitude (m) at/above which the cap is not drawn at all (fully the coarse globe).
+pub const CAP_START_ALT_M: f64 = 40_000.0;
+
+/// The cap↔globe cross-fade: 0 at/above `CAP_START_ALT_M`, 1 at/below `CAP_FULL_ALT_M`, smoothstepped.
+/// At exactly 1 the renderer drops the globe draw (see `CAP_FULL_ALT_M`).
+pub fn cap_fade(alt_m: f64) -> f64 {
+    let t = ((alt_m - CAP_FULL_ALT_M) / (CAP_START_ALT_M - CAP_FULL_ALT_M)).clamp(0.0, 1.0);
+    1.0 - t * t * (3.0 - 2.0 * t)
+}
+
+/// The cap's radial lift (display units) that wins the depth fight against the coarse globe while BOTH
+/// are drawn (the fade band). It is 0.2% of the altitude, capped at 20 m: by `CAP_FULL_ALT_M` (where the
+/// globe can still be co-drawn) it has reached the full 20 m, and below that it shrinks with the descent
+/// so it can NEVER reach the eye; the fixed 20 m lift used to put the cap ABOVE a camera standing 2 m
+/// up, showing its underside. `ds` is the display scale (metres → display units).
+pub fn cap_lift_disp(alt_m: f64, ds: f64) -> f64 {
+    (alt_m * 0.002).min(20.0) * ds
+}
+
 /// Fill `out` with the ground-cap vertices (cleared first). The index topology is fixed for a given `res` — get
 /// it once from [`cap_indices`] — so this is called every frame to rewrite only the vertex buffer.
 /// - `center`,`east`,`north`: the unit surface direction under the camera and its tangent frame.
@@ -117,6 +141,31 @@ mod tests {
         let idx = cap_indices(res);
         assert_eq!(idx.len(), (res - 1) * (res - 1) * 6);
         assert!(idx.iter().all(|&i| (i as usize) < v.len()));
+    }
+
+    #[test]
+    fn cap_lift_stays_below_the_eye_and_reaches_full_depth_separation_with_the_globe() {
+        let ds = 1.0 / 6_371_000.0;
+        // Wherever the coarse globe is co-drawn (fade band and above), the lift is the full 20 m the
+        // depth fight needs; wherever only the cap is drawn, it shrinks with the descent.
+        for alt in [CAP_FULL_ALT_M, 20_000.0, CAP_START_ALT_M, 100_000.0] {
+            assert!((cap_lift_disp(alt, ds) - 20.0 * ds).abs() < 1e-15, "full lift at {alt} m");
+        }
+        // The lift can never reach the camera: it is 0.2% of the altitude, so the eye (at 100%) always
+        // sits far above the lifted surface; down to and below the 2 m standing height.
+        for alt in [0.5, 2.0, 10.0, 100.0, 1_000.0, CAP_FULL_ALT_M] {
+            assert!(cap_lift_disp(alt, ds) < alt * ds * 0.01, "lift must stay well under the eye at {alt} m");
+        }
+        // The fade is 1 through the whole globe-skipped regime, 0 at orbital altitude, monotonic between.
+        assert_eq!(cap_fade(2.0), 1.0);
+        assert_eq!(cap_fade(CAP_FULL_ALT_M), 1.0);
+        assert_eq!(cap_fade(CAP_START_ALT_M), 0.0);
+        let mut prev = 1.0f64;
+        for alt in [16_000.0, 20_000.0, 25_000.0, 30_000.0, 39_000.0] {
+            let f = cap_fade(alt);
+            assert!(f < prev && f > 0.0 && f < 1.0, "fade blends monotonically at {alt} m");
+            prev = f;
+        }
     }
 
     #[test]

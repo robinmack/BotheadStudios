@@ -59,6 +59,68 @@ pub struct CohesiveBody {
 }
 
 impl CohesiveBody {
+    /// **The one cohesive-matter law, from parcels already laid out.** Bond stiffness from the
+    /// material's own elastic modulus (k = E·L, capped for explicit stability), the declared
+    /// break strain, damping derived from the material's restitution through the SAME
+    /// `zeta_for_restitution` the granular contact law uses, specific heat from the catalogue,
+    /// and gravity from the named planet. `build_cohesive_body` lattices a declared sphere and
+    /// comes here; the docs/59 site hands its released split children straight in - one law,
+    /// two consumers, so the site's ball and the ground scene's ball cannot answer "what holds
+    /// iron together" differently.
+    pub fn from_parcels(
+        particles: Vec<crate::orbit::Body>,
+        mat_idx: usize,
+        spacing_m: f64,
+        materials: &[Material],
+        surface_g: f32,
+    ) -> Result<CohesiveBody, String> {
+        let mat = &materials[mat_idx];
+        if mat.youngs_modulus <= 0.0 {
+            return Err(format!(
+                "material {:?} has no elastic modulus; a cohesive solid's stiffness derives from it",
+                mat.id
+            ));
+        }
+        if particles.is_empty() {
+            return Err(format!("no parcels to build a cohesive {:?} body from", mat.id));
+        }
+        let l = spacing_m.max(1.0e-3);
+        // Rigidity comes from the material's OWN elastic force (docs/23): a lattice bond of
+        // spacing L has spring constant k = E·A/L = E·L (A = L² tributary area) - capped for
+        // explicit stability (see BODY_STIFFNESS_CAP). Bond cutoff 1.75·L reaches
+        // face/edge/corner neighbours.
+        let stiffness = (mat.youngs_modulus as f64 * l).min(BODY_STIFFNESS_CAP);
+        let mut agg = Aggregate::cohesive(
+            particles,
+            mat_idx,
+            0.5 * l,
+            1.75 * l,
+            stiffness,
+            0.0,
+            BODY_BREAK_STRAIN,
+        );
+        // Damping DERIVED from the material's own coefficient of restitution - ζ = −ln(e)/√(π²+ln²e),
+        // the SAME `zeta_for_restitution` the granular contact law uses, so a bond and a grain
+        // contact agree on what "iron is this bouncy" means.
+        agg.damping =
+            agg.critically_damped(crate::granular::zeta_for_restitution(mat.restitution as f64));
+        if let Some(c) = mat.specific_heat() {
+            agg = agg.with_specific_heat(c as f64);
+        }
+        // Surface gravity is the field of the WHOLE planet below, ~uniform over this small patch -
+        // computed from the named planet (g = GM/R²), never a constant.
+        let mut agg = agg.with_gravity(DVec3::new(0.0, -(surface_g as f64), 0.0));
+        let acc = agg.accelerations();
+        Ok(CohesiveBody { agg, acc, part_half: 0.5 * l })
+    }
+
+    /// One velocity-Verlet substep with the body's carried acceleration buffer - the same call
+    /// `Simulation::step_cohesive_bodies` makes, exposed so the docs/59 site can step its own
+    /// cohesive matter through the identical integrator.
+    pub fn substep(&mut self, dt: f64) {
+        self.agg.step(&mut self.acc, dt);
+    }
+
     /// The body's structural verdict in one word, read from the same bond state the physics runs
     /// on: "intact" while every forged bond still holds, "dented" once some fraction has fractured
     /// but the majority still binds the lattice, "shattered" once fewer than half survive. The
@@ -91,13 +153,7 @@ fn build_cohesive_body(
         .position(|m| m.id == def.material)
         .ok_or_else(|| format!("body material {:?} is not in the material DB", def.material))?;
     let mat = &materials[mat_idx];
-    if mat.youngs_modulus <= 0.0 {
-        return Err(format!(
-            "material {:?} has no elastic modulus; a cohesive solid's stiffness derives from it",
-            def.material
-        ));
-    }
-    let l = lattice_m.max(1.0e-3) as f64;
+    let l = lattice_m.max(1.0e-3);
     let density = mat.density as f64;
     let at = DVec3::new(def.at_m[0] as f64, def.at_m[1] as f64, def.at_m[2] as f64);
     let ri = (def.radius_m / l).ceil() as i32;
@@ -122,33 +178,7 @@ fn build_cohesive_body(
             def.radius_m, l
         ));
     }
-    // Rigidity comes from the material's OWN elastic force (docs/23): a lattice bond of spacing L has
-    // spring constant k = E·A/L = E·L (A = L² tributary area) - capped for explicit stability (see
-    // BODY_STIFFNESS_CAP). Bond cutoff 1.75·L reaches face/edge/corner neighbours.
-    let stiffness = (mat.youngs_modulus as f64 * l).min(BODY_STIFFNESS_CAP);
-    let mut agg = Aggregate::cohesive(
-        particles,
-        mat_idx,
-        0.5 * l,
-        1.75 * l,
-        stiffness,
-        0.0,
-        BODY_BREAK_STRAIN,
-    );
-    // Damping DERIVED from the material's own coefficient of restitution - ζ = −ln(e)/√(π²+ln²e), the
-    // SAME `zeta_for_restitution` the granular contact law uses, so a bond and a grain contact agree on
-    // what "iron is this bouncy" means. `critically_damped` supplies the units with the coordination
-    // correction that fixed the probe-detonation bug (docs/23).
-    agg.damping =
-        agg.critically_damped(crate::granular::zeta_for_restitution(mat.restitution as f64));
-    if let Some(c) = mat.specific_heat() {
-        agg = agg.with_specific_heat(c as f64);
-    }
-    // Surface gravity is the field of the WHOLE planet below, ~uniform over this small patch -
-    // computed from the named planet (g = GM/R²), never a constant.
-    let mut agg = agg.with_gravity(DVec3::new(0.0, -(surface_g as f64), 0.0));
-    let acc = agg.accelerations();
-    Ok(CohesiveBody { agg, acc, part_half: 0.5 * l })
+    CohesiveBody::from_parcels(particles, mat_idx, l, materials, surface_g)
 }
 
 /// A running ground simulation built from a definition.
