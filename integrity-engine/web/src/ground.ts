@@ -122,9 +122,13 @@ async function main() {
 
   // Share view: one shared implementation (see share-view.ts), placed in this scene's control strip.
   const share = createShareView(canvas, { onStatus: (m, bad) => setStatus(m, bad) });
-  document.getElementById("ground-controls")?.appendChild(share.button);
 
   const hud = createSimHud("ground");
+  // Into the HUD's own layer, not a hand-placed div — so this scene gets the same furniture in the same
+  // place as every other. Ground has ONE camera system (the shared fly rig in camera-input.ts), so it
+  // declares none and the selector stays hidden: a control offering one choice is noise. It appears by
+  // itself the day this scene gains a second producer.
+  hud.add("actions", share.button);
   let fps = 0, frames = 0, last = performance.now();
   const frame = () => {
     frames++;

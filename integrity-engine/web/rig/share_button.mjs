@@ -1,4 +1,4 @@
-// Every scene must have a working "Share view": the button exists, clicking it posts the frame, and a
+// Every scene must have a working "Send Shot": the button exists, clicking it posts the frame, and a
 // PNG lands in shots/. Asserts the SAVED FILE, not just that the click did not throw — a capture taken
 // outside the presented frame silently yields a blank or empty image.
 import { launch, PORT } from './_launch.mjs';
@@ -14,8 +14,11 @@ for (const page of ['ground.html', 'terra.html', 'birth.html', 'orbit.html', 'tw
   const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
   const errs = []; p.on('pageerror', e => errs.push(e.message));
   await p.goto(`http://127.0.0.1:${PORT}/${page}`, { waitUntil: 'load' });
-  await p.waitForTimeout(page === 'terra.html' ? 9000 : 7000);
-  const btn = p.locator('#share-view, button:has-text("Share view")').first();
+  // WAIT FOR THE CONDITION, not a duration. The fixed 7 s below used to pass and fail the SAME scene on
+  // consecutive runs — these pages boot at very different speeds (star catalogue, 437k-triangle globe,
+  // GPU pipeline creation), so a sleep measures the rig rather than the page.
+  await p.locator('#share-view').waitFor({ state: 'attached', timeout: 45000 }).catch(() => {});
+  const btn = p.locator('#share-view, button:has-text("Send Shot")').first();
   const has = await btn.count() > 0;
   const before = count();
   if (has) { await btn.click(); await p.waitForTimeout(2500); }

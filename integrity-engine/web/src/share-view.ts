@@ -49,7 +49,7 @@ export function createShareView(
   canvas: HTMLCanvasElement,
   opts: { label?: string; onStatus?: (msg: string, bad?: boolean) => void } = {},
 ): ShareView {
-  const { label = "📷 Share view", onStatus } = opts;
+  const { label = "📷 Send Shot", onStatus } = opts;
   let want = false;
 
   const button = document.createElement("button");
