@@ -19,19 +19,17 @@
 #     feature branch — shipping it inside #81 would not have unblocked #81.
 
 # Everything, unless a narrower rule below says otherwise.
-* @robinmack seanreid@gmail.com
+* @robinmack @sean-reid
 
-# Sean is named by EMAIL rather than by @username, which GitHub supports, because the username could not be
-# established from here: the address is not public, so an API search by it returns nothing, and a name search
-# returns several plausible `seanreid*` accounts. Naming the wrong account fails SILENTLY, so an address given
-# first-hand is the safer identifier.
+# Sean was briefly named by EMAIL here, because his username could not be established at the time. It is
+# now known and verified against the API (`sean-reid`), and a username is strictly better: it cannot silently
+# stop matching the way an email can if it is unverified, changed, or simply the wrong one of several.
 #
-# TWO THINGS STILL HAVE TO BE TRUE for that entry to do anything, and both fail without warning:
-#   1. `seanreid@gmail.com` must be a VERIFIED address on his GitHub account. (Note it differs from the
-#      seanreid.mail@gmail.com given when he was introduced — this is the one supplied for this purpose. If
-#      reviews never route to him, this is the first thing to check.)
-#   2. He must have WRITE access. The repo listed one collaborator (robinmack) when this was written, and a
-#      CODEOWNERS entry for an account without write access is inert.
+# It was the wrong one of several. The address used was `seanreid@gmail.com`, but his 141 commits are all
+# authored as `seanreid.mail@gmail.com` — so the entry was very likely inert, in exactly the way this file
+# already warned about: no error, no warning, simply no owner. That is the whole argument for @username.
 #
-# Swapping the address for `@his-username` once known is strictly more robust, since a username cannot
+# STILL REQUIRED for this to do anything: Sean needs WRITE access. A CODEOWNERS entry for an account without
+# it is inert, and as of 2026-07-25 the repo listed one collaborator (robinmack). He works from a public fork
+# (sean-reid/BotheadStudios), which needs no write access to CONTRIBUTE — but reviewing as a code owner does.
 # silently stop matching the way an unverified or changed email can.
