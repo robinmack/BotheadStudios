@@ -274,6 +274,15 @@ async function main(): Promise<void> {
     // depth-range constraint (docs/59: one depth range cannot hold an 80 m fragment AND a 6,371 km
     // planet). Shrinking CHASE_BACK therefore closes the gap only where the fragment's OWN size
     // dominates — the low, close, fast part of the descent this camera exists for.
+    // CHASE_SIDE stays 0 — MEASURED, not assumed. The worry was that the ablation trail, which streams
+    // backwards along −v straight into the lens, would obscure the shot. Photographed at peak density
+    // (2.7 km, fragment 2853 K, 7,814 trail parcels at 2616 K, 11,288 items drawn): the fragment reads
+    // bright and clear at frame centre, and the parcels are sparse scattered points rather than a
+    // curtain. A side offset was trialled at 4 radii and is not needed to see the subject.
+    //
+    // What sitting on the axis DOES mean is that the camera flies THROUGH the wake rather than alongside
+    // it — parcels all around instead of a streak beside you. That is a framing preference, not a
+    // visibility problem, and it is left at 0 because nothing measured argues for moving it.
     const CHASE_BACK = 14, CHASE_UP = 3, CHASE_SIDE = 0;
     const ALT_STANDOFF = 1 / 1000;
     const driveFollowCamera = (): boolean => {

@@ -38,14 +38,41 @@ const read = () =>
   });
 
 const marks = [800, 1500, 2500];
+// **Does the trail obscure the shot?** The camera sits behind the fragment and the ablation trail streams
+// BACKWARDS along -v — i.e. straight at the lens. Photograph at rising parcel counts, while still
+// following, so the question is answered by looking rather than by argument.
+const parcelMarks = [1000, 4000, 8000];
 let peak = 0;
+let filmed = false;
 let lastAlt = null;
-for (let i = 0; i < 170; i++) {
-  await p.waitForTimeout(3000);
+for (let i = 0; i < 420; i++) {
+  await p.waitForTimeout(1200);
   const s = await read().catch(() => null);
   if (!s) continue;
   if ((s.tempK ?? 0) > peak) peak = s.tempK ?? 0;
-  if (i % 4 === 0 || (s.tempK ?? 0) > 700) console.log(`t+${(i + 1) * 3}s ${JSON.stringify(s)}`);
+  if (i % 10 === 0 || (s.tempK ?? 0) > 700) console.log(`t+${((i + 1) * 1.2).toFixed(0)}s ${JSON.stringify(s)}`);
+  // FILMSTRIP: a rapid sequence of SCREENSHOTS, nothing to do with the engine. (It was called a "burst"
+  // and that was a bad name in this codebase — `damage::disrupt` bursting a body into the swarm is a real
+  // physical event here, and the word was already taken. The rig computes no physics; it only decides
+  // when to photograph.)
+  //
+  // Needed because the entry is the last ~2 SECONDS of a four-minute ride, so a threshold-triggered shot
+  // always lands after it. Filming across it is the only way to see whether the fragment's own trail,
+  // which streams backwards into the camera, obscures the shot.
+  if (!filmed && (s.tempK ?? 0) > 900) {
+    filmed = true;
+    for (let k = 0; k < 8; k++) {
+      const q = await read().catch(() => null);
+      await p.screenshot({ path: `/tmp/frame-${k}.png` });
+      console.log(`   frame ${k}: ${JSON.stringify(q)}`);
+      await p.waitForTimeout(140);
+    }
+  }
+  while (parcelMarks.length && (s.parcels ?? 0) >= parcelMarks[0]) {
+    const m = parcelMarks.shift();
+    await p.screenshot({ path: `/tmp/trail-${m}p.png` });
+    console.log(`   >>> ${m} trail parcels at ${s.altKm} km, fragment ${s.tempK} K — shot written`);
+  }
   while (marks.length && peak >= marks[0]) {
     const m = marks.shift();
     await p.screenshot({ path: `/tmp/nightglow-${m}K.png` });
