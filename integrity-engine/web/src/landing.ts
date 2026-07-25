@@ -302,8 +302,3 @@ if (sim && simCtx) {
     requestAnimationFrame(frame);
   }
 }
-
-// TODO(hero field): paint the hero's live velocity-Verlet N-body field onto <canvas id="sim"> and wire
-// the telemetry readouts (#tm-int / #tm-n / #tm-steps / #tm-ke). Both are commented out in index.html
-// until this exists — the copy claims "F = G·m/r² integrated live", so it must be a real sim, not a loop.
-// Full spec + guardrails: web/HERO-FIELD-HANDOFF.md. Guard on the element (it may be absent) like above.

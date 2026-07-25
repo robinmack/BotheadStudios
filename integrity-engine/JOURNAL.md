@@ -3,6 +3,31 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-23: doc truth-up after the marathon: the map traces the one SPH path
+
+**What.** Three audited drift fixes, no behaviour change. (1) docs/32 §6 no longer narrates the
+retired CPU `Aggregate` debris path (`start_birth` → `build_impact_debris_scaled` → `moon_debris` →
+`step_block`) as the live trace with a "second path" warning: the section now traces what `lib.rs`
+actually does, the ONE GPU SPH path with two entries (the declared birth impact and the live-drop
+hand-off), with every anchor re-verified against today's tree; the stale probe-path and `MatterSim`
+snap mentions (the §3 matter.rs bullet and §4.7) are re-anchored to the current production callers
+(`simulation.rs:317`/`:403`, the camera shell sweep). (2) CLAUDE.md's suite count is measured again:
+379 run by default (was 362), 22 ignored, per-file breakdown unchanged. (3) The impactor-spin IOU in
+`lib.rs` now names its wiring owner: per-body spin angular momentum in the N-body state is the
+generic body's `ang_mom` vector, docs/58 item 3, being built on the generic-body arc.
+
+**Why.** docs/32 exists so a session starts oriented; after the aggregate retirement (docs/46 rows
+1 and 3) its canonical trace pointed a reader at code that no longer exists, which is exactly the
+"one question, two answers" drift the map's own header warns about. A count nobody measured is a
+guess (Law VII), and an IOU without an owner is a debt nobody collects.
+
+**Verified.** Full native suite: `bash scripts/test.sh`, 379 passed, 0 failed, 22 ignored, exit 0
+(2026-07-23). Ignore breakdown measured with `grep -rn '#\[ignore' crates/engine/src`:
+hydrostatic.rs 9, impact.rs 8, aggregate.rs 2, gpu_gravity.rs 2, gpu_host.rs 1 (the extra grep hit
+at gpu_host.rs:99 is a doc comment, not an attribute). Every new docs/32 anchor was read in today's
+tree before being written; `moon_debris` and the `step_block` wiring confirmed at zero grep hits in
+`lib.rs`, and `build_impact_debris_scaled` confirmed test-only in `impact.rs`.
+
 ## 2026-07-23: wasm size baseline recorded
 
 **What.** Recorded the release wasm baseline and made it a release-checklist step (docs/03), with a

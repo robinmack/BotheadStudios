@@ -9,6 +9,27 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Doc truth-up: the architecture map traces the one SPH path.** docs/32 §6 now describes the live
+  birth trace (the GPU SPH machine with its two entries, the declared impact and the live-drop
+  hand-off) instead of the retired CPU `Aggregate` debris path, with anchors re-verified against the
+  current tree; the stale probe-path and terrain-contact mentions are re-anchored to their current
+  callers. CLAUDE.md's suite counts are re-measured (379 run by default, 22 ignored, per-file
+  breakdown listed), and the impactor-spin IOU in `lib.rs` names its wiring owner (the generic
+  body's per-body `ang_mom`, docs/58 item 3). No behaviour change.
+
+- **The public pitch claims the discipline, not the absolute.** The READMEs and the landing hero no
+  longer assert outcomes the conformance ledger (docs/46) disproves: the four pillars are framed as
+  the goal, pillar 3 describes the ground scene's real craters instead of the deleted terrain
+  slice, the prior-art absolute is qualified, and the hero pitches the auditable discipline (fudges
+  are bugs on a public ledger, with the test that closes each one) and links the ledger as proof.
+  Birth of the Moon stays the hook.
+
+- **Docs truth-sync:** the READMEs describe the engine as it is (GPU SPH giant impact with a
+  Tillotson EOS; no rapier or MLS-MPM, which were never dependencies; the phase ladder and the
+  deleted terrain slice are gone from the pitch), SECURITY.md is a real policy instead of the
+  GitHub template, and the stale hero-field TODO in `web/src/landing.ts` is deleted (the field
+  has been live since it was built; the TODO referenced a handoff spec that no longer exists).
+
 - **Wasm download weight is now tracked.** The release `engine_bg.wasm` baseline is recorded in
   the versioning doc (811,915 bytes raw, 322,386 bytes gzipped on 2026-07-23), measuring it is a
   release-checklist step alongside the `wgpu` version note, and the CI wasm job prints the raw and
