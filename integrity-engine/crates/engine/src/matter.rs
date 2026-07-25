@@ -78,8 +78,8 @@ pub struct Particle {
     pub pos: Vec3, // centered world coords
     pub vel: Vec3,
     pub material: usize,
-    /// kg. Not read yet (gravity is mass-independent); kept for momentum/collision later.
-    #[allow(dead_code)]
+    /// kg. Read by the conservation accounting (the batch downward rung bins by REAL mass,
+    /// [`crate::recohere`]); gravity stays mass-independent.
     pub mass: f32,
     /// Kelvin. Impact ejecta carry the heat deposited in them (`docs/20`); drives the incandescent
     /// glow of molten debris ([`crate::emission::incandescence`]). Cold matter sits at `REF_TEMP_K`.
@@ -92,6 +92,54 @@ pub struct MatterSim {
     pub particles: Vec<Particle>,
     max_particles: usize,
     dirty: bool, // a voxel changed → terrain needs re-meshing
+}
+
+/// **The ONE grain→voxel deposition law**, as a free function so every downward rung shares it:
+/// [`MatterSim::deposit_resting_grain`] (the per-grain settle path, CPU and GPU readback) and
+/// [`crate::recohere::recohere_settled`] (the batch settled-region rung, docs/61) both come through
+/// here, so the two rungs cannot disagree about where matter may return (Law II).
+///
+/// Deposits one voxel of `material` into the air-start of the column under `pos` (centered coords):
+/// stacks, refills a crater, and displaces sea water upward rather than annihilating it. Returns
+/// `false` — the matter STAYS particles, conserved — when the target cell is inside a dynamic
+/// `body`, the column is full to the sky, or displaced water has no air cell to rise into. NEVER
+/// deletes matter to lower a count.
+pub fn deposit_grain(world: &mut World, pos: Vec3, material: usize, bodies: &[Sphere]) -> bool {
+    let center = world.center();
+    let xi = (pos.x + center.x).floor() as i32;
+    let zi = (pos.z + center.z).floor() as i32;
+    if let Some(ty) = world.surface_top_voxel(xi, zi) {
+        if (ty as usize) < world.h {
+            let cell = Vec3::new(xi as f32 + 0.5, ty as f32 + 0.5, zi as f32 + 0.5) - center;
+            let inside_body = bodies
+                .iter()
+                .any(|b| (cell - b.pos).length() < b.radius + PARTICLE_HALF);
+            if !inside_body {
+                // If the seabed air-start `ty` is under the SEA (a submerged column), the sinking
+                // grain DISPLACES the water it lands in rather than annihilating it: relocate one
+                // water voxel up to the first air cell above the water column, so the sea volume is
+                // conserved (the displaced water rises — the level goes up as the basin fills) and
+                // total matter is conserved. STATIC-sea placeholder for real splash/displacement
+                // dynamics (deferred): the grain sinks to the seabed, the water it pushed aside rises.
+                if world.is_water(xi, ty, zi) {
+                    let mut wy = ty;
+                    while (wy as usize) < world.h && world.is_water(xi, wy, zi) {
+                        wy += 1;
+                    }
+                    // Only sink the grain if the displaced water has an air cell to rise into; else
+                    // the grain STAYS a particle (matter conserved — never annihilate the water).
+                    if (wy as usize) < world.h && world.material_at(xi, wy, zi).is_none() {
+                        world.set_voxel(xi, wy, zi, world.water_mat); // displaced water rises
+                    } else {
+                        return false;
+                    }
+                }
+                world.set_voxel(xi, ty, zi, Some(material)); // grain settles on the seabed / crater
+                return true;
+            }
+        }
+    }
+    false
 }
 
 impl MatterSim {
@@ -976,9 +1024,10 @@ impl MatterSim {
     /// **Shared de-resolution primitive** (`docs/22`/`docs/23`): a single grain that has come to REST at
     /// `pos` (centered coords), of material `material`, returns to the voxel grid — matter-conserving
     /// (one grain → exactly one voxel). This is the on-demand-resolution principle in reverse: once the
-    /// excitement passes, resolved matter goes back to bulk. It is the SINGLE source of truth for
-    /// depositing a resting grain, used by BOTH the CPU [`Self::step`] settling and the GPU debris
-    /// readback (`lib.rs::settle_gpu_debris`) — "improving one improves all".
+    /// excitement passes, resolved matter goes back to bulk. The law itself lives in the free
+    /// function [`deposit_grain`], shared with the batch settled-region rung
+    /// ([`crate::recohere::recohere_settled`]); this method is the per-grain form used by BOTH the
+    /// CPU [`Self::step`] settling and the GPU debris readback — "improving one improves all".
     ///
     /// Deposits into the column's air-start voxel (stacks / refills the crater). Returns `true` iff the
     /// grain was deposited (the caller then removes it). Returns `false` — grain STAYS a grain, matter
@@ -991,42 +1040,61 @@ impl MatterSim {
         material: usize,
         bodies: &[Sphere],
     ) -> bool {
-        let center = world.center();
-        let xi = (pos.x + center.x).floor() as i32;
-        let zi = (pos.z + center.z).floor() as i32;
-        if let Some(ty) = world.surface_top_voxel(xi, zi) {
-            if (ty as usize) < world.h {
-                let cell = Vec3::new(xi as f32 + 0.5, ty as f32 + 0.5, zi as f32 + 0.5) - center;
-                let inside_body = bodies
-                    .iter()
-                    .any(|b| (cell - b.pos).length() < b.radius + PARTICLE_HALF);
-                if !inside_body {
-                    // If the seabed air-start `ty` is under the SEA (a submerged column), the sinking
-                    // grain DISPLACES the water it lands in rather than annihilating it: relocate one
-                    // water voxel up to the first air cell above the water column, so the sea volume is
-                    // conserved (the displaced water rises — the level goes up as the basin fills) and
-                    // total matter is conserved. STATIC-sea placeholder for real splash/displacement
-                    // dynamics (deferred): the grain sinks to the seabed, the water it pushed aside rises.
-                    if world.is_water(xi, ty, zi) {
-                        let mut wy = ty;
-                        while (wy as usize) < world.h && world.is_water(xi, wy, zi) {
-                            wy += 1;
-                        }
-                        // Only sink the grain if the displaced water has an air cell to rise into; else
-                        // the grain STAYS a particle (matter conserved — never annihilate the water).
-                        if (wy as usize) < world.h && world.material_at(xi, wy, zi).is_none() {
-                            world.set_voxel(xi, wy, zi, world.water_mat); // displaced water rises
-                        } else {
-                            return false;
-                        }
-                    }
-                    world.set_voxel(xi, ty, zi, Some(material)); // grain settles on the seabed / crater
-                    self.dirty = true;
-                    return true;
-                }
-            }
+        let deposited = deposit_grain(world, pos, material, bodies);
+        if deposited {
+            self.dirty = true;
         }
-        false
+        deposited
+    }
+
+    /// **The batch downward rung over THIS field** (docs/61): once a caller's [`SettleGauge`] shows
+    /// the whole region quiet at the physical criterion, every remaining particle is offered back to
+    /// the world in one conserving pass — the region-level guarantee that a settled impact site ends
+    /// as ground, not as a bare particle field. Adapts the particles to
+    /// [`crate::recohere::FieldGrain`], runs [`crate::recohere::recohere_settled`], and on success
+    /// swaps in the remainder (sub-quantum masses and law-refused columns, which STAY particles).
+    /// Returns the rung's full audit (voxels written, deposited mass, and the kinetic energy and
+    /// heat measured at the crossing, which has no voxel-side thermal sink yet, docs/46 row 17)
+    /// with the remainder ALREADY swapped into this field; a [`crate::recohere::Refusal`] passes
+    /// through untouched.
+    ///
+    /// [`SettleGauge`]: crate::recohere::SettleGauge
+    pub fn recohere_settled(
+        &mut self,
+        world: &mut World,
+        materials: &[Material],
+        g: f32,
+        gauge: &crate::recohere::SettleGauge,
+        bodies: &[Sphere],
+    ) -> Result<crate::recohere::Recohered, crate::recohere::Refusal> {
+        let grains: Vec<crate::recohere::FieldGrain> = self
+            .particles
+            .iter()
+            .map(|p| crate::recohere::FieldGrain {
+                pos: p.pos,
+                vel: p.vel,
+                mass: p.mass,
+                material: p.material,
+                temp_k: p.temp_k,
+            })
+            .collect();
+        let r = crate::recohere::recohere_settled(world, materials, &grains, g, gauge, bodies)?;
+        if r.voxels > 0 {
+            self.particles = r
+                .remainder
+                .iter()
+                .map(|gr| Particle {
+                    pos: gr.pos,
+                    vel: gr.vel,
+                    material: gr.material,
+                    mass: gr.mass,
+                    temp_k: gr.temp_k,
+                    resting_seconds: 0.0,
+                })
+                .collect();
+            self.dirty = true;
+        }
+        Ok(r)
     }
 
     /// Advance all particles by `dt`: gravity from the field, terrain collision, and — when a
@@ -1253,6 +1321,63 @@ mod tests {
         assert!(sim.take_dirty(), "a deposit marks the world dirty (it must remesh)");
         // The column grew by one — a second grain would stack on top, never overwrite.
         assert_eq!(w.surface_top_voxel(4, 4), Some(5), "air-start rose after the deposit");
+    }
+
+    /// **The batch downward rung over a `MatterSim` field** (docs/61): sub-quantum grains — masses
+    /// the per-grain one-grain-one-voxel path could never bin without CREATING matter — fold
+    /// through the adapter conserving mass exactly: whole quanta become voxels, the remainder
+    /// survives as a particle, and the world is marked dirty so the surface remeshes.
+    #[test]
+    fn the_batch_rung_folds_a_settled_field_and_keeps_the_remainder() {
+        let mats = materials::load();
+        let gravel = materials::index_of(&mats, "gravel");
+        let rho = mats[gravel].density;
+        let n = 8usize;
+        let dirt = materials::index_of(&mats, "dirt") as u16;
+        let mut voxels = vec![0u16; n * n * n];
+        for z in 0..n {
+            for x in 0..n {
+                voxels[z * n + x] = dirt + 1; // one-voxel dirt floor at y = 0
+            }
+        }
+        let mut w = World::from_voxels(n, n, n, voxels, 1, None);
+        let c = w.center();
+        let g = 9.81;
+
+        // Four resting grains of 0.4 quanta each in one column: 1.6 quanta of gravel. The per-grain
+        // path would have deposited FOUR voxels (4.0 quanta) — conjuring 2.4 quanta of rock.
+        let mut sim = MatterSim::new(64);
+        for i in 0..4 {
+            sim.particles.push(Particle {
+                pos: Vec3::new(4.5, 1.5 + i as f32 * 0.2, 4.5) - c,
+                vel: Vec3::ZERO,
+                material: gravel,
+                mass: 0.4 * rho,
+                temp_k: REF_TEMP_K,
+                resting_seconds: 0.0,
+            });
+        }
+        let mass_in = 4.0 * 0.4 * rho as f64;
+        let before = w.solid_count();
+
+        let mut gauge = crate::recohere::SettleGauge::new();
+        for _ in 0..100 {
+            gauge.observe(0.0, g, 0.01); // a full second of quiet, over twice sqrt(2Δ/g)
+        }
+        let folded = sim
+            .recohere_settled(&mut w, &mats, g, &gauge, &[])
+            .expect("a settled field folds");
+        assert_eq!(folded.voxels, 1, "1.6 quanta afford exactly ONE whole voxel");
+        assert_eq!(w.solid_count(), before + 1);
+        assert_eq!(w.material_at(4, 1, 4), Some(gravel), "gravel comes back as gravel");
+        assert_eq!(sim.particle_count(), 1, "the 0.6-quantum remainder stays a particle");
+        let mass_out = w.solid_count().saturating_sub(before) as f64 * rho as f64
+            + sim.particles[0].mass as f64;
+        assert!(
+            (mass_out - mass_in).abs() <= mass_in * 1e-5,
+            "mass conserved through the fold: in {mass_in:.1} kg, out {mass_out:.1} kg"
+        );
+        assert!(sim.take_dirty(), "a fold changes the ground, so the surface must remesh");
     }
 
     #[test]

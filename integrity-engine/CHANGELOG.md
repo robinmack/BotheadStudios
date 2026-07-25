@@ -9,6 +9,71 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **One Earth serves the orbit and the ground (docs/59 order-of-work item 1).** The world
+  definition owns the body: all three shipped scenes now read `assets/bodies/earth.json` and
+  nothing else for Earth's identity and parameters. The space band's `EARTH_MASS` /
+  `EARTH_RADIUS_M` / `MOON_*` constants are retired for cached reads of the definitions; Terra
+  inherits its radius from the body its world names (`worlds/earth/world.json` no longer carries
+  `radius_m`/`mass_kg`, and a laws scan refuses a planet block that overrides a defined body);
+  and a ground world now declares WHERE on the planet it sits (`lat`/`lon`) and derives its
+  gravity, air pressure AND its material strata from the shared body at that site
+  (`LayeredBody::surface_strata`: materials and order from the body's own layers, band
+  thicknesses a declared log2 vertical LOD, biosphere skin only on land - an ocean site's seabed
+  is the body's own basalt crust). `worlds/ground/world.json` drops its private strata list.
+  Digit-identity across the three paths is pinned by `one_earth_tests::the_three_scenes_read_one_earth`;
+  docs/46 ledger row 16 narrows accordingly. Schema note: `GroundSurface.strata` now defaults to
+  empty = inherited; an explicit column remains declarable for body-less sandboxes.
+
+- **The re-coherence rung's energy debts are measured, and all three of its physics debts are
+  on the ledger (docs/61, docs/46 row 17).** None is closed; two are measured, one is designed.
+  Measured: the batch grain-to-voxel rung books the binned mass's remaining kinetic energy
+  (settling is dissipation, bounded per grain by `m g Δ`) and its carried heat at the crossing
+  (`Recohered::binned_kinetic_j` / `binned_heat_j`, energy-in minus remainder-out per column;
+  heat counted only where the material's specific heat is sourced, an unknown stays unknown),
+  because the voxel store carries no thermal state to receive them and inventing a fake sink was
+  refused. `MatterSim::recohere_settled` returns the full audit instead of a bare voxel count,
+  `Simulation` accumulates it (`recohered_kinetic_j()` / `recohered_heat_j()`), and
+  `run-definition` prints a `recohered` line whenever the rung ran. A native conservation test
+  holds the ledger identity (energy in = remainder out + audit) against independently computed
+  expectations. Designed only: consolidation. Re-cohered rubble is still instantly
+  bedrock-competent; docs/46 row 17c names the deferred state (porosity and strength fraction
+  relaxing toward intact over a physical timescale) and the test that would close it.
+
+- **The celestial field can initialize the local patch, conserved (docs/59 item 3): built, tested,
+  deliberately unwired.** New `refine` module, the upward rung mirroring `recohere`'s downward one:
+  a one-shot icosahedron split with a mandatory retained center child (13 children inheriting the
+  parent's velocity and specific internal energy, masses summing exactly to the parent's), then
+  relax-then-release with a frozen clock: children shift, damped, against the coarse field's own
+  interpolated density with the coarse exterior held as a fixed guard band, and release is the
+  stated 5e-3 relative density-error bound, never an iteration count. The two stencil constants
+  were re-derived offline for the engine's own cubic-spline kernel by least squares over the
+  kernel (separation 0.3051 h, child smoothing 0.7915 h in this kernel's support-radius
+  convention; the literature pair, 0.2 h and 0.9 h mapped into the same convention, measures 4.9%
+  L2 density error on this kernel against 0.7% for the derived pair). Interface discipline is
+  enforced by refusal with stated reasons: one rung per interface, and a coarse particle inside
+  the fine region is contamination that invalidates the refinement rather than being smoothed
+  over. A five-quantity conservation ledger (mass, momentum, angular momentum, kinetic, internal)
+  is audited before, after split and after relax; the split is exact to f32 rounding and the relax
+  carries its own stated angular-momentum drift bound. Measured on native tests: the raw split
+  blip is 7.5e-2 on a uniform basalt field and 9.5e-2 across a basalt/iron interface, both
+  released at 5.0e-3. The Holsapple-Housen pi-scaling gate (gravity regime, v2.2.1 hard-rock and
+  regolith rows) ships alongside for the future end-to-end crater check, unit-tested against a
+  hand-computed Meteor Crater example. FLAGGED IOU: zero production consumers; the M4 zoom
+  materialization milestone owns the camera trigger and the scene wiring (docs/46 ledger row 18).
+
+- **A settled impact site re-coheres into meshed ground (docs/61).** New `crate::recohere`: the
+  batch downward rung that returns a SETTLED region of any particle field to the voxel world, which
+  the existing surface-nets mesher then renders as standable ground. The criterion is physical, not
+  a frame count — quiescent speed `sqrt(2gΔ)` (below it a grain's kinetic energy cannot buy a
+  one-cell rise) sustained for one cell dynamical time `sqrt(2Δ/g)`, tracked by
+  `recohere::SettleGauge` in seconds of simulated time. Binning conserves mass (f64 accumulation of
+  real grain masses; whole voxel quanta `ρ·Δ³` out, sub-quantum remainder STAYS particles) and
+  material identity, and deposits through the one grain→voxel law (`matter::deposit_grain`, the
+  per-grain path's body now shared as a free function). A still-moving region is refused with the
+  world untouched. Production consumer: `Simulation::step` folds the quiet meteor aftermath back
+  into the world (`Simulation::recohered_voxels()` exposes the count); the SPH-remnant and
+  cohesive-wreck wirings are docs/61's flagged IOUs.
+
 - **Pan input works for real hands and trackpads.** Shift plus left-drag now pans no matter
   whether shift or the button lands first: a left-drag upgrades to a pan the moment the modifier
   is seen, and in a scene with a pan handler that chord never means reverse walk (reverse stays

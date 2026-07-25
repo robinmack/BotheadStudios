@@ -200,6 +200,57 @@ impl LayeredBody {
         let mat = &mats[crate::materials::index_of(mats, &layer.material)];
         surface_phase(mat, self.temperature_at(r), self.pressure_at(r))
     }
+
+    /// The material column a LOCAL SURFACE PATCH of this body exposes at `(lat, lon)` - the body's OWN
+    /// layers, top-down, as declared strata (docs/59 order-of-work 1: one body serves the orbit AND the
+    /// ground). A ground world declares WHERE it sits; WHAT it digs through comes from here, so there is
+    /// no second, scene-private copy of the planet's composition to drift.
+    ///
+    /// Derivation, in the open:
+    ///   * **Materials and ORDER are the body's real radial structure** - the layers walked outside-in,
+    ///     adjacent same-material shells collapsed (Earth's three declared iron core shells are one iron
+    ///     band in a column).
+    ///   * **Band thicknesses are a declared vertical LOD** (flagged, Law V): a 96 m patch cannot hold a
+    ///     2,900 km mantle at true scale, so each buried band spans log2(its real thickness in metres)
+    ///     metres of patch - one metre per DOUBLING of real depth, the same "compressed so a dig
+    ///     exposes honest strata" statement the hand-written column made, now computed from the layers
+    ///     it compresses (base 2 keeps the derived bands nearest the previously validated hand values:
+    ///     crust 15 m vs the old 12, mantle 21 m vs the old 22). The innermost band fills everything
+    ///     beneath. The IOU it names: a true depth-resolved column when resolution-by-necessity can
+    ///     afford one.
+    ///   * **The skin comes from the body's surface at the site**: on land, one metre of biosphere
+    ///     ("grass" - the landcover raster's per-biome answer at the site is the flagged refinement);
+    ///     over ocean there is no soil and the crust itself is the seabed. A body with no declared
+    ///     surface (the Moon, proto-Earth) has no skin at all.
+    pub fn surface_strata(&self, lat_deg: f64, lon_deg: f64) -> Vec<crate::terra::world_def::Stratum> {
+        use crate::terra::world_def::Stratum;
+        // Layers outside-in, collapsing adjacent shells of the same material.
+        let mut bands: Vec<(String, f64)> = Vec::new(); // (material, real thickness m)
+        let mut inner = 0.0f64;
+        for l in &self.layers {
+            let t = l.outer_r - inner;
+            inner = l.outer_r;
+            match bands.last_mut() {
+                Some((m, acc)) if *m == l.material => *acc += t,
+                _ => bands.push((l.material.clone(), t)),
+            }
+        }
+        bands.reverse();
+        let mut strata: Vec<Stratum> = Vec::new();
+        if self.surface.is_some() && is_land(lat_deg, lon_deg) {
+            strata.push(Stratum { material: "grass".into(), thickness_m: Some(1) });
+        }
+        let n = bands.len();
+        for (i, (material, real_t)) in bands.into_iter().enumerate() {
+            let thickness_m = if i + 1 == n {
+                None // the deepest band fills the rest of the patch
+            } else {
+                Some(real_t.max(2.0).log2().round() as i32)
+            };
+            strata.push(Stratum { material, thickness_m });
+        }
+        strata
+    }
 }
 
 /// Phase of a material at temperature `t` (K) under ambient pressure `p` (Pa) — the general P–T phase
@@ -519,6 +570,60 @@ mod tests {
         // The Moon is less centrally condensed than Earth, so its factor is higher — an ordering the
         // density profiles produce on their own.
         assert!(ef < mf, "Earth is more centrally condensed than the Moon (ef {ef:.4} < mf {mf:.4})");
+    }
+}
+
+#[cfg(test)]
+mod surface_strata_tests {
+    use super::*;
+
+    /// **The ground's column IS the body's own layers** (docs/59 item 1). No list of materials is typed
+    /// anywhere near a ground world: the strata derive from `earth.json`, so improving the one Earth
+    /// improves what every patch digs through. Order real, adjacent shells collapsed, thicknesses the
+    /// declared logarithmic vertical LOD, innermost band unbounded.
+    #[test]
+    fn a_patch_column_derives_from_the_bodys_own_layers() {
+        let e = earth();
+        let strata = e.surface_strata(45.0, -100.0); // a land site (North America)
+        let names: Vec<&str> = strata.iter().map(|s| s.material.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["grass", "basalt", "peridotite", "iron"],
+            "land: biosphere skin, then Earth's real radial order top-down"
+        );
+        // The buried bands really came from the layers: same materials as the definition, outside-in,
+        // adjacent same-material shells collapsed.
+        let mut from_layers: Vec<String> =
+            e.layers.iter().rev().map(|l| l.material.clone()).collect();
+        from_layers.dedup();
+        assert_eq!(
+            names[1..].to_vec(),
+            from_layers.iter().map(String::as_str).collect::<Vec<_>>(),
+            "the column under the skin is the definition's layer stack, nothing else"
+        );
+        // Thickness is the declared compression: log2(real thickness m), one metre per doubling.
+        let crust_real = e.layers.last().unwrap().outer_r - e.layers[e.layers.len() - 2].outer_r;
+        assert_eq!(
+            strata[1].thickness_m,
+            Some(crust_real.log2().round() as i32),
+            "a band's patch thickness is log2(its real thickness)"
+        );
+        assert_eq!(strata.last().unwrap().thickness_m, None, "the core fills the rest");
+    }
+
+    /// Over OCEAN there is no soil: the crust itself is the seabed (oceanic crust is basalt - real, not
+    /// a choice). And a body with no declared surface carries no skin anywhere.
+    #[test]
+    fn the_skin_follows_the_bodys_surface_at_the_site() {
+        let e = earth();
+        let ocean = e.surface_strata(0.0, -150.0); // equatorial Pacific per the landmask
+        assert_eq!(ocean[0].material, "basalt", "no biosphere skin on the sea floor");
+        let m = moon();
+        assert_eq!(
+            m.surface_strata(45.0, -100.0)[0].material,
+            m.layers.last().unwrap().material,
+            "an airless body with no surface data has no skin at all"
+        );
     }
 }
 

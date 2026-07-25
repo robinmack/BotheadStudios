@@ -15,13 +15,6 @@ pub const W: usize = 96;
 pub const H: usize = 96;
 pub const D: usize = 96;
 
-const GRASS_THICKNESS: usize = 1; // thin fragile biosphere skin over the crust
-
-/// Highest possible surface top (voxel-y ≈ metres): leaves 8 voxels of headroom above the terrain.
-const BASE_TOP: f32 = (H - 8) as f32;
-/// Peak-to-valley relief of the procedural heightfield (voxels ≈ metres): real rolling hills, not a slab.
-const AMPLITUDE: f32 = 34.0;
-
 /// Sea-level datum (voxel-y, metres in the patch's own frame): the reference height the oceans fill
 /// water BELOW (real `water` matter above the seabed, up to this level; land is ABOVE it). This is the
 /// waterline where the ONE continuous hydrostatic column switches from air (pressure decreasing upward,
@@ -29,9 +22,9 @@ const AMPLITUDE: f32 = 34.0;
 /// parallel to the atmosphere, P = P_atm at depth 0.
 ///
 /// DEMONSTRATION SEA LEVEL (flagged): the coarse 10° landmask calls this cell all-land, so there is no
-/// real bathymetry to pin the datum yet. It is chosen to sit WITHIN the terrain's relief band
-/// (`BASE_TOP - AMPLITUDE` = 54 .. `BASE_TOP` = 88, procedural tops ~54..81) so the low basins are
-/// genuinely submerged and the sea is visible, while hills stay dry. When real elevation/bathymetry
+/// real bathymetry to pin the datum yet. It is chosen to sit WITHIN the terrain's relief band (the
+/// declared default surface: base_top 88, amplitude 34, so procedural tops ~54..81) so the low basins
+/// are genuinely submerged and the sea is visible, while hills stay dry. When real elevation/bathymetry
 /// (ETOPO) drops into `terrain_height`, the true 0 m geoid replaces this demonstration value.
 pub const SEA_LEVEL_Y: f32 = 64.0;
 
@@ -947,91 +940,14 @@ pub fn generate_from(def: &crate::terra::world_def::GroundSurface, materials: &[
 }
 
 pub fn generate(materials: &[Material]) -> World {
-    // Real Earth column (planet::earth(), docs/25/28): a biosphere skin over basalt CRUST, peridotite
-    // MANTLE, iron CORE. This is a DECLARED VERTICAL LOD: the material order is Earth's real radial
-    // structure, but the layer THICKNESSES are rebalanced into the ~88-voxel patch (real crust is 0.4%
-    // of the radius — invisible at true scale), so a dig or a giant impact exposes honest strata from
-    // this surface frame (Robin: "see Theia impact from this perspective"). Depths are compressed —
-    // flagged; 1 voxel = 1 m holds only for the near-surface probe/dig physics.
-    let grass = index_of(materials, "grass") as u16 + 1;
-    let crust = index_of(materials, "basalt") as u16 + 1;
-    let mantle = index_of(materials, "peridotite") as u16 + 1;
-    let core = index_of(materials, "iron") as u16 + 1;
-    let water_idx = index_of(materials, "water");
-    let water = water_idx as u16 + 1;
-
-    let mut voxels = vec![0u16; W * H * D];
-    let base_top = BASE_TOP as i32; // highest possible surface; leaves headroom above the terrain
-    let valley_floor = base_top - AMPLITUDE as i32; // the LOWEST any surface top can reach
-
-    // Flat strata boundaries (real geology is horizontal), anchored BENEATH the deepest valley so every
-    // column — hilltop or valley bottom — carries the full grass → crust → mantle → core column. The
-    // grass skin follows the undulating terrain top; the crust/mantle/core boundaries are level planes,
-    // so a dig anywhere hits the same deep layer at the same absolute depth.
-    const CRUST_VOX: i32 = 12; // basalt crust band (LOD-inflated from ~25 km)
-    const MANTLE_VOX: i32 = 22; // peridotite mantle band
-    let crust_bottom = valley_floor - CRUST_VOX;
-    let mantle_bottom = crust_bottom - MANTLE_VOX;
-
-    let mut max_top = 0usize;
-    for z in 0..D {
-        for x in 0..W {
-            // Fill up to the SHARED continuous heightfield (the same function the Earth cap samples).
-            let top = (terrain_height(x as f32, z as f32).round() as i32)
-                .clamp(GRASS_THICKNESS as i32 + 1, H as i32 - 1);
-            let grass_start = top - GRASS_THICKNESS as i32;
-            for y in 0..top {
-                let v = if y >= grass_start {
-                    grass
-                } else if y >= crust_bottom {
-                    crust
-                } else if y >= mantle_bottom {
-                    mantle
-                } else {
-                    core
-                };
-                let i = (y as usize * D + z) * W + x;
-                voxels[i] = v;
-            }
-            max_top = max_top.max(top as usize);
-        }
-    }
-
-    // OCEAN PASS — water as real matter (docs/28; the sea, parallel to the atmosphere). Fill every AIR
-    // voxel that lies below the sea-level datum and ABOVE the solid land top with the DB `water`
-    // material, so the terrain's below-sea-level basins become genuine water bodies (filled voxels that
-    // carry mass and render), never a decorative plane. The solid strata beneath the seabed are left
-    // untouched — water sits in the air space above the grass, up to SEA_LEVEL_Y. STATIC filled sea for
-    // now: no flow/waves/splash yet (that dynamic step — water resolving into flowing particles when a
-    // meteor/dig disturbs it — is deferred and must NOT be faked). The hydrostatic pressure of this
-    // column is [`ocean_pressure`], continuous with the atmosphere at the waterline.
-    let sea_level = SEA_LEVEL_Y.round() as i32;
-    for z in 0..D {
-        for x in 0..W {
-            for y in 0..sea_level.min(H as i32) {
-                let i = (y as usize * D + z) * W + x;
-                if voxels[i] == 0 {
-                    voxels[i] = water; // air below the datum, above the land → sea
-                }
-            }
-        }
-    }
-
-    let mut world = World {
-        w: W,
-        h: H,
-        d: D,
-        voxels,
-        max_top,
-        water_mat: Some(water_idx),
-        // T0 starts flat: a fresh world IS the procedural relief, unmodified. Every non-zero entry
-        // hereafter is a real, persisted deformation baked back from voxels.
-        displacement: vec![0.0; W * D],
-        demoted: vec![false; W * D],
-        tops: vec![-1; W * D],
-    };
-    world.rebuild_tops();
-    world
+    // The default patch of the REAL layered Earth (docs/25/28, docs/59): the declared default surface
+    // dials, with the material column INHERITED from the shared body definition at the default site -
+    // the same derivation every ground world gets (`LayeredBody::surface_strata`). The hand-written
+    // grass/crust/mantle/core list that used to live here was a private copy of the planet; the body
+    // answers now, so improving `earth.json` improves this world too.
+    let mut def = crate::terra::world_def::GroundSurface::default();
+    def.resolve_strata(&crate::planet::earth(), 0.0, 0.0);
+    generate_from(&def, materials)
 }
 
 // --- deterministic value noise (no RNG; stable across runs/clients) ---
@@ -1101,22 +1017,44 @@ fn fbm_with(octaves: &[crate::terra::world_def::Octave], x: f32, z: f32) -> f32 
 mod tests {
     use crate::terra::world_def::{Octave, Stratum, GroundSurface};
 
-    /// **The whole safety of moving the surface into data.** `generate` still hardcodes the world via
-    /// the module constants; `generate_from` builds it from a definition. If the declared defaults drift
-    /// from those constants by even one voxel, every existing world silently becomes a different place —
-    /// different relief, different strata depths, different coastline — with nothing erroring.
+    /// The default surface's strata are INHERITED, never listed: `GroundSurface::default()` carries an
+    /// EMPTY column, and `generate` fills it from the shared Earth definition - the same derivation
+    /// every ground world gets. If a hand-written default column ever crept back in, the ground would
+    /// again be a private copy of the planet (docs/46 row 16).
     #[test]
-    fn surface_defaults_reproduce_the_hardcoded_world() {
+    fn the_default_ground_column_is_inherited_from_the_shared_earth() {
         let mats = crate::materials::load();
-        let hardcoded = super::generate(&mats);
-        let declared = super::generate_from(&GroundSurface::default(), &mats);
-        assert_eq!((declared.w, declared.h, declared.d), (hardcoded.w, hardcoded.h, hardcoded.d));
-        assert_eq!(declared.max_top, hardcoded.max_top, "surface envelope must match");
-        assert_eq!(declared.water_mat, hardcoded.water_mat);
-        assert_eq!(
-            declared.voxels, hardcoded.voxels,
-            "the declared default surface must be VOXEL-IDENTICAL to the hardcoded one"
+        assert!(
+            GroundSurface::default().strata.is_empty(),
+            "the default column must be inherited from the body, not declared here"
         );
+        let mut def = GroundSurface::default();
+        def.resolve_strata(&crate::planet::earth(), 0.0, 0.0);
+        let declared = super::generate_from(&def, &mats);
+        let derived = super::generate(&mats);
+        assert_eq!(
+            declared.voxels, derived.voxels,
+            "generate() must BE the derived-default world - one path, one Earth"
+        );
+        // And the column really is the definition's layer stack under the skin.
+        let earth = crate::planet::earth();
+        let mut from_layers: Vec<String> =
+            earth.layers.iter().rev().map(|l| l.material.clone()).collect();
+        from_layers.dedup();
+        let names: Vec<&str> = def.strata.iter().map(|s| s.material.as_str()).collect();
+        assert_eq!(
+            names[1..].to_vec(),
+            from_layers.iter().map(String::as_str).collect::<Vec<_>>(),
+            "the default column under the skin is earth.json's own layers"
+        );
+    }
+
+    /// A default surface with its column resolved from the shared Earth - what `generate` builds, and
+    /// what every dial-variation below starts from.
+    fn resolved_default() -> GroundSurface {
+        let mut d = GroundSurface::default();
+        d.resolve_strata(&crate::planet::earth(), 0.0, 0.0);
+        d
     }
 
     /// The definition must actually shape the ground, or the file is decoration. Each dial is changed
@@ -1124,32 +1062,32 @@ mod tests {
     #[test]
     fn changing_the_declared_surface_changes_the_world() {
         let mats = crate::materials::load();
-        let base = super::generate_from(&GroundSurface::default(), &mats);
+        let base = super::generate_from(&resolved_default(), &mats);
 
-        let mut smaller = GroundSurface::default();
+        let mut smaller = resolved_default();
         smaller.size_voxels = [48, 96, 48];
         let w = super::generate_from(&smaller, &mats);
         assert_eq!((w.w, w.d), (48, 48), "declared patch size must be honoured");
 
-        let mut flat = GroundSurface::default();
+        let mut flat = resolved_default();
         flat.amplitude_m = 0.0;
         let w = super::generate_from(&flat, &mats);
         let tops: Vec<i32> = (0..w.w as i32).map(|x| w.surface_top_voxel(x, 0).unwrap_or(-1)).collect();
         assert!(tops.windows(2).all(|p| p[0] == p[1]), "zero declared amplitude must give a flat surface");
 
-        let mut rough = GroundSurface::default();
+        let mut rough = resolved_default();
         rough.octaves = vec![Octave { frequency: 0.4, weight: 1.0 }];
         let w = super::generate_from(&rough, &mats);
         assert_ne!(w.voxels, base.voxels, "different declared octaves must give different relief");
 
-        let mut dry = GroundSurface::default();
+        let mut dry = resolved_default();
         dry.sea_level_m = 0.0;
         let w = super::generate_from(&dry, &mats);
         let water = w.water_mat.expect("water material");
         let wet = w.voxels.iter().filter(|&&v| v > 0 && (v - 1) as usize == water).count();
         assert_eq!(wet, 0, "a sea level of 0 must leave no water");
 
-        let mut basalt_skin = GroundSurface::default();
+        let mut basalt_skin = resolved_default();
         basalt_skin.strata = vec![
             Stratum { material: "basalt".into(), thickness_m: Some(1) },
             Stratum { material: "iron".into(), thickness_m: None },
@@ -1704,11 +1642,14 @@ mod tests {
         // and the cap ever drifting apart again (the hovering-rubble bug).
         let mats = materials::load();
         let w = generate(&mats);
+        // The clamp floor is the SKIN thickness the resolved column declares (the same value
+        // generate_from uses), so this test and the generator agree by construction.
+        let skin = resolved_default().strata.first().and_then(|s| s.thickness_m).unwrap_or(1);
         for z in 0..D as i32 {
             for x in 0..W as i32 {
                 let top = w.surface_top_voxel(x, z).expect("solid column");
                 let th = (terrain_height(x as f32, z as f32).round() as i32)
-                    .clamp(GRASS_THICKNESS as i32 + 1, H as i32 - 1);
+                    .clamp(skin + 1, H as i32 - 1);
                 assert_eq!(top, th, "patch top disagrees with terrain_height at ({x},{z})");
             }
         }
@@ -1729,11 +1670,12 @@ mod tests {
         let sea = SEA_LEVEL_Y.round() as i32;
 
         // (a) The demonstration datum is inside the terrain's relief band → genuinely part sea, part land.
+        let def = resolved_default();
         assert!(
-            SEA_LEVEL_Y > BASE_TOP - AMPLITUDE && SEA_LEVEL_Y < BASE_TOP,
+            SEA_LEVEL_Y > def.base_top_m - def.amplitude_m && SEA_LEVEL_Y < def.base_top_m,
             "sea level {SEA_LEVEL_Y} must sit within the relief band ({}..{}) to be visible",
-            BASE_TOP - AMPLITUDE,
-            BASE_TOP
+            def.base_top_m - def.amplitude_m,
+            def.base_top_m
         );
 
         let (mut water_cols, mut land_cols, mut water_voxels) = (0usize, 0usize, 0usize);

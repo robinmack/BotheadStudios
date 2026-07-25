@@ -65,6 +65,14 @@ pub struct GroundDef {
     /// an abstraction, not a world. Name the planet and the physics follows.
     #[serde(default = "GroundDef::default_planet")]
     pub planet: String,
+    /// WHERE on that planet this patch sits: geodetic latitude/longitude, degrees. This is the docs/59
+    /// derivation path - a ground world declares a PLACE on the shared body; the skin and strata it
+    /// digs through derive from the body's own definition at that site
+    /// (`planet::LayeredBody::surface_strata`), never from a private copy.
+    #[serde(default)]
+    pub lat: f64,
+    #[serde(default)]
+    pub lon: f64,
     /// Camera altitude above the surface beneath it (m) — the scene's framing, declared not compiled.
     #[serde(default = "GroundDef::default_eye_height")]
     pub eye_height_m: f32,
@@ -123,7 +131,11 @@ pub struct GroundSurface {
     #[serde(default = "GroundSurface::default_octaves")]
     pub octaves: Vec<Octave>,
     /// The material column, top-down: a skin, then bands. The LAST entry fills everything beneath.
-    #[serde(default = "GroundSurface::default_strata")]
+    /// **Empty (the default) means INHERITED**: the column derives from the named planet's own layers
+    /// at the declared `(lat, lon)` (`planet::LayeredBody::surface_strata`) - one Earth, one column,
+    /// no scene-private copy. A world may still declare an explicit column for a body-less sandbox
+    /// experiment; a world that places a real body should not.
+    #[serde(default)]
     pub strata: Vec<Stratum>,
 }
 
@@ -159,15 +171,14 @@ impl GroundSurface {
             Octave { frequency: 0.13,  weight: 0.15 }, // surface texture
         ]
     }
-    fn default_strata() -> Vec<Stratum> {
-        // Earth's real radial order as a DECLARED vertical LOD: thicknesses are compressed into the
-        // patch (real crust is 0.4% of the radius) so a dig exposes honest strata. Material ORDER is real.
-        vec![
-            Stratum { material: "grass".into(),      thickness_m: Some(1) },
-            Stratum { material: "basalt".into(),     thickness_m: Some(12) },
-            Stratum { material: "peridotite".into(), thickness_m: Some(22) },
-            Stratum { material: "iron".into(),       thickness_m: None },
-        ]
+
+    /// Fill an empty (inherited) column from the body this ground is a patch of, at the declared site.
+    /// This used to be a hand-written default list of Earth's materials - a private copy of the planet
+    /// living beside the real definition (docs/46 row 16). Now the body answers.
+    pub fn resolve_strata(&mut self, body: &crate::planet::LayeredBody, lat_deg: f64, lon_deg: f64) {
+        if self.strata.is_empty() {
+            self.strata = body.surface_strata(lat_deg, lon_deg);
+        }
     }
 }
 
@@ -179,7 +190,7 @@ impl Default for GroundSurface {
             amplitude_m: Self::default_amplitude(),
             sea_level_m: Self::default_sea_level(),
             octaves: Self::default_octaves(),
-            strata: Self::default_strata(),
+            strata: Vec::new(), // inherited from the placed body (resolve_strata)
         }
     }
 }
@@ -378,7 +389,12 @@ pub struct BodyDef {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Planet {
-    pub radius_m: f64,
+    /// The planet's radius (m) - declarable ONLY for a body the engine has no definition for. A world
+    /// that names a defined body (`profile`, or the world-level `body`) inherits the definition's
+    /// radius and may omit this; `lib::declared_planet_radius` ignores it if declared anyway, and the
+    /// laws scan refuses the shipped world files that try.
+    #[serde(default)]
+    pub radius_m: Option<f64>,
     #[serde(default)]
     pub mass_kg: Option<f64>,
     #[serde(default)]
@@ -520,12 +536,15 @@ mod atmosphere_source_tests {
         )
         .expect("shipped Earth world");
         let w = World::parse(&json).expect("Earth world parses");
-        let planet = w.planet.as_ref().expect("Earth world has a planet");
+        assert!(w.planet.is_some(), "Earth world has a planet");
         let atm = w.atmosphere.as_ref().expect("Earth world declares an atmosphere");
 
+        // The radius the pressure is weighed over comes from the DEFINITION the world names - the
+        // world file no longer carries its own copy (docs/59 one Earth).
         let earth = crate::planet::earth();
-        let g = earth.gravity_at(planet.radius_m);
-        let from_world = atm.surface_pressure(planet.radius_m, g).expect("mass is declared");
+        let r = earth.radius();
+        let g = earth.gravity_at(r);
+        let from_world = atm.surface_pressure(r, g).expect("mass is declared");
         let from_profile = earth.surface_pressure();
 
         let rel = (from_world - from_profile).abs() / from_profile;
@@ -691,7 +710,7 @@ mod tests {
         // Minimal: just a named planet with a radius.
         let w = World::parse(r#"{"name":"Bare","planet":{"radius_m":6371000}}"#).unwrap();
         assert_eq!(w.name, "Bare");
-        assert_eq!(w.planet.as_ref().unwrap().radius_m, 6_371_000.0);
+        assert_eq!(w.planet.as_ref().unwrap().radius_m, Some(6_371_000.0));
         assert!(w.surface.is_none());
 
         // Full-ish Earth world (the reference).

@@ -229,24 +229,41 @@ mod single_source_tests {
             );
         }
     }
-}
 
-#[cfg(test)]
-mod pinned_constant_tests {
-    /// `EARTH_RADIUS_M` has to be a `const` — `DISPLAY_SCALE` is derived from it in a const context — so
-    /// it cannot simply ask `planet::body("earth")` at runtime. That makes it the one legitimate second
-    /// copy of a number the definitions already own, and the only honest way to keep a second copy is to
-    /// pin it: if `earth.json` ever changes, this fails rather than the two drifting apart in silence.
+    /// **A scene carries NO copy of a body parameter - not one, not a pinned one** (docs/59 one Earth,
+    /// docs/58 name-freeness). The scene modules used to hold `EARTH_RADIUS_M`/`EARTH_MASS`/`MOON_*`
+    /// constants that every render and fallback read; they now READ the shared definitions, so removing
+    /// the constants broke nothing, and this scan is the grep made permanent: zero hits, forever.
+    /// (Non-scene modules are covered by the ≤1-copy rule above; test fixtures pinning published values
+    /// are stripped before counting, as everywhere in this file.)
     #[test]
-    fn the_earth_radius_constant_matches_the_definition() {
-        let declared = crate::planet::body("earth").radius();
-        assert!(
-            (declared - 6.371e6).abs() < 1.0,
-            "earth.json says {declared} m; the engine's EARTH_RADIUS_M const says 6.371e6. One of them \
-             moved — change the definition, then this constant, never the other way round."
-        );
+    fn a_scene_module_carries_no_copy_of_a_body_parameter() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        for &scene in super::SCENE_MODULES {
+            let text = std::fs::read_to_string(format!("{dir}/{scene}"))
+                .unwrap_or_else(|_| panic!("{scene} must exist"));
+            let code = strip(&text);
+            for &(literal, what) in super::DEFINITION_OWNED {
+                assert!(
+                    !contains_number(&code, literal),
+                    "{scene} carries {literal} ({what}) - a scene reads the definition \
+                     (planet::body / the cached shared params), it never copies the number"
+                );
+            }
+        }
     }
 }
+
+/// Body parameters the DEFINITIONS own outright: a scene module may not carry even ONE copy of these,
+/// pinned or otherwise. Each is `(literal, what it is)`. This replaces the old pinned
+/// `EARTH_RADIUS_M` test - the constant it pinned is gone; scenes now READ the definition (cached
+/// once), so there is no second copy left to drift, and this scan is what keeps it that way.
+pub(crate) const DEFINITION_OWNED: &[(&str, &str)] = &[
+    ("6.371e6", "Earth's radius - assets/bodies/earth.json"),
+    ("5.972e24", "Earth's mass - it emerges from earth.json's layers"),
+    ("1.737e6", "the Moon's radius - assets/bodies/moon.json"),
+    ("7.342e22", "the Moon's mass - it emerges from moon.json's layers"),
+];
 
 /// The low-level collision primitives. A SCENE must never call these — detecting a collision is the
 /// engine's job (`interaction::detect_swept`), and a scene that forecasts contact or recovers a contact
@@ -340,6 +357,26 @@ mod scene_declares_not_overrides_tests {
             let json: serde_json::Value =
                 serde_json::from_str(&text).unwrap_or_else(|e| panic!("{world:?} is malformed: {e}"));
             let scene = entry.file_name().to_string_lossy().to_string();
+
+            // The `planet` block of a "planet" world is a body instance too (docs/59 one Earth): a
+            // world that names a defined body places it and may not size or weigh it.
+            if let Some(planet) = json.get("planet") {
+                let named = json
+                    .get("body")
+                    .or_else(|| planet.get("profile"))
+                    .and_then(|p| p.as_str());
+                if named.is_some_and(|p| super::DEFINED_BODY_IDS.contains(&p)) {
+                    for &key in super::SCENE_BODY_OVERRIDE_KEYS {
+                        assert!(
+                            planet.get(key).is_none(),
+                            "{scene}: the planet block names the defined body {:?} yet declares \
+                             `{key}` - that is the definition's physics, not the scene's.",
+                            named.unwrap(),
+                        );
+                        checked += 1;
+                    }
+                }
+            }
 
             let Some(bodies) = json.get("bodies").and_then(|b| b.as_array()) else { continue };
             for b in bodies {

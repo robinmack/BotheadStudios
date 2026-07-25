@@ -93,5 +93,18 @@ fn main() {
         if created > 0 { 100.0 * lost as f64 / created as f64 } else { 0.0 }
     );
     println!("voxels     : {voxels_before} -> {voxels_after}");
+    // The batch rung's energy books (docs/61, docs/46 row 17): the grain-to-voxel crossing has no
+    // thermal sink on the voxel side yet, so the kinetic energy and carried heat of binned matter
+    // are MEASURED at the crossing. Reported whenever the rung ran, so the loss is a number a
+    // definition author sees, never a silent zero.
+    if sim.recohered_voxels() > 0 {
+        println!(
+            "recohered  : {} voxels via the batch rung | {:.3e} J kinetic + {:.3e} J heat measured \
+             at the crossing (no voxel thermal sink yet, docs/46 row 17)",
+            sim.recohered_voxels(),
+            sim.recohered_kinetic_j(),
+            sim.recohered_heat_j()
+        );
+    }
     report_bodies(&sim, "at end ");
 }
