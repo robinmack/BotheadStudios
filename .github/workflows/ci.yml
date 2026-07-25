@@ -46,6 +46,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          # `scripts/test.sh` IS the deploy gate, and its full run now type-checks `mod app` against
+          # wasm32 (the scenes a native check cannot see). The target has to exist here or the gate
+          # fails for the wrong reason — which is exactly what happened the first time this landed.
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: integrity-engine

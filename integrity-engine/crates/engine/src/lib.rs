@@ -5395,8 +5395,9 @@ mod app {
                     // into buffers that persist across frames.
                     if self.draw_matter >= 1 {
                         let (drawn, inst) = (&mut self.drawn_buf, &mut self.inst_buf);
-                        self.flight
-                            .drawn_into(drawn, &self.flight_env, |p| (p * display_scale()).as_vec3());
+                        self.flight.drawn_into(drawn, &self.flight_env, |p| {
+                            (p * display_scale()).as_vec3()
+                        });
                         inst.clear();
                         inst.extend(drawn.iter().map(|d| GpuParticle::of_matter(d, &self.mats)));
                         self.matter.upload(&self.queue, inst);
