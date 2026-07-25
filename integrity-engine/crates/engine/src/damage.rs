@@ -42,7 +42,11 @@ pub fn melt_energy_density(m: &Material) -> Option<f64> {
     // Ask through the accessors: a material that DOES NOT MELT has no melting point, and reading the raw
     // field gave 0 K — an energy of c·(0 − 293) + 0, i.e. NEGATIVE, which classified oak as molten at any
     // energy whatsoever. Wood chars; it does not melt.
-    let (c, melt, fusion) = (m.specific_heat()?, m.melt_point()?, m.thermal.as_ref()?.latent_fusion as f64);
+    let (c, melt, fusion) = (
+        m.specific_heat()?,
+        m.melt_point()?,
+        m.thermal.as_ref()?.latent_fusion as f64,
+    );
     Some((c * (melt - REF_TEMP_K) + fusion) * m.density as f64)
 }
 
@@ -236,8 +240,11 @@ pub fn disrupt(mass_kg: f64, radius_m: f64, n: usize, since_s: f64) -> Vec<Fragm
     let masses: Vec<f64> = weights.iter().map(|w| mass_kg * w / total_w).collect();
     // The mass-weighted mean direction. Subtracting it puts the velocities in the parent's
     // centre-of-momentum frame, so `Σ m·v = 0` exactly and the disruption moves nothing but the pieces.
-    let mean_dir: glam::DVec3 =
-        masses.iter().zip(&dirs).map(|(m, d)| *d * (*m / mass_kg)).sum();
+    let mean_dir: glam::DVec3 = masses
+        .iter()
+        .zip(&dirs)
+        .map(|(m, d)| *d * (*m / mass_kg))
+        .sum();
     masses
         .iter()
         .zip(&dirs)
@@ -270,7 +277,10 @@ mod tests {
             let frags = disrupt(m, r, n, 6.0 * 3600.0);
             assert_eq!(frags.len(), n);
             let sum: f64 = frags.iter().map(|f| f.mass_kg).sum();
-            assert!((sum / m - 1.0).abs() < 1e-12, "n={n}: mass conserved ({sum:.6e} vs {m:.6e})");
+            assert!(
+                (sum / m - 1.0).abs() < 1e-12,
+                "n={n}: mass conserved ({sum:.6e} vs {m:.6e})"
+            );
 
             // Disruption is INTERNAL: it cannot move the centre of mass, so the momentum closes to zero
             // exactly — which is why the swarm as a whole still flies the parent's declared trajectory and
@@ -278,12 +288,19 @@ mod tests {
             // the masses differ; the centre-of-momentum construction is what does.
             let p: glam::DVec3 = frags.iter().map(|f| f.rel_vel * f.mass_kg).sum();
             let scale = m * frags.iter().map(|f| f.rel_vel.length()).fold(0.0, f64::max);
-            assert!(p.length() / scale < 1e-14, "n={n}: momentum closes ({:.3e} relative)", p.length() / scale);
+            assert!(
+                p.length() / scale < 1e-14,
+                "n={n}: momentum closes ({:.3e} relative)",
+                p.length() / scale
+            );
 
             // Every piece is real matter at the parent's density.
             for f in &frags {
                 let implied = f.mass_kg / ((4.0 / 3.0) * std::f64::consts::PI * f.radius_m.powi(3));
-                assert!((implied / rho - 1.0).abs() < 1e-9, "fragment keeps the parent's density");
+                assert!(
+                    (implied / rho - 1.0).abs() < 1e-9,
+                    "fragment keeps the parent's density"
+                );
             }
         }
     }
@@ -300,14 +317,25 @@ mod tests {
         // Ranked heaviest-first, and the ratio between ranks is i^(-6/5) — checked against the law, not
         // against a recorded number.
         for i in 1..frags.len() {
-            assert!(frags[i].mass_kg < frags[i - 1].mass_kg, "fragment {i} is smaller than {}", i - 1);
+            assert!(
+                frags[i].mass_kg < frags[i - 1].mass_kg,
+                "fragment {i} is smaller than {}",
+                i - 1
+            );
             let expect = ((i + 1) as f64 / i as f64).powf(-6.0 / 5.0);
             let got = frags[i].mass_kg / frags[i - 1].mass_kg;
-            assert!((got / expect - 1.0).abs() < 1e-9, "rank {i}: {got:.6} vs {expect:.6}");
+            assert!(
+                (got / expect - 1.0).abs() < 1e-9,
+                "rank {i}: {got:.6} vs {expect:.6}"
+            );
         }
         // One dominant remnant with a tail of smaller pieces — what the exponent implies, ~39% at n=12.
         let biggest = frags[0].mass_kg / m;
-        assert!((0.3..0.5).contains(&biggest), "largest remnant is {:.0}% of the parent", biggest * 100.0);
+        assert!(
+            (0.3..0.5).contains(&biggest),
+            "largest remnant is {:.0}% of the parent",
+            biggest * 100.0
+        );
 
         // The separation SCALE is the parent's escape speed (0.38 m/s for this asteroid). Individual
         // speeds spread around it because momentum must close, and they spread the way conservation says:
@@ -315,7 +343,10 @@ mod tests {
         let v_esc = (2.0 * crate::orbit::G * m / r).sqrt();
         for f in &frags {
             let ratio = f.rel_vel.length() / v_esc;
-            assert!((0.3..2.0).contains(&ratio), "speeds are of order the escape speed (got {ratio:.2})");
+            assert!(
+                (0.3..2.0).contains(&ratio),
+                "speeds are of order the escape speed (got {ratio:.2})"
+            );
         }
         assert!(
             frags[0].rel_vel.length() < frags[frags.len() - 1].rel_vel.length(),
@@ -326,8 +357,14 @@ mod tests {
             f.iter().map(|x| x.rel_pos.length()).fold(0.0, f64::max)
         };
         let (a_day, a_week) = (extent(86_400.0), extent(7.0 * 86_400.0));
-        assert!(a_day > 30_000.0, "a day out the swarm is tens of km across, got {a_day:.0} m");
-        assert!((a_week / a_day - 7.0).abs() < 0.1, "and it spreads linearly in time");
+        assert!(
+            a_day > 30_000.0,
+            "a day out the swarm is tens of km across, got {a_day:.0} m"
+        );
+        assert!(
+            (a_week / a_day - 7.0).abs() < 0.1,
+            "and it spreads linearly in time"
+        );
     }
 
     /// The directions really do cover the sphere: no hemisphere is empty, and no axis is preferred.
@@ -341,9 +378,16 @@ mod tests {
         let mean: glam::DVec3 = dirs.iter().sum::<glam::DVec3>() / dirs.len() as f64;
         assert!(mean.length() < 0.02, "no net direction ({mean:?})");
         // Second moments: an isotropic set has ⟨x²⟩=⟨y²⟩=⟨z²⟩=⅓, so no axis is special.
-        for (axis, v) in [("x", glam::DVec3::X), ("y", glam::DVec3::Y), ("z", glam::DVec3::Z)] {
+        for (axis, v) in [
+            ("x", glam::DVec3::X),
+            ("y", glam::DVec3::Y),
+            ("z", glam::DVec3::Z),
+        ] {
             let m2: f64 = dirs.iter().map(|d| d.dot(v).powi(2)).sum::<f64>() / dirs.len() as f64;
-            assert!((m2 - 1.0 / 3.0).abs() < 0.02, "{axis}: ⟨{axis}²⟩ = {m2:.4}, expected ⅓");
+            assert!(
+                (m2 - 1.0 / 3.0).abs() < 0.02,
+                "{axis}: ⟨{axis}²⟩ = {m2:.4}, expected ⅓"
+            );
         }
     }
 
@@ -407,10 +451,22 @@ mod tests {
         // A single impact produces ALL of these at once — near-field vaporizes, mid melts, far
         // fractures — because the deposited energy density falls with distance. (Also a scale-of-detail
         // test: one event, several material fates.)
-        assert_eq!(classify(sigma * 0.5, basalt, ONE_ATM_PA), PhaseChange::Intact);
-        assert_eq!(classify((sigma + em) * 0.5, basalt, ONE_ATM_PA), PhaseChange::Fractured);
-        assert_eq!(classify((em + ev) * 0.5, basalt, ONE_ATM_PA), PhaseChange::Melted);
-        assert_eq!(classify(ev * 2.0, basalt, ONE_ATM_PA), PhaseChange::Vaporized);
+        assert_eq!(
+            classify(sigma * 0.5, basalt, ONE_ATM_PA),
+            PhaseChange::Intact
+        );
+        assert_eq!(
+            classify((sigma + em) * 0.5, basalt, ONE_ATM_PA),
+            PhaseChange::Fractured
+        );
+        assert_eq!(
+            classify((em + ev) * 0.5, basalt, ONE_ATM_PA),
+            PhaseChange::Melted
+        );
+        assert_eq!(
+            classify(ev * 2.0, basalt, ONE_ATM_PA),
+            PhaseChange::Vaporized
+        );
 
         // Planetary-scale sanity: a giant impact vaporizes rock (real giant impacts do — magma ocean +
         // rock-vapour atmosphere).
@@ -423,12 +479,24 @@ mod tests {
         let oak = &mats[crate::materials::index_of(&mats, "oak")];
         assert!(oak.melt_point().is_none(), "wood does not melt");
         assert_eq!(classify(1.0e12, oak, ONE_ATM_PA), PhaseChange::Decomposed);
-        assert_eq!(classify(1.0e12, oak, 1.0e11), PhaseChange::Decomposed, "not even under pressure");
+        assert_eq!(
+            classify(1.0e12, oak, 1.0e11),
+            PhaseChange::Decomposed,
+            "not even under pressure"
+        );
 
         // LIMESTONE, though, is decided by pressure — Robin's correction. On a kiln floor it calcines;
         // inside an impact the CO₂ cannot escape, the reaction is suppressed, and the same rock melts.
         let lime = &mats[crate::materials::index_of(&mats, "limestone")];
-        assert_eq!(classify(1.0e12, lime, ONE_ATM_PA), PhaseChange::Decomposed, "at 1 atm it calcines");
-        assert_eq!(classify(1.0e12, lime, 1.0e9), PhaseChange::Melted, "under a kilobar it melts");
+        assert_eq!(
+            classify(1.0e12, lime, ONE_ATM_PA),
+            PhaseChange::Decomposed,
+            "at 1 atm it calcines"
+        );
+        assert_eq!(
+            classify(1.0e12, lime, 1.0e9),
+            PhaseChange::Melted,
+            "under a kilobar it melts"
+        );
     }
 }

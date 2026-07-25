@@ -24,10 +24,15 @@ const MOLTEN_EMISSIVITY: f64 = 0.45;
 /// isentropic bulk modulus K = γ·P_ref (v0: isothermal reference state, flagged), not Young's modulus;
 /// zero cohesion (gases don't bond), zero Coulomb friction (viscosity is the later refinement, flagged).
 /// `radius`/`parcel_mass` follow the mass-agnostic model like every other particle.
-pub fn gas_contact_from_material(mat: &Material, radius: f64, parcel_mass: f64, p_ref: f64) -> Contact {
+pub fn gas_contact_from_material(
+    mat: &Material,
+    radius: f64,
+    parcel_mass: f64,
+    p_ref: f64,
+) -> Contact {
     let m = parcel_mass.max(1.0e-30);
     let k_bulk = GAMMA_DIATOMIC * p_ref.max(1.0); // Pa — the gas's real resistance to compression
-    // Same per-mass linear form as the solid law (force k_bulk·r per metre of overlap, over mass).
+                                                  // Same per-mass linear form as the solid law (force k_bulk·r per metre of overlap, over mass).
     let stiffness = (k_bulk * radius) / m;
     Contact {
         radius,
@@ -120,7 +125,11 @@ impl AirShell {
     pub fn new(surface_pressure: f64, air: &Material, temp_k: f64, g: f64) -> Self {
         let rs = specific_gas_constant(air);
         if rs <= 0.0 || temp_k <= 0.0 || surface_pressure <= 0.0 {
-            return AirShell { rho_surface: 0.0, scale_height_m: 0.0, ambient_temp_k: temp_k.max(0.0) };
+            return AirShell {
+                rho_surface: 0.0,
+                scale_height_m: 0.0,
+                ambient_temp_k: temp_k.max(0.0),
+            };
         }
         AirShell {
             rho_surface: surface_pressure / (rs * temp_k),
@@ -317,8 +326,13 @@ pub fn atmospheric_step(
     mat: &Material,
     dt: f64,
 ) -> AtmosphericStep {
-    let mut out =
-        AtmosphericStep { drag_accel: glam::DVec3::ZERO, temp_k, ablated_mass: 0.0, radius_m, skin_m };
+    let mut out = AtmosphericStep {
+        drag_accel: glam::DVec3::ZERO,
+        temp_k,
+        ablated_mass: 0.0,
+        radius_m,
+        skin_m,
+    };
     if rho <= 0.0 || mass_kg <= 0.0 || radius_m <= 0.0 {
         return out; // no air, or nothing left of the body — vacuum flight
     }
@@ -331,8 +345,11 @@ pub fn atmospheric_step(
 
     // AEROHEATING + ABLATION (energy). The catalogue must characterise the body's thermal response; a
     // material with no boiling point or latent heat cannot ablate honestly, so it only heats.
-    let (Some(c), Some(t_boil), Some(l_v)) = (mat.specific_heat(), mat.boil_point(), mat.latent_vaporization())
-    else {
+    let (Some(c), Some(t_boil), Some(l_v)) = (
+        mat.specific_heat(),
+        mat.boil_point(),
+        mat.latent_vaporization(),
+    ) else {
         return out;
     };
     // Windward-hemisphere heat: the stagnation flux averaged (~½) over the front (~2πr²) ⇒ q·πr².
@@ -490,8 +507,10 @@ pub fn vapor_step(
         return out; // uncharacterised: we do not claim to know how fast it cools
     };
     let area = 4.0 * std::f64::consts::PI * r * r;
-    let p_rad =
-        MOLTEN_EMISSIVITY * crate::blackbody::SIGMA * (p.temp_k.powi(4) - ambient_temp_k.powi(4)).max(0.0) * area;
+    let p_rad = MOLTEN_EMISSIVITY
+        * crate::blackbody::SIGMA
+        * (p.temp_k.powi(4) - ambient_temp_k.powi(4)).max(0.0)
+        * area;
     out.temp_k = (p.temp_k - p_rad / (p.mass_kg * c) * dt).max(ambient_temp_k);
     out
 }
@@ -536,7 +555,12 @@ impl Trail {
 
     /// The body shed this much mass, here, at this velocity and temperature.
     pub fn shed(
-        &mut self, mass_kg: f64, material: usize, pos: glam::DVec3, vel: glam::DVec3, temp_k: f64,
+        &mut self,
+        mass_kg: f64,
+        material: usize,
+        pos: glam::DVec3,
+        vel: glam::DVec3,
+        temp_k: f64,
     ) {
         if mass_kg <= 0.0 {
             return;
@@ -545,7 +569,14 @@ impl Trail {
             self.book(mass_kg); // over budget: same mass, coarser representation
             return;
         }
-        self.parcels.push(VaporParcel { mass_kg, material, pos, vel, temp_k, shed_temp_k: temp_k });
+        self.parcels.push(VaporParcel {
+            mass_kg,
+            material,
+            pos,
+            vel,
+            temp_k,
+            shed_temp_k: temp_k,
+        });
     }
 
     /// Shed mass without resolving it — the coarse representation, for a trail nothing is close enough to
@@ -575,7 +606,12 @@ impl Trail {
             return (0.0, 0.0);
         }
         let hottest = self.parcels.iter().map(|p| p.temp_k).fold(0.0, f64::max);
-        let mean = self.parcels.iter().map(|p| p.temp_k * p.mass_kg).sum::<f64>() / mass;
+        let mean = self
+            .parcels
+            .iter()
+            .map(|p| p.temp_k * p.mass_kg)
+            .sum::<f64>()
+            / mass;
         (hottest, mean)
     }
 
@@ -592,11 +628,18 @@ impl Trail {
     /// `mats` is the catalogue, not one material: several bodies of different materials can be ablating
     /// at once, and each parcel cools as what it actually is. (It took a `&Material` first, which quietly
     /// cooled everything as whatever the first body in flight happened to be made of.)
-    pub fn step(&mut self, mats: &[Material], dt: f64, ambient: impl Fn(glam::DVec3) -> (f64, f64)) {
+    pub fn step(
+        &mut self,
+        mats: &[Material],
+        dt: f64,
+        ambient: impl Fn(glam::DVec3) -> (f64, f64),
+    ) {
         let mut merged = 0.0;
         self.parcels.retain_mut(|p| {
             let (rho, t_amb) = ambient(p.pos);
-            let Some(mat) = mats.get(p.material) else { return true };
+            let Some(mat) = mats.get(p.material) else {
+                return true;
+            };
             *p = vapor_step(*p, rho, t_amb, mat, dt);
             if p.merged_into_air(t_amb) {
                 merged += p.mass_kg;
@@ -617,9 +660,9 @@ impl Trail {
 pub struct AirField {
     pub pos: Vec<glam::DVec3>,
     pub vel: Vec<glam::DVec3>,
-    pub mass: f64,  // per parcel (equal-mass model)
-    pub h: f64,     // kernel smoothing length (m)
-    pub rs_t: f64,  // R_s·T (isothermal v0)
+    pub mass: f64, // per parcel (equal-mass model)
+    pub h: f64,    // kernel smoothing length (m)
+    pub rs_t: f64, // R_s·T (isothermal v0)
     pub rho: Vec<f64>,
     /// GHOST-PARTICLE boundaries: parcels within `h` of a face see their own and their neighbours'
     /// mirror images across it, completing the kernel support — without this, boundary densities are
@@ -846,13 +889,24 @@ pub fn twilight_half_angle(scale_height_m: f64, radius_m: f64) -> f64 {
 /// sun-to-view angle cosine `cos_theta`. In-scatter = phase·(1 − e^−τ/μᵥ)·(sunlight attenuated on the
 /// way in). Flat-slab slant path (Chapman function is the refinement, flagged); single scatter only
 /// (multiple scattering + ozone are the refinement). Night side → 0, honestly.
-pub fn rayleigh_veil(mu_v: f64, mu_s: f64, cos_theta: f64, tau: [f64; 3], sun_gain: f64, twilight: f64) -> [f32; 3] {
+pub fn rayleigh_veil(
+    mu_v: f64,
+    mu_s: f64,
+    cos_theta: f64,
+    tau: [f64; 3],
+    sun_gain: f64,
+    twilight: f64,
+) -> [f32; 3] {
     // TWILIGHT: the ground here may have turned away from the Sun, but the AIR ABOVE IT has not. The
     // shell stays lit for `twilight` radians past the geometric terminator (see `twilight_half_angle`),
     // so the day/night line is a gradient the width of the atmosphere itself rather than a knife edge.
     // Day side (mu_s > 0) is untouched: `lit` clamps to 1 there. An airless body passes twilight = 0 and
     // gets the hard terminator it should have.
-    let lit = if twilight > 0.0 { ((mu_s + twilight) / twilight).clamp(0.0, 1.0) } else { (mu_s > 0.0) as u8 as f64 };
+    let lit = if twilight > 0.0 {
+        ((mu_s + twilight) / twilight).clamp(0.0, 1.0)
+    } else {
+        (mu_s > 0.0) as u8 as f64
+    };
     if lit <= 0.0 {
         return [0.0; 3];
     }
@@ -906,12 +960,25 @@ mod tests {
         // v³ scaling: doubling the speed is 8× the flux.
         let q1 = stagnation_heat_flux(1.0, 1000.0, 0.5);
         let q2 = stagnation_heat_flux(1.0, 2000.0, 0.5);
-        assert!((q2 / q1 - 8.0).abs() < 1.0e-6, "heating must go as v³: {q1} -> {q2}");
+        assert!(
+            (q2 / q1 - 8.0).abs() < 1.0e-6,
+            "heating must go as v³: {q1} -> {q2}"
+        );
         // √ρ scaling, 1/√R scaling.
-        assert!((stagnation_heat_flux(4.0, 1000.0, 0.5) / q1 - 2.0).abs() < 1.0e-6, "√ρ");
-        assert!((stagnation_heat_flux(1.0, 1000.0, 2.0) / q1 - 0.5).abs() < 1.0e-6, "1/√R");
+        assert!(
+            (stagnation_heat_flux(4.0, 1000.0, 0.5) / q1 - 2.0).abs() < 1.0e-6,
+            "√ρ"
+        );
+        assert!(
+            (stagnation_heat_flux(1.0, 1000.0, 2.0) / q1 - 0.5).abs() < 1.0e-6,
+            "1/√R"
+        );
         // No bow shock below Mach 1 ⇒ no stagnation heating.
-        assert_eq!(stagnation_heat_flux(1.2, 200.0, 0.5), 0.0, "subsonic: no shock, no stagnation heat");
+        assert_eq!(
+            stagnation_heat_flux(1.2, 200.0, 0.5),
+            0.0,
+            "subsonic: no shock, no stagnation heat"
+        );
     }
 
     /// The generic body⊕atmosphere operator (docs/58): drag slows any body, aeroheating warms it, and at
@@ -932,35 +999,87 @@ mod tests {
 
         // DRAG opposes motion.
         let s = step(1.2, 288.0);
-        assert!(s.drag_accel.x < 0.0, "drag must oppose motion, got {:?}", s.drag_accel);
+        assert!(
+            s.drag_accel.x < 0.0,
+            "drag must oppose motion, got {:?}",
+            s.drag_accel
+        );
 
         // HEATING raises the temperature of a cold fast body.
-        assert!(s.temp_k > 288.0, "a fast body in air must heat above ambient, got {}", s.temp_k);
+        assert!(
+            s.temp_k > 288.0,
+            "a fast body in air must heat above ambient, got {}",
+            s.temp_k
+        );
 
         // ABLATION needs true METEOR speed, not merely supersonic: at 3000 m/s iron's radiative loss at its
         // boiling point EXCEEDS the aeroheating (net < 0), so it does NOT ablate — the equilibrium temp is
         // below boiling. Only at ~12 km/s does the heat flux overwhelm radiation and vaporise mass. That the
         // slow case refuses to ablate is the physics being honest, not a bug.
         let t_boil = iron.boil_point().unwrap();
-        let slow_at_boil =
-            atmospheric_step(1.2, glam::DVec3::new(3000.0, 0.0, 0.0), 1000.0, 0.3, t_boil, 0.3, 288.0, iron, 1.0 / 60.0);
-        assert_eq!(slow_at_boil.ablated_mass, 0.0, "a merely-supersonic body cannot sustain iron at boiling");
+        let slow_at_boil = atmospheric_step(
+            1.2,
+            glam::DVec3::new(3000.0, 0.0, 0.0),
+            1000.0,
+            0.3,
+            t_boil,
+            0.3,
+            288.0,
+            iron,
+            1.0 / 60.0,
+        );
+        assert_eq!(
+            slow_at_boil.ablated_mass, 0.0,
+            "a merely-supersonic body cannot sustain iron at boiling"
+        );
 
         // Consistent mass/radius: 1000 kg of iron is r0, and the operator recomputes radius from the
         // ablated mass at iron's own density, so ablation must return a radius below r0.
         let r0 = (3.0 * 1000.0 / (4.0 * std::f64::consts::PI * iron.density as f64)).cbrt();
-        let hyper =
-            atmospheric_step(1.2, glam::DVec3::new(12_000.0, 0.0, 0.0), 1000.0, r0, t_boil, r0, 288.0, iron, 1.0 / 60.0);
-        assert!(hyper.ablated_mass > 0.0, "at meteor speed, excess heat must vaporise mass");
-        assert!(hyper.radius_m < r0, "ablation must shrink the body: {} vs {r0}", hyper.radius_m);
-        assert!((hyper.temp_k - t_boil).abs() < 1.0, "temperature pins at the boiling point while ablating");
+        let hyper = atmospheric_step(
+            1.2,
+            glam::DVec3::new(12_000.0, 0.0, 0.0),
+            1000.0,
+            r0,
+            t_boil,
+            r0,
+            288.0,
+            iron,
+            1.0 / 60.0,
+        );
+        assert!(
+            hyper.ablated_mass > 0.0,
+            "at meteor speed, excess heat must vaporise mass"
+        );
+        assert!(
+            hyper.radius_m < r0,
+            "ablation must shrink the body: {} vs {r0}",
+            hyper.radius_m
+        );
+        assert!(
+            (hyper.temp_k - t_boil).abs() < 1.0,
+            "temperature pins at the boiling point while ablating"
+        );
 
         // VACUUM / SUBSONIC: no air ⇒ nothing happens; below Mach 1 ⇒ drag only, no heating.
         let vac = atmospheric_step(0.0, v, 1000.0, 0.3, 288.0, 0.3, 288.0, iron, 1.0 / 60.0);
         assert_eq!(vac.drag_accel, glam::DVec3::ZERO, "no air, no drag");
         assert_eq!(vac.temp_k, 288.0, "no air, no heating");
-        let slow = atmospheric_step(1.2, glam::DVec3::new(100.0, 0.0, 0.0), 1000.0, 0.3, 288.0, 0.3, 288.0, iron, 1.0 / 60.0);
-        assert!((slow.temp_k - 288.0).abs() < 1.0, "subsonic: no shock heating");
+        let slow = atmospheric_step(
+            1.2,
+            glam::DVec3::new(100.0, 0.0, 0.0),
+            1000.0,
+            0.3,
+            288.0,
+            0.3,
+            288.0,
+            iron,
+            1.0 / 60.0,
+        );
+        assert!(
+            (slow.temp_k - 288.0).abs() < 1.0,
+            "subsonic: no shock heating"
+        );
     }
     /// **A real entry, flown, with the books kept.** An iron grain comes in at 20 km/s and ablates its
     /// way down through Earth's own emergent air. The thing being tested is that the mass it loses does
@@ -1001,13 +1120,26 @@ mod tests {
                 break;
             }
             let rho = air.density_at(alt);
-            let s = atmospheric_step(rho, vel, mass, radius, temp, skin, air.ambient_temp_k, iron, dt);
+            let s = atmospheric_step(
+                rho,
+                vel,
+                mass,
+                radius,
+                temp,
+                skin,
+                air.ambient_temp_k,
+                iron,
+                dt,
+            );
             skin = s.skin_m;
             if s.ablated_mass > 0.0 {
                 // The vapour leaves the body carrying the body's own velocity and temperature.
                 trail.shed(
-                    s.ablated_mass, materials::index_of(&mats, "iron"),
-                    DVec3::new(0.0, alt, 0.0), vel, s.temp_k,
+                    s.ablated_mass,
+                    materials::index_of(&mats, "iron"),
+                    DVec3::new(0.0, alt, 0.0),
+                    vel,
+                    s.temp_k,
                 );
                 if s.temp_k > air.ambient_temp_k {
                     shed_hot += 1;
@@ -1018,7 +1150,9 @@ mod tests {
             temp = s.temp_k;
             vel += (s.drag_accel + DVec3::new(0.0, -g, 0.0)) * dt;
             alt += vel.y * dt;
-            trail.step(&mats, dt, |at| (air.density_at(at.y.max(0.0)), air.ambient_temp_k));
+            trail.step(&mats, dt, |at| {
+                (air.density_at(at.y.max(0.0)), air.ambient_temp_k)
+            });
 
             // THE INVARIANT, every single step: nothing has left the books.
             let booked = mass + trail.mass();
@@ -1029,12 +1163,19 @@ mod tests {
         }
 
         // The entry has to have actually HAPPENED for the invariant to mean anything.
-        assert!(mass < start_mass, "the grain ablated ({mass:.3e} kg of {start_mass:.3e})");
-        assert!(shed_hot > 0, "and the vapour left hot — that is the trail you see");
+        assert!(
+            mass < start_mass,
+            "the grain ablated ({mass:.3e} kg of {start_mass:.3e})"
+        );
+        assert!(
+            shed_hot > 0,
+            "and the vapour left hot — that is the trail you see"
+        );
         assert!(trail.mass() > 0.0, "the shed mass is somewhere");
         assert!(
             trail.merged_kg() > 0.0,
-            "and some of it has finished cooling into the air ({:.3e} kg)", trail.merged_kg()
+            "and some of it has finished cooling into the air ({:.3e} kg)",
+            trail.merged_kg()
         );
     }
 
@@ -1047,12 +1188,29 @@ mod tests {
         let mut booked = Trail::default();
         for i in 0..10 {
             let m = 0.5 * (i + 1) as f64;
-            resolved.shed(m, 0, DVec3::new(0.0, 60_000.0, 0.0), DVec3::new(0.0, -1.0e4, 0.0), 3134.0);
+            resolved.shed(
+                m,
+                0,
+                DVec3::new(0.0, 60_000.0, 0.0),
+                DVec3::new(0.0, -1.0e4, 0.0),
+                3134.0,
+            );
             booked.book(m);
         }
-        assert_eq!(resolved.mass(), booked.mass(), "one mass, two representations");
-        assert_eq!(resolved.parcels().len(), 10, "resolved: individual puffs to draw");
-        assert!(booked.parcels().is_empty(), "booked: nothing to draw, the mass is in the air");
+        assert_eq!(
+            resolved.mass(),
+            booked.mass(),
+            "one mass, two representations"
+        );
+        assert_eq!(
+            resolved.parcels().len(),
+            10,
+            "resolved: individual puffs to draw"
+        );
+        assert!(
+            booked.parcels().is_empty(),
+            "booked: nothing to draw, the mass is in the air"
+        );
     }
 
     /// A shed parcel expands to the air around it, and cools by the SAME radiation law the body uses —
@@ -1072,15 +1230,25 @@ mod tests {
         };
         // Size is set by the air it expands into: 1 kg at sea level vs at 80 km.
         let (rho_low, rho_high) = (1.2, 1.0e-5);
-        assert!(p.radius_in(rho_high) > 10.0 * p.radius_in(rho_low), "thin air ⇒ a far bigger puff");
+        assert!(
+            p.radius_in(rho_high) > 10.0 * p.radius_in(rho_low),
+            "thin air ⇒ a far bigger puff"
+        );
 
         // It cools toward ambient and never below it.
         let mut hot = p;
         for _ in 0..200 {
             hot = vapor_step(hot, rho_low, 288.0, iron, 0.01);
         }
-        assert!(hot.temp_k < p.temp_k, "a hot parcel radiates its heat away ({:.0} K)", hot.temp_k);
-        assert!(hot.temp_k >= 288.0, "and never cools below the air it is in");
+        assert!(
+            hot.temp_k < p.temp_k,
+            "a hot parcel radiates its heat away ({:.0} K)",
+            hot.temp_k
+        );
+        assert!(
+            hot.temp_k >= 288.0,
+            "and never cools below the air it is in"
+        );
         // **And it must FINISH.** Radiative cooling is asymptotic, so "has it reached ambient?" is a test
         // that never passes — a trail of parcels crept to 288.00 K and sat there permanently. A parcel is
         // air once it has radiated all but a hundredth of the heat it was shed with.
@@ -1097,11 +1265,17 @@ mod tests {
         );
 
         // And it is slowed by the air, like anything else moving through a fluid.
-        assert!(hot.vel.length() < p.vel.length(), "the parcel is dragged to a stop, not left at 10 km/s");
+        assert!(
+            hot.vel.length() < p.vel.length(),
+            "the parcel is dragged to a stop, not left at 10 km/s"
+        );
 
         // A parcel already at ambient is simply air, and says so.
         let cold = VaporParcel { temp_k: 288.0, ..p };
-        assert!(cold.merged_into_air(288.0), "cooled to ambient ⇒ it has joined the atmosphere");
+        assert!(
+            cold.merged_into_air(288.0),
+            "cooled to ambient ⇒ it has joined the atmosphere"
+        );
     }
 
     use glam::DVec3;
@@ -1112,18 +1286,35 @@ mod tests {
         let tau = rayleigh_tau(1.0);
         assert!(
             (tau[2] / tau[0] - (650.0f64 / 450.0).powf(4.05)).abs() < 0.1,
-            "the λ⁻⁴ law (got ratio {:.2})", tau[2] / tau[0]
+            "the λ⁻⁴ law (got ratio {:.2})",
+            tau[2] / tau[0]
         );
         // The day-side veil is BLUE-dominant…
         let v = rayleigh_veil(0.8, 0.8, 0.5, tau, 22.0, 0.0);
-        assert!(v[2] > v[1] && v[1] > v[0], "blue > green > red veil (got {v:?})");
+        assert!(
+            v[2] > v[1] && v[1] > v[0],
+            "blue > green > red veil (got {v:?})"
+        );
         // …brighter at the limb (long slant path)…
         let limb = rayleigh_veil(0.1, 0.8, 0.5, tau, 22.0, 0.0);
-        assert!(limb[2] > v[2], "limb glow exceeds nadir (got {} vs {})", limb[2], v[2]);
+        assert!(
+            limb[2] > v[2],
+            "limb glow exceeds nadir (got {} vs {})",
+            limb[2],
+            v[2]
+        );
         // …zero on the night side, and zero on an airless world. No atmosphere, no blue. Honest.
-        assert_eq!(rayleigh_veil(0.8, -0.1, 0.5, tau, 22.0, 0.0), [0.0; 3], "night is dark");
+        assert_eq!(
+            rayleigh_veil(0.8, -0.1, 0.5, tau, 22.0, 0.0),
+            [0.0; 3],
+            "night is dark"
+        );
         let vacuum = rayleigh_tau(0.0);
-        assert_eq!(rayleigh_veil(0.8, 0.8, 0.5, vacuum, 22.0, 0.0), [0.0; 3], "the Moon stays colorless");
+        assert_eq!(
+            rayleigh_veil(0.8, 0.8, 0.5, vacuum, 22.0, 0.0),
+            [0.0; 3],
+            "the Moon stays colorless"
+        );
         // And the ground under the air reddens slightly (blue is scattered OUT of the beam).
         let t = rayleigh_transmit(0.8, 0.8, tau);
         assert!(t[0] > t[2], "transmittance favors red (got {t:?})");
@@ -1137,8 +1328,8 @@ mod tests {
         // renders, so the derived-physics claim can't silently regress into a hand-painted gradient.
         let tau = rayleigh_tau(1.0); // Earth's 1-atm air — the same τ the space band's blue marble uses
         let sun_y = 0.9f64; // a sun most of the way up
-        // Look straight up (short air path) vs out at the horizon (long slant path). cos_theta uses the
-        // ray·sun geometry for each; the horizon sample looks away from the sun (its dimmest azimuth).
+                            // Look straight up (short air path) vs out at the horizon (long slant path). cos_theta uses the
+                            // ray·sun geometry for each; the horizon sample looks away from the sun (its dimmest azimuth).
         let zenith = rayleigh_veil(1.0, sun_y, sun_y, tau, 22.0, 0.0); // ray=up ⇒ cosθ = sun.y
         let horizon = rayleigh_veil(0.02, sun_y, -0.2, tau, 22.0, 0.0); // ray near-horizontal, anti-sun
 
@@ -1160,12 +1351,17 @@ mod tests {
         assert!(
             horizon[2] > zenith[2],
             "the horizon is brighter than the zenith (longer air path; got {} vs {})",
-            horizon[2], zenith[2]
+            horizon[2],
+            zenith[2]
         );
         // (3) NO AIR, NO SKY: strip the declared atmosphere and the whole gradient goes black — derived,
         //     never painted, exactly like the space band's airless Moon.
         let vacuum = rayleigh_tau(0.0);
-        assert_eq!(rayleigh_veil(1.0, sun_y, sun_y, vacuum, 22.0, 0.0), [0.0; 3], "airless ⇒ black sky");
+        assert_eq!(
+            rayleigh_veil(1.0, sun_y, sun_y, vacuum, 22.0, 0.0),
+            [0.0; 3],
+            "airless ⇒ black sky"
+        );
     }
 
     #[test]
@@ -1192,7 +1388,10 @@ mod tests {
 
         // One scale height up, density must fall by exactly 1/e — that IS the barometric law.
         let h = scale_height(air, t, g);
-        assert!((7500.0..9500.0).contains(&h), "Earth scale height {h:.0} m should be ~8.4 km");
+        assert!(
+            (7500.0..9500.0).contains(&h),
+            "Earth scale height {h:.0} m should be ~8.4 km"
+        );
         let rho_h = air_density_at(p0, air, t, g, h);
         assert!(
             (rho_h / rho0 - std::f64::consts::E.recip()).abs() < 1.0e-9,
@@ -1206,7 +1405,10 @@ mod tests {
             assert!(r < prev, "density must fall monotonically with altitude");
             prev = r;
         }
-        assert!(air_density_at(p0, air, t, g, 100_000.0) < 1.0e-4, "≈vacuum at the Karman line");
+        assert!(
+            air_density_at(p0, air, t, g, 100_000.0) < 1.0e-4,
+            "≈vacuum at the Karman line"
+        );
     }
 
     /// An AIRLESS body gives exactly zero density and therefore exactly zero drag — the Moon
@@ -1216,7 +1418,13 @@ mod tests {
         let mats = materials::load();
         let air = &mats[materials::index_of(&mats, "air")];
         let moon = crate::planet::moon();
-        let rho = air_density_at(moon.surface_pressure(), air, 288.0, moon.gravity_at(moon.radius()), 0.0);
+        let rho = air_density_at(
+            moon.surface_pressure(),
+            air,
+            288.0,
+            moon.gravity_at(moon.radius()),
+            0.0,
+        );
         assert_eq!(rho, 0.0, "an airless body must have zero air density");
         let a = drag_accel(rho, glam::DVec3::new(1000.0, 0.0, 0.0), 1.0, 10.0, 1.0);
         assert_eq!(a, glam::DVec3::ZERO, "no air ⇒ no drag, exactly");
@@ -1233,18 +1441,25 @@ mod tests {
         let a2 = drag_accel(1.225, v * 2.0, 1.0, 100.0, 1.0);
         assert!(
             (a2.length() / a1.length() - 4.0).abs() < 1.0e-9,
-            "quadratic: {}x for 2x speed", a2.length() / a1.length()
+            "quadratic: {}x for 2x speed",
+            a2.length() / a1.length()
         );
         // Applied over any positive dt, speed strictly decreases — never a rebound, never a gain.
         let after = v + a1 * 0.01;
-        assert!(after.length() < v.length(), "drag must only remove kinetic energy");
+        assert!(
+            after.length() < v.length(),
+            "drag must only remove kinetic energy"
+        );
     }
 
     fn airs_declared_constants_give_the_real_gas_constant_and_scale_height() {
         let mats = materials::load();
         let air = &mats[materials::index_of(&mats, "air")];
         let rs = specific_gas_constant(air);
-        assert!((rs - 287.0).abs() < 2.0, "R_s = R_u/M ≈ 287 J/(kg·K) (got {rs:.1})");
+        assert!(
+            (rs - 287.0).abs() < 2.0,
+            "R_s = R_u/M ≈ 287 J/(kg·K) (got {rs:.1})"
+        );
         let h = scale_height(air, 288.0, 9.81);
         assert!(
             (8.2e3..8.6e3).contains(&h),
@@ -1378,14 +1593,22 @@ mod tests {
         agg.self_gravity = false;
 
         let p0: DVec3 = agg.particles.iter().map(|b| b.vel * b.mass).sum();
-        let ke0: f64 = agg.particles.iter().map(|b| 0.5 * b.mass * b.vel.length_squared()).sum();
+        let ke0: f64 = agg
+            .particles
+            .iter()
+            .map(|b| 0.5 * b.mass * b.vel.length_squared())
+            .sum();
         let v0 = agg.particles[0].vel.z;
         let mut acc = agg.accelerations();
         for _ in 0..800 {
             agg.step(&mut acc, 1.0e-3);
         }
         let p1: DVec3 = agg.particles.iter().map(|b| b.vel * b.mass).sum();
-        let ke1: f64 = agg.particles.iter().map(|b| 0.5 * b.mass * b.vel.length_squared()).sum();
+        let ke1: f64 = agg
+            .particles
+            .iter()
+            .map(|b| 0.5 * b.mass * b.vel.length_squared())
+            .sum();
         let v1 = agg.particles[0].vel.z;
         let air_pz: f64 = agg.particles[1..].iter().map(|b| b.mass * b.vel.z).sum();
         println!(
@@ -1393,14 +1616,23 @@ mod tests {
             (p1 - p0).length()
         );
 
-        assert!(v1 < v0 * 0.999, "the body decelerates — drag EMERGES from swept air (v {v0} → {v1})");
-        assert!(air_pz > 0.0, "the air is swept forward — it gained the body's momentum");
+        assert!(
+            v1 < v0 * 0.999,
+            "the body decelerates — drag EMERGES from swept air (v {v0} → {v1})"
+        );
+        assert!(
+            air_pz > 0.0,
+            "the air is swept forward — it gained the body's momentum"
+        );
         assert!(
             (p1 - p0).length() < 1.0e-6 * p0.length(),
             "momentum conserved across the phase boundary (drift {:.3e})",
             (p1 - p0).length()
         );
-        assert!(ke1 <= ke0 * 1.001, "no energy created (KE {ke0:.0} → {ke1:.0} J)");
+        assert!(
+            ke1 <= ke0 * 1.001,
+            "no energy created (KE {ke0:.0} → {ke1:.0} J)"
+        );
     }
 
     #[test]
@@ -1560,12 +1792,19 @@ mod tests {
         let m_parcel = 10_332.0 * area / n_col; // one real atmosphere per column area
         let mut field = AirField::new(col, m_parcel, 2.0 * dz, rs_t)
             .with_floor(0.0)
-            .with_walls((-0.5 * dz, (n_side as f64 - 0.5) * dz), (-0.5 * dz, (n_side as f64 - 0.5) * dz));
+            .with_walls(
+                (-0.5 * dz, (n_side as f64 - 0.5) * dz),
+                (-0.5 * dz, (n_side as f64 - 0.5) * dz),
+            );
         // Relaxation at a CFL-appropriate step (c_s = √(R_s·T) ≈ 287 m/s, h = 1.6 km ⇒ dt ≲ 1.4 s;
         // the old dt = 0.02 s crept 70× slower than sound and never transported mass). Two phases:
         // light damping to move mass, then heavier damping to ring down.
         let g_vec = glam::DVec3::new(0.0, -g, 0.0);
-        let (s1, s2) = if cfg!(debug_assertions) { (3_000, 1_000) } else { (8_000, 2_000) };
+        let (s1, s2) = if cfg!(debug_assertions) {
+            (3_000, 1_000)
+        } else {
+            (8_000, 2_000)
+        };
         for _ in 0..s1 {
             field.relax_step(g_vec, 0.4, 0.999);
         }
@@ -1599,7 +1838,10 @@ mod tests {
         // The field must be genuinely SETTLED — self-supported, not falling: if the kernel pressure
         // were truly deficient the column would still be accelerating downward. It is static.
         let v_max = field.vel.iter().map(|v| v.length()).fold(0.0f64, f64::max);
-        assert!(v_max < 5.0, "the field is static — self-supported equilibrium (max |v| {v_max:.2} m/s)");
+        assert!(
+            v_max < 5.0,
+            "the field is static — self-supported equilibrium (max |v| {v_max:.2} m/s)"
+        );
         // Continuum bookkeeping matches within the OPERATOR'S truncation error at this resolution
         // (N=162, h/H ≈ 0.19 ⇒ ~20–35% observed; documented, resolution-convergent — the standard SPH
         // claim, and the neighbour-grid refinement will let us verify convergence at larger N). This is
@@ -1667,25 +1909,47 @@ mod twilight_tests {
 
         // Earth's twilight wedge is a few degrees — set by sqrt(2H/R), nothing else.
         let deg = w.to_degrees();
-        assert!((2.0..4.0).contains(&deg), "Earth's twilight wedge ≈ 3°, got {deg:.2}°");
+        assert!(
+            (2.0..4.0).contains(&deg),
+            "Earth's twilight wedge ≈ 3°, got {deg:.2}°"
+        );
 
         // Just PAST the geometric terminator the sky is still lit (the air above is in sunlight)...
         let past = rayleigh_veil(0.5, -0.3 * w, 0.5, tau, SUN_GAIN as f64, w);
-        assert!(past[2] > 0.0, "just past the terminator must still scatter, got {past:?}");
+        assert!(
+            past[2] > 0.0,
+            "just past the terminator must still scatter, got {past:?}"
+        );
         // ...and it fades MONOTONICALLY to black by the far edge of the wedge.
         let deeper = rayleigh_veil(0.5, -0.8 * w, 0.5, tau, SUN_GAIN as f64, w);
-        assert!(deeper[2] < past[2], "deeper into night must be dimmer ({deeper:?} vs {past:?})");
+        assert!(
+            deeper[2] < past[2],
+            "deeper into night must be dimmer ({deeper:?} vs {past:?})"
+        );
         let night = rayleigh_veil(0.5, -1.5 * w, 0.5, tau, SUN_GAIN as f64, w);
-        assert_eq!(night, [0.0; 3], "well past the wedge is honestly black, got {night:?}");
+        assert_eq!(
+            night, [0.0; 3],
+            "well past the wedge is honestly black, got {night:?}"
+        );
 
         // The DAY side is untouched by any of this — the same value with or without twilight.
         let day_hard = rayleigh_veil(0.7, 0.6, 0.5, tau, SUN_GAIN as f64, 0.0);
         let day_soft = rayleigh_veil(0.7, 0.6, 0.5, tau, SUN_GAIN as f64, w);
-        assert_eq!(day_hard, day_soft, "twilight must not change the lit hemisphere");
+        assert_eq!(
+            day_hard, day_soft,
+            "twilight must not change the lit hemisphere"
+        );
 
         // AIRLESS: no atmosphere, no twilight, hard edge — the Moon, with no special case in the code.
-        assert_eq!(twilight_half_angle(0.0, e.radius()), 0.0, "no air ⇒ no twilight");
+        assert_eq!(
+            twilight_half_angle(0.0, e.radius()),
+            0.0,
+            "no air ⇒ no twilight"
+        );
         let moon_night = rayleigh_veil(0.5, -0.001, 0.5, rayleigh_tau(0.0), SUN_GAIN as f64, 0.0);
-        assert_eq!(moon_night, [0.0; 3], "airless body keeps its knife-edge terminator");
+        assert_eq!(
+            moon_night, [0.0; 3],
+            "airless body keeps its knife-edge terminator"
+        );
     }
 }

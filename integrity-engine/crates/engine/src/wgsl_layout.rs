@@ -17,7 +17,9 @@
 /// exactly the padding region a struct grows into.
 pub(crate) fn wgsl_typed(src: &str, name: &str) -> Vec<(String, &'static str)> {
     let head = format!("struct {name} {{");
-    let start = src.find(&head).unwrap_or_else(|| panic!("no `{head}` in the shader"));
+    let start = src
+        .find(&head)
+        .unwrap_or_else(|| panic!("no `{head}` in the shader"));
     let body = &src[start + head.len()..];
     let end = body.find('}').expect("unterminated struct in the shader");
     body[..end]
@@ -30,7 +32,13 @@ pub(crate) fn wgsl_typed(src: &str, name: &str) -> Vec<(String, &'static str)> {
             let (field, ty) = chunk.split_once(':')?;
             let field = field.trim();
             let t = ty.trim();
-            let ty = if t.starts_with("vec4") { "vec4" } else if t.starts_with("vec3") { "vec3" } else { "scalar" };
+            let ty = if t.starts_with("vec4") {
+                "vec4"
+            } else if t.starts_with("vec3") {
+                "vec3"
+            } else {
+                "scalar"
+            };
             (!field.is_empty()).then(|| (field.to_string(), ty))
         })
         .collect()

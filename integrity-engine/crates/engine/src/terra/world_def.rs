@@ -147,26 +147,57 @@ pub struct Stratum {
 
 impl GroundSurface {
     /// The default octaves, reachable from `world` so the relief law has ONE definition.
-    pub fn default_octaves_pub() -> Vec<Octave> { Self::default_octaves() }
-    fn default_size() -> [usize; 3] { [96, 96, 96] }
-    fn default_base_top() -> f32 { 88.0 }   // H - 8: eight voxels of headroom
-    fn default_amplitude() -> f32 { 34.0 }
-    fn default_sea_level() -> f32 { 64.0 }
+    pub fn default_octaves_pub() -> Vec<Octave> {
+        Self::default_octaves()
+    }
+    fn default_size() -> [usize; 3] {
+        [96, 96, 96]
+    }
+    fn default_base_top() -> f32 {
+        88.0
+    } // H - 8: eight voxels of headroom
+    fn default_amplitude() -> f32 {
+        34.0
+    }
+    fn default_sea_level() -> f32 {
+        64.0
+    }
     fn default_octaves() -> Vec<Octave> {
         vec![
-            Octave { frequency: 0.026, weight: 0.55 }, // map-wide hills and valleys
-            Octave { frequency: 0.062, weight: 0.30 }, // individual slopes
-            Octave { frequency: 0.13,  weight: 0.15 }, // surface texture
+            Octave {
+                frequency: 0.026,
+                weight: 0.55,
+            }, // map-wide hills and valleys
+            Octave {
+                frequency: 0.062,
+                weight: 0.30,
+            }, // individual slopes
+            Octave {
+                frequency: 0.13,
+                weight: 0.15,
+            }, // surface texture
         ]
     }
     fn default_strata() -> Vec<Stratum> {
         // Earth's real radial order as a DECLARED vertical LOD: thicknesses are compressed into the
         // patch (real crust is 0.4% of the radius) so a dig exposes honest strata. Material ORDER is real.
         vec![
-            Stratum { material: "grass".into(),      thickness_m: Some(1) },
-            Stratum { material: "basalt".into(),     thickness_m: Some(12) },
-            Stratum { material: "peridotite".into(), thickness_m: Some(22) },
-            Stratum { material: "iron".into(),       thickness_m: None },
+            Stratum {
+                material: "grass".into(),
+                thickness_m: Some(1),
+            },
+            Stratum {
+                material: "basalt".into(),
+                thickness_m: Some(12),
+            },
+            Stratum {
+                material: "peridotite".into(),
+                thickness_m: Some(22),
+            },
+            Stratum {
+                material: "iron".into(),
+                thickness_m: None,
+            },
         ]
     }
 }
@@ -185,10 +216,18 @@ impl Default for GroundSurface {
 }
 
 impl GroundDef {
-    fn default_view_radius() -> f32 { 2_000.0 }
-    fn default_eye_height() -> f32 { 20.0 }
-    fn default_grain() -> f32 { 1.0 }
-    fn default_planet() -> String { "earth".into() }
+    fn default_view_radius() -> f32 {
+        2_000.0
+    }
+    fn default_eye_height() -> f32 {
+        20.0
+    }
+    fn default_grain() -> f32 {
+        1.0
+    }
+    fn default_planet() -> String {
+        "earth".into()
+    }
 }
 
 /// A solid body placed on a ground world - the docs/23 ball, as data. Only INITIAL CONDITIONS are
@@ -237,8 +276,12 @@ pub enum GroundEvent {
 }
 
 impl GroundEvent {
-    fn default_down() -> [f32; 3] { [0.0, -1.0, 0.0] }
-    fn default_grain() -> f32 { 0.5 }
+    fn default_down() -> [f32; 3] {
+        [0.0, -1.0, 0.0]
+    }
+    fn default_grain() -> f32 {
+        0.5
+    }
 }
 
 /// **The giant impact as DECLARED initial conditions** (`docs/51`).
@@ -315,18 +358,36 @@ pub struct ImpactBody {
 }
 
 impl ImpactDef {
-    fn default_v_esc_multiple() -> f64 { 1.15 }
-    fn default_start_separation() -> f64 { 1.6 }
-    fn default_impact_parameter() -> f64 { 1.0 }
-    fn default_spin() -> f64 { 4.0e-4 }
-    fn default_relax_separation() -> f64 { 40.0 }
-    fn default_softening() -> f64 { 1.0e6 }
-    fn default_core_lod() -> f64 { 1.0 }
+    fn default_v_esc_multiple() -> f64 {
+        1.15
+    }
+    fn default_start_separation() -> f64 {
+        1.6
+    }
+    fn default_impact_parameter() -> f64 {
+        1.0
+    }
+    fn default_spin() -> f64 {
+        4.0e-4
+    }
+    fn default_relax_separation() -> f64 {
+        40.0
+    }
+    fn default_softening() -> f64 {
+        1.0e6
+    }
+    fn default_core_lod() -> f64 {
+        1.0
+    }
     fn default_target() -> ImpactBody {
-        ImpactBody { body: "proto-earth".into() }
+        ImpactBody {
+            body: "proto-earth".into(),
+        }
     }
     fn default_impactor() -> ImpactBody {
-        ImpactBody { body: "theia".into() }
+        ImpactBody {
+            body: "theia".into(),
+        }
     }
 }
 
@@ -515,17 +576,23 @@ mod atmosphere_source_tests {
     /// so Terra's sky was a 2.2%-different atmosphere from the terrain and orbit scenes (docs/46).
     #[test]
     fn the_world_file_and_the_planet_profile_agree_on_earths_air() {
-        let json = std::fs::read_to_string(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/public/worlds/earth/world.json"),
-        )
+        let json = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../web/public/worlds/earth/world.json"
+        ))
         .expect("shipped Earth world");
         let w = World::parse(&json).expect("Earth world parses");
         let planet = w.planet.as_ref().expect("Earth world has a planet");
-        let atm = w.atmosphere.as_ref().expect("Earth world declares an atmosphere");
+        let atm = w
+            .atmosphere
+            .as_ref()
+            .expect("Earth world declares an atmosphere");
 
         let earth = crate::planet::earth();
         let g = earth.gravity_at(planet.radius_m);
-        let from_world = atm.surface_pressure(planet.radius_m, g).expect("mass is declared");
+        let from_world = atm
+            .surface_pressure(planet.radius_m, g)
+            .expect("mass is declared");
         let from_profile = earth.surface_pressure();
 
         let rel = (from_world - from_profile).abs() / from_profile;
@@ -545,7 +612,9 @@ mod atmosphere_source_tests {
         // Scope the search to the struct BODY. Searching the whole file matches this test's own source
         // (include_str! includes it), which is a false positive, not a violation.
         let src = include_str!("world_def.rs");
-        let start = src.find("pub struct Atmosphere {").expect("Atmosphere struct");
+        let start = src
+            .find("pub struct Atmosphere {")
+            .expect("Atmosphere struct");
         let body = &src[start..start + src[start..].find("\n}").expect("struct end")];
         let banned = concat!("surface_", "pressure_pa"); // split so this line is not itself a match
         assert!(
@@ -564,7 +633,11 @@ mod atmosphere_source_tests {
         )
         .expect("airless world parses");
         let atm = w.atmosphere.as_ref().unwrap();
-        assert_eq!(atm.surface_pressure(1_737_400.0, 1.62), Some(0.0), "no air ⇒ no pressure");
+        assert_eq!(
+            atm.surface_pressure(1_737_400.0, 1.62),
+            Some(0.0),
+            "no air ⇒ no pressure"
+        );
     }
 
     /// Composition is declarable, so the specific gas constant (hence scale height) can follow from what
@@ -576,7 +649,13 @@ mod atmosphere_source_tests {
                 "atmosphere":{"mass_kg":2.5e16,"composition":[["air",1.0]]}}"#,
         )
         .expect("world with composition parses");
-        let c = w.atmosphere.as_ref().unwrap().composition.as_ref().expect("composition present");
+        let c = w
+            .atmosphere
+            .as_ref()
+            .unwrap()
+            .composition
+            .as_ref()
+            .expect("composition present");
         assert_eq!(c.len(), 1);
         assert_eq!(c[0].0, "air");
     }
@@ -593,7 +672,10 @@ mod tests {
     #[test]
     fn impact_defaults_reproduce_the_hardcoded_constants() {
         let d = ImpactDef::default();
-        assert_eq!(d.v_esc_multiple, 1.15, "canonical giant-impact approach speed");
+        assert_eq!(
+            d.v_esc_multiple, 1.15,
+            "canonical giant-impact approach speed"
+        );
         assert_eq!(d.start_separation, 1.6, "d0 = 1.6 x contact radius");
         assert_eq!(d.impact_parameter, 1.0, "b = r_e, the oblique hit");
         assert_eq!(d.target_spin_rad_s, 4.0e-4, "PROTO_EARTH_SPIN");
@@ -605,13 +687,32 @@ mod tests {
         // place, which is how it survived.
         assert_eq!(d.target.body, "proto-earth");
         assert_eq!(d.impactor.body, "theia");
-        assert!((d.target.radius_m() - 6.161e6).abs() < 5e3, "the target is PROTO-Earth: {}", d.target.radius_m());
-        assert!((d.impactor.radius_m() - 3.39e6).abs() < 1e3, "the impactor IS Theia: {}", d.impactor.radius_m());
+        assert!(
+            (d.target.radius_m() - 6.161e6).abs() < 5e3,
+            "the target is PROTO-Earth: {}",
+            d.target.radius_m()
+        );
+        assert!(
+            (d.impactor.radius_m() - 3.39e6).abs() < 1e3,
+            "the impactor IS Theia: {}",
+            d.impactor.radius_m()
+        );
         // Core boundaries come from the definitions' own iron layers, not from a declared fraction.
-        assert!((d.target.core_radius_m() - 3.365e6).abs() < 1e4, "proto-Earth's core: {}", d.target.core_radius_m());
-        assert!((d.impactor.core_radius_m() - 1.8e6).abs() < 1e4, "Theia's core: {}", d.impactor.core_radius_m());
+        assert!(
+            (d.target.core_radius_m() - 3.365e6).abs() < 1e4,
+            "proto-Earth's core: {}",
+            d.target.core_radius_m()
+        );
+        assert!(
+            (d.impactor.core_radius_m() - 1.8e6).abs() < 1e4,
+            "Theia's core: {}",
+            d.impactor.core_radius_m()
+        );
         // Theia must be the SMALLER body, or it is not an impactor.
-        assert!(d.impactor.radius_m() < d.target.radius_m(), "the impactor is smaller than the target");
+        assert!(
+            d.impactor.radius_m() < d.target.radius_m(),
+            "the impactor is smaller than the target"
+        );
     }
 
     /// A scene may say WHICH body, and nothing else about it. Resolution (particle count, softening,
@@ -625,10 +726,16 @@ mod tests {
             r#"{"name":"w","type":"impact","impact":{"impactor":{"body":"theia","softening_m":1.0e6}}}"#,
             r#"{"name":"w","type":"impact","impact":{"impactor":{"body":"theia","core_lod_factor":4.0}}}"#,
         ] {
-            assert!(World::parse(bad).is_err(), "a scene must not be able to say this: {bad}");
+            assert!(
+                World::parse(bad).is_err(),
+                "a scene must not be able to say this: {bad}"
+            );
         }
         // Naming a body is all it takes.
-        assert!(World::parse(r#"{"name":"w","type":"impact","impact":{"impactor":{"body":"theia"}}}"#).is_ok());
+        assert!(World::parse(
+            r#"{"name":"w","type":"impact","impact":{"impactor":{"body":"theia"}}}"#
+        )
+        .is_ok());
     }
 
     /// A MISTYPED key must be an error, not a silent fallback. serde ignores unknown fields by default,
@@ -638,9 +745,13 @@ mod tests {
     #[test]
     fn a_mistyped_key_is_refused_rather_than_silently_defaulted() {
         let err = World::parse(
-            r#"{"name":"typo","type":"ground","ground":{"terrian":{"amplitude_m":0.0}}}"#)
-            .expect_err("an unknown key must be rejected");
-        assert!(err.contains("terrian") || err.contains("unknown"), "the error must name it: {err}");
+            r#"{"name":"typo","type":"ground","ground":{"terrian":{"amplitude_m":0.0}}}"#,
+        )
+        .expect_err("an unknown key must be rejected");
+        assert!(
+            err.contains("terrian") || err.contains("unknown"),
+            "the error must name it: {err}"
+        );
         // And the correct spelling still parses.
         World::parse(r#"{"name":"ok","type":"ground","ground":{"surface":{"amplitude_m":0.0}}}"#)
             .expect("the real field still works");
@@ -654,11 +765,15 @@ mod tests {
         assert_eq!(w.impact.expect("impact present"), ImpactDef::default());
 
         // Overriding ONE dial must leave the rest alone.
-        let w = World::parse(
-            r#"{"name":"b","type":"impact","impact":{"v_esc_multiple":1.4}}"#).expect("parses");
+        let w = World::parse(r#"{"name":"b","type":"impact","impact":{"v_esc_multiple":1.4}}"#)
+            .expect("parses");
         let i = w.impact.expect("impact present");
         assert_eq!(i.v_esc_multiple, 1.4, "the override takes");
-        assert_eq!(i.impact_parameter, ImpactDef::default().impact_parameter, "others stay declared");
+        assert_eq!(
+            i.impact_parameter,
+            ImpactDef::default().impact_parameter,
+            "others stay declared"
+        );
         assert_eq!(i.target, ImpactDef::default().target);
     }
 
@@ -670,7 +785,9 @@ mod tests {
     fn naming_a_different_body_builds_a_different_body() {
         let theia = ImpactDef::default();
         let mut lunar = ImpactDef::default();
-        lunar.impactor = ImpactBody { body: "moon".into() }; // 1,737 km, half Theia's radius
+        lunar.impactor = ImpactBody {
+            body: "moon".into(),
+        }; // 1,737 km, half Theia's radius
         let (_, t_theia) = crate::gpu_sph::build_impact_bodies_from(&theia, 2000);
         let (_, t_lunar) = crate::gpu_sph::build_impact_bodies_from(&lunar, 2000);
         assert!(
@@ -681,7 +798,10 @@ mod tests {
         );
         // And the built radius must match the definition, not anything the scene said.
         let r = t_theia.pos.iter().map(|p| p.length()).fold(0.0, f64::max);
-        assert!((r - 3.39e6).abs() < 3.0e5, "the built Theia is Theia-sized: {r:.3e} m");
+        assert!(
+            (r - 3.39e6).abs() < 3.0e5,
+            "the built Theia is Theia-sized: {r:.3e} m"
+        );
     }
 
     use super::*;

@@ -55,8 +55,24 @@ pub struct FlyingBody {
 impl FlyingBody {
     /// A body that has not been heated yet — the state anything is introduced in. `id` is stamped by
     /// [`Flight::introduce`]; a body that has not been introduced yet has none, which is why this is 0.
-    pub fn fresh(pos: DVec3, vel: DVec3, mass_kg: f64, material: usize, radius_m: f64, temp_k: f64) -> Self {
-        FlyingBody { id: 0, pos, vel, mass_kg, material, radius_m, temp_k, skin_m: 0.0 }
+    pub fn fresh(
+        pos: DVec3,
+        vel: DVec3,
+        mass_kg: f64,
+        material: usize,
+        radius_m: f64,
+        temp_k: f64,
+    ) -> Self {
+        FlyingBody {
+            id: 0,
+            pos,
+            vel,
+            mass_kg,
+            material,
+            radius_m,
+            temp_k,
+            skin_m: 0.0,
+        }
     }
 }
 
@@ -217,7 +233,10 @@ impl Flight {
     /// hands the engine a mass, a material, a place and a velocity. It cannot ask for an outcome.
     pub fn introduce(&mut self, body: FlyingBody) -> u64 {
         self.next_id += 1;
-        self.bodies.push(FlyingBody { id: self.next_id, ..body });
+        self.bodies.push(FlyingBody {
+            id: self.next_id,
+            ..body
+        });
         self.next_id
     }
 
@@ -238,7 +257,12 @@ impl Flight {
     ) {
         for f in crate::damage::disrupt(parent_mass_kg, parent_radius_m, count, since_s) {
             self.introduce(FlyingBody::fresh(
-                origin + f.rel_pos, approach + f.rel_vel, f.mass_kg, material, f.radius_m, temp_k,
+                origin + f.rel_pos,
+                approach + f.rel_vel,
+                f.mass_kg,
+                material,
+                f.radius_m,
+                temp_k,
             ));
         }
     }
@@ -257,7 +281,9 @@ impl Flight {
     /// the air takes least of, so it is the one that will still be there at the ground — and picking it
     /// needs no dial, only a comparison.
     pub fn heaviest(&self) -> Option<&FlyingBody> {
-        self.bodies.iter().max_by(|a, b| a.mass_kg.total_cmp(&b.mass_kg))
+        self.bodies
+            .iter()
+            .max_by(|a, b| a.mass_kg.total_cmp(&b.mass_kg))
     }
 
     /// Resolve at most `n` trail parcels at once; beyond that the shed mass is booked into the air. The
@@ -294,7 +320,11 @@ impl Flight {
         // scale height — never the caller's frame time. The cap is a COMPUTE bound, and reaching it means
         // the entry is being integrated more coarsely than it deserves, not that more work is spawned.
         let h = env.air_scale_height_m();
-        let fastest = self.bodies.iter().map(|b| b.vel.length()).fold(0.0_f64, f64::max);
+        let fastest = self
+            .bodies
+            .iter()
+            .map(|b| b.vel.length())
+            .fold(0.0_f64, f64::max);
         let n = if h > 0.0 && fastest > 0.0 {
             (((fastest * dt) / (0.1 * h)).ceil() as usize).clamp(1, 32)
         } else {
@@ -308,7 +338,8 @@ impl Flight {
         // The trail ages ONCE per call, not once per substep. Shed vapour is dragged to rest in
         // milliseconds and never travels far, so it needs none of the resolution a hypervelocity body
         // does — and stepping tens of thousands of parcels per substep was pure cost.
-        self.trail.step(mats, dt, |at| env.air_at(at).unwrap_or((0.0, 0.0)));
+        self.trail
+            .step(mats, dt, |at| env.air_at(at).unwrap_or((0.0, 0.0)));
         arrivals
     }
 
@@ -391,7 +422,11 @@ impl Flight {
     ///
     /// Bodies come before trail parcels for the reason `Simulation::drawn` orders matter in flight first:
     /// a caller with a finite instance budget should lose the least informative matter.
-    pub fn drawn(&self, env: &impl FlightEnvironment, to_scene: impl Fn(DVec3) -> glam::Vec3) -> Vec<crate::Drawn> {
+    pub fn drawn(
+        &self,
+        env: &impl FlightEnvironment,
+        to_scene: impl Fn(DVec3) -> glam::Vec3,
+    ) -> Vec<crate::Drawn> {
         let mut out = Vec::new();
         self.drawn_into(&mut out, env, to_scene);
         out
@@ -451,7 +486,11 @@ mod tests {
             // A flat floor is defined everywhere, so the crossing can be resolved to the loop's limit.
             let at = surface_crossing(from, to, |p| p.y <= 0.0);
             let (energy_j, momentum) = delivered(body, DVec3::ZERO, None);
-            Some(Met { at, energy_j, momentum })
+            Some(Met {
+                at,
+                energy_j,
+                momentum,
+            })
         }
         fn air_scale_height_m(&self) -> f64 {
             self.air.scale_height_m
@@ -478,7 +517,11 @@ mod tests {
             }
             let at = surface_crossing(from, to, |p| p.length() <= r);
             let (energy_j, momentum) = delivered(body, DVec3::ZERO, None);
-            Some(Met { at, energy_j, momentum })
+            Some(Met {
+                at,
+                energy_j,
+                momentum,
+            })
         }
         fn air_scale_height_m(&self) -> f64 {
             self.air.scale_height_m
@@ -490,7 +533,10 @@ mod tests {
         let air_mat = &mats[crate::materials::index_of(&mats, "air")];
         let earth = crate::planet::earth();
         let air = crate::atmosphere::AirShell::new(
-            earth.surface_pressure(), air_mat, 288.0, earth.gravity_at(earth.radius()),
+            earth.surface_pressure(),
+            air_mat,
+            288.0,
+            earth.gravity_at(earth.radius()),
         );
         (Planet { matter: earth, air }, mats)
     }
@@ -507,7 +553,14 @@ mod tests {
     /// never drift into being two answers to one question.
     #[test]
     fn an_immovable_target_is_the_reduced_mass_limit() {
-        let b = FlyingBody::fresh(DVec3::ZERO, DVec3::new(0.0, -17_000.0, 0.0), 1200.0, 0, 0.33, 288.0);
+        let b = FlyingBody::fresh(
+            DVec3::ZERO,
+            DVec3::new(0.0, -17_000.0, 0.0),
+            1200.0,
+            0,
+            0.33,
+            288.0,
+        );
         let (e_immovable, p_immovable) = delivered(&b, DVec3::ZERO, None);
 
         // The closed form the terrain path used to compute inline.
@@ -520,14 +573,23 @@ mod tests {
         for exp in [3, 6, 9, 12, 15] {
             let m_target = b.mass_kg * 10f64.powi(exp);
             let (e, p) = delivered(&b, DVec3::ZERO, Some(m_target));
-            assert!(e < e_immovable, "a target that can recoil takes LESS energy at the contact frame");
+            assert!(
+                e < e_immovable,
+                "a target that can recoil takes LESS energy at the contact frame"
+            );
             let err = (e_immovable - e) / e_immovable;
-            assert!(err < last_err, "and it converges as the target gets heavier ({err:e})");
+            assert!(
+                err < last_err,
+                "and it converges as the target gets heavier ({err:e})"
+            );
             last_err = err;
             // Momentum is the arriving body's own mv either way — the target's mass does not change it.
             assert!((p - p_immovable).length() < 1e-9);
         }
-        assert!(last_err < 1e-14, "at 1e15x the striker's mass it is the immovable case ({last_err:e})");
+        assert!(
+            last_err < 1e-14,
+            "at 1e15x the striker's mass it is the immovable case ({last_err:e})"
+        );
 
         // A moving target is priced on the RELATIVE velocity, so a body it cannot catch delivers nothing.
         let (e_chasing, _) = delivered(&b, b.vel, None);
@@ -542,26 +604,54 @@ mod tests {
     #[test]
     fn an_arrival_sites_the_impact_on_the_surface_not_where_the_step_ended() {
         let (planet, mats) = earth_planet();
-        let g = FlatGround { g: 9.81, air: crate::atmosphere::AirShell { rho_surface: 0.0, scale_height_m: 0.0, ambient_temp_k: 288.0 } };
+        let g = FlatGround {
+            g: 9.81,
+            air: crate::atmosphere::AirShell {
+                rho_surface: 0.0,
+                scale_height_m: 0.0,
+                ambient_temp_k: 288.0,
+            },
+        };
 
         // 17 km/s over a 1/60 s step is a ~283 m segment straddling the floor.
         let from = DVec3::new(0.0, 40.0, 0.0);
         let to = DVec3::new(0.0, 40.0 - 283.0, 0.0);
-        let b = FlyingBody::fresh(to, (to - from).normalize() * 17_000.0, 1200.0, 0, 0.33, 288.0);
-        let met = g.arrival(&b, from, to, 1.0 / 60.0).expect("the path met the floor");
+        let b = FlyingBody::fresh(
+            to,
+            (to - from).normalize() * 17_000.0,
+            1200.0,
+            0,
+            0.33,
+            288.0,
+        );
+        let met = g
+            .arrival(&b, from, to, 1.0 / 60.0)
+            .expect("the path met the floor");
         assert!(
             met.at.y.abs() < 1e-6,
             "the site is ON the floor, not {:.1} m under it",
             -met.at.y
         );
-        assert!(met.at.y > to.y + 1.0, "and emphatically not the post-step sample");
+        assert!(
+            met.at.y > to.y + 1.0,
+            "and emphatically not the post-step sample"
+        );
 
         // The same law at planetary scale, where the step is longer still.
         let r = planet.matter.radius();
         let from_p = DVec3::new(0.0, r + 5_000.0, 0.0);
         let to_p = DVec3::new(0.0, r - 5_000.0, 0.0);
-        let bp = FlyingBody::fresh(to_p, DVec3::new(0.0, -17_000.0, 0.0), 1200.0, 0, 0.33, 288.0);
-        let met_p = planet.arrival(&bp, from_p, to_p, 1.0 / 60.0).expect("the path met the ground");
+        let bp = FlyingBody::fresh(
+            to_p,
+            DVec3::new(0.0, -17_000.0, 0.0),
+            1200.0,
+            0,
+            0.33,
+            288.0,
+        );
+        let met_p = planet
+            .arrival(&bp, from_p, to_p, 1.0 / 60.0)
+            .expect("the path met the ground");
         assert!(
             (met_p.at.length() - r).abs() < 1e-3,
             "the site sits on the planet's surface, {:.1} m off",
@@ -580,10 +670,22 @@ mod tests {
         // Ground patch: a rock dropped from 200 m arrives at the floor.
         let ground = FlatGround {
             g: 9.81,
-            air: crate::atmosphere::AirShell::new(101_325.0, &mats[crate::materials::index_of(&mats, "air")], 288.0, 9.81),
+            air: crate::atmosphere::AirShell::new(
+                101_325.0,
+                &mats[crate::materials::index_of(&mats, "air")],
+                288.0,
+                9.81,
+            ),
         };
         let mut flight = Flight::default();
-        flight.introduce(FlyingBody::fresh(DVec3::new(0.0, 200.0, 0.0), DVec3::ZERO, grain(0.1), iron, 0.1, 288.0));
+        flight.introduce(FlyingBody::fresh(
+            DVec3::new(0.0, 200.0, 0.0),
+            DVec3::ZERO,
+            grain(0.1),
+            iron,
+            0.1,
+            288.0,
+        ));
         let mut hit = None;
         for _ in 0..2000 {
             if let Some(a) = flight.step(&ground, &mats, 0.005).first() {
@@ -592,13 +694,23 @@ mod tests {
             }
         }
         let a = hit.expect("the rock reaches the floor");
-        assert!(a.energy_j > 0.0, "it arrives with the energy its own fall gave it");
+        assert!(
+            a.energy_j > 0.0,
+            "it arrives with the energy its own fall gave it"
+        );
         assert!(flight.bodies().is_empty(), "and is no longer in flight");
 
         // Planet: the SAME code, the same struct, from 300 km up at orbital-entry speed, falling in.
         let mut orbital = Flight::default();
         let r0 = planet.matter.radius() + 300_000.0;
-        orbital.introduce(FlyingBody::fresh(DVec3::new(0.0, r0, 0.0), DVec3::new(0.0, -15_000.0, 0.0), grain(0.5), iron, 0.5, 288.0));
+        orbital.introduce(FlyingBody::fresh(
+            DVec3::new(0.0, r0, 0.0),
+            DVec3::new(0.0, -15_000.0, 0.0),
+            grain(0.5),
+            iron,
+            0.5,
+            288.0,
+        ));
         let mut arrived = None;
         for _ in 0..40_000 {
             if let Some(x) = orbital.step(&planet, &mats, 0.002).first() {
@@ -615,8 +727,16 @@ mod tests {
             "it arrives AT the surface, not somewhere near it"
         );
         // It was slowed and heated by real air on the way down.
-        assert!(x.body.vel.length() < 15_000.0, "the air braked it ({:.0} m/s)", x.body.vel.length());
-        assert!(x.body.temp_k > 288.0, "and heated it ({:.0} K)", x.body.temp_k);
+        assert!(
+            x.body.vel.length() < 15_000.0,
+            "the air braked it ({:.0} m/s)",
+            x.body.vel.length()
+        );
+        assert!(
+            x.body.temp_k > 288.0,
+            "and heated it ({:.0} K)",
+            x.body.temp_k
+        );
     }
 
     /// **A swarm is two operations composed, not a feature.** `introduce_swarm` is `damage::disrupt` fed
@@ -657,11 +777,23 @@ mod tests {
             flight.introduce_swarm(
                 DVec3::new(0.0, r_surface + 200_000.0, 0.0),
                 DVec3::new(0.0, -15_000.0, 0.0),
-                parent_m, parent_r, iron, 8, 86_400.0, 288.0,
+                parent_m,
+                parent_r,
+                iron,
+                8,
+                86_400.0,
+                288.0,
             );
-            assert_eq!(flight.bodies().len(), 8, "eight fragments, from one disrupted body");
+            assert_eq!(
+                flight.bodies().len(),
+                8,
+                "eight fragments, from one disrupted body"
+            );
             let launched: f64 = flight.bodies().iter().map(|b| b.mass_kg).sum();
-            assert!((launched / parent_m - 1.0).abs() < 1e-9, "the swarm IS the parent's mass");
+            assert!(
+                (launched / parent_m - 1.0).abs() < 1e-9,
+                "the swarm IS the parent's mass"
+            );
 
             let mut arrived_mass = 0.0;
             for _ in 0..120_000 {
@@ -684,15 +816,23 @@ mod tests {
 
         let f = [0.01_f64, 0.05, 0.1, 0.3, 1.0].map(ablated_fraction);
         for w in f.windows(2) {
-            assert!(w[0] > w[1], "the air takes a larger share of a smaller fragment: {w:?}");
+            assert!(
+                w[0] > w[1],
+                "the air takes a larger share of a smaller fragment: {w:?}"
+            );
         }
-        assert!(f[0] > 0.9, "millimetre pieces are almost entirely consumed ({:.1}%)", f[0] * 100.0);
+        assert!(
+            f[0] > 0.9,
+            "millimetre pieces are almost entirely consumed ({:.1}%)",
+            f[0] * 100.0
+        );
         // A METRE-CLASS body still arrives with essentially all of itself — iron meteorites do — but it is
         // no longer untouched: it ablates a real, small fraction, which before the thermal-skin model was
         // exactly zero because the whole body was heated at once (docs/46 row 21).
         assert!(
             (1.0e-4..0.05).contains(&f[4]),
-            "a metre iron body loses a little of itself, not none and not much ({:.3}%)", f[4] * 100.0
+            "a metre iron body loses a little of itself, not none and not much ({:.3}%)",
+            f[4] * 100.0
         );
     }
 
@@ -720,7 +860,11 @@ mod tests {
             let mut flight = Flight::default();
             let mut b = FlyingBody::fresh(
                 DVec3::new(0.0, planet.matter.radius() + 200_000.0, 0.0),
-                DVec3::new(0.0, -15_000.0, 0.0), m, iron, r, 288.0,
+                DVec3::new(0.0, -15_000.0, 0.0),
+                m,
+                iron,
+                r,
+                288.0,
             );
             b.skin_m = skin_m;
             flight.introduce(b);
@@ -745,7 +889,10 @@ mod tests {
             (skin_t - t_boil).abs() < 1.0,
             "with a real skin, a 1 m iron body reaches its BOILING point ({skin_t:.0} K of {t_boil:.0} K)"
         );
-        assert!(skin_ablated > 0.0, "and therefore ablates ({skin_ablated:.2} kg)");
+        assert!(
+            skin_ablated > 0.0,
+            "and therefore ablates ({skin_ablated:.2} kg)"
+        );
         assert!(
             bulk_t < 1500.0,
             "heated in bulk the same body barely warms ({bulk_t:.0} K) — that was row 21"
@@ -762,7 +909,8 @@ mod tests {
         // ~1.4 cm for iron, and it must stay a small fraction of a metre-wide body or "skin" means nothing.
         assert!(
             (0.002..0.05).contains(&peak_skin),
-            "the heated layer settles thin ({:.4} m on a {r} m body)", peak_skin
+            "the heated layer settles thin ({:.4} m on a {r} m body)",
+            peak_skin
         );
     }
 
@@ -783,13 +931,19 @@ mod tests {
         let (planet, mats) = earth_planet();
         let iron = crate::materials::index_of(&mats, "iron");
         let parent_r = 0.5_f64;
-        let parent_m = mats[iron].density as f64 * (4.0 / 3.0) * std::f64::consts::PI * parent_r.powi(3);
+        let parent_m =
+            mats[iron].density as f64 * (4.0 / 3.0) * std::f64::consts::PI * parent_r.powi(3);
 
         let mut flight = Flight::default();
         flight.introduce_swarm(
             glam::DVec3::new(0.0, planet.matter.radius() + 500_000.0, 0.0),
             glam::DVec3::new(0.0, -17_000.0, 0.0),
-            parent_m, parent_r, iron, 40, 86_400.0, 250.0,
+            parent_m,
+            parent_r,
+            iron,
+            40,
+            86_400.0,
+            250.0,
         );
         let launched = flight.bodies().len();
         let launched_mass: f64 = flight.bodies().iter().map(|b| b.mass_kg).sum();
@@ -817,21 +971,31 @@ mod tests {
         // Guards against a VACUOUS pass: the entry has to have actually taken place. An empty sim also
         // satisfies "nothing is left aloft".
         assert!(arrived > 0, "some fragments must reach the ground");
-        assert!(flight.trail().mass() > 0.0, "and the air must have taken some of them");
-        assert!(steps > 1_000, "the entry must have taken real time, not exited immediately ({steps} steps)");
+        assert!(
+            flight.trail().mass() > 0.0,
+            "and the air must have taken some of them"
+        );
+        assert!(
+            steps > 1_000,
+            "the entry must have taken real time, not exited immediately ({steps} steps)"
+        );
         assert!(
             flight.bodies().is_empty(),
             "every fragment must arrive or be consumed — {} still aloft after {:.0} s",
-            flight.bodies().len(), steps as f64 * dt
+            flight.bodies().len(),
+            steps as f64 * dt
         );
         assert!(
             flight.trail().parcels().is_empty(),
             "every parcel must become air — {} still resolved after {:.0} s",
-            flight.trail().parcels().len(), steps as f64 * dt
+            flight.trail().parcels().len(),
+            steps as f64 * dt
         );
         assert_eq!(
-            arrived + flight.burned_up(), launched,
-            "{arrived} arrived + {} burned up must account for all {launched}", flight.burned_up()
+            arrived + flight.burned_up(),
+            launched,
+            "{arrived} arrived + {} burned up must account for all {launched}",
+            flight.burned_up()
         );
         // And the mass is the mass: what landed, plus what the air took, is what was launched.
         let booked = arrived_mass + flight.trail().mass();
@@ -845,7 +1009,6 @@ mod tests {
             "all trail mass has become air"
         );
     }
-
 
     /// An airless world flies its bodies ballistically — no drag, no heating, no trail. Vacuum honestly,
     /// rather than a thin atmosphere nobody declared.
@@ -865,7 +1028,11 @@ mod tests {
                 }
                 let at = surface_crossing(f, t, |p| p.y <= 0.0);
                 let (energy_j, momentum) = delivered(body, DVec3::ZERO, None);
-                Some(Met { at, energy_j, momentum })
+                Some(Met {
+                    at,
+                    energy_j,
+                    momentum,
+                })
             }
             fn air_scale_height_m(&self) -> f64 {
                 0.0 // airless
@@ -875,7 +1042,14 @@ mod tests {
         let iron = crate::materials::index_of(&mats, "iron");
         let (h0, v0, mass) = (1000.0, 100.0, 10.0);
         let mut flight = Flight::default();
-        flight.introduce(FlyingBody::fresh(DVec3::new(0.0, h0, 0.0), DVec3::new(v0, 0.0, 0.0), mass, iron, 0.1, 100.0));
+        flight.introduce(FlyingBody::fresh(
+            DVec3::new(0.0, h0, 0.0),
+            DVec3::new(v0, 0.0, 0.0),
+            mass,
+            iron,
+            0.1,
+            100.0,
+        ));
         // 1,200 steps = 60 s. The drop needs t = sqrt(2h/g) = 35.1 s at lunar gravity; the ORIGINAL loop
         // ran 400 steps = 20 s and so never landed at all, which is exactly why the arrival below was
         // worth asserting.
@@ -893,9 +1067,18 @@ mod tests {
         // arrival but never asserted that one HAPPENED, so every claim in it also held for a body that
         // simply never landed. On an airless world the arrival is the whole point: no air means nothing
         // slows the body down, so the ground gets ALL of it.
-        let a = *arrivals.first().expect("an airless world still receives the impact");
-        assert!(a.at.y.abs() < 1e-6, "and it is sited on the surface ({:.3e} m off)", a.at.y);
-        assert_eq!(a.body.mass_kg, mass, "nothing was ablated away on the way down");
+        let a = *arrivals
+            .first()
+            .expect("an airless world still receives the impact");
+        assert!(
+            a.at.y.abs() < 1e-6,
+            "and it is sited on the surface ({:.3e} m off)",
+            a.at.y
+        );
+        assert_eq!(
+            a.body.mass_kg, mass,
+            "nothing was ablated away on the way down"
+        );
 
         // Energy is the launch KE plus the work gravity did over the drop — the closed form, because in
         // vacuum there is nothing else to spend it on. On an atmosphere-bearing world this is exactly the
@@ -906,6 +1089,9 @@ mod tests {
             "vacuum arrival carries the full ½mv₀² + mgh = {expect:.0} J, got {:.0} J",
             a.energy_j
         );
-        assert!(flight.bodies().is_empty(), "and the body is no longer in flight — it arrived");
+        assert!(
+            flight.bodies().is_empty(),
+            "and the body is no longer in flight — it arrived"
+        );
     }
 }

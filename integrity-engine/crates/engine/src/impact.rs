@@ -178,7 +178,11 @@ impl Furrow {
         // coefficients are pinned so a 45° impact reproduces the previously-tuned furrow exactly
         // (l_along 1.5·extent, downrange 0.5·extent), so the space-band oblique tests are unperturbed.
         const SQRT2: f64 = std::f64::consts::SQRT_2;
-        let oblq = if v_mag > 0.0 { SQRT2 * v_tan / v_mag } else { 0.0 };
+        let oblq = if v_mag > 0.0 {
+            SQRT2 * v_tan / v_mag
+        } else {
+            0.0
+        };
         Furrow {
             site,
             n,
@@ -281,10 +285,7 @@ impl Furrow {
 /// ejecta gets only a cratering fraction f < 1, so a cited f would give a GENTLER spray. We use the hard
 /// bound f = 1 here (unambiguous conservation, no free knob); a cited ejecta-KE fraction is a flagged
 /// REFINEMENT, deliberately NOT tuned to "look right".
-pub fn ejecta_energy_scale(
-    ejecta: impl IntoIterator<Item = (f64, DVec3)>,
-    e_impact: f64,
-) -> f64 {
+pub fn ejecta_energy_scale(ejecta: impl IntoIterator<Item = (f64, DVec3)>, e_impact: f64) -> f64 {
     let ke: f64 = ejecta
         .into_iter()
         .map(|(m, v)| 0.5 * m * v.length_squared())
@@ -346,8 +347,8 @@ pub fn furrow_target_grains(
     // the LOCAL density at its depth (iron-rich deep, crust shallow). This is what makes the cap ≈ 0.31×
     // the impactor (was a fudged 2×), so the momentum-conserving loft can drag it near-orbital without
     // gutting the impactor. (`frag_mass` — the impactor's grain mass — is no longer the cap's mass.)
-    let vol_per = (2.0 / 3.0) * std::f64::consts::PI * f.l_along * f.l_lat * f.l_depth
-        / n_grains as f64;
+    let vol_per =
+        (2.0 / 3.0) * std::f64::consts::PI * f.l_along * f.l_lat * f.l_depth / n_grains as f64;
     let mut masses = Vec::with_capacity(n_grains);
     // Pass 1: place each grain and compute its RAW declared shock-ejection velocity (relative to ground).
     // The energy cap is a property of the WHOLE ejecta set, so we cannot finalise velocities per grain.
@@ -358,14 +359,18 @@ pub fn furrow_target_grains(
         let along = u.dot(f.t) * r * f.l_along + f.downrange;
         let lat = u.dot(f.b) * r * f.l_lat;
         let depth = -(u.dot(n).abs() * r) * f.l_depth; // always INTO the surface
-        // Project the along/lateral offset onto the surface (curved or flat), then descend by `depth` so
-        // every grain is genuinely below the surface.
+                                                       // Project the along/lateral offset onto the surface (curved or flat), then descend by `depth` so
+                                                       // every grain is genuinely below the surface.
         let tangent_pt = site + f.t * along + f.b * lat;
         let (pos, outward, r_sample, below) = surface.place(tangent_pt, depth);
         let layer = target.layer_at(r_sample);
         let mass_i = (layer.density * vol_per).max(1.0); // real ρ·V of this grain's slice
         ejections.push(f.ejection(pos, outward, below));
-        bodies.push(Body { pos, vel: ground_vel, mass: mass_i }); // ejection added (scaled) below
+        bodies.push(Body {
+            pos,
+            vel: ground_vel,
+            mass: mass_i,
+        }); // ejection added (scaled) below
         masses.push(mass_i);
         mat_ids.push(materials::index_of(mats, &layer.material));
         temps.push(target.temperature_at(r_sample) as f32);
@@ -376,8 +381,10 @@ pub fn furrow_target_grains(
     // (Theia) the factor is 1.0 and the velocities are byte-unchanged. `v*1.0 == v`, so the space band is
     // untouched. KE uses each grain's REAL mass.
     let e_impact = 0.5 * impactor_mass * v_impact.length_squared();
-    let scale =
-        ejecta_energy_scale(ejections.iter().zip(masses.iter()).map(|(&ej, &m)| (m, ej)), e_impact);
+    let scale = ejecta_energy_scale(
+        ejections.iter().zip(masses.iter()).map(|(&ej, &m)| (m, ej)),
+        e_impact,
+    );
     for (b, ej) in bodies.iter_mut().zip(ejections.iter()) {
         b.vel += *ej * scale;
     }
@@ -404,8 +411,19 @@ pub fn build_impact_debris_between(
     earth_radius: f64,
 ) -> (Aggregate, Vec<DVec3>) {
     build_impact_debris_scaled(
-        mats, site, earth_pos, earth_vel, impactor_mass, v_contact, impactor, target, earth_mass,
-        earth_radius, DEBRIS_N, CAP_N, DVec3::ZERO,
+        mats,
+        site,
+        earth_pos,
+        earth_vel,
+        impactor_mass,
+        v_contact,
+        impactor,
+        target,
+        earth_mass,
+        earth_radius,
+        DEBRIS_N,
+        CAP_N,
+        DVec3::ZERO,
     )
 }
 
@@ -488,7 +506,10 @@ pub fn build_impact_debris_scaled(
     let (cap_bodies, cap_mats, cap_temps, cap_src) = furrow_target_grains(
         mats,
         earth_body,
-        ExcavSurface::Curved { center: earth_pos, radius: earth_radius },
+        ExcavSurface::Curved {
+            center: earth_pos,
+            radius: earth_radius,
+        },
         surface,
         v_contact,
         moon_r,
@@ -527,15 +548,17 @@ pub fn build_impact_debris_scaled(
     // cap gains, the impactor loses; Σp conserved). Now that the cap is at its PHYSICAL ρ·V mass, this
     // drags Earth material to near-orbital tangential speed — so it joins the bound disk (the Moon is
     // Earth-derived) — without gutting the impactor's own disk. Same law a terrain meteor would use.
-    let is_impactor: Vec<bool> =
-        source.iter().map(|&s| s == crate::aggregate::SOURCE_IMPACTOR).collect();
+    let is_impactor: Vec<bool> = source
+        .iter()
+        .map(|&s| s == crate::aggregate::SOURCE_IMPACTOR)
+        .collect();
     granular::plough_loft(&mut particles, &is_impactor, n, v_contact);
 
     // One canonical contact law from the real material. Grain radius is DENSITY-CONSISTENT — the radius a
     // grain of this mass and the material's density actually has, r = (3m/4πρ)^⅓ — so the contact
     // stiffness (E·r/m) is faithful to the matter, not to the render spacing.
-    let frag_r = (3.0 * frag_mass / (4.0 * std::f64::consts::PI * (mat.density as f64).max(1.0)))
-        .cbrt();
+    let frag_r =
+        (3.0 * frag_mass / (4.0 * std::f64::consts::PI * (mat.density as f64).max(1.0))).cbrt();
     let contact = granular::contact_from_material(mat, frag_r, frag_mass);
     // Gravitational softening at FRAGMENT scale (half a grain radius): the contact law provides the
     // short-range repulsion, so gravity may be honest down to touching distance — with impactor-scale
@@ -545,7 +568,10 @@ pub fn build_impact_debris_scaled(
     // The bulk planet: a conservative penalty boundary at the REAL surface, with the crater bowl
     // (the materialized half-ball) carved out at the site — debris landing far from the crater rests on
     // the surface; only in the bowl does free space reach cap depth. Matter cannot cross the planet.
-    let specific_heat = mat.thermal.as_ref().map_or(840.0, |t| t.specific_heat as f64);
+    let specific_heat = mat
+        .thermal
+        .as_ref()
+        .map_or(840.0, |t| t.specific_heat as f64);
     // VAPOR phase (docs/27): shock-heated fragments past the boil point interact as GAS — EOS
     // pressure anchored at the boiling reference state (vapor pressure ≈ 1 atm at the boil point,
     // definitionally; flagged first-order). This pressure support is what spreads the proto-lunar
@@ -570,7 +596,9 @@ pub fn build_impact_debris_scaled(
         .with_vapor_sph(
             crate::atmosphere::specific_gas_constant(mat),
             moon_r.max(1.0),
-            mat.thermal.as_ref().map_or(0.0, |t| t.latent_vaporization as f64 / specific_heat),
+            mat.thermal
+                .as_ref()
+                .map_or(0.0, |t| t.latent_vaporization as f64 / specific_heat),
         )
         .with_specific_heat(specific_heat)
         .with_boundary(earth_pos, earth_radius, contact.stiffness)
@@ -579,24 +607,25 @@ pub fn build_impact_debris_scaled(
     agg.mat_ids = mat_ids;
     agg.temps = temps;
     agg.source = source; // per-particle provenance (Theia vs Earth)
-    // PER-GRAIN contact law (docs/23: everything is matter): each grain collides as its OWN material — a
-    // Theia iron-core grain with iron's stiffness/restitution/friction, a mantle grain as peridotite — not
-    // all of them as the bulk basalt above. The grain RADIUS is from that material's REAL density
-    // (r = (3m/4πρ)^⅓), so iron packs denser than crust for the same mass. `Aggregate` mixes the two grains'
-    // laws per contact (`Contact::mix`), reducing exactly to the single law for a same-material pair — so
-    // only genuinely cross-material contacts change. Radius is from the grain's REAL material density AND
-    // its REAL mass (the cap is now physical ρ·V, so impactor and cap grains differ in mass) —
-    // r = (3m/4πρ)^⅓ — so iron packs denser than crust.
-    // Radius from the grain's REAL mass + material density; but the Contact is referenced to the SHARED
-    // `frag_mass` (= the aggregate's `contact_ref_mass`), so the loop's `per-mass × ref_mass = force`
-    // yields the true force-stiffness E·r for any grain mass, and the ÷(own mass) that follows is exact.
+                         // PER-GRAIN contact law (docs/23: everything is matter): each grain collides as its OWN material — a
+                         // Theia iron-core grain with iron's stiffness/restitution/friction, a mantle grain as peridotite — not
+                         // all of them as the bulk basalt above. The grain RADIUS is from that material's REAL density
+                         // (r = (3m/4πρ)^⅓), so iron packs denser than crust for the same mass. `Aggregate` mixes the two grains'
+                         // laws per contact (`Contact::mix`), reducing exactly to the single law for a same-material pair — so
+                         // only genuinely cross-material contacts change. Radius is from the grain's REAL material density AND
+                         // its REAL mass (the cap is now physical ρ·V, so impactor and cap grains differ in mass) —
+                         // r = (3m/4πρ)^⅓ — so iron packs denser than crust.
+                         // Radius from the grain's REAL mass + material density; but the Contact is referenced to the SHARED
+                         // `frag_mass` (= the aggregate's `contact_ref_mass`), so the loop's `per-mass × ref_mass = force`
+                         // yields the true force-stiffness E·r for any grain mass, and the ÷(own mass) that follows is exact.
     agg.per_grain_contact = agg
         .mat_ids
         .iter()
         .zip(agg.particles.iter())
         .map(|(&mid, p)| {
             let m = &mats[mid];
-            let r = (3.0 * p.mass / (4.0 * std::f64::consts::PI * (m.density as f64).max(1.0))).cbrt();
+            let r =
+                (3.0 * p.mass / (4.0 * std::f64::consts::PI * (m.density as f64).max(1.0))).cbrt();
             granular::contact_from_material(m, r, frag_mass)
         })
         .collect();
@@ -640,16 +669,26 @@ mod tests {
         let earth_vel = DVec3::ZERO;
         let site = DVec3::new(0.0, EARTH_RADIUS_M, 0.0);
         // Mutual escape speed at contact, 45° oblique (tangential +x, radial −y).
-        let v_esc = (2.0 * G * (EARTH_MASS + m_theia)
-            / (EARTH_RADIUS_M + theia.radius()))
-        .sqrt();
+        let v_esc = (2.0 * G * (EARTH_MASS + m_theia) / (EARTH_RADIUS_M + theia.radius())).sqrt();
         let v_contact = DVec3::new(v_esc * 0.7071, -v_esc * 0.7071, 0.0);
 
         let (mut agg, mut acc) = build_impact_debris_between(
-            &mats, site, earth_pos, earth_vel, m_theia, v_contact, &theia, &earth,
-            EARTH_MASS, EARTH_RADIUS_M,
+            &mats,
+            site,
+            earth_pos,
+            earth_vel,
+            m_theia,
+            v_contact,
+            &theia,
+            &earth,
+            EARTH_MASS,
+            EARTH_RADIUS_M,
         );
-        let steps = if cfg!(debug_assertions) { 4_000 } else { 20_000 };
+        let steps = if cfg!(debug_assertions) {
+            4_000
+        } else {
+            20_000
+        };
         for _ in 0..steps {
             agg.step(&mut acc, 2.0); // hours of aftermath
         }
@@ -665,8 +704,8 @@ mod tests {
                 escaped += p.mass;
             } else if r > 1.1 * EARTH_RADIUS_M {
                 aloft_bound += p.mass;
-                let peri = crate::orbit::perigee(p.pos - earth_pos, p.vel - earth_vel, mu)
-                    .unwrap_or(0.0);
+                let peri =
+                    crate::orbit::perigee(p.pos - earth_pos, p.vel - earth_vel, mu).unwrap_or(0.0);
                 if peri > EARTH_RADIUS_M {
                     in_orbit += p.mass; // perigee raised above the surface: genuinely orbiting
                 }
@@ -711,8 +750,7 @@ mod tests {
         let earth_pos = DVec3::ZERO;
         let earth_vel = DVec3::ZERO;
         let site = DVec3::new(0.0, EARTH_RADIUS_M, 0.0);
-        let v_esc =
-            (2.0 * G * (EARTH_MASS + m_theia) / (EARTH_RADIUS_M + theia.radius())).sqrt();
+        let v_esc = (2.0 * G * (EARTH_MASS + m_theia) / (EARTH_RADIUS_M + theia.radius())).sqrt();
         let v_contact = DVec3::new(v_esc * 0.7071, -v_esc * 0.7071, 0.0);
         let (dn, cn) = (256, 512);
 
@@ -748,8 +786,19 @@ mod tests {
         let m_moon = MOON_MASS;
         let mut run = |w: DVec3| -> (f64, f64) {
             let (mut agg, mut acc) = build_impact_debris_scaled(
-                &mats, site, earth_pos, earth_vel, m_theia, v_contact, &theia, &earth, EARTH_MASS,
-                EARTH_RADIUS_M, dn, cn, w,
+                &mats,
+                site,
+                earth_pos,
+                earth_vel,
+                m_theia,
+                v_contact,
+                &theia,
+                &earth,
+                EARTH_MASS,
+                EARTH_RADIUS_M,
+                dn,
+                cn,
+                w,
             );
             for _ in 0..3000 {
                 agg.step(&mut acc, 2.0);
@@ -821,7 +870,11 @@ mod tests {
         let b = 1.46 * contact;
 
         let mut bodies = vec![
-            crate::orbit::Body { pos: DVec3::ZERO, vel: DVec3::ZERO, mass: EARTH_MASS },
+            crate::orbit::Body {
+                pos: DVec3::ZERO,
+                vel: DVec3::ZERO,
+                mass: EARTH_MASS,
+            },
             crate::orbit::Body {
                 pos: DVec3::new(d0, b, 0.0),
                 vel: DVec3::new(-v_in, 0.0, 0.0),
@@ -848,24 +901,41 @@ mod tests {
         let (site, v_contact, n_hat) = hit.expect("the birth geometry must actually hit Earth");
         // Obliquity at contact: the angle between the arrival velocity and straight-down.
         let v_norm = v_contact.dot(-n_hat); // inward component
-        let obliquity = (v_contact.length_squared() - v_norm * v_norm).max(0.0).sqrt()
+        let obliquity = (v_contact.length_squared() - v_norm * v_norm)
+            .max(0.0)
+            .sqrt()
             .atan2(v_norm)
             .to_degrees();
-        println!("birth geometry: v_c {:.0} m/s at {obliquity:.0}° obliquity", v_contact.length());
+        println!(
+            "birth geometry: v_c {:.0} m/s at {obliquity:.0}° obliquity",
+            v_contact.length()
+        );
         assert!(
             obliquity >= 40.0,
             "the scene's impact parameter must yield a giant-impact obliquity (got {obliquity:.0}°)"
         );
 
         let (mut agg, mut acc2) = build_impact_debris_between(
-            &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia, &earth_profile,
-            EARTH_MASS, EARTH_RADIUS_M,
+            &mats,
+            site,
+            DVec3::ZERO,
+            DVec3::ZERO,
+            m_theia,
+            v_contact,
+            &theia,
+            &earth_profile,
+            EARTH_MASS,
+            EARTH_RADIUS_M,
         );
         // Spin bookkeeping (docs/27): Earth's gravity is CENTRAL (no torque about its own centre), the
         // cloud's self-interactions conserve their own L, and there is no Sun in this test — so ALL
         // change in the cloud's angular momentum about Earth is boundary shear, whose mirror is SPIN.
         let l0 = crate::tides::cloud_angular_momentum(&agg.particles, DVec3::ZERO, DVec3::ZERO);
-        let steps = if cfg!(debug_assertions) { 3_000 } else { 20_000 };
+        let steps = if cfg!(debug_assertions) {
+            3_000
+        } else {
+            20_000
+        };
         // The declared shock ejection LAUNCHES the excavated reservoir, so it spends time in ballistic
         // flight before settling — a single late snapshot undercounts it. Track the PEAK bound-aloft
         // reservoir over the run: the honest measure of "how much did the scene loft" (docs/28 step 3).
@@ -973,23 +1043,47 @@ mod tests {
         let v_esc = (2.0 * G * (EARTH_MASS + m_theia) / (EARTH_RADIUS_M + theia.radius())).sqrt();
         let v_contact = DVec3::new(v_esc * 0.7071, -v_esc * 0.7071, 0.0);
         let (mut agg, mut acc) = build_impact_debris_between(
-            &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia, &earth,
-            EARTH_MASS, EARTH_RADIUS_M,
+            &mats,
+            site,
+            DVec3::ZERO,
+            DVec3::ZERO,
+            m_theia,
+            v_contact,
+            &theia,
+            &earth,
+            EARTH_MASS,
+            EARTH_RADIUS_M,
         );
         // Counts at build: exactly the impactor and cap populations.
         assert_eq!(agg.source.len(), IMPACT_N);
-        assert_eq!(agg.source.iter().filter(|&&s| s == SOURCE_IMPACTOR).count(), DEBRIS_N);
-        assert_eq!(agg.source.iter().filter(|&&s| s == SOURCE_TARGET).count(), CAP_N);
+        assert_eq!(
+            agg.source.iter().filter(|&&s| s == SOURCE_IMPACTOR).count(),
+            DEBRIS_N
+        );
+        assert_eq!(
+            agg.source.iter().filter(|&&s| s == SOURCE_TARGET).count(),
+            CAP_N
+        );
         // The tag matches physical layout: the impactor is a ball ON/above the surface carrying
         // v_contact (~km/s); Earth's cap is EXCAVATED below the surface (and now carries the declared
         // shock-ejection velocity — no longer at rest, so we discriminate by geometry, not motion).
         for (i, p) in agg.particles.iter().enumerate() {
             let r = p.pos.length();
             if agg.source[i] == SOURCE_IMPACTOR {
-                assert!(r >= EARTH_RADIUS_M * 0.999, "impactor grain {i} below surface: r={r}");
-                assert!(p.vel.length() > 1_000.0, "impactor grain {i} not moving: {}", p.vel.length());
+                assert!(
+                    r >= EARTH_RADIUS_M * 0.999,
+                    "impactor grain {i} below surface: r={r}"
+                );
+                assert!(
+                    p.vel.length() > 1_000.0,
+                    "impactor grain {i} not moving: {}",
+                    p.vel.length()
+                );
             } else {
-                assert!(r <= EARTH_RADIUS_M * 1.001, "target grain {i} above surface: r={r}");
+                assert!(
+                    r <= EARTH_RADIUS_M * 1.001,
+                    "target grain {i} above surface: r={r}"
+                );
             }
         }
         // The tag rides swap_remove: integrate the aftermath, drain settled matter, require source to
@@ -1001,7 +1095,11 @@ mod tests {
         let r_tol = 4.0 * agg.contact.map_or(5.0e5, |c| c.radius);
         let (drained, _, _) =
             agg.drain_settled(DVec3::ZERO, EARTH_RADIUS_M, DVec3::ZERO, 30.0, r_tol);
-        assert_eq!(agg.source.len(), agg.particles.len(), "source desynced from particles after drain");
+        assert_eq!(
+            agg.source.len(),
+            agg.particles.len(),
+            "source desynced from particles after drain"
+        );
         assert_eq!(agg.particles.len(), before - drained);
         // DOCUMENTS the deficit step 3 must close — NO target assertion here (that is step 3's job).
         // The bound-aloft disk is ~100% Theia today; this print makes it a measurable number that will
@@ -1048,8 +1146,19 @@ mod tests {
         println!("\n N (deb+cap) | Earth aloft | Theia aloft | Earth esc | Theia esc  (M_moon)");
         for &(debris_n, cap_n) in &[(128usize, 256usize), (256, 512), (512, 1024)] {
             let (mut agg, mut acc) = build_impact_debris_scaled(
-                &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia, &earth, EARTH_MASS,
-                EARTH_RADIUS_M, debris_n, cap_n, DVec3::ZERO,
+                &mats,
+                site,
+                DVec3::ZERO,
+                DVec3::ZERO,
+                m_theia,
+                v_contact,
+                &theia,
+                &earth,
+                EARTH_MASS,
+                EARTH_RADIUS_M,
+                debris_n,
+                cap_n,
+                DVec3::ZERO,
             );
             for _ in 0..3000 {
                 agg.step(&mut acc, 2.0);
@@ -1107,8 +1216,19 @@ mod tests {
         println!(" N (deb+cap) | Earth aloft | Theia aloft   (M_moon)");
         for &(debris_n, cap_n) in &[(128usize, 256usize), (512, 1024)] {
             let (mut agg, mut acc) = build_impact_debris_scaled(
-                &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia, &earth, EARTH_MASS,
-                EARTH_RADIUS_M, debris_n, cap_n, DVec3::ZERO,
+                &mats,
+                site,
+                DVec3::ZERO,
+                DVec3::ZERO,
+                m_theia,
+                v_contact,
+                &theia,
+                &earth,
+                EARTH_MASS,
+                EARTH_RADIUS_M,
+                debris_n,
+                cap_n,
+                DVec3::ZERO,
             );
             // Strip the DECLARED ejection: every target grain back to rest (ground velocity = 0 here).
             for (i, p) in agg.particles.iter_mut().enumerate() {
@@ -1154,7 +1274,7 @@ mod tests {
         let m_theia = theia.total_mass();
         let contact = EARTH_RADIUS_M + theia.radius();
         let mu = G * (EARTH_MASS + m_theia); // relative-motion gravitational parameter
-        // The scene's inbound geometry (lib.rs start_birth), Earth at the origin.
+                                             // The scene's inbound geometry (lib.rs start_birth), Earth at the origin.
         let (d0, v_in, b) = (9.6e7_f64, 5_000.0_f64, 1.46 * contact);
         let mut rel = DVec3::new(d0, b, 0.0); // Theia relative to Earth
         let mut vrel = DVec3::new(-v_in, 0.0, 0.0);
@@ -1180,15 +1300,28 @@ mod tests {
         let v_circ = (G * EARTH_MASS / EARTH_RADIUS_M).sqrt();
         // Obliquity: angle of v_contact from the local surface (0 = grazing, 90 = head-on).
         let vt_frac = (v_contact - n_hat * v_contact.dot(n_hat)).length();
-        let obliq_deg = (v_contact.dot(n_hat).abs() / v_contact.length()).acos().to_degrees();
+        let obliq_deg = (v_contact.dot(n_hat).abs() / v_contact.length())
+            .acos()
+            .to_degrees();
         println!(
             "\nSCENE approach → contact: |v| = {:.0} m/s ({:.2}× v_circ), tangential {:.0} m/s ({:.2}× v_circ), obliquity {:.0}°",
             v_contact.length(), v_contact.length() / v_circ, vt_frac, vt_frac / v_circ, obliq_deg
         );
         // Build the SAME impact the scene builds, integrate the aftermath, measure orbiting by PERIGEE.
         let (mut agg, mut acc) = build_impact_debris_scaled(
-            &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia,
-            &crate::planet::earth(), EARTH_MASS, EARTH_RADIUS_M, 128, 256, DVec3::ZERO,
+            &mats,
+            site,
+            DVec3::ZERO,
+            DVec3::ZERO,
+            m_theia,
+            v_contact,
+            &theia,
+            &crate::planet::earth(),
+            EARTH_MASS,
+            EARTH_RADIUS_M,
+            128,
+            256,
+            DVec3::ZERO,
         );
         for _ in 0..3000 {
             agg.step(&mut acc, 2.0);
@@ -1271,8 +1404,19 @@ mod tests {
         };
         let build = || {
             build_impact_debris_scaled(
-                &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia, &earth, EARTH_MASS,
-                EARTH_RADIUS_M, 128, 256, DVec3::ZERO,
+                &mats,
+                site,
+                DVec3::ZERO,
+                DVec3::ZERO,
+                m_theia,
+                v_contact,
+                &theia,
+                &earth,
+                EARTH_MASS,
+                EARTH_RADIUS_M,
+                128,
+                256,
+                DVec3::ZERO,
             )
         };
         let (mut ag, mut acc) = build();
@@ -1288,7 +1432,10 @@ mod tests {
         println!(
             "\nDISK — global step() {disk_global:.3} M_moon | block step_block {disk_block:.3} M_moon"
         );
-        assert!(disk_block > 0.3, "step_block must form a bound disk on the real impact (got {disk_block:.3})");
+        assert!(
+            disk_block > 0.3,
+            "step_block must form a bound disk on the real impact (got {disk_block:.3})"
+        );
         assert!(
             (disk_block - disk_global).abs() < 0.5 * disk_global.max(0.2) + 0.3,
             "block disk must track the global-dt disk (block {disk_block:.3} vs global {disk_global:.3})"
@@ -1315,8 +1462,19 @@ mod tests {
         // O(N²) before; grid+tree make them tractable. Watch the disk converge toward the ~1–2 M☾ real range.
         for &(dn, cn) in &[(512usize, 1024usize), (1024, 2048), (2048, 4096)] {
             let (mut agg, mut acc) = build_impact_debris_scaled(
-                &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia, &earth, EARTH_MASS,
-                EARTH_RADIUS_M, dn, cn, DVec3::ZERO,
+                &mats,
+                site,
+                DVec3::ZERO,
+                DVec3::ZERO,
+                m_theia,
+                v_contact,
+                &theia,
+                &earth,
+                EARTH_MASS,
+                EARTH_RADIUS_M,
+                dn,
+                cn,
+                DVec3::ZERO,
             );
             for _ in 0..3000 {
                 agg.step(&mut acc, 2.0);
@@ -1366,14 +1524,33 @@ mod tests {
         let v_esc = (2.0 * G * (EARTH_MASS + m_theia) / (EARTH_RADIUS_M + theia.radius())).sqrt();
         let v_contact = DVec3::new(v_esc * 0.7071, -v_esc * 0.7071, 0.0);
         let (mut agg, mut acc) = build_impact_debris_scaled(
-            &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia, &earth, EARTH_MASS,
-            EARTH_RADIUS_M, 128, 256, DVec3::ZERO,
+            &mats,
+            site,
+            DVec3::ZERO,
+            DVec3::ZERO,
+            m_theia,
+            v_contact,
+            &theia,
+            &earth,
+            EARTH_MASS,
+            EARTH_RADIUS_M,
+            128,
+            256,
+            DVec3::ZERO,
         );
         let c = agg.specific_heat;
         let energy = |a: &Aggregate| -> (f64, f64, f64, f64) {
-            let ke: f64 = a.particles.iter().map(|p| 0.5 * p.mass * p.vel.length_squared()).sum();
-            let u: f64 =
-                a.particles.iter().zip(a.temps.iter()).map(|(p, &t)| p.mass * c * t as f64).sum();
+            let ke: f64 = a
+                .particles
+                .iter()
+                .map(|p| 0.5 * p.mass * p.vel.length_squared())
+                .sum();
+            let u: f64 = a
+                .particles
+                .iter()
+                .zip(a.temps.iter())
+                .map(|(p, &t)| p.mass * c * t as f64)
+                .sum();
             let (mu, r_e) = (G * EARTH_MASS, EARTH_RADIUS_M);
             let pe_ext: f64 = a
                 .particles
@@ -1408,7 +1585,10 @@ mod tests {
         println!("\n           KE           U(heat)      PE_ext       PE_self      TOTAL");
         println!("t=0    {ke0:.3e} {u0:.3e} {pe0:.3e} {ps0:.3e} {e0:.3e}");
         println!("t=end  {ke1:.3e} {u1:.3e} {pe1:.3e} {ps1:.3e} {e1:.3e}");
-        println!("impact KE input      = {:.3e} J", 0.5 * m_theia * v_contact.length_squared());
+        println!(
+            "impact KE input      = {:.3e} J",
+            0.5 * m_theia * v_contact.length_squared()
+        );
         println!("ΔU (heat generated)  = {:.3e} J", u1 - u0);
         println!("ΔKE                  = {:.3e} J", ke1 - ke0);
         println!("ΔPE (ext+self)       = {:.3e} J", (pe1 + ps1) - (pe0 + ps0));
@@ -1434,8 +1614,19 @@ mod tests {
         let v_esc = (2.0 * G * (EARTH_MASS + m_theia) / (EARTH_RADIUS_M + theia.radius())).sqrt();
         let v_contact = DVec3::new(v_esc * 0.7071, -v_esc * 0.7071, 0.0);
         let (mut agg, mut acc) = build_impact_debris_scaled(
-            &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia, &earth, EARTH_MASS,
-            EARTH_RADIUS_M, 128, 256, DVec3::ZERO,
+            &mats,
+            site,
+            DVec3::ZERO,
+            DVec3::ZERO,
+            m_theia,
+            v_contact,
+            &theia,
+            &earth,
+            EARTH_MASS,
+            EARTH_RADIUS_M,
+            128,
+            256,
+            DVec3::ZERO,
         );
         let mu = G * EARTH_MASS;
         let v_circ = (mu / EARTH_RADIUS_M).sqrt();
@@ -1478,9 +1669,20 @@ mod tests {
             }
         }
         let mm = MOON_MASS;
-        println!("\nv_circ = {:.0} m/s, v_esc = {:.0} m/s", v_circ, v_esc_surf);
-        println!("cap PEAK tangential speed at launch = {:.0} m/s ({:.2}× circular)", peak_vt0, peak_vt0 / v_circ);
-        println!("cap peak tangential speed at t=end   = {:.0} m/s ({:.2}× circular)", peak_vt, peak_vt / v_circ);
+        println!(
+            "\nv_circ = {:.0} m/s, v_esc = {:.0} m/s",
+            v_circ, v_esc_surf
+        );
+        println!(
+            "cap PEAK tangential speed at launch = {:.0} m/s ({:.2}× circular)",
+            peak_vt0,
+            peak_vt0 / v_circ
+        );
+        println!(
+            "cap peak tangential speed at t=end   = {:.0} m/s ({:.2}× circular)",
+            peak_vt,
+            peak_vt / v_circ
+        );
         println!(
             "cap Earth material: TRULY ORBITING (perigee>R) {:.4} M_moon | re-impacting (perigee<R) {:.4} M_moon",
             orbiting / mm, reimpacting / mm
@@ -1510,7 +1712,10 @@ mod tests {
         let (bodies, mids, temps, src) = furrow_target_grains(
             &mats,
             &earth,
-            ExcavSurface::Curved { center: earth_pos, radius: EARTH_RADIUS_M },
+            ExcavSurface::Curved {
+                center: earth_pos,
+                radius: EARTH_RADIUS_M,
+            },
             site,
             v_impact,
             a,
@@ -1524,7 +1729,10 @@ mod tests {
         assert_eq!(bodies.len(), CAP_N);
         assert_eq!(mids.len(), CAP_N);
         assert_eq!(temps.len(), CAP_N);
-        assert!(src.iter().all(|&s| s == SOURCE_TARGET), "all grains Earth-tagged");
+        assert!(
+            src.iter().all(|&s| s == SOURCE_TARGET),
+            "all grains Earth-tagged"
+        );
         for p in &bodies {
             assert!(
                 p.pos.length() <= EARTH_RADIUS_M + 1.0,
@@ -1544,7 +1752,10 @@ mod tests {
             span(&across)
         );
         let cx = along.iter().sum::<f64>() / along.len() as f64;
-        assert!(cx > 0.0, "furrow centroid should be downrange of contact, got {cx:.2e}");
+        assert!(
+            cx > 0.0,
+            "furrow centroid should be downrange of contact, got {cx:.2e}"
+        );
 
         // SHOCK EJECTION: shallow grains carry an OUTWARD (positive radial) velocity — lofted, not at
         // rest — and the fastest ejecta stays sub-escape (bound), so it can form a disk not just escape.
@@ -1559,14 +1770,20 @@ mod tests {
             outward.iter().cloned().fold(0.0, f64::max)
         );
         let vmax = bodies.iter().map(|p| p.vel.length()).fold(0.0, f64::max);
-        assert!(vmax < v_esc, "ejecta must be sub-escape (bound): vmax {vmax:.0} vs esc {v_esc:.0}");
+        assert!(
+            vmax < v_esc,
+            "ejecta must be sub-escape (bound): vmax {vmax:.0} vs esc {v_esc:.0}"
+        );
 
         // VERTICAL incidence (track along −n): no preferred direction → a symmetric bowl, still all
         // below the surface (the fallback tangent must not panic or loft matter above the surface).
         let (vb, _, _, _) = furrow_target_grains(
             &mats,
             &earth,
-            ExcavSurface::Curved { center: earth_pos, radius: EARTH_RADIUS_M },
+            ExcavSurface::Curved {
+                center: earth_pos,
+                radius: EARTH_RADIUS_M,
+            },
             site,
             -DVec3::Y * 10_000.0,
             a,
@@ -1578,7 +1795,10 @@ mod tests {
             EARTH_G,
         );
         for p in &vb {
-            assert!(p.pos.length() <= EARTH_RADIUS_M + 1.0, "vertical: grain above surface");
+            assert!(
+                p.pos.length() <= EARTH_RADIUS_M + 1.0,
+                "vertical: grain above surface"
+            );
         }
     }
 
@@ -1604,7 +1824,10 @@ mod tests {
         let earth = crate::planet::earth();
         let up = DVec3::Y; // local surface normal on a flat patch (+y under uniform gravity)
         let site = DVec3::ZERO; // impact point at the origin of the tangent plane
-        let flat = ExcavSurface::Flat { up, ref_radius: EARTH_RADIUS_M };
+        let flat = ExcavSurface::Flat {
+            up,
+            ref_radius: EARTH_RADIUS_M,
+        };
         let frag_mass = 2_900.0; // a 1 m³ basalt voxel (kg) — the real terrain grain, not a proxy
         let extent = 12.0; // a meteor-scale crater (metres), not a giant impact
         let a = 0.3; // impactor radius (scaling length) — a small Fe-Ni body
@@ -1614,13 +1837,26 @@ mod tests {
         // OBLIQUE 45° impact at 17 km/s in the x–y plane → downrange = +x.
         let v_oblique = DVec3::new(1.0, -1.0, 0.0).normalize() * 17_000.0;
         let (bodies, mids, temps, src) = furrow_target_grains(
-            &mats, &earth, flat, site, v_oblique, a, frag_mass, DVec3::ZERO, CAP_N, extent,
-            impactor_mass, TERRAIN_G,
+            &mats,
+            &earth,
+            flat,
+            site,
+            v_oblique,
+            a,
+            frag_mass,
+            DVec3::ZERO,
+            CAP_N,
+            extent,
+            impactor_mass,
+            TERRAIN_G,
         );
         assert_eq!(bodies.len(), CAP_N);
         assert_eq!(mids.len(), CAP_N);
         assert_eq!(temps.len(), CAP_N);
-        assert!(src.iter().all(|&s| s == SOURCE_TARGET), "all grains Earth-tagged (target material)");
+        assert!(
+            src.iter().all(|&s| s == SOURCE_TARGET),
+            "all grains Earth-tagged (target material)"
+        );
         // All grains sit on/below the flat surface plane (pos·up ≤ site·up).
         for p in &bodies {
             assert!(
@@ -1642,17 +1878,26 @@ mod tests {
             span(&across)
         );
         let cx = along.iter().sum::<f64>() / along.len() as f64;
-        assert!(cx > 0.0, "oblique furrow centroid should be downrange of contact, got {cx:.3}");
+        assert!(
+            cx > 0.0,
+            "oblique furrow centroid should be downrange of contact, got {cx:.3}"
+        );
 
         // Ejecta lofted: some grains carry outward (+up) velocity, launched along the LOCAL normal.
         let up_vel: Vec<f64> = bodies.iter().map(|p| p.vel.dot(up)).collect();
         let max_up = up_vel.iter().cloned().fold(f64::MIN, f64::max);
-        assert!(max_up > 0.0, "some grains must be lofted (outward/up velocity), got max {max_up:.3}");
+        assert!(
+            max_up > 0.0,
+            "some grains must be lofted (outward/up velocity), got max {max_up:.3}"
+        );
         // EXACT ENERGY CONSERVATION (docs/28): the total ejecta KE never exceeds the impact energy ½·m·v².
         // For this physically-consistent 1000 kg / 0.31 m terrain meteor the raw H-H ejecta KE is within
         // budget (~0.15× E_i, measured), so the f=1 cap is inactive here — the invariant still holds.
         let e_impact = 0.5 * impactor_mass * v_oblique.length_squared();
-        let ke: f64 = bodies.iter().map(|p| 0.5 * p.mass * p.vel.length_squared()).sum();
+        let ke: f64 = bodies
+            .iter()
+            .map(|p| 0.5 * p.mass * p.vel.length_squared())
+            .sum();
         assert!(
             ke <= e_impact * (1.0 + 1e-9),
             "ejecta KE {ke:.3e} must not exceed the impact energy {e_impact:.3e} (energy conserved)"
@@ -1664,8 +1909,18 @@ mod tests {
         // loft only through the crater it digs (energy → R_crater), tested next.
         let vmax = |b: &[Body]| b.iter().map(|p| p.vel.length()).fold(0.0, f64::max);
         let (half, _, _, _) = furrow_target_grains(
-            &mats, &earth, flat, site, v_oblique * 0.5, a, frag_mass, DVec3::ZERO, CAP_N, extent,
-            impactor_mass, TERRAIN_G,
+            &mats,
+            &earth,
+            flat,
+            site,
+            v_oblique * 0.5,
+            a,
+            frag_mass,
+            DVec3::ZERO,
+            CAP_N,
+            extent,
+            impactor_mass,
+            TERRAIN_G,
         );
         let (vf, vh) = (vmax(&bodies), vmax(&half));
         assert!(
@@ -1679,8 +1934,18 @@ mod tests {
         // This isolates the derived scale (the (a/d)^(1/μ) shape is unchanged when only g moves), proving
         // it is √g, not a fixed kick nor tuned to look right.
         let (heavy_g, _, _, _) = furrow_target_grains(
-            &mats, &earth, flat, site, v_oblique, a, frag_mass, DVec3::ZERO, CAP_N, extent,
-            impactor_mass, 4.0 * TERRAIN_G,
+            &mats,
+            &earth,
+            flat,
+            site,
+            v_oblique,
+            a,
+            frag_mass,
+            DVec3::ZERO,
+            CAP_N,
+            extent,
+            impactor_mass,
+            4.0 * TERRAIN_G,
         );
         for (p, q) in bodies.iter().zip(heavy_g.iter()) {
             let (s, sg) = (p.vel.length(), q.vel.length());
@@ -1697,8 +1962,18 @@ mod tests {
         // and the centroid is centred over the impact (obliquity is what elongates/offsets a furrow).
         let v_vert = -up * 17_000.0;
         let (vb, _, _, _) = furrow_target_grains(
-            &mats, &earth, flat, site, v_vert, a, frag_mass, DVec3::ZERO, CAP_N, extent,
-            impactor_mass, TERRAIN_G,
+            &mats,
+            &earth,
+            flat,
+            site,
+            v_vert,
+            a,
+            frag_mass,
+            DVec3::ZERO,
+            CAP_N,
+            extent,
+            impactor_mass,
+            TERRAIN_G,
         );
         // Its tangent axes are arbitrary (no preferred direction), so measure symmetry in two fixed
         // orthogonal tangents (x, z) of the plane.
@@ -1719,7 +1994,10 @@ mod tests {
             "vertical strike bowl is centred over the impact (centroid {cx2:.2},{cz2:.2}; r {radius:.2})"
         );
         for p in &vb {
-            assert!((p.pos - site).dot(up) <= 1e-6, "vertical: grain above the flat surface");
+            assert!(
+                (p.pos - site).dot(up) <= 1e-6,
+                "vertical: grain above the flat surface"
+            );
         }
     }
 
@@ -1730,20 +2008,32 @@ mod tests {
             (2_900.0, DVec3::new(0.0, 10_000.0, 0.0)),
             (2_900.0, DVec3::new(0.0, 6_000.0, 0.0)),
         ];
-        let raw_ke: f64 = ejecta.iter().map(|(m, v)| 0.5 * m * v.length_squared()).sum();
+        let raw_ke: f64 = ejecta
+            .iter()
+            .map(|(m, v)| 0.5 * m * v.length_squared())
+            .sum();
         // (a) OVER budget → factor √(E/KE), and the SCALED KE equals the budget exactly.
         let budget = 1.0e10;
         assert!(budget < raw_ke, "test premise: raw KE exceeds the budget");
         let s = ejecta_energy_scale(ejecta.iter().copied(), budget);
-        assert!((s - (budget / raw_ke).sqrt()).abs() < 1e-15, "factor is √(E/KE)");
-        let scaled_ke: f64 = ejecta.iter().map(|(m, v)| 0.5 * m * (*v * s).length_squared()).sum();
+        assert!(
+            (s - (budget / raw_ke).sqrt()).abs() < 1e-15,
+            "factor is √(E/KE)"
+        );
+        let scaled_ke: f64 = ejecta
+            .iter()
+            .map(|(m, v)| 0.5 * m * (*v * s).length_squared())
+            .sum();
         assert!(
             (scaled_ke - budget).abs() / budget < 1e-12,
             "scaled ejecta KE equals the budget exactly ({scaled_ke:.6e} vs {budget:.6e})"
         );
         // (b) WITHIN budget → factor is EXACTLY 1.0 (byte-unchanged; `v * 1.0 == v`).
         let s2 = ejecta_energy_scale(ejecta.iter().copied(), raw_ke * 2.0);
-        assert_eq!(s2, 1.0, "within budget: the declared velocities are left exactly as they are");
+        assert_eq!(
+            s2, 1.0,
+            "within budget: the declared velocities are left exactly as they are"
+        );
     }
 
     #[test]
@@ -1755,7 +2045,10 @@ mod tests {
         // scale the total ejecta KE down to the impact energy EXACTLY.
         let mats = materials::load();
         let earth = crate::planet::earth();
-        let flat = ExcavSurface::Flat { up: DVec3::Y, ref_radius: EARTH_RADIUS_M };
+        let flat = ExcavSurface::Flat {
+            up: DVec3::Y,
+            ref_radius: EARTH_RADIUS_M,
+        };
         let site = DVec3::ZERO;
         let a = 0.31; // impactor radius (H-H scaling length)
         let v = DVec3::new(1.0, -1.0, 0.0).normalize() * 17_000.0; // 17 km/s oblique
@@ -1763,27 +2056,56 @@ mod tests {
 
         // Raw (uncapped) ejecta KE of this excavation.
         let raw = furrow_target_grains(
-            &mats, &earth, flat, site, v, a, frag_mass, DVec3::ZERO, CAP_N, 12.0, f64::INFINITY,
+            &mats,
+            &earth,
+            flat,
+            site,
+            v,
+            a,
+            frag_mass,
+            DVec3::ZERO,
+            CAP_N,
+            12.0,
+            f64::INFINITY,
             TERRAIN_G,
         )
         .0;
-        let raw_ke: f64 = raw.iter().map(|b| 0.5 * b.mass * b.vel.length_squared()).sum();
+        let raw_ke: f64 = raw
+            .iter()
+            .map(|b| 0.5 * b.mass * b.vel.length_squared())
+            .sum();
         assert!(raw_ke > 0.0);
 
         // A light impactor whose impact energy is HALF the raw ejecta KE → the cap must bind.
         let e_impact = 0.5 * raw_ke;
         let impactor_mass = e_impact / (0.5 * v.length_squared());
         let (bodies, ..) = furrow_target_grains(
-            &mats, &earth, flat, site, v, a, frag_mass, DVec3::ZERO, CAP_N, 12.0, impactor_mass,
+            &mats,
+            &earth,
+            flat,
+            site,
+            v,
+            a,
+            frag_mass,
+            DVec3::ZERO,
+            CAP_N,
+            12.0,
+            impactor_mass,
             TERRAIN_G,
         );
         // ground_vel is zero here, so the ejecta KE relative to ground is the absolute KE.
-        let ke: f64 = bodies.iter().map(|b| 0.5 * b.mass * b.vel.length_squared()).sum();
+        let ke: f64 = bodies
+            .iter()
+            .map(|b| 0.5 * b.mass * b.vel.length_squared())
+            .sum();
         assert!(
             (ke - e_impact).abs() / e_impact < 1e-9,
             "capped ejecta KE {ke:.3e} J == the impact energy {e_impact:.3e} J (exact conservation)"
         );
-        assert!(ke < raw_ke, "the cap reduced the ejecta KE ({ke:.3e} < raw {raw_ke:.3e})");
+        assert!(
+            ke < raw_ke,
+            "the cap reduced the ejecta KE ({ke:.3e} < raw {raw_ke:.3e})"
+        );
 
         // HONEST FINDING (docs/28): a PHYSICALLY-CONSISTENT 1000 kg / 0.31 m terrain meteor delivers far
         // MORE energy than this raw ejection carries, so at the f=1 bound the cap does NOT bind for it. The
@@ -1806,7 +2128,10 @@ mod tests {
         // INFINITE-energy run (which forces factor 1 by construction): byte-equal ⇒ Theia was uncapped.
         let mats = materials::load();
         let earth = crate::planet::earth();
-        let curved = ExcavSurface::Curved { center: DVec3::ZERO, radius: EARTH_RADIUS_M };
+        let curved = ExcavSurface::Curved {
+            center: DVec3::ZERO,
+            radius: EARTH_RADIUS_M,
+        };
         let site = DVec3::new(0.0, EARTH_RADIUS_M, 0.0);
         let v = DVec3::new(1.0, -1.0, 0.0).normalize() * 10_000.0;
         let a = MOON_RADIUS_M;
@@ -1815,22 +2140,51 @@ mod tests {
         let m_theia = theia.total_mass();
         let frag_mass = m_theia / DEBRIS_N as f64;
         let real = furrow_target_grains(
-            &mats, &earth, curved, site, v, a, frag_mass, DVec3::ZERO, CAP_N, extent, m_theia,
+            &mats,
+            &earth,
+            curved,
+            site,
+            v,
+            a,
+            frag_mass,
+            DVec3::ZERO,
+            CAP_N,
+            extent,
+            m_theia,
             EARTH_G,
         )
         .0;
         let uncapped = furrow_target_grains(
-            &mats, &earth, curved, site, v, a, frag_mass, DVec3::ZERO, CAP_N, extent, f64::INFINITY,
+            &mats,
+            &earth,
+            curved,
+            site,
+            v,
+            a,
+            frag_mass,
+            DVec3::ZERO,
+            CAP_N,
+            extent,
+            f64::INFINITY,
             EARTH_G,
         )
         .0;
         for (r, u) in real.iter().zip(uncapped.iter()) {
-            assert_eq!(r.vel, u.vel, "Theia's declared ejection must be unscaled (within budget)");
+            assert_eq!(
+                r.vel, u.vel,
+                "Theia's declared ejection must be unscaled (within budget)"
+            );
         }
         // And directly: the ejecta KE is comfortably under the impact energy.
         let e_impact = 0.5 * m_theia * v.length_squared();
-        let ke: f64 = real.iter().map(|b| 0.5 * b.mass * b.vel.length_squared()).sum();
-        assert!(ke < e_impact, "Theia's ejecta KE {ke:.3e} J < impact energy {e_impact:.3e} J");
+        let ke: f64 = real
+            .iter()
+            .map(|b| 0.5 * b.mass * b.vel.length_squared())
+            .sum();
+        assert!(
+            ke < e_impact,
+            "Theia's ejecta KE {ke:.3e} J < impact energy {e_impact:.3e} J"
+        );
     }
 
     #[test]
@@ -1850,7 +2204,10 @@ mod tests {
         // change); this test guards only that the ejection LAW itself is now local, not a km-scale spray.
         let mats = materials::load();
         let earth = crate::planet::earth();
-        let flat = ExcavSurface::Flat { up: DVec3::Y, ref_radius: EARTH_RADIUS_M };
+        let flat = ExcavSurface::Flat {
+            up: DVec3::Y,
+            ref_radius: EARTH_RADIUS_M,
+        };
         let site = DVec3::ZERO;
         // The real terrain-meteor parameters (lib.rs `meteor`): a 1000 kg / 0.31 m Fe-Ni body at 17 km/s
         // digs an R_crater ≈ 14 m crater (energy/σ, LOD-capped) into g = 9.88 terrain.
@@ -1860,8 +2217,18 @@ mod tests {
         let frag_mass = 2_900.0; // 1 m³ basalt voxel
         let impactor_mass = 1_000.0;
         let (bodies, ..) = furrow_target_grains(
-            &mats, &earth, flat, site, v_impact, a, frag_mass, DVec3::ZERO, CAP_N, r_crater,
-            impactor_mass, TERRAIN_G,
+            &mats,
+            &earth,
+            flat,
+            site,
+            v_impact,
+            a,
+            frag_mass,
+            DVec3::ZERO,
+            CAP_N,
+            r_crater,
+            impactor_mass,
+            TERRAIN_G,
         );
         // Ballistic range on the flat uniform-g patch: a grain launched from ~the surface with up-speed vu
         // and horizontal speed vh lands 2·vu·vh/g downrange (only the lofted, vu>0 grains travel).
@@ -1903,7 +2270,10 @@ mod tests {
         // (bound), so material is launched into orbit rather than blown clean away.
         let mats = materials::load();
         let earth = crate::planet::earth();
-        let curved = ExcavSurface::Curved { center: DVec3::ZERO, radius: EARTH_RADIUS_M };
+        let curved = ExcavSurface::Curved {
+            center: DVec3::ZERO,
+            radius: EARTH_RADIUS_M,
+        };
         let site = DVec3::new(0.0, EARTH_RADIUS_M, 0.0);
         let theia = crate::planet::theia();
         let m_theia = theia.total_mass();
@@ -1912,7 +2282,17 @@ mod tests {
         let v = DVec3::new(1.0, -1.0, 0.0).normalize() * 9_500.0; // ~mutual escape, 45° oblique
         let frag_mass = m_theia / DEBRIS_N as f64;
         let (bodies, ..) = furrow_target_grains(
-            &mats, &earth, curved, site, v, a, frag_mass, DVec3::ZERO, CAP_N, extent, m_theia,
+            &mats,
+            &earth,
+            curved,
+            site,
+            v,
+            a,
+            frag_mass,
+            DVec3::ZERO,
+            CAP_N,
+            extent,
+            m_theia,
             EARTH_G,
         );
         let vmax = bodies.iter().map(|p| p.vel.length()).fold(0.0f64, f64::max);
@@ -1928,7 +2308,10 @@ mod tests {
             vmax > 3_000.0,
             "space-band ejecta must stay km/s to loft a disk (got {vmax:.0} m/s)"
         );
-        assert!(vmax < v_esc, "ejecta must be sub-escape (bound): {vmax:.0} < {v_esc:.0}");
+        assert!(
+            vmax < v_esc,
+            "ejecta must be sub-escape (bound): {vmax:.0} < {v_esc:.0}"
+        );
         // The scale IS √(g·R_crater) (the max-speed grain sits at d→a, where (a/d)^(1/μ)·fade ≈ 1).
         assert!(
             (vmax - expected_scale).abs() / expected_scale < 0.2,

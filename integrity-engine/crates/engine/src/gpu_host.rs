@@ -83,7 +83,11 @@ impl GpuHost {
         ))
         .map_err(|e| format!("request_device failed on {}: {e}", info.name))?;
 
-        Ok(GpuHost { device, queue, info })
+        Ok(GpuHost {
+            device,
+            queue,
+            info,
+        })
     }
 }
 
@@ -108,23 +112,30 @@ mod tests {
                 return;
             }
         };
-        eprintln!("adapter: {} ({:?}, {:?})", host.info.name, host.info.device_type, host.info.backend);
+        eprintln!(
+            "adapter: {} ({:?}, {:?})",
+            host.info.name, host.info.device_type, host.info.backend
+        );
 
         // The REAL shader that ships, not a reimplementation.
-        let module = host.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("sph_step"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../../../shaders/sph_step.wgsl").into(),
-            ),
-        });
-        let pipeline = host.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("cs_grid_clear"),
-            layout: None,
-            module: &module,
-            entry_point: Some("cs_grid_clear"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let module = host
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("sph_step"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("../../../shaders/sph_step.wgsl").into(),
+                ),
+            });
+        let pipeline = host
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("cs_grid_clear"),
+                layout: None,
+                module: &module,
+                entry_point: Some("cs_grid_clear"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
         // Reaching here means the shipping WGSL compiled and a pipeline was created on real hardware.
         assert!(
             !host.info.name.is_empty(),

@@ -49,11 +49,11 @@ pub(crate) struct GpuParticles {
     /// SOLVER, which stays specialized (docs/46 §1).
     store: crate::gpu_store::ParticleStore<GpuParticle>,
     pub(crate) render_buf: wgpu::Buffer, // STORAGE | VERTEX — 8× render sub-cubes (cs_expand fills it), drawn
-    params: wgpu::Buffer,     // UNIFORM | COPY_DST
-    heightfield: wgpu::Buffer, // STORAGE | COPY_DST
-    grid_count: wgpu::Buffer, // STORAGE — atomic per-cell particle count (spatial hash)
-    grid_bucket: wgpu::Buffer, // STORAGE — per-cell particle indices
-    forces: wgpu::Buffer,     // STORAGE — accumulated contact acceleration per particle
+    params: wgpu::Buffer,                // UNIFORM | COPY_DST
+    heightfield: wgpu::Buffer,           // STORAGE | COPY_DST
+    grid_count: wgpu::Buffer,            // STORAGE — atomic per-cell particle count (spatial hash)
+    grid_bucket: wgpu::Buffer,           // STORAGE — per-cell particle indices
+    forces: wgpu::Buffer,                // STORAGE — accumulated contact acceleration per particle
     clear: wgpu::ComputePipeline,
     insert: wgpu::ComputePipeline,
     sort: wgpu::ComputePipeline,
@@ -67,7 +67,11 @@ impl GpuParticles {
     pub(crate) fn new(device: &wgpu::Device, capacity: u32, world_cells: u32) -> Self {
         // COPY_SRC (for the de-resolution read-back) and STORAGE|COPY_DST are supplied by the store.
         let store = crate::gpu_store::ParticleStore::<GpuParticle>::new(
-            device, capacity, wgpu::BufferUsages::empty(), "gpu-particles-physics");
+            device,
+            capacity,
+            wgpu::BufferUsages::empty(),
+            "gpu-particles-physics",
+        );
         // 8× render sub-cubes, filled each frame by cs_expand and drawn as instances.
         let render_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("gpu-particles-render"),
@@ -352,7 +356,10 @@ mod tests {
             })
             .collect();
 
-        assert!(!sizes.is_empty(), "parsed no @workgroup_size — the guard would pass vacuously");
+        assert!(
+            !sizes.is_empty(),
+            "parsed no @workgroup_size — the guard would pass vacuously"
+        );
         assert_eq!(
             sizes.len(),
             SHADER.matches("@compute").count(),
@@ -379,6 +386,9 @@ mod tests {
             "grid table {GRID_TABLE_SIZE} is under 2x the {SCENE_CAPACITY} particle capacity; cells \
              fill and `GRID_BUCKET_K` overflow silently drops contacts"
         );
-        assert!(GRID_TABLE_SIZE.is_power_of_two(), "the shader masks with `table_mask` = size - 1");
+        assert!(
+            GRID_TABLE_SIZE.is_power_of_two(),
+            "the shader masks with `table_mask` = size - 1"
+        );
     }
 }

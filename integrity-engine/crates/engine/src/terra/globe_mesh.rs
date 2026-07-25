@@ -8,31 +8,39 @@ use glam::{DVec3, Vec3};
 
 /// (outward normal, right tangent, up tangent) for the 6 cube faces — one consistent basis per face.
 const FACES: [([f64; 3], [f64; 3], [f64; 3]); 6] = [
-    ([1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]),  // +X
-    ([-1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]),  // -X
-    ([0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]),  // +Y
-    ([0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),  // -Y
-    ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),   // +Z
+    ([1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]), // +X
+    ([-1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]), // -X
+    ([0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]), // +Y
+    ([0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]), // -Y
+    ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),  // +Z
     ([0.0, 0.0, -1.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), // -Z
 ];
 
 /// Build the globe surface. `res` = grid points per cube-face edge; `r_disp` = the sphere radius in display
 /// units; `sample(dir)` returns `(albedo, radius_offset_display, material_index)` for a unit surface direction — the caller
 /// (Terra) reads the rasters there (land biome + elevation lift, or ocean-floor depth).
-pub fn build_globe(res: usize, r_disp: f64, sample: impl Fn(DVec3) -> ([f32; 3], f64, u32)) -> Mesh {
+pub fn build_globe(
+    res: usize,
+    r_disp: f64,
+    sample: impl Fn(DVec3) -> ([f32; 3], f64, u32),
+) -> Mesh {
     assert!(res >= 2);
     let mut vertices: Vec<Vertex> = Vec::with_capacity(6 * res * res);
     let mut indices: Vec<u32> = Vec::with_capacity(6 * (res - 1) * (res - 1) * 6);
 
     for (n, right, up) in FACES.iter() {
         let base = vertices.len() as u32;
-        let (n, right, up) = (DVec3::from_array(*n), DVec3::from_array(*right), DVec3::from_array(*up));
+        let (n, right, up) = (
+            DVec3::from_array(*n),
+            DVec3::from_array(*right),
+            DVec3::from_array(*up),
+        );
         // Positions + directions for this face's grid.
         let mut pos = vec![Vec3::ZERO; res * res];
         let mut dirs = vec![DVec3::ZERO; res * res];
         let mut cols = vec![[0f32; 3]; res * res];
-    // Which material each vertex is made OF — the shader picks its relief layer with it.
-    let mut mats = vec![0u32; res * res];
+        // Which material each vertex is made OF — the shader picks its relief layer with it.
+        let mut mats = vec![0u32; res * res];
         for j in 0..res {
             for i in 0..res {
                 let u = -1.0 + 2.0 * i as f64 / (res - 1) as f64;
@@ -97,9 +105,16 @@ mod tests {
         let res = 8;
         let m = build_globe(res, 1.0, |_| ([0.5, 0.5, 0.5], 0.0, 0));
         assert_eq!(m.vertices.len(), 6 * res * res, "6 faces × res² vertices");
-        assert_eq!(m.indices.len(), 6 * (res - 1) * (res - 1) * 6, "2 tris × 3 idx per quad");
+        assert_eq!(
+            m.indices.len(),
+            6 * (res - 1) * (res - 1) * 6,
+            "2 tris × 3 idx per quad"
+        );
         let n = m.vertices.len() as u32;
-        assert!(m.indices.iter().all(|&i| i < n), "every index references a real vertex");
+        assert!(
+            m.indices.iter().all(|&i| i < n),
+            "every index references a real vertex"
+        );
     }
 
     #[test]
@@ -110,7 +125,12 @@ mod tests {
         let m = build_globe(6, r, |_| ([1.0, 0.0, 0.0], 0.0, 0));
         for v in &m.vertices {
             let p = Vec3::from_array(v.pos);
-            assert!((p.length() - r as f32).abs() < 1e-4, "radius {} != {}", p.length(), r);
+            assert!(
+                (p.length() - r as f32).abs() < 1e-4,
+                "radius {} != {}",
+                p.length(),
+                r
+            );
             let nrm = Vec3::from_array(v.nrm);
             assert!(nrm.dot(p.normalize()) > 0.5, "normal must point outward");
         }
@@ -123,8 +143,15 @@ mod tests {
             let off = if dir.x > 0.9 { 0.3 } else { 0.0 };
             ([0.0, 0.0, 0.0], off, 0)
         });
-        let max_r = m.vertices.iter().map(|v| Vec3::from_array(v.pos).length()).fold(0.0f32, f32::max);
-        assert!((max_r - 1.3).abs() < 1e-3, "displaced apex radius {max_r} != 1.3");
+        let max_r = m
+            .vertices
+            .iter()
+            .map(|v| Vec3::from_array(v.pos).length())
+            .fold(0.0f32, f32::max);
+        assert!(
+            (max_r - 1.3).abs() < 1e-3,
+            "displaced apex radius {max_r} != 1.3"
+        );
     }
 }
 
@@ -159,7 +186,9 @@ pub fn build_body_globe(
         if is_land {
             let biome = landcover.map_or(1, |r| r.biome_at(lat, lon) as usize);
             let mi = biome_mats.get(biome).copied().unwrap_or(water_idx);
-            let e = elevation.map_or(0.0, |r| r.elevation_m_at(lat, lon, elev_range[0], elev_range[1]));
+            let e = elevation.map_or(0.0, |r| {
+                r.elevation_m_at(lat, lon, elev_range[0], elev_range[1])
+            });
             // Land above sea level; below-sea-level land (Dead Sea etc.) clamps to the shore.
             (mats[mi].albedo, e.max(0.0) * ds * exag, mi as u32)
         } else {

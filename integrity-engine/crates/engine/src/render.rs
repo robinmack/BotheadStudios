@@ -110,7 +110,10 @@ pub(crate) fn draw<'a>(pass: &mut wgpu::RenderPass<'a>, uni: &'a UniformSlot, me
     pass.draw_indexed(0..mesh.index_count, 0, 0..1);
 }
 
-pub(crate) fn uniform_entry(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
+pub(crate) fn uniform_entry(
+    binding: u32,
+    visibility: wgpu::ShaderStages,
+) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility,
@@ -150,7 +153,11 @@ pub(crate) fn upload_mesh(device: &wgpu::Device, label: &str, mesh: &Mesh) -> Gp
     }
 }
 
-pub(crate) fn create_depth_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
+pub(crate) fn create_depth_view(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> wgpu::TextureView {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("depth"),
         size: wgpu::Extent3d {
@@ -191,15 +198,29 @@ pub(crate) fn make_buffer(
 /// A GpuMesh whose vertex buffer is writable (VERTEX | COPY_DST) and pre-sized for `vert_capacity` vertices,
 /// with a fixed index buffer. For geometry rebuilt every frame (the ground cap) — write vertices, don't
 /// reallocate.
-pub(crate) fn make_dynamic_mesh(device: &wgpu::Device, label: &str, vert_capacity: usize, indices: &[u32]) -> GpuMesh {
+pub(crate) fn make_dynamic_mesh(
+    device: &wgpu::Device,
+    label: &str,
+    vert_capacity: usize,
+    indices: &[u32],
+) -> GpuMesh {
     let vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size: (vert_capacity * std::mem::size_of::<Vertex>()) as u64,
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    let index_buf = make_buffer(device, label, bytemuck::cast_slice(indices), wgpu::BufferUsages::INDEX);
-    GpuMesh { vertex_buf, index_buf, index_count: indices.len() as u32 }
+    let index_buf = make_buffer(
+        device,
+        label,
+        bytemuck::cast_slice(indices),
+        wgpu::BufferUsages::INDEX,
+    );
+    GpuMesh {
+        vertex_buf,
+        index_buf,
+        index_count: indices.len() as u32,
+    }
 }
 
 /// Uniforms for the star field (matches `StarU` in `shaders/stars.wgsl`).
@@ -254,7 +275,12 @@ impl StarField {
         use wgpu::util::DeviceExt;
         let data: Vec<StarInstance> = stars
             .iter()
-            .map(|s| StarInstance { pos_pc: s.pos_pc, _pad0: 0.0, color: s.color, luminosity: s.luminosity })
+            .map(|s| StarInstance {
+                pos_pc: s.pos_pc,
+                _pad0: 0.0,
+                color: s.color,
+                luminosity: s.luminosity,
+            })
             .collect();
         let instances = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("stars"),
@@ -269,16 +295,28 @@ impl StarField {
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("star-bind-layout"),
-            entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT)],
+            entries: &[uniform_entry(
+                0,
+                wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+            )],
         });
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("star-bind"),
             layout: &layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: uni.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uni.as_entire_binding(),
+            }],
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("stars"),
-            source: wgpu::ShaderSource::Wgsl(concat!(include_str!("../../../shaders/tonemap.wgsl"), include_str!("../../../shaders/stars.wgsl")).into()),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("../../../shaders/tonemap.wgsl"),
+                    include_str!("../../../shaders/stars.wgsl")
+                )
+                .into(),
+            ),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("star-pipeline-layout"),
@@ -296,9 +334,21 @@ impl StarField {
                     array_stride: std::mem::size_of::<StarInstance>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &[
-                        wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
-                        wgpu::VertexAttribute { offset: 16, shader_location: 1, format: wgpu::VertexFormat::Float32x3 },
-                        wgpu::VertexAttribute { offset: 28, shader_location: 2, format: wgpu::VertexFormat::Float32 },
+                        wgpu::VertexAttribute {
+                            offset: 0,
+                            shader_location: 0,
+                            format: wgpu::VertexFormat::Float32x3,
+                        },
+                        wgpu::VertexAttribute {
+                            offset: 16,
+                            shader_location: 1,
+                            format: wgpu::VertexFormat::Float32x3,
+                        },
+                        wgpu::VertexAttribute {
+                            offset: 28,
+                            shader_location: 2,
+                            format: wgpu::VertexFormat::Float32,
+                        },
                     ],
                 }],
             },
@@ -325,7 +375,13 @@ impl StarField {
             multiview: None,
             cache: None,
         });
-        Self { pipeline, instances, count: data.len() as u32, uni, bind }
+        Self {
+            pipeline,
+            instances,
+            count: data.len() as u32,
+            uni,
+            bind,
+        }
     }
 
     /// Update and draw. `spin` carries the scene's frame (identity for an inertial world); `radius` places
@@ -348,7 +404,12 @@ impl StarField {
             view_proj: view_proj.to_cols_array_2d(),
             spin: spin.to_cols_array_2d(),
             cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, 1.0],
-            cam_pc: [cam_pc.x, cam_pc.y, cam_pc.z, (viewport_w / viewport_h.max(1.0)).max(1e-6)],
+            cam_pc: [
+                cam_pc.x,
+                cam_pc.y,
+                cam_pc.z,
+                (viewport_w / viewport_h.max(1.0)).max(1e-6),
+            ],
             params: [radius, 2.2, viewport_h.max(1.0), exposure],
         };
         queue.write_buffer(&self.uni, 0, bytemuck::bytes_of(&u));
@@ -404,7 +465,10 @@ impl GpuParticle {
             u: 0.0,
             vel: d.vel.to_array(),
             resting: if d.resting { 1.0 } else { 0.0 },
-            color: mats.get(d.material).map(|m| m.albedo).unwrap_or([0.5, 0.5, 0.5]),
+            color: mats
+                .get(d.material)
+                .map(|m| m.albedo)
+                .unwrap_or([0.5, 0.5, 0.5]),
             material: d.material as f32,
             emission: crate::emission::incandescence(d.temp_k),
             rho: 0.0,
@@ -468,12 +532,18 @@ impl MatterField {
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("matter-bind-layout"),
-            entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT)],
+            entries: &[uniform_entry(
+                0,
+                wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+            )],
         });
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("matter-bind"),
             layout: &layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: uni.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uni.as_entire_binding(),
+            }],
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("matter"),
@@ -496,10 +566,26 @@ impl MatterField {
                     array_stride: std::mem::size_of::<GpuParticle>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &[
-                        wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
-                        wgpu::VertexAttribute { offset: 32, shader_location: 1, format: wgpu::VertexFormat::Float32x3 },
-                        wgpu::VertexAttribute { offset: 48, shader_location: 2, format: wgpu::VertexFormat::Float32x3 },
-                        wgpu::VertexAttribute { offset: 64, shader_location: 3, format: wgpu::VertexFormat::Float32 },
+                        wgpu::VertexAttribute {
+                            offset: 0,
+                            shader_location: 0,
+                            format: wgpu::VertexFormat::Float32x3,
+                        },
+                        wgpu::VertexAttribute {
+                            offset: 32,
+                            shader_location: 1,
+                            format: wgpu::VertexFormat::Float32x3,
+                        },
+                        wgpu::VertexAttribute {
+                            offset: 48,
+                            shader_location: 2,
+                            format: wgpu::VertexFormat::Float32x3,
+                        },
+                        wgpu::VertexAttribute {
+                            offset: 64,
+                            shader_location: 3,
+                            format: wgpu::VertexFormat::Float32,
+                        },
                     ],
                 }],
             },
@@ -536,7 +622,14 @@ impl MatterField {
             multiview: None,
             cache: None,
         });
-        Self { pipeline, instances, capacity, count: 0, uni, bind }
+        Self {
+            pipeline,
+            instances,
+            capacity,
+            count: 0,
+            uni,
+            bind,
+        }
     }
 
     /// Hand it this frame's matter. Silently drawing only what fits would hide matter, so the overflow is
@@ -586,7 +679,13 @@ mod tests {
     use glam::Vec3;
 
     fn cam() -> Camera {
-        Camera { yaw: 0.3, pitch: 0.2, zoom: 1.0, base_distance: 100.0, pan: Vec3::ZERO }
+        Camera {
+            yaw: 0.3,
+            pitch: 0.2,
+            zoom: 1.0,
+            base_distance: 100.0,
+            pan: Vec3::ZERO,
+        }
     }
 
     /// The pan scale is derived, not tuned: dragging the full viewport height translates the
@@ -598,7 +697,12 @@ mod tests {
         let mut c = cam();
         c.pan_by_pixels(0.0, h, fov_y, h);
         let expect = 2.0 * c.base_distance * c.zoom * (0.5 * fov_y).tan();
-        assert!((c.pan.length() - expect).abs() < 1e-3, "{} vs {}", c.pan.length(), expect);
+        assert!(
+            (c.pan.length() - expect).abs() < 1e-3,
+            "{} vs {}",
+            c.pan.length(),
+            expect
+        );
 
         let mut near = cam();
         near.zoom = 0.5;
@@ -616,11 +720,20 @@ mod tests {
         let mut c = cam();
         c.pan_by_pixels(120.0, 0.0, 0.9, 768.0);
         let forward = -c.eye_dir();
-        assert!(c.pan.dot(forward).abs() < 1e-4, "no component along the view axis");
+        assert!(
+            c.pan.dot(forward).abs() < 1e-4,
+            "no component along the view axis"
+        );
         let right = forward.cross(Vec3::Y).normalize();
-        assert!(c.pan.dot(right) < 0.0, "dragging right carries the target left");
+        assert!(
+            c.pan.dot(right) < 0.0,
+            "dragging right carries the target left"
+        );
 
         c.pan_by_pixels(-120.0, 0.0, 0.9, 768.0);
-        assert!(c.pan.length() < 1e-4, "panning back returns the classic framing");
+        assert!(
+            c.pan.length() < 1e-4,
+            "panning back returns the classic framing"
+        );
     }
 }

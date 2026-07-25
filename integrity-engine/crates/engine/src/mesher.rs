@@ -331,7 +331,7 @@ pub fn build_earth_cap(
     // Emit vertices: optional centre, then each ring's SEG points.
     if has_center {
         vertices.push(vert(0.0, 0.0)); // index 0
-        // Triangle fan from the centre to ring 0.
+                                       // Triangle fan from the centre to ring 0.
         for s in 0..SEG {
             let s1 = (s + 1) % SEG;
             indices.extend_from_slice(&[0, 1 + s as u32, 1 + s1 as u32]);
@@ -558,10 +558,22 @@ pub fn build_sea(world: &World, materials: &[Material]) -> Mesh {
                 }
                 // The four corners of the shared edge between (x,z) and its neighbour, at the two heights.
                 let (a, b) = match (dx, dz) {
-                    (1, 0) => (glam::Vec3::new(xf + 1.0, 0.0, zf), glam::Vec3::new(xf + 1.0, 0.0, zf + 1.0)),
-                    (-1, 0) => (glam::Vec3::new(xf, 0.0, zf + 1.0), glam::Vec3::new(xf, 0.0, zf)),
-                    (0, 1) => (glam::Vec3::new(xf + 1.0, 0.0, zf + 1.0), glam::Vec3::new(xf, 0.0, zf + 1.0)),
-                    _ => (glam::Vec3::new(xf, 0.0, zf), glam::Vec3::new(xf + 1.0, 0.0, zf)),
+                    (1, 0) => (
+                        glam::Vec3::new(xf + 1.0, 0.0, zf),
+                        glam::Vec3::new(xf + 1.0, 0.0, zf + 1.0),
+                    ),
+                    (-1, 0) => (
+                        glam::Vec3::new(xf, 0.0, zf + 1.0),
+                        glam::Vec3::new(xf, 0.0, zf),
+                    ),
+                    (0, 1) => (
+                        glam::Vec3::new(xf + 1.0, 0.0, zf + 1.0),
+                        glam::Vec3::new(xf, 0.0, zf + 1.0),
+                    ),
+                    _ => (
+                        glam::Vec3::new(xf, 0.0, zf),
+                        glam::Vec3::new(xf + 1.0, 0.0, zf),
+                    ),
                 };
                 let a_hi = glam::Vec3::new(a.x, hi, a.z);
                 let b_hi = glam::Vec3::new(b.x, hi, b.z);
@@ -713,7 +725,10 @@ mod tests {
             let l = (v.nrm[0] * v.nrm[0] + v.nrm[1] * v.nrm[1] + v.nrm[2] * v.nrm[2]).sqrt();
             worst_len = worst_len.max((l - 1.0).abs());
         }
-        assert!(worst_len < 1e-3, "normals are not unit length (worst deviation {worst_len})");
+        assert!(
+            worst_len < 1e-3,
+            "normals are not unit length (worst deviation {worst_len})"
+        );
 
         // The top of a heightfield world faces UP. Take the highest vertex in each column and check it.
         use std::collections::HashMap;
@@ -756,15 +771,21 @@ mod tests {
         for (&(xi, zi), &(_, nr)) in top.iter() {
             let (x, z) = (xi as f32 + 0.5, zi as f32 + 0.5);
             // Interior only: rim columns have no full neighbourhood.
-            if (x + c.x) < 8.0 || (x + c.x) > (world.w as f32 - 8.0) { continue; }
-            if (z + c.z) < 8.0 || (z + c.z) > (world.d as f32 - 8.0) { continue; }
+            if (x + c.x) < 8.0 || (x + c.x) > (world.w as f32 - 8.0) {
+                continue;
+            }
+            if (z + c.z) < 8.0 || (z + c.z) > (world.d as f32 - 8.0) {
+                continue;
+            }
             let (_, dhdx, dhdz) = world.surface_bilinear_grad(glam::Vec3::new(x, 0.0, z));
             let contact = glam::Vec3::new(-dhdx, 1.0, -dhdz).normalize();
             let m = glam::Vec3::new(nr[0], nr[1], nr[2]);
             checked += 1;
             // Same hemisphere and broadly the same direction. Surface Nets smooths across a voxel, so
             // exact equality is not expected — pointing the same WAY is.
-            if m.dot(contact) > 0.5 { agreeing += 1; }
+            if m.dot(contact) > 0.5 {
+                agreeing += 1;
+            }
         }
         assert!(checked > 1000, "not enough interior columns ({checked})");
         assert!(
@@ -790,9 +811,21 @@ mod tests {
         let water = materials::index_of(&mats, "water");
         let mesh = build_sea(&w, &mats);
         let c = w.center();
-        let wv: Vec<&Vertex> = mesh.vertices.iter().filter(|v| v.mat as usize == water).collect();
-        assert_eq!(wv.len(), mesh.vertices.len(), "the sea mesh is all water-tagged");
-        assert!(wv.len() > 100, "the sea must be meshed as a visible body (got {} verts)", wv.len());
+        let wv: Vec<&Vertex> = mesh
+            .vertices
+            .iter()
+            .filter(|v| v.mat as usize == water)
+            .collect();
+        assert_eq!(
+            wv.len(),
+            mesh.vertices.len(),
+            "the sea mesh is all water-tagged"
+        );
+        assert!(
+            wv.len() > 100,
+            "the sea must be meshed as a visible body (got {} verts)",
+            wv.len()
+        );
         // The highest water vertices are the flat top faces — they sit AT the waterline datum.
         let top_y = wv.iter().map(|v| v.pos[1] + c.y).fold(f32::MIN, f32::max);
         assert!(
@@ -911,7 +944,8 @@ mod tests {
         for v in &mesh.vertices {
             let [x, y, z] = v.pos;
             let d = (x * x + z * z).sqrt();
-            let expected = terrain_height(x + center.x, z + center.z) - center.y - d * d / (2.0 * radius);
+            let expected =
+                terrain_height(x + center.x, z + center.z) - center.y - d * d / (2.0 * radius);
             assert!(
                 (y - expected).abs() < 0.01,
                 "bulk cap vertex off the shared heightfield at d={d:.0}: y={y:.3} expected {expected:.3}"
@@ -938,7 +972,14 @@ mod tests {
         let w = world::generate(&mats);
         let center = w.center();
         // Resolve the whole footprint: hole half-extents = the patch's centre offset (its half-extents).
-        let mesh = build_earth_cap(&mats, center, radius, 26_000.0, Some(glam::Vec2::new(center.x, center.z)), None);
+        let mesh = build_earth_cap(
+            &mats,
+            center,
+            radius,
+            26_000.0,
+            Some(glam::Vec2::new(center.x, center.z)),
+            None,
+        );
 
         // (1) HOLE: NO cap vertex may lie strictly inside the patch footprint (voxel (x,z) in 0..W, 0..D).
         //     A cap vertex there would be a lid drawn over the patch, hiding craters/digs beneath it.
@@ -962,11 +1003,16 @@ mod tests {
             let y = v.pos[1];
             let (vx, vz) = (v.pos[0] + center.x, v.pos[2] + center.z);
             // Sanity: a seam vertex sits on the footprint boundary (one axis at 0 or W, the other within).
-            let on_boundary = (vx.abs() < 0.5 || (vx - W as f32).abs() < 0.5 || vz.abs() < 0.5
+            let on_boundary = (vx.abs() < 0.5
+                || (vx - W as f32).abs() < 0.5
+                || vz.abs() < 0.5
                 || (vz - D as f32).abs() < 0.5)
                 && (-0.5..=W as f32 + 0.5).contains(&vx)
                 && (-0.5..=D as f32 + 0.5).contains(&vz);
-            assert!(on_boundary, "seam vertex off the footprint boundary at ({vx:.1},{vz:.1})");
+            assert!(
+                on_boundary,
+                "seam vertex off the footprint boundary at ({vx:.1},{vz:.1})"
+            );
             let xi = (vx.round() as i32).clamp(0, W as i32 - 1);
             let zi = (vz.round() as i32).clamp(0, D as i32 - 1);
             let patch = w.surface_top_voxel(xi, zi).expect("edge column solid") as f32 - center.y;
@@ -976,7 +1022,10 @@ mod tests {
             );
             checked += 1;
         }
-        assert_eq!(checked, SEG, "the whole seam ring must be continuity-checked");
+        assert_eq!(
+            checked, SEG,
+            "the whole seam ring must be continuity-checked"
+        );
     }
 
     /// **The cap must render the ground the physics reports.** A column demoted to T0 keeps its surface
@@ -1000,7 +1049,8 @@ mod tests {
                 for y in (top - DEPTH)..top {
                     w.set_voxel(px + dx, y, pz + dz, None);
                 }
-                w.demote_column_to_field(px + dx, pz + dz).expect("bakeable");
+                w.demote_column_to_field(px + dx, pz + dz)
+                    .expect("bakeable");
             }
         }
         let sample = |m: &Mesh| -> f32 {
@@ -1013,7 +1063,10 @@ mod tests {
         let blind = build_earth_cap(&mats, center, radius, 26_000.0, None, None);
         let seeing = build_earth_cap(&mats, center, radius, 26_000.0, None, Some(&w));
         let (yb, ys) = (sample(&blind), sample(&seeing));
-        assert!(yb.is_finite() && ys.is_finite(), "the cap must have vertices over the patch centre");
+        assert!(
+            yb.is_finite() && ys.is_finite(),
+            "the cap must have vertices over the patch centre"
+        );
         assert!(
             ys < yb - (DEPTH as f32 * 0.5),
             "the cap did not follow the baked crater down: field-blind {yb:.2} m vs field-aware \
@@ -1060,7 +1113,10 @@ mod tests {
                 mats[v.mat as usize].id
             );
         }
-        assert!(tops > 200, "expected many interior top vertices to check, got {tops}");
+        assert!(
+            tops > 200,
+            "expected many interior top vertices to check, got {tops}"
+        );
     }
 
     #[test]
@@ -1152,4 +1208,3 @@ mod tests {
         );
     }
 }
-

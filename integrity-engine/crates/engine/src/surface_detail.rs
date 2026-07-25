@@ -152,7 +152,8 @@ pub fn micro_relief_m(
         let amp = relief_amplitude_m(wavelength, mu, h_crit_m) * slope_fraction.clamp(0.0, 1.0);
         // Centred on zero: this is roughness, not a change of elevation. The measured raster stays the
         // truth about height.
-        let n = crate::world::value_noise(x_m as f32, z_m as f32, (1.0 / wavelength) as f32) as f64 - 0.5;
+        let n = crate::world::value_noise(x_m as f32, z_m as f32, (1.0 / wavelength) as f32) as f64
+            - 0.5;
         let weight = if i == whole { frac } else { 1.0 };
         relief += n * 2.0 * amp * weight;
     }
@@ -182,7 +183,8 @@ mod tests {
         for id in ["granite", "basalt", "sand", "dirt", "grass", "clay", "snow"] {
             let m = &mats[crate::materials::index_of(&mats, id)];
             let mu = m.friction_coefficient as f64;
-            let h_crit = crate::granular::critical_bank_height(m.fracture_strength, m.density, 9.81) as f64;
+            let h_crit =
+                crate::granular::critical_bank_height(m.fracture_strength, m.density, 9.81) as f64;
             for lambda in [0.01_f64, 0.1, 1.0, 10.0, 100.0, 1000.0] {
                 let amp = relief_amplitude_m(lambda, mu, h_crit);
                 // The face this relief implies: a crest-to-trough drop over half a wavelength of run,
@@ -193,7 +195,10 @@ mod tests {
                     "{id} at lambda={lambda} m: generated a {drop:.4} m face over {run:.4} m that the \
                      engine's own Mohr-Coulomb test says would fail"
                 );
-                assert!(amp <= lambda * 0.25 + 1e-12, "{id} lambda={lambda}: relief cannot overhang");
+                assert!(
+                    amp <= lambda * 0.25 + 1e-12,
+                    "{id} lambda={lambda}: relief cannot overhang"
+                );
             }
         }
     }
@@ -213,13 +218,25 @@ mod tests {
         };
         let (g_mu, g_h) = get("granite");
         let (s_mu, s_h) = get("sand");
-        assert!(s_mu > g_mu, "sand grips harder ({s_mu} vs {g_mu}) - friction alone is not the answer");
-        assert_eq!(s_h, 0.0, "and cohesionless sand holds no bank at all: that IS the difference");
+        assert!(
+            s_mu > g_mu,
+            "sand grips harder ({s_mu} vs {g_mu}) - friction alone is not the answer"
+        );
+        assert_eq!(
+            s_h, 0.0,
+            "and cohesionless sand holds no bank at all: that IS the difference"
+        );
         assert!(g_h > 100.0, "granite holds a substantial bank ({g_h:.0} m)");
 
         // At a SMALL scale cohesion dominates and rock is craggier than sand.
-        let (rock, sand) = (relief_amplitude_m(0.1, g_mu, g_h), relief_amplitude_m(0.1, s_mu, s_h));
-        assert!(rock > sand, "at 10 cm rock is craggier than sand ({rock:.4} vs {sand:.4})");
+        let (rock, sand) = (
+            relief_amplitude_m(0.1, g_mu, g_h),
+            relief_amplitude_m(0.1, s_mu, s_h),
+        );
+        assert!(
+            rock > sand,
+            "at 10 cm rock is craggier than sand ({rock:.4} vs {sand:.4})"
+        );
         // But only just — and the reason is worth pinning, because it is a limit of the DRAWING and not of
         // the ground: granite's cohesion permits a 1,057 m bank, so below ~2 km wavelength its ceiling is
         // the heightfield's own `lambda/4` (a height cannot overhang) rather than anything physical. Rock is
@@ -302,24 +319,39 @@ mod tests {
         for id in ["sand", "gravel"] {
             assert_eq!(props(id).1, 0.0, "{id} is cohesionless");
             for lambda in [0.001_f64, 0.1, 10.0, 10_000.0] {
-                assert!(!capped(id, lambda), "{id} at lambda={lambda} is repose-limited, never capped");
+                assert!(
+                    !capped(id, lambda),
+                    "{id} at lambda={lambda} is repose-limited, never capped"
+                );
             }
         }
 
         // ARCH SCALE (10 m): soil and regolith are repose-limited; stone and ice are not. Robin's split.
         for id in ["dirt", "clay", "grass"] {
-            assert!(!capped(id, 10.0), "a ten-metre {id} arch does not form, so nothing is discarded");
+            assert!(
+                !capped(id, 10.0),
+                "a ten-metre {id} arch does not form, so nothing is discarded"
+            );
         }
         for id in ["granite", "basalt", "limestone", "sandstone", "ice"] {
-            assert!(capped(id, 10.0), "{id} can arch at ten metres and a heightfield cannot hold it");
+            assert!(
+                capped(id, 10.0),
+                "{id} can arch at ten metres and a heightfield cannot hold it"
+            );
         }
         // SNOW is the honest exception: cornices overhang by metres.
-        assert!(capped("snow", 10.0), "a snow cornice overhangs — that is why it is a hazard");
+        assert!(
+            capped("snow", 10.0),
+            "a snow cornice overhangs — that is why it is a hazard"
+        );
         assert!(!capped("snow", 40.0), "but not at forty metres");
 
         // The boundary is h_crit, not the material's category: even soil is capped well below its own bank
         // height, because a centimetre undercut in damp dirt is real.
-        assert!(capped("dirt", 0.1), "a decimetre undercut in damp dirt is real");
+        assert!(
+            capped("dirt", 0.1),
+            "a decimetre undercut in damp dirt is real"
+        );
         let (_, dirt_h) = props("dirt");
         assert!(
             !capped("dirt", 4.0 * dirt_h),
@@ -338,23 +370,39 @@ mod tests {
             crate::granular::critical_bank_height(gr.fracture_strength, gr.density, 9.81) as f64,
         );
         let base = 90.0; // the elevation raster's ground resolution - where measurement runs out
-        let r = |x: f64, z: f64, oct: f64, frac: f64| micro_relief_m(x, z, base, oct, mu, h_crit, frac);
+        let r =
+            |x: f64, z: f64, oct: f64, frac: f64| micro_relief_m(x, z, base, oct, mu, h_crit, frac);
 
         // Same place, same answer, even after sampling elsewhere in between.
         let a = r(1234.5, -678.9, 4.0, 1.0);
         let _ = r(0.0, 0.0, 4.0, 1.0);
-        assert_eq!(a, r(1234.5, -678.9, 4.0, 1.0), "the same ground, every time");
+        assert_eq!(
+            a,
+            r(1234.5, -678.9, 4.0, 1.0),
+            "the same ground, every time"
+        );
 
         // Nothing requested, nothing added - the measured surface untouched.
         assert_eq!(r(1234.5, -678.9, 0.0, 1.0), 0.0, "no octaves => no change");
-        assert_eq!(r(1234.5, -678.9, 6.0, 0.0), 0.0, "and flat ground stays flat");
+        assert_eq!(
+            r(1234.5, -678.9, 6.0, 0.0),
+            0.0,
+            "and flat ground stays flat"
+        );
 
         // FLAT GROUND STAYS FLAT: the slope fraction is what stops a plain coming out like a mountainside.
         let (steep, gentle) = (r(50.0, 50.0, 6.0, 1.0).abs(), r(50.0, 50.0, 6.0, 0.1).abs());
-        assert!(gentle < steep * 0.2, "a gentle slope is far smoother ({gentle:.4} vs {steep:.4})");
+        assert!(
+            gentle < steep * 0.2,
+            "a gentle slope is far smoother ({gentle:.4} vs {steep:.4})"
+        );
 
         // It FADES IN: a fractional octave lands between its neighbours, so nothing pops.
-        let (o3, o3h, o4) = (r(50.0, 50.0, 3.0, 1.0), r(50.0, 50.0, 3.5, 1.0), r(50.0, 50.0, 4.0, 1.0));
+        let (o3, o3h, o4) = (
+            r(50.0, 50.0, 3.0, 1.0),
+            r(50.0, 50.0, 3.5, 1.0),
+            r(50.0, 50.0, 4.0, 1.0),
+        );
         assert!(
             (o3h - o3).abs() <= (o4 - o3).abs() + 1e-9,
             "a half octave sits between {o3:.5} and {o4:.5}, got {o3h:.5}"
@@ -385,7 +433,10 @@ mod tests {
         let mut prev = f64::INFINITY;
         for d in dists {
             let t = texel_size_m(&c, d);
-            assert!(t < prev, "at {d} m the texel ({t}) must be finer than at the previous distance ({prev})");
+            assert!(
+                t < prev,
+                "at {d} m the texel ({t}) must be finer than at the previous distance ({prev})"
+            );
             prev = t;
         }
     }
@@ -397,11 +448,17 @@ mod tests {
         let c = ctrl();
         // 8,000 km up (Terra's default): ~1 mrad × 8e6 m = 8 km. You cannot see a boulder.
         let orbital = texel_size_m(&c, 8_000_000.0);
-        assert!((7_000.0..9_000.0).contains(&orbital), "orbital texel {orbital} m should be ~8 km");
+        assert!(
+            (7_000.0..9_000.0).contains(&orbital),
+            "orbital texel {orbital} m should be ~8 km"
+        );
         // 2 m up (standing): ~2 mm. Individual pebbles are resolvable — which is why the ground must
         // not be a single flat triangle there.
         let standing = texel_size_m(&c, 2.0);
-        assert!((0.001..0.01).contains(&standing), "standing texel {standing} m should be ~2 mm");
+        assert!(
+            (0.001..0.01).contains(&standing),
+            "standing texel {standing} m should be ~2 mm"
+        );
         assert!(
             orbital / standing > 1e5,
             "the span from orbit to standing is five orders of magnitude — that is the whole problem"
@@ -414,7 +471,10 @@ mod tests {
     fn detail_never_goes_below_the_declared_floor() {
         let c = ctrl();
         for d in [1.0, 0.1, 0.001, 0.0] {
-            assert!(texel_size_m(&c, d) >= c.min_grain_radius, "floor breached at {d} m");
+            assert!(
+                texel_size_m(&c, d) >= c.min_grain_radius,
+                "floor breached at {d} m"
+            );
         }
     }
 
@@ -437,7 +497,10 @@ mod tests {
             prev = n;
             d = next_d;
         }
-        assert!(prev > 15.0, "closing from 1000 km to 2 m on a 1 km cell needs many octaves, got {prev}");
+        assert!(
+            prev > 15.0,
+            "closing from 1000 km to 2 m on a 1 km cell needs many octaves, got {prev}"
+        );
     }
 
     /// Far enough away, added detail is not merely unnecessary — it is invisible, so the honest answer
@@ -469,8 +532,14 @@ mod tests {
              magnitude; a single global LOD level cannot serve both"
         );
         // Concretely: hundreds of metres per texel for the planet, millimetres for the debris.
-        assert!(earth > 100.0, "the Earth 400 km away needs no sub-metre detail, got {earth} m");
-        assert!(debris < 0.01, "the debris at arm's length does, got {debris} m");
+        assert!(
+            earth > 100.0,
+            "the Earth 400 km away needs no sub-metre detail, got {earth} m"
+        );
+        assert!(
+            debris < 0.01,
+            "the debris at arm's length does, got {debris} m"
+        );
     }
 
     /// Detail must follow VIEWABLE AREA, not just a raw number — a wide field of view at the same
@@ -479,7 +548,10 @@ mod tests {
     fn view_span_grows_with_distance_and_field_of_view() {
         let narrow = view_span_m(100.0, 30f64.to_radians());
         let wide = view_span_m(100.0, 90f64.to_radians());
-        assert!(wide > narrow * 2.0, "a 90-degree view spans far more than a 30-degree one");
+        assert!(
+            wide > narrow * 2.0,
+            "a 90-degree view spans far more than a 30-degree one"
+        );
         assert!(view_span_m(200.0, 60f64.to_radians()) > view_span_m(100.0, 60f64.to_radians()));
         assert_eq!(view_span_m(0.0, 60f64.to_radians()), 0.0);
     }

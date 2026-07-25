@@ -23,9 +23,9 @@
 //! is an engine edit (`docs/46` ledger row 14's remaining half). What this scene proves is the other
 //! half — that a scene's CONTENT is data.
 
+use crate::gpu_layout::GpuParticle;
 use crate::gravity::MassField;
 use crate::materials;
-use crate::gpu_layout::GpuParticle;
 use crate::mesher::{self, Vertex};
 use crate::render::*;
 use crate::simulation::Simulation;
@@ -78,7 +78,13 @@ fn build_pipeline(
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("world-shader"),
-        source: wgpu::ShaderSource::Wgsl(concat!(include_str!("../../../shaders/surface_normal.wgsl"), include_str!("../../../shaders/world.wgsl")).into()),
+        source: wgpu::ShaderSource::Wgsl(
+            concat!(
+                include_str!("../../../shaders/surface_normal.wgsl"),
+                include_str!("../../../shaders/world.wgsl")
+            )
+            .into(),
+        ),
     });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("pipeline-layout"),
@@ -148,7 +154,14 @@ fn build_sky_pipeline(
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("sky-shader"),
-        source: wgpu::ShaderSource::Wgsl(concat!(include_str!("../../../shaders/tonemap.wgsl"), include_str!("../../../shaders/rayleigh.wgsl"), include_str!("../../../shaders/sky.wgsl")).into()),
+        source: wgpu::ShaderSource::Wgsl(
+            concat!(
+                include_str!("../../../shaders/tonemap.wgsl"),
+                include_str!("../../../shaders/rayleigh.wgsl"),
+                include_str!("../../../shaders/sky.wgsl")
+            )
+            .into(),
+        ),
     });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("sky-pipeline-layout"),
@@ -209,9 +222,7 @@ fn build_particle_pipeline(
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("particle-shader"),
-        source: wgpu::ShaderSource::Wgsl(
-            include_str!("../../../shaders/particles.wgsl").into(),
-        ),
+        source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/particles.wgsl").into()),
     });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("particle-pipeline-layout"),
@@ -386,7 +397,12 @@ impl Ground {
             .map_err(|e| JsValue::from_str(&format!("request_device failed: {e}")))?;
 
         let caps = surface.get_capabilities(&adapter);
-        let format = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]);
+        let format = caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| f.is_srgb())
+            .unwrap_or(caps.formats[0]);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -431,7 +447,11 @@ impl Ground {
                     wgpu::TexelCopyTextureInfo {
                         texture: &material_tex,
                         mip_level: mip as u32,
-                        origin: wgpu::Origin3d { x: 0, y: 0, z: layer as u32 },
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: layer as u32,
+                        },
                         aspect: wgpu::TextureAspect::All,
                     },
                     data,
@@ -440,7 +460,11 @@ impl Ground {
                         bytes_per_row: Some(4 * msize),
                         rows_per_image: Some(msize),
                     },
-                    wgpu::Extent3d { width: msize, height: msize, depth_or_array_layers: 1 },
+                    wgpu::Extent3d {
+                        width: msize,
+                        height: msize,
+                        depth_or_array_layers: 1,
+                    },
                 );
             }
         }
@@ -467,7 +491,11 @@ impl Ground {
                     wgpu::TexelCopyTextureInfo {
                         texture: &normal_tex,
                         mip_level: mip as u32,
-                        origin: wgpu::Origin3d { x: 0, y: 0, z: layer as u32 },
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: layer as u32,
+                        },
                         aspect: wgpu::TextureAspect::All,
                     },
                     data,
@@ -476,7 +504,11 @@ impl Ground {
                         bytes_per_row: Some(4 * msize),
                         rows_per_image: Some(msize),
                     },
-                    wgpu::Extent3d { width: msize, height: msize, depth_or_array_layers: 1 },
+                    wgpu::Extent3d {
+                        width: msize,
+                        height: msize,
+                        depth_or_array_layers: 1,
+                    },
                 );
             }
         }
@@ -547,8 +579,19 @@ impl Ground {
             ],
         });
         let world_ubuf = make_uniform_buffer(&device);
-        let world_bind = make_world_bind(&device, &world_bind_layout, &world_ubuf, &tex_view, &sampler, &matparams_buf, &normal_view);
-        let world_uni = UniformSlot { buf: world_ubuf, bind: world_bind };
+        let world_bind = make_world_bind(
+            &device,
+            &world_bind_layout,
+            &world_ubuf,
+            &tex_view,
+            &sampler,
+            &matparams_buf,
+            &normal_view,
+        );
+        let world_uni = UniformSlot {
+            buf: world_ubuf,
+            bind: world_bind,
+        };
         let world_pipeline = build_pipeline(&device, &world_bind_layout, format);
 
         let sky_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -564,19 +607,31 @@ impl Ground {
         let sky_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("sky-bind"),
             layout: &sky_layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: sky_buf.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: sky_buf.as_entire_binding(),
+            }],
         });
-        let sky_uni = UniformSlot { buf: sky_buf, bind: sky_bind };
+        let sky_uni = UniformSlot {
+            buf: sky_buf,
+            bind: sky_bind,
+        };
         let sky_pipeline = build_sky_pipeline(&device, &sky_layout, format);
 
         let particle_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("particle-bind-layout"),
-            entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT)],
+            entries: &[uniform_entry(
+                0,
+                wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+            )],
         });
         let particle_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("particle-bind"),
             layout: &particle_layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: world_uni.buf.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: world_uni.buf.as_entire_binding(),
+            }],
         });
         let particle_pipeline = build_particle_pipeline(&device, &particle_layout, format);
 
@@ -588,9 +643,17 @@ impl Ground {
             mapped_at_creation: false,
         });
         let grain_half = 0.5 * sim.grain_size_m();
-        let cube_gpu = upload_mesh(&device, "grain-cube", &mesher::build_cube(grain_half, [1.0, 1.0, 1.0]));
+        let cube_gpu = upload_mesh(
+            &device,
+            "grain-cube",
+            &mesher::build_cube(grain_half, [1.0, 1.0, 1.0]),
+        );
 
-        let world_gpu = upload_mesh(&device, "world", &mesher::build_surface_nets(&sim.world, &mats));
+        let world_gpu = upload_mesh(
+            &device,
+            "world",
+            &mesher::build_surface_nets(&sim.world, &mats),
+        );
         let sea_gpu = upload_mesh(&device, "sea", &mesher::build_sea(&sim.world, &mats));
 
         let eye_height_m = sim.eye_height_m();
@@ -610,10 +673,23 @@ impl Ground {
         };
         Ok(Ground {
             step_clock: crate::clock::StepClock::new(),
-            surface, device, queue, config, depth_view,
-            world_pipeline, world_uni, sky_pipeline, sky_uni,
-            particle_pipeline, particle_bind, particle_instances, cube_gpu,
-            world_gpu, sea_gpu, sim, mats,
+            surface,
+            device,
+            queue,
+            config,
+            depth_view,
+            world_pipeline,
+            world_uni,
+            sky_pipeline,
+            sky_uni,
+            particle_pipeline,
+            particle_bind,
+            particle_instances,
+            cube_gpu,
+            world_gpu,
+            sea_gpu,
+            sim,
+            mats,
             // Start high and back, pitched down at the origin where meteors land — so the impact is in
             // frame from the first moment (Robin: "can see a flicker of a meteor falling but can't see the
             // actual impact"). Free to fly anywhere from there.
@@ -631,7 +707,8 @@ impl Ground {
             eye_height_m,
             last_eye: Vec3::new(0.0, eye_height_m * 3.0, eye_height_m * 3.0),
             atm_tau: crate::atmosphere::rayleigh_tau(
-                crate::planet::earth().surface_pressure() / 101_325.0),
+                crate::planet::earth().surface_pressure() / 101_325.0,
+            ),
             atm_twilight,
             frame: 0,
             max_particles,
@@ -723,7 +800,9 @@ impl Ground {
     /// "aimed at the slope behind it". Returns an EMPTY vec when the ray meets nothing or the point
     /// is behind the near plane, so the crosshair hides.
     pub fn aim_screen(&self) -> Vec<f32> {
-        let Some((hit, on_body)) = self.aim_first_matter() else { return Vec::new() };
+        let Some((hit, on_body)) = self.aim_first_matter() else {
+            return Vec::new();
+        };
         let (vp, _) = self.view_proj();
         let clip = vp * glam::Vec4::new(hit.x, hit.y, hit.z, 1.0);
         if clip.w <= 0.0 {
@@ -733,9 +812,12 @@ impl Ground {
         if ndc.x.abs() > 1.2 || ndc.y.abs() > 1.2 {
             return Vec::new();
         }
-        vec![ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5, if on_body { 1.0 } else { 0.0 }]
+        vec![
+            ndc.x * 0.5 + 0.5,
+            0.5 - ndc.y * 0.5,
+            if on_body { 1.0 } else { 0.0 },
+        ]
     }
-
 
     pub fn resize(&mut self, width: u32, height: u32) {
         self.config.width = width.max(1);
@@ -744,13 +826,17 @@ impl Ground {
         self.depth_view = create_depth_view(&self.device, self.config.width, self.config.height);
     }
 
-    pub fn particle_count(&self) -> usize { self.sim.particle_count() }
+    pub fn particle_count(&self) -> usize {
+        self.sim.particle_count()
+    }
     /// The declared solid bodies, probed for the HUD and the verification rigs:
     /// `[parcels, intact_bonds, com_y, ground_under_com]` for the first body, empty when none is
     /// declared. The HUD showing the same numbers the physics runs on is what lets a rig assert
     /// "the ball rests ON the ground" instead of eyeballing pixels.
     pub fn body_probe(&self) -> Vec<f32> {
-        let Some(b) = self.sim.cohesive_bodies().first() else { return Vec::new() };
+        let Some(b) = self.sim.cohesive_bodies().first() else {
+            return Vec::new();
+        };
         let c = b.agg.com();
         vec![
             b.agg.particles.len() as f32,
@@ -763,12 +849,24 @@ impl Ground {
     /// from the same bond state `body_probe` counts - so the HUD can LEAD with the state instead of
     /// asking the viewer to interpret a raw bond number. Empty when no body is declared.
     pub fn body_verdict(&self) -> String {
-        self.sim.cohesive_bodies().first().map(|b| b.verdict().to_string()).unwrap_or_default()
+        self.sim
+            .cohesive_bodies()
+            .first()
+            .map(|b| b.verdict().to_string())
+            .unwrap_or_default()
     }
-    pub fn created_total(&self) -> usize { self.sim.created_total() }
-    pub fn world_name(&self) -> String { self.sim.name().to_string() }
-    pub fn surface_material(&self) -> String { self.sim.surface_material().to_string() }
-    pub fn eye_altitude_m(&self) -> f32 { self.eye_height_m }
+    pub fn created_total(&self) -> usize {
+        self.sim.created_total()
+    }
+    pub fn world_name(&self) -> String {
+        self.sim.name().to_string()
+    }
+    pub fn surface_material(&self) -> String {
+        self.sim.surface_material().to_string()
+    }
+    pub fn eye_altitude_m(&self) -> f32 {
+        self.eye_height_m
+    }
 
     /// One frame: step the physics, re-mesh if matter changed the ground, then draw sky → world → grains.
     pub fn render(&mut self) -> Result<(), JsValue> {
@@ -789,10 +887,16 @@ impl Ground {
         // Grains that came to rest de-resolved back into voxels, so the surface changed: re-mesh. The
         // crater persists as GEOMETRY — the matter became ground again rather than being deleted.
         if self.sim.take_dirty() {
-            self.world_gpu = upload_mesh(&self.device, "world",
-                &mesher::build_surface_nets(&self.sim.world, &self.mats));
-            self.sea_gpu = upload_mesh(&self.device, "sea",
-                &mesher::build_sea(&self.sim.world, &self.mats));
+            self.world_gpu = upload_mesh(
+                &self.device,
+                "world",
+                &mesher::build_surface_nets(&self.sim.world, &self.mats),
+            );
+            self.sea_gpu = upload_mesh(
+                &self.device,
+                "sea",
+                &mesher::build_sea(&self.sim.world, &self.mats),
+            );
         }
 
         let (view_proj, eye) = self.view_proj();
@@ -805,8 +909,23 @@ impl Ground {
         // else is the physical reason, so this is a report of the sim, not a failure mode being hidden.
         let submerged = self.eye_is_inside_matter(eye);
         let light = Vec3::new(0.45, 0.9, 0.4).normalize();
-        write_uniform(&self.queue, &self.world_uni, view_proj, Mat4::IDENTITY, eye, light);
-        write_sky(&self.queue, &self.sky_uni, view_proj, eye, light, self.atm_tau, self.atm_twilight);
+        write_uniform(
+            &self.queue,
+            &self.world_uni,
+            view_proj,
+            Mat4::IDENTITY,
+            eye,
+            light,
+        );
+        write_sky(
+            &self.queue,
+            &self.sky_uni,
+            view_proj,
+            eye,
+            light,
+            self.atm_tau,
+            self.atm_twilight,
+        );
 
         // **The engine says what it is holding; this scene puts it on the screen.** Grains, meteors in
         // flight and the vapour they have shed all arrive as `Drawn` — physical facts only — and one
@@ -823,17 +942,22 @@ impl Ground {
             .map(|d| GpuParticle::of_matter(d, &self.mats))
             .collect();
         if !inst.is_empty() {
-            self.queue.write_buffer(&self.particle_instances, 0, bytemuck::cast_slice(&inst));
+            self.queue
+                .write_buffer(&self.particle_instances, 0, bytemuck::cast_slice(&inst));
         }
 
         let output = self
             .surface
             .get_current_texture()
             .map_err(|e| JsValue::from_str(&format!("get_current_texture failed: {e}")))?;
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
         let mut enc = self
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ground-frame") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("ground-frame"),
+            });
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("ground-pass"),
@@ -844,7 +968,12 @@ impl Ground {
                         load: wgpu::LoadOp::Clear(if submerged {
                             wgpu::Color::BLACK
                         } else {
-                            wgpu::Color { r: 0.02, g: 0.03, b: 0.05, a: 1.0 }
+                            wgpu::Color {
+                                r: 0.02,
+                                g: 0.03,
+                                b: 0.05,
+                                a: 1.0,
+                            }
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -863,23 +992,26 @@ impl Ground {
             if submerged {
                 // Nothing is drawn: the cleared black IS the view. Cheaper as well as more honest.
             } else {
-            // Sky first (fullscreen, behind everything), then the textured ground, then the grains.
-            pass.set_pipeline(&self.sky_pipeline);
-            pass.set_bind_group(0, &self.sky_uni.bind, &[]);
-            pass.draw(0..3, 0..1);
+                // Sky first (fullscreen, behind everything), then the textured ground, then the grains.
+                pass.set_pipeline(&self.sky_pipeline);
+                pass.set_bind_group(0, &self.sky_uni.bind, &[]);
+                pass.draw(0..3, 0..1);
 
-            pass.set_pipeline(&self.world_pipeline);
-            draw(&mut pass, &self.world_uni, &self.world_gpu);
-            draw(&mut pass, &self.world_uni, &self.sea_gpu);
+                pass.set_pipeline(&self.world_pipeline);
+                draw(&mut pass, &self.world_uni, &self.world_gpu);
+                draw(&mut pass, &self.world_uni, &self.sea_gpu);
 
-            if !inst.is_empty() {
-                pass.set_pipeline(&self.particle_pipeline);
-                pass.set_bind_group(0, &self.particle_bind, &[]);
-                pass.set_vertex_buffer(0, self.cube_gpu.vertex_buf.slice(..));
-                pass.set_vertex_buffer(1, self.particle_instances.slice(..));
-                pass.set_index_buffer(self.cube_gpu.index_buf.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..self.cube_gpu.index_count, 0, 0..inst.len() as u32);
-            }
+                if !inst.is_empty() {
+                    pass.set_pipeline(&self.particle_pipeline);
+                    pass.set_bind_group(0, &self.particle_bind, &[]);
+                    pass.set_vertex_buffer(0, self.cube_gpu.vertex_buf.slice(..));
+                    pass.set_vertex_buffer(1, self.particle_instances.slice(..));
+                    pass.set_index_buffer(
+                        self.cube_gpu.index_buf.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    pass.draw_indexed(0..self.cube_gpu.index_count, 0, 0..inst.len() as u32);
+                }
             }
         }
         self.queue.submit(std::iter::once(enc.finish()));
@@ -894,7 +1026,11 @@ impl Ground {
     /// The look DIRECTION from yaw/pitch (unit).
     fn look_dir(&self) -> Vec3 {
         let cp = self.camera.pitch.cos();
-        Vec3::new(cp * self.camera.yaw.sin(), self.camera.pitch.sin(), cp * self.camera.yaw.cos())
+        Vec3::new(
+            cp * self.camera.yaw.sin(),
+            self.camera.pitch.sin(),
+            cp * self.camera.yaw.cos(),
+        )
     }
 
     /// **Where the camera is aimed** - the user-chosen impact point: the FIRST MATTER the look ray
@@ -963,7 +1099,6 @@ impl Ground {
         best
     }
 
-
     fn eye_and_target(&self) -> (Vec3, Vec3) {
         // A FREE-FLY camera: the eye is wherever the user has walked it, not a point on an orbit around
         // the impact. PHYSICS still decides where it may actually be — the matter shell cannot enter the
@@ -996,7 +1131,11 @@ impl Ground {
         let to = DVec3::new(desired.x as f64, desired.y as f64, desired.z as f64);
         // SWEPT: resolve along the path from last frame to here, so a fast camera cannot tunnel through
         // the thin surface skin in one frame (a grain needs this for the same reason).
-        let from = DVec3::new(self.last_eye.x as f64, self.last_eye.y as f64, self.last_eye.z as f64);
+        let from = DVec3::new(
+            self.last_eye.x as f64,
+            self.last_eye.y as f64,
+            self.last_eye.z as f64,
+        );
         let pos = crate::granular::sweep_shell_resolve(from, to, |sample| {
             self.sim.world.surface_bilinear_grad(sample)
         });
@@ -1027,7 +1166,14 @@ impl Ground {
     }
 }
 
-fn write_uniform(queue: &wgpu::Queue, slot: &UniformSlot, vp: Mat4, model: Mat4, eye: Vec3, light: Vec3) {
+fn write_uniform(
+    queue: &wgpu::Queue,
+    slot: &UniformSlot,
+    vp: Mat4,
+    model: Mat4,
+    eye: Vec3,
+    light: Vec3,
+) {
     let u = Uniforms {
         view_proj: vp.to_cols_array_2d(),
         model: model.to_cols_array_2d(),
@@ -1037,7 +1183,15 @@ fn write_uniform(queue: &wgpu::Queue, slot: &UniformSlot, vp: Mat4, model: Mat4,
     queue.write_buffer(&slot.buf, 0, bytemuck::bytes_of(&u));
 }
 
-fn write_sky(queue: &wgpu::Queue, slot: &UniformSlot, vp: Mat4, eye: Vec3, light: Vec3, tau: [f64; 3], twilight: f64) {
+fn write_sky(
+    queue: &wgpu::Queue,
+    slot: &UniformSlot,
+    vp: Mat4,
+    eye: Vec3,
+    light: Vec3,
+    tau: [f64; 3],
+    twilight: f64,
+) {
     // Sun gain: the exposure the veil is displayed at (atmosphere::SUN_GAIN — shared with the globe, so
     // one atmosphere is shown at one exposure whether you are under it or above it). Recovered from the
     // working terrain scene: with the 1.0 first guessed here the Rayleigh term is far below display range
@@ -1053,4 +1207,3 @@ fn write_sky(queue: &wgpu::Queue, slot: &UniformSlot, vp: Mat4, eye: Vec3, light
     };
     queue.write_buffer(&slot.buf, 0, bytemuck::bytes_of(&u));
 }
-

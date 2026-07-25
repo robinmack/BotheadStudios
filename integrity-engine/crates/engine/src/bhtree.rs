@@ -23,12 +23,12 @@ const BRUTE_BELOW: usize = 1024;
 const MAX_DEPTH: u32 = 28;
 
 struct Node {
-    center: DVec3, // geometric centre of the cubic cell
-    half: f64,     // half-width of the cell
-    com: DVec3,    // centre of mass of the subtree
-    mass: f64,     // total mass of the subtree
+    center: DVec3,        // geometric centre of the cubic cell
+    half: f64,            // half-width of the cell
+    com: DVec3,           // centre of mass of the subtree
+    mass: f64,            // total mass of the subtree
     children: [usize; 8], // arena indices; EMPTY when absent
-    leaf: Vec<usize>,     // particle indices when this is a leaf (usually 1; more only if degenerate)
+    leaf: Vec<usize>, // particle indices when this is a leaf (usually 1; more only if degenerate)
 }
 
 const EMPTY: usize = usize::MAX;
@@ -44,7 +44,12 @@ impl BarnesHut {
     /// Build the tree over `pos`/`mass` with opening angle `theta` and Plummer softening `softening`.
     pub fn build(pos: &[DVec3], mass: &[f64], theta: f64, softening: f64) -> Self {
         let n = pos.len();
-        let mut bh = BarnesHut { nodes: Vec::new(), theta, soft2: softening * softening, n };
+        let mut bh = BarnesHut {
+            nodes: Vec::new(),
+            theta,
+            soft2: softening * softening,
+            n,
+        };
         if n < BRUTE_BELOW {
             return bh; // brute-force mode: no tree
         }
@@ -81,7 +86,14 @@ impl BarnesHut {
             com += pos[i] * mass[i];
         }
         com = if m > 0.0 { com / m } else { center };
-        self.nodes.push(Node { center, half, com, mass: m, children: [EMPTY; 8], leaf: Vec::new() });
+        self.nodes.push(Node {
+            center,
+            half,
+            com,
+            mass: m,
+            children: [EMPTY; 8],
+            leaf: Vec::new(),
+        });
         if idx.len() <= 1 || depth >= MAX_DEPTH {
             self.nodes[id].leaf = idx.to_vec(); // leaf (single body, or a coincident bucket at the cap)
             return id;
@@ -130,7 +142,9 @@ impl BarnesHut {
             }
             return acc;
         }
-        (0..self.n).map(|i| self.accel_on(i, 0, pos, mass)).collect()
+        (0..self.n)
+            .map(|i| self.accel_on(i, 0, pos, mass))
+            .collect()
     }
 
     /// Softened self-gravity on ONLY the `active` bodies (others get `DVec3::ZERO`) — the block-timestep
@@ -156,7 +170,13 @@ impl BarnesHut {
             return acc;
         }
         (0..self.n)
-            .map(|i| if active[i] { self.accel_on(i, 0, pos, mass) } else { DVec3::ZERO })
+            .map(|i| {
+                if active[i] {
+                    self.accel_on(i, 0, pos, mass)
+                } else {
+                    DVec3::ZERO
+                }
+            })
             .collect()
     }
 
@@ -183,7 +203,9 @@ impl BarnesHut {
             }
             return phi;
         }
-        (0..self.n).map(|i| self.potential_on(i, 0, pos, mass)).collect()
+        (0..self.n)
+            .map(|i| self.potential_on(i, 0, pos, mass))
+            .collect()
     }
 
     /// The set's own gravitational binding energy, `−Σ_{i<j} G·mᵢ·mⱼ/√(rᵢⱼ²+s²)`, as `½ Σ mᵢ φᵢ` — the
@@ -263,7 +285,6 @@ mod tests {
         ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
     }
 
-
     // docs/44: the binding energy de-resolution needs. Same discipline as the acceleration test above —
     // the accelerated answer is PINNED to the exact O(k^2) sum, so speed cannot change whether a clump is
     // judged self-bound. Cloud > BRUTE_BELOW so the TREE path actually runs.
@@ -288,7 +309,10 @@ mod tests {
         let bh = BarnesHut::build(&pos, &mass, 0.5, soft);
         let pe = bh.self_potential_energy(&pos, &mass);
 
-        assert!(brute_pe < 0.0, "a real cloud is gravitationally bound to itself");
+        assert!(
+            brute_pe < 0.0,
+            "a real cloud is gravitationally bound to itself"
+        );
         let rel = ((pe - brute_pe) / brute_pe).abs();
         assert!(rel < 0.01, "BH potential energy must match brute force to <1% (got {rel:.5}, {pe:.6e} vs {brute_pe:.6e})");
 
@@ -296,7 +320,10 @@ mod tests {
         // near it. This is what makes the approximation a DECLARED one with a named resolved counterpart.
         let exact = BarnesHut::build(&pos, &mass, 0.0, soft).self_potential_energy(&pos, &mass);
         let rel_exact = ((exact - brute_pe) / brute_pe).abs();
-        assert!(rel_exact < 1.0e-9, "theta=0 must reproduce brute force exactly (got {rel_exact:.3e})");
+        assert!(
+            rel_exact < 1.0e-9,
+            "theta=0 must reproduce brute force exactly (got {rel_exact:.3e})"
+        );
     }
 
     // The brute-force path (n < BRUTE_BELOW) and the tree path must agree about the same small cloud —
@@ -318,7 +345,10 @@ mod tests {
             }
         }
         let pe = BarnesHut::build(&pos, &mass, 0.5, soft).self_potential_energy(&pos, &mass);
-        assert!(((pe - brute_pe) / brute_pe).abs() < 1.0e-12, "brute path must be exact: {pe:.6e} vs {brute_pe:.6e}");
+        assert!(
+            ((pe - brute_pe) / brute_pe).abs() < 1.0e-12,
+            "brute path must be exact: {pe:.6e} vs {brute_pe:.6e}"
+        );
     }
 
     #[test]
@@ -355,8 +385,14 @@ mod tests {
             max_rel = max_rel.max(e);
         }
         let rms = (sum_sq / n as f64).sqrt();
-        assert!(rms < 0.01, "Barnes–Hut (θ=0.5) RMS error must be <1% (got rms {rms:.4}, max {max_rel:.4})");
-        assert!(max_rel < 0.1, "and no single particle wildly off (max {max_rel:.4})");
+        assert!(
+            rms < 0.01,
+            "Barnes–Hut (θ=0.5) RMS error must be <1% (got rms {rms:.4}, max {max_rel:.4})"
+        );
+        assert!(
+            max_rel < 0.1,
+            "and no single particle wildly off (max {max_rel:.4})"
+        );
         // And θ→0 must be ~exact (opens every node ⇒ direct sum).
         let exact = BarnesHut::build(&pos, &mass, 1.0e-6, soft).accelerations(&pos, &mass);
         let mut max_rel_exact = 0.0f64;
@@ -364,6 +400,9 @@ mod tests {
             max_rel_exact =
                 max_rel_exact.max((exact[i] - brute[i]).length() / brute[i].length().max(1.0e-30));
         }
-        assert!(max_rel_exact < 1.0e-9, "θ→0 must recover brute force exactly (got {max_rel_exact:.2e})");
+        assert!(
+            max_rel_exact < 1.0e-9,
+            "θ→0 must recover brute force exactly (got {max_rel_exact:.2e})"
+        );
     }
 }

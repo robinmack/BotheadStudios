@@ -1,0 +1,16 @@
+# Commits that changed FORMATTING ONLY. `git blame` looks straight through these to whoever last changed
+# the code's MEANING — otherwise one sweep re-attributes 39,607 lines to whoever happened to run the
+# formatter, and the history stops being able to answer "who wrote this, and why".
+#
+# GitHub reads this file automatically in its blame view. Locally it is opt-in, ONCE per clone:
+#
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# ONE RULE for anything added here: the commit must contain no decisions — no renames, no reordering, no
+# "while I was in there". A blame-ignored commit is one nobody will ever be shown, so anything hidden
+# inside it is hidden for good. Each entry states how that was verified.
+
+# fmt: apply cargo fmt to the whole tree — FORMATTING ONLY, no behaviour (2026-07-25)
+# Stock rustfmt defaults; 47 files, +7871/-2089. Verified not a behaviour change: 393/393 native before and
+# after, wasm32 clean, and `cargo fmt --check` passes afterwards so the sweep is idempotent.
+e05a7ede58b71c98db10f625c674874130dd51b9

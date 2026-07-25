@@ -55,8 +55,24 @@ const ORBIT_ALT: f64 = 400_000.0;
 
 impl FlyCamera {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(lat: f64, lon: f64, alt_m: f64, yaw: f64, pitch: f64, min_alt: f64, max_alt: f64) -> Self {
-        let mut c = FlyCamera { lat, lon, alt_m, yaw, pitch, min_alt: min_alt.max(0.1), max_alt };
+    pub fn new(
+        lat: f64,
+        lon: f64,
+        alt_m: f64,
+        yaw: f64,
+        pitch: f64,
+        min_alt: f64,
+        max_alt: f64,
+    ) -> Self {
+        let mut c = FlyCamera {
+            lat,
+            lon,
+            alt_m,
+            yaw,
+            pitch,
+            min_alt: min_alt.max(0.1),
+            max_alt,
+        };
         c.alt_m = c.alt_m.clamp(c.min_alt, c.max_alt);
         c
     }
@@ -120,7 +136,17 @@ impl FlyCamera {
         let proj = DMat4::perspective_rh(DEFAULT_FOV_Y, aspect.max(1e-3), near, far);
         let vp_abs = (proj * DMat4::look_at_rh(eye, eye + fwd, up_view)).as_mat4();
         let vp_rel = (proj * DMat4::look_at_rh(DVec3::ZERO, fwd, up_view)).as_mat4();
-        View { vp_abs, vp_rel, eye, up, north, east, alt_disp, horizon, fov_y: DEFAULT_FOV_Y }
+        View {
+            vp_abs,
+            vp_rel,
+            eye,
+            up,
+            north,
+            east,
+            alt_disp,
+            horizon,
+            fov_y: DEFAULT_FOV_Y,
+        }
     }
 
     // --- an externally driven camera ---
@@ -187,11 +213,24 @@ impl FlyCamera {
         // small matter visible when it does.
         let alt_disp = alt_disp.max(1e-9);
         let closest = nearest_m.max(0.01).min(alt_m.max(0.01)) * ds;
-        let near = (closest * 0.2).max(alt_disp * 1.0e-4).clamp(1e-9, 0.5).min(far * 0.5);
+        let near = (closest * 0.2)
+            .max(alt_disp * 1.0e-4)
+            .clamp(1e-9, 0.5)
+            .min(far * 0.5);
         let proj = DMat4::perspective_rh(fov_y.max(1e-3), aspect.max(1e-3), near, far);
         let vp_abs = (proj * DMat4::look_at_rh(eye, eye + fwd, up_view)).as_mat4();
         let vp_rel = (proj * DMat4::look_at_rh(DVec3::ZERO, fwd, up_view)).as_mat4();
-        View { vp_abs, vp_rel, eye, up, north, east, alt_disp, horizon, fov_y }
+        View {
+            vp_abs,
+            vp_rel,
+            eye,
+            up,
+            north,
+            east,
+            alt_disp,
+            horizon,
+            fov_y,
+        }
     }
 
     // --- input deltas ---
@@ -255,9 +294,16 @@ mod tests {
             for v in [up, north, east] {
                 assert!((v.length() - 1.0).abs() < 1e-9, "unit vectors");
             }
-            assert!(up.dot(north).abs() < 1e-9 && up.dot(east).abs() < 1e-9 && north.dot(east).abs() < 1e-9);
+            assert!(
+                up.dot(north).abs() < 1e-9
+                    && up.dot(east).abs() < 1e-9
+                    && north.dot(east).abs() < 1e-9
+            );
             // `up` must equal the surface direction the raster sampler decodes back to this lat/lon.
-            assert!((up.y.asin().to_degrees() - lat).abs() < 1e-6, "up recovers latitude");
+            assert!(
+                (up.y.asin().to_degrees() - lat).abs() < 1e-6,
+                "up recovers latitude"
+            );
         }
     }
 
@@ -283,9 +329,15 @@ mod tests {
         let c = cam();
         let (eye, fwd, _up) = c.view_basis(1.0, 1.0 / 6_371_000.0, 0.0);
         let expect_r = 1.0 + 8_000_000.0 / 6_371_000.0;
-        assert!((eye.length() - expect_r).abs() < 1e-9, "eye radius = r_disp + alt");
+        assert!(
+            (eye.length() - expect_r).abs() < 1e-9,
+            "eye radius = r_disp + alt"
+        );
         // At 8000 km the camera is orbital → forward points inward (toward the planet centre).
-        assert!(fwd.dot(-eye.normalize()) > 0.99, "orbital forward looks down");
+        assert!(
+            fwd.dot(-eye.normalize()) > 0.99,
+            "orbital forward looks down"
+        );
     }
 
     #[test]
@@ -311,9 +363,17 @@ mod tests {
         let mut e = FlyCamera::new(0.0, 0.0, 1000.0, 0.0, 0.0, 1.0, 1e9);
         let quarter = std::f64::consts::FRAC_PI_2 * 6_371_000.0;
         e.move_tangent(0.0, quarter, 6_371_000.0);
-        assert!((e.lon - 90.0).abs() < 1e-6, "quarter-circumference east = 90° lon, got {}", e.lon);
+        assert!(
+            (e.lon - 90.0).abs() < 1e-6,
+            "quarter-circumference east = 90° lon, got {}",
+            e.lon
+        );
         // Longitude wraps.
         e.move_tangent(0.0, 3.0 * quarter, 6_371_000.0);
-        assert!(e.lon > -180.0 && e.lon <= 180.0, "lon stays wrapped, got {}", e.lon);
+        assert!(
+            e.lon > -180.0 && e.lon <= 180.0,
+            "lon stays wrapped, got {}",
+            e.lon
+        );
     }
 }

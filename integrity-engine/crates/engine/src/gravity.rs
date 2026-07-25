@@ -144,7 +144,11 @@ impl MassField {
     #[allow(dead_code)]
     /// Declare which body this patch belongs to. Chainable off [`MassField::build`].
     pub fn on_host(mut self, mass_kg: f64, radius_m: f64, surface_y: f32) -> Self {
-        self.host = Some(HostBody { mass_kg, radius_m, surface_y });
+        self.host = Some(HostBody {
+            mass_kg,
+            radius_m,
+            surface_y,
+        });
         self
     }
 

@@ -16,13 +16,31 @@
 /// Law V — a number that did not come from physics — and usually Law II as well, since the emergent
 /// value already exists elsewhere and the two will drift.
 pub(crate) const MUST_EMERGE: &[(&str, &str)] = &[
-    ("gravity_ms2", "g = GM/R² from the body's real layered mass (planet::LayeredBody::gravity_at)"),
-    ("surface_gravity", "g = GM/R² from the body's real layered mass"),
+    (
+        "gravity_ms2",
+        "g = GM/R² from the body's real layered mass (planet::LayeredBody::gravity_at)",
+    ),
+    (
+        "surface_gravity",
+        "g = GM/R² from the body's real layered mass",
+    ),
     ("gravity", "g = GM/R² from the body's real layered mass"),
-    ("surface_pressure_pa", "P = M_atm·g/(4πR²) — the weight of the declared air column"),
-    ("surface_pressure", "P = M_atm·g/(4πR²) — the weight of the declared air column"),
-    ("escape_velocity", "v_esc = sqrt(2GM/R) from mass and radius"),
-    ("escape_velocity_ms", "v_esc = sqrt(2GM/R) from mass and radius"),
+    (
+        "surface_pressure_pa",
+        "P = M_atm·g/(4πR²) — the weight of the declared air column",
+    ),
+    (
+        "surface_pressure",
+        "P = M_atm·g/(4πR²) — the weight of the declared air column",
+    ),
+    (
+        "escape_velocity",
+        "v_esc = sqrt(2GM/R) from mass and radius",
+    ),
+    (
+        "escape_velocity_ms",
+        "v_esc = sqrt(2GM/R) from mass and radius",
+    ),
 ];
 
 #[cfg(test)]
@@ -60,7 +78,11 @@ mod tests {
                 }
             }
         }
-        assert!(sins.is_empty(), "world files declare emergent quantities:\n  {}", sins.join("\n  "));
+        assert!(
+            sins.is_empty(),
+            "world files declare emergent quantities:\n  {}",
+            sins.join("\n  ")
+        );
     }
 
     /// The guard must be able to fail, or it is decoration that reports safety it never checked.
@@ -70,16 +92,23 @@ mod tests {
         let caught = MUST_EMERGE
             .iter()
             .any(|(k, _)| offending.contains(&format!("\"{k}\"")));
-        assert!(caught, "the guard failed to see a declared gravity — it would pass a Law V violation");
+        assert!(
+            caught,
+            "the guard failed to see a declared gravity — it would pass a Law V violation"
+        );
         let clean = r#"{"name":"ok","type":"ground","ground":{"planet":"earth"}}"#;
         assert!(
-            !MUST_EMERGE.iter().any(|(k, _)| clean.contains(&format!("\"{k}\""))),
+            !MUST_EMERGE
+                .iter()
+                .any(|(k, _)| clean.contains(&format!("\"{k}\""))),
             "naming the planet is how you get gravity honestly; it must not be flagged"
         );
     }
 
     fn collect_json(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
         for e in entries.flatten() {
             let p = e.path();
             if p.is_dir() {
@@ -106,12 +135,28 @@ mod tests {
 ///
 /// None of those were caught by reading the Laws. They are caught by counting.
 pub(crate) const SINGLE_SOURCE: &[(&str, &str, &str)] = &[
-    ("6.371e6", "Earth's radius — assets/bodies/earth.json declares it", "planet"),
-    ("6.96e8", "the Sun's radius — assets/bodies/sun.json declares it", "planet"),
-    ("5.972e24", "Earth's mass — it emerges from the declared layers", "planet"),
+    (
+        "6.371e6",
+        "Earth's radius — assets/bodies/earth.json declares it",
+        "planet",
+    ),
+    (
+        "6.96e8",
+        "the Sun's radius — assets/bodies/sun.json declares it",
+        "planet",
+    ),
+    (
+        "5.972e24",
+        "Earth's mass — it emerges from the declared layers",
+        "planet",
+    ),
     // The exemplar this checker was written for, and which the first version of it did not catch: the
     // display exposure lived in `atmosphere`, in `ground_scene` and again inside `globe.wgsl`.
-    ("22.0", "the display exposure — atmosphere::SUN_GAIN owns it", "atmosphere"),
+    (
+        "22.0",
+        "the display exposure — atmosphere::SUN_GAIN owns it",
+        "atmosphere",
+    ),
     // Universal constants are the easiest of all to retype, because everyone knows them. Found
     // 2026-07-24: G written out in FIVE modules (`gravity`, `planet`, `damage`, `accretion`, `orbit`),
     // and Stefan–Boltzmann in three — one of those as a truncated `5.670e-8`, so a cooling moonlet and an
@@ -122,8 +167,16 @@ pub(crate) const SINGLE_SOURCE: &[(&str, &str, &str)] = &[
     // `pinned_constant_tests::the_shaders_gravitational_constant_matches_the_engines`, the same treatment
     // `EARTH_RADIUS_M` gets: a second copy is honest only if something fails when the two disagree.
     // ("6.674e-11", "Newton's constant G — orbit::G owns it", "orbit"),
-    ("5.670_374_419e-8", "the Stefan–Boltzmann constant σ — blackbody::SIGMA owns it", "blackbody"),
-    ("5.670e-8", "σ again, truncated — ask blackbody::SIGMA, do not retype it shorter", "blackbody"),
+    (
+        "5.670_374_419e-8",
+        "the Stefan–Boltzmann constant σ — blackbody::SIGMA owns it",
+        "blackbody",
+    ),
+    (
+        "5.670e-8",
+        "σ again, truncated — ask blackbody::SIGMA, do not retype it shorter",
+        "blackbody",
+    ),
 ];
 
 /// Shaders count too. A constant duplicated from Rust into WGSL is the same defect and harder to see,
@@ -198,12 +251,14 @@ mod single_source_tests {
         let mut sources: Vec<(String, String)> = Vec::new();
         let mut stack = vec![std::path::PathBuf::from(dir)];
         while let Some(p) = stack.pop() {
-            for e in std::fs::read_dir(&p).expect("engine sources are readable").flatten() {
+            for e in std::fs::read_dir(&p)
+                .expect("engine sources are readable")
+                .flatten()
+            {
                 let path = e.path();
                 if path.is_dir() {
                     stack.push(path);
-                } else if path.extension().is_some_and(|x| x == "rs")
-                    && !path.ends_with("laws.rs")
+                } else if path.extension().is_some_and(|x| x == "rs") && !path.ends_with("laws.rs")
                 {
                     let text = std::fs::read_to_string(&path).unwrap_or_default();
                     sources.push((path.display().to_string(), strip(&text)));
@@ -212,20 +267,33 @@ mod single_source_tests {
         }
         // Shaders as well: a constant copied from Rust into WGSL is the same defect and harder to spot,
         // because the two files never show up in the same diff.
-        for e in std::fs::read_dir(super::SHADER_DIR).expect("shaders are readable").flatten() {
+        for e in std::fs::read_dir(super::SHADER_DIR)
+            .expect("shaders are readable")
+            .flatten()
+        {
             let path = e.path();
             if path.extension().is_some_and(|x| x == "wgsl") {
                 let text = std::fs::read_to_string(&path).unwrap_or_default();
                 sources.push((path.display().to_string(), strip(&text)));
             }
         }
-        assert!(sources.len() > 20, "expected the engine's sources AND its shaders, got {}", sources.len());
+        assert!(
+            sources.len() > 20,
+            "expected the engine's sources AND its shaders, got {}",
+            sources.len()
+        );
 
         // The matcher itself must not cry wolf: a checker that reports the Moon's 1022.0 m/s as a copy
         // of the exposure 22.0 gets switched off, which costs more than the duplicates it catches.
-        assert!(!contains_number("const MOON_SPEED: f64 = 1022.0;", "22.0"), "1022.0 is not 22.0");
+        assert!(
+            !contains_number("const MOON_SPEED: f64 = 1022.0;", "22.0"),
+            "1022.0 is not 22.0"
+        );
         assert!(contains_number("let g = 22.0;", "22.0"), "but 22.0 is");
-        assert!(!contains_number("6.3712e6", "6.371e6"), "6.3712e6 is not 6.371e6");
+        assert!(
+            !contains_number("6.3712e6", "6.371e6"),
+            "6.3712e6 is not 6.371e6"
+        );
 
         for &(literal, what, owner) in super::SINGLE_SOURCE {
             let hits: Vec<&str> = sources
@@ -266,7 +334,10 @@ mod fov_tests {
         let mut checked = 0usize;
         let mut stack = vec![std::path::PathBuf::from(dir)];
         while let Some(p) = stack.pop() {
-            for e in std::fs::read_dir(&p).expect("engine sources are readable").flatten() {
+            for e in std::fs::read_dir(&p)
+                .expect("engine sources are readable")
+                .flatten()
+            {
                 let path = e.path();
                 if path.is_dir() {
                     stack.push(path);
@@ -281,7 +352,9 @@ mod fov_tests {
                     if t.starts_with("//") || t.starts_with("///") {
                         continue; // prose may name a number freely
                     }
-                    let Some(at) = line.find("perspective_rh(") else { continue };
+                    let Some(at) = line.find("perspective_rh(") else {
+                        continue;
+                    };
                     checked += 1;
                     let arg = line[at + "perspective_rh(".len()..].trim_start();
                     if arg.starts_with(|c: char| c.is_ascii_digit()) {
@@ -296,8 +369,15 @@ mod fov_tests {
                 }
             }
         }
-        assert!(checked >= 3, "expected to find the engine's projections, found {checked}");
-        assert!(sins.is_empty(), "field of view written inline at a projection:\n  {}", sins.join("\n  "));
+        assert!(
+            checked >= 3,
+            "expected to find the engine's projections, found {checked}"
+        );
+        assert!(
+            sins.is_empty(),
+            "field of view written inline at a projection:\n  {}",
+            sins.join("\n  ")
+        );
     }
 }
 
@@ -376,7 +456,8 @@ mod scene_purity_tests {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
         for &scene in super::SCENE_MODULES {
             let path = format!("{dir}/{scene}");
-            let text = std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("{scene} must exist"));
+            let text =
+                std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("{scene} must exist"));
             // Strip line comments — prose may name a primitive while explaining that the scene no longer
             // calls it, which is exactly what the migration comments do.
             let code: String = text
@@ -396,8 +477,9 @@ mod scene_purity_tests {
         }
 
         // And the owner really does own it — the primitives ARE called there, or the invariant is vacuous.
-        let owner = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/interaction.rs"))
-            .expect("interaction.rs exists");
+        let owner =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/interaction.rs"))
+                .expect("interaction.rs exists");
         for &prim in super::COLLISION_PRIMITIVES {
             assert!(
                 owner.contains(&format!("{prim}(")),
@@ -435,14 +517,21 @@ mod scene_declares_not_overrides_tests {
     fn no_scene_body_overrides_the_physics_of_the_body_it_names() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/public/worlds");
         let mut checked = 0;
-        for entry in std::fs::read_dir(dir).expect("worlds directory exists").flatten() {
+        for entry in std::fs::read_dir(dir)
+            .expect("worlds directory exists")
+            .flatten()
+        {
             let world = entry.path().join("world.json");
-            let Ok(text) = std::fs::read_to_string(&world) else { continue };
-            let json: serde_json::Value =
-                serde_json::from_str(&text).unwrap_or_else(|e| panic!("{world:?} is malformed: {e}"));
+            let Ok(text) = std::fs::read_to_string(&world) else {
+                continue;
+            };
+            let json: serde_json::Value = serde_json::from_str(&text)
+                .unwrap_or_else(|e| panic!("{world:?} is malformed: {e}"));
             let scene = entry.file_name().to_string_lossy().to_string();
 
-            let Some(bodies) = json.get("bodies").and_then(|b| b.as_array()) else { continue };
+            let Some(bodies) = json.get("bodies").and_then(|b| b.as_array()) else {
+                continue;
+            };
             for b in bodies {
                 let profile = b
                     .get("profile")
@@ -467,6 +556,9 @@ mod scene_declares_not_overrides_tests {
                 }
             }
         }
-        assert!(checked > 0, "expected to check some defined-body instances across the worlds");
+        assert!(
+            checked > 0,
+            "expected to check some defined-body instances across the worlds"
+        );
     }
 }

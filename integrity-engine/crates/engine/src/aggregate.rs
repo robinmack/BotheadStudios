@@ -431,13 +431,22 @@ impl Aggregate {
     ///      hypervelocity — and it does nothing when the energy can't vaporize (an 890-t ball vs a pebble
     ///      just recoils and scars), which is the honest outcome.
     /// Whether the aggregate dents, spalls, or shatters then falls out of its own bond strengths.
-    pub fn deposit_impact(&mut self, materials: &[Material], site: DVec3, momentum: DVec3, energy: f64) {
+    pub fn deposit_impact(
+        &mut self,
+        materials: &[Material],
+        site: DVec3,
+        momentum: DVec3,
+        energy: f64,
+    ) {
         if self.particles.is_empty() {
             return;
         }
         let mat = &materials[self.material];
         let density = (mat.density as f64).max(1.0);
-        let c = mat.thermal.as_ref().map_or(1000.0, |t| t.specific_heat as f64);
+        let c = mat
+            .thermal
+            .as_ref()
+            .map_or(1000.0, |t| t.specific_heat as f64);
         let vapor = crate::damage::vapor_energy_density(mat);
         // Coupling length ~ half the cloud's spread, so the impact concentrates near the contact.
         let lambda = (self.rms_radius() * 0.5).max(1.0);
@@ -448,7 +457,10 @@ impl Aggregate {
             .collect();
         let mut bulk_ke = 0.0;
         if !core.is_empty() {
-            let m_total: f64 = core.iter().map(|&i| self.particles[i].mass.max(1.0e-6)).sum();
+            let m_total: f64 = core
+                .iter()
+                .map(|&i| self.particles[i].mass.max(1.0e-6))
+                .sum();
             let dv = momentum / m_total; // Σ mᵢ·Δv = momentum
             for &i in &core {
                 self.particles[i].vel += dv;
@@ -484,7 +496,9 @@ impl Aggregate {
         // the same flagged stand-in `matter::impact` uses until the EOS carries pressure here.
         let failed: Vec<bool> = e_dep
             .iter()
-            .map(|&e| e > 0.0 && crate::damage::classify(e, mat, e) != crate::damage::PhaseChange::Intact)
+            .map(|&e| {
+                e > 0.0 && crate::damage::classify(e, mat, e) != crate::damage::PhaseChange::Intact
+            })
             .collect();
         if failed.iter().any(|&f| f) {
             for bond in &mut self.bonds {
@@ -540,13 +554,13 @@ impl Aggregate {
     fn accelerations_masked(&mut self, grav_active: Option<&[bool]>) -> Vec<DVec3> {
         let p = &self.particles;
         let mut acc = vec![self.gravity; p.len()]; // uniform external gravity (0 for a rubble pile)
-        // External extended-body gravity source (e.g. the planet the debris falls back to). OUTSIDE the
-        // body: real 1/r² toward its centre — escape vs. fall-back emerges. INSIDE it: Gauss's law — only
-        // the mass interior to r pulls, so for a (uniform-density) planet g(r) = G·M·r/R³, decreasing
-        // LINEARLY to zero at the centre. A point-mass 1/r² inside is WRONG physics: it grows without
-        // bound inward and turns the core into an attractor that swallows anything that ploughs beneath
-        // the surface. `body_r` is the source's physical radius (the crossover), doubling as the scale
-        // that keeps the force finite everywhere.
+                                                   // External extended-body gravity source (e.g. the planet the debris falls back to). OUTSIDE the
+                                                   // body: real 1/r² toward its centre — escape vs. fall-back emerges. INSIDE it: Gauss's law — only
+                                                   // the mass interior to r pulls, so for a (uniform-density) planet g(r) = G·M·r/R³, decreasing
+                                                   // LINEARLY to zero at the centre. A point-mass 1/r² inside is WRONG physics: it grows without
+                                                   // bound inward and turns the core into an attractor that swallows anything that ploughs beneath
+                                                   // the surface. `body_r` is the source's physical radius (the crossover), doubling as the scale
+                                                   // that keeps the force finite everywhere.
         if let Some((src_pos, src_mass, body_r)) = self.gravity_source {
             let r3 = body_r * body_r * body_r;
             for (i, body) in p.iter().enumerate() {
@@ -563,8 +577,8 @@ impl Aggregate {
                 acc[i] += (d / dist) * g_mag;
             }
         }
-                                                   // O(n²) N-body self-gravity — only for a self-gravitating pile. A cohesive solid skips it (its
-                                                   // own gravity is ~0 and this `powf(-1.5)` loop would dominate the frame; see `self_gravity`).
+        // O(n²) N-body self-gravity — only for a self-gravitating pile. A cohesive solid skips it (its
+        // own gravity is ~0 and this `powf(-1.5)` loop would dominate the frame; see `self_gravity`).
         // Positions + masses, materialised ONCE and shared by BOTH accelerated schemes: Barnes–Hut for the
         // long-range self-gravity here, and the neighbour grid for the short-range contact/SPH below
         // (docs/30). Positions are fixed within one accelerations pass.
@@ -623,7 +637,11 @@ impl Aggregate {
                 if dist < 1.0e-9 {
                     continue;
                 }
-                let g_mag = if dist >= br { G * bm / (dist * dist) } else { G * bm * dist / r3 };
+                let g_mag = if dist >= br {
+                    G * bm / (dist * dist)
+                } else {
+                    G * bm * dist / r3
+                };
                 acc[i] += (d / dist) * g_mag;
             }
         }
@@ -646,7 +664,10 @@ impl Aggregate {
                 // pair still contacts (the plume pushes the condensed debris at the interface). Without SPH,
                 // fall back to the legacy overlap gas law. Otherwise a solid pair collides via each grain's
                 // own material mixed (iron-as-iron, docs/23).
-                let (vi, vj) = (self.vapor.get(i) == Some(&true), self.vapor.get(j) == Some(&true));
+                let (vi, vj) = (
+                    self.vapor.get(i) == Some(&true),
+                    self.vapor.get(j) == Some(&true),
+                );
                 if sph_vapor && vi && vj {
                     return;
                 }
@@ -661,7 +682,8 @@ impl Aggregate {
                 };
                 // The law's per-mass output × the reference mass = the pair FORCE; each particle divides by
                 // its own mass — equal & opposite FORCES ⇒ momentum conserved for ANY mass ratio.
-                let f = crate::granular::contact_accel(p[i].pos, p[i].vel, p[j].pos, p[j].vel, law) * m_ref;
+                let f = crate::granular::contact_accel(p[i].pos, p[i].vel, p[j].pos, p[j].vel, law)
+                    * m_ref;
                 acc[i] += f / p[i].mass.max(1.0e-30);
                 acc[j] -= f / p[j].mass.max(1.0e-30);
             });
@@ -684,11 +706,11 @@ impl Aggregate {
                 // it's in free space — no force. Otherwise it's in solid: push it out through the
                 // NEAREST free surface — radially to the planet surface, or through the bowl wall.
                 let pen_sphere = radius - dist; // depth below the planet surface
-                // The boundary is MATTER: it contacts with the one canonical law — normal spring +
-                // damping (incl. the shock closure) + Coulomb FRICTION — not a frictionless radial
-                // push (an oblique impactor was skating over the planet with zero shear, Robin's
-                // "flows over the surface"). Normal direction and penetration pick the nearest free
-                // surface (planet surface or crater-bowl wall).
+                                                // The boundary is MATTER: it contacts with the one canonical law — normal spring +
+                                                // damping (incl. the shock closure) + Coulomb FRICTION — not a frictionless radial
+                                                // push (an oblique impactor was skating over the planet with zero shear, Robin's
+                                                // "flows over the surface"). Normal direction and penetration pick the nearest free
+                                                // surface (planet surface or crater-bowl wall).
                 let (mut n_hat, mut pen) = (d / dist, pen_sphere);
                 let mut in_solid = true;
                 if let Some((hc, hr)) = self.boundary_hole {
@@ -710,9 +732,10 @@ impl Aggregate {
                 let mut f_particle = DVec3::ZERO; // per-mass accel from the boundary, this particle
                 let v_rel = body.vel - self.boundary_vel;
                 let v_n = v_rel.dot(n_hat); // >0 exiting the solid
-                let (c_damp, mu, tan_d, sh, cr) = self.contact.map_or((0.0, 0.0, 0.0, 0.0, 1.0), |c| {
-                    (c.normal_damp, c.friction, c.tangent_damp, c.shock, c.radius)
-                });
+                let (c_damp, mu, tan_d, sh, cr) =
+                    self.contact.map_or((0.0, 0.0, 0.0, 0.0, 1.0), |c| {
+                        (c.normal_damp, c.friction, c.tangent_damp, c.shock, c.radius)
+                    });
                 let c_eff = c_damp + sh * v_n.abs() / (4.0 * cr.max(1.0e-9));
                 let f_n = (stiffness * pen - c_eff * v_n).max(0.0);
                 acc[i] += n_hat * f_n;
@@ -763,7 +786,8 @@ impl Aggregate {
             // Density: self-contribution, then symmetric neighbour sums over the grid (vapor↔vapor within h).
             for i in 0..n {
                 if self.vapor.get(i) == Some(&true) {
-                    rho[i] = (self.particles[i].mass * crate::atmosphere::sph_w(0.0, h)).max(1.0e-30);
+                    rho[i] =
+                        (self.particles[i].mass * crate::atmosphere::sph_w(0.0, h)).max(1.0e-30);
                 }
             }
             sr_grid.for_each_pair(&sr_pos, |i, j| {
@@ -900,8 +924,9 @@ impl Aggregate {
             // (for their closing half-kick). The expensive self-gravity is evaluated for the active set
             // ONLY; short-range forces are still computed for all (cheap, and keeps contact reactions
             // symmetric), but only the active particles' entries are read.
-            let active: Vec<bool> =
-                (0..self.particles.len()).map(|i| (sub + 1) % stride(level[i]) == 0).collect();
+            let active: Vec<bool> = (0..self.particles.len())
+                .map(|i| (sub + 1) % stride(level[i]) == 0)
+                .collect();
             let new_acc = self.accelerations_masked(Some(&active));
             // Second half-kick for the active particles, and refresh ONLY their stored accel — a coasting
             // particle keeps the force from its last kick, so it genuinely coasts (the O(N)→O(N_active) win).
@@ -1078,7 +1103,8 @@ impl Aggregate {
                 // A vapor↔vapor pair interacts by CONSERVATIVE SPH pressure (no contact force above), so it
                 // dissipates NOTHING — skip it, exactly as the force loop does, or we would create heat from
                 // a force that no longer acts (spurious energy, over-heating the plume).
-                if sph_vapor && self.vapor.get(i) == Some(&true) && self.vapor.get(j) == Some(&true) {
+                if sph_vapor && self.vapor.get(i) == Some(&true) && self.vapor.get(j) == Some(&true)
+                {
                     return;
                 }
                 // Specific power × ref mass = the pair's actual dissipated watts; split half-half, each
@@ -1188,18 +1214,41 @@ mod tests {
         // one (the whole point — it must be updated more often), positive/finite for real accel, and an
         // unaccelerated body is unconstrained (∞). Free-fall scaling dt ∝ √(ε/|a|) with velocity 0.
         let ps = vec![
-            Body { pos: DVec3::ZERO, vel: DVec3::ZERO, mass: 1.0 },
-            Body { pos: DVec3::X, vel: DVec3::ZERO, mass: 1.0 },
-            Body { pos: DVec3::X * 2.0, vel: DVec3::ZERO, mass: 1.0 },
+            Body {
+                pos: DVec3::ZERO,
+                vel: DVec3::ZERO,
+                mass: 1.0,
+            },
+            Body {
+                pos: DVec3::X,
+                vel: DVec3::ZERO,
+                mass: 1.0,
+            },
+            Body {
+                pos: DVec3::X * 2.0,
+                vel: DVec3::ZERO,
+                mass: 1.0,
+            },
         ];
         let mut agg = Aggregate::new(ps, 1.0); // softening ε = 1
         agg.self_gravity = false;
         let acc = vec![DVec3::X * 100.0, DVec3::X * 1.0, DVec3::ZERO]; // violent, gentle, none
         let dt = agg.particle_timesteps(&acc, 0.05);
-        assert!(dt[0] < dt[1], "violent particle needs a smaller dt: {} !< {}", dt[0], dt[1]);
-        assert!(dt[0] > 0.0 && dt[0].is_finite(), "positive finite dt for real accel");
+        assert!(
+            dt[0] < dt[1],
+            "violent particle needs a smaller dt: {} !< {}",
+            dt[0],
+            dt[1]
+        );
+        assert!(
+            dt[0] > 0.0 && dt[0].is_finite(),
+            "positive finite dt for real accel"
+        );
         assert!(dt[2].is_infinite(), "unaccelerated body is unconstrained");
-        assert!((dt[1] / dt[0] - 10.0).abs() < 1e-6, "dt ∝ 1/√|a|: 100× accel ⇒ dt/10");
+        assert!(
+            (dt[1] / dt[0] - 10.0).abs() < 1e-6,
+            "dt ∝ 1/√|a|: 100× accel ⇒ dt/10"
+        );
     }
 
     #[test]
@@ -1219,15 +1268,27 @@ mod tests {
         let mut ps = Vec::new();
         for _ in 0..2000 {
             let dir = DVec3::new(rng(), rng(), rng()).normalize_or_zero();
-            ps.push(Body { pos: dir * (5.0e6 + rng().abs() * 5.0e6), vel: DVec3::ZERO, mass: 1.0e18 });
+            ps.push(Body {
+                pos: dir * (5.0e6 + rng().abs() * 5.0e6),
+                vel: DVec3::ZERO,
+                mass: 1.0e18,
+            });
         }
         for _ in 0..200 {
-            ps.push(Body { pos: DVec3::new(rng(), rng(), rng()) * 1.0e5, vel: DVec3::ZERO, mass: 1.0e20 });
+            ps.push(Body {
+                pos: DVec3::new(rng(), rng(), rng()) * 1.0e5,
+                vel: DVec3::ZERO,
+                mass: 1.0e20,
+            });
         }
         let (soft, dt, eta) = (3.0e4, 40.0, 0.05);
         let mut probe = Aggregate::new(ps.clone(), soft);
         let acc0 = probe.accelerations();
-        let tmin = probe.particle_timesteps(&acc0, eta).iter().cloned().fold(f64::INFINITY, f64::min);
+        let tmin = probe
+            .particle_timesteps(&acc0, eta)
+            .iter()
+            .cloned()
+            .fold(f64::INFINITY, f64::min);
         let n_global = (dt / tmin).ceil().max(1.0) as usize;
         let mut g = Aggregate::new(ps.clone(), soft);
         let mut gacc = g.accelerations();
@@ -1268,10 +1329,17 @@ mod tests {
             .zip(&a2.particles)
             .map(|(x, y)| (x.pos - y.pos).length() + (x.vel - y.vel).length())
             .fold(0.0, f64::max);
-        assert!(maxdiff < 1.0e-6, "block == global step at uniform level (diff {maxdiff:.3e})");
+        assert!(
+            maxdiff < 1.0e-6,
+            "block == global step at uniform level (diff {maxdiff:.3e})"
+        );
         // (b) mixed levels, many steps ⇒ energy conserved.
         let energy = |a: &Aggregate| -> f64 {
-            let ke: f64 = a.particles.iter().map(|p| 0.5 * p.mass * p.vel.length_squared()).sum();
+            let ke: f64 = a
+                .particles
+                .iter()
+                .map(|p| 0.5 * p.mass * p.vel.length_squared())
+                .sum();
             let s2 = a.softening * a.softening;
             let mut pe = 0.0;
             for i in 0..a.particles.len() {
@@ -1335,8 +1403,9 @@ mod tests {
         let mut brute = vec![DVec3::ZERO; n];
         for i in 0..n {
             for j in (i + 1)..n {
-                let f = crate::granular::contact_accel(ps[i].pos, ps[i].vel, ps[j].pos, ps[j].vel, &contact)
-                    * m;
+                let f = crate::granular::contact_accel(
+                    ps[i].pos, ps[i].vel, ps[j].pos, ps[j].vel, &contact,
+                ) * m;
                 brute[i] += f / ps[i].mass;
                 brute[j] -= f / ps[j].mass;
             }
@@ -1346,9 +1415,15 @@ mod tests {
             let d = (grid_acc[i] - brute[i]).length();
             max_rel = max_rel.max(d / brute[i].length().max(1.0e-30).max(1.0));
         }
-        assert!(max_rel < 1.0e-9, "grid contact accel must match brute force (max rel err {max_rel:.2e})");
+        assert!(
+            max_rel < 1.0e-9,
+            "grid contact accel must match brute force (max rel err {max_rel:.2e})"
+        );
         // Sanity: the cloud actually has overlaps (else the test proves nothing).
-        assert!(brute.iter().any(|a| a.length() > 1.0), "test cloud must have real contact forces");
+        assert!(
+            brute.iter().any(|a| a.length() > 1.0),
+            "test cloud must have real contact forces"
+        );
     }
 
     #[test]
@@ -1360,7 +1435,9 @@ mod tests {
         let spacing = 1.0;
         let ps = cloud(3, spacing, 1.0); // 27 equal-mass parcels
         let (c, rs, h, t0) = (840.0f64, 100.0f64, 2.5 * spacing, 6000.0f32);
-        let mut agg = Aggregate::new(ps, 0.0).with_vapor_sph(rs, h, 0.0).with_specific_heat(c);
+        let mut agg = Aggregate::new(ps, 0.0)
+            .with_vapor_sph(rs, h, 0.0)
+            .with_specific_heat(c);
         agg.self_gravity = false; // isolate the vapor pressure from gravity
         agg.boil_k = 0.0; // keep parcels flagged vapor as they cool (temp stays > 0)
         agg.temps = vec![t0; agg.particles.len()];
@@ -1369,14 +1446,25 @@ mod tests {
             a.particles.iter().map(|p| p.pos).sum::<DVec3>() / a.particles.len() as f64
         };
         let rms = |a: &Aggregate, cm: DVec3| {
-            (a.particles.iter().map(|p| (p.pos - cm).length_squared()).sum::<f64>()
+            (a.particles
+                .iter()
+                .map(|p| (p.pos - cm).length_squared())
+                .sum::<f64>()
                 / a.particles.len() as f64)
                 .sqrt()
         };
         let energy = |a: &Aggregate| {
-            let ke: f64 = a.particles.iter().map(|p| 0.5 * p.mass * p.vel.length_squared()).sum();
-            let u: f64 =
-                a.particles.iter().zip(a.temps.iter()).map(|(p, &t)| p.mass * c * t as f64).sum();
+            let ke: f64 = a
+                .particles
+                .iter()
+                .map(|p| 0.5 * p.mass * p.vel.length_squared())
+                .sum();
+            let u: f64 = a
+                .particles
+                .iter()
+                .zip(a.temps.iter())
+                .map(|(p, &t)| p.mass * c * t as f64)
+                .sum();
             ke + u
         };
         let cm0 = com(&agg);
@@ -1389,13 +1477,19 @@ mod tests {
         let (r1, e1) = (rms(&agg, cm1), energy(&agg));
         let tmean = agg.temps.iter().map(|&t| t as f64).sum::<f64>() / agg.temps.len() as f64;
         assert!(r1 > 1.05 * r0, "vapor must expand: rms {r0:.3} → {r1:.3}");
-        assert!(tmean < t0 as f64, "vapor must cool as it expands: {t0} → {tmean:.0} K");
+        assert!(
+            tmean < t0 as f64,
+            "vapor must cool as it expands: {t0} → {tmean:.0} K"
+        );
         assert!(
             (e1 - e0).abs() < 0.03 * e0,
             "total energy (KE + internal) conserved: {e0:.4e} → {e1:.4e}"
         );
         let p1: DVec3 = agg.particles.iter().map(|p| p.vel * p.mass).sum();
-        assert!(p1.length() < 1.0e-6 * agg.particles.len() as f64, "momentum stays ~0 (started at rest)");
+        assert!(
+            p1.length() < 1.0e-6 * agg.particles.len() as f64,
+            "momentum stays ~0 (started at rest)"
+        );
     }
 
     /// A small cubic cloud of equal-mass particles, at rest.
@@ -1666,9 +1760,9 @@ mod tests {
             let mut rmax = r0;
             for _ in 0..40_000 {
                 agg.step(&mut acc, 2.0); // ~22 h of flight — long enough to fall back or clearly escape
-                // Surface contact — exactly as the render does it: a fragment can't sink below the surface,
-                // so a bound one arcs back UP to apoapsis and returns to rest on the ground (it never falls
-                // through the singular core). This is the faithful setup; the split is read from it.
+                                         // Surface contact — exactly as the render does it: a fragment can't sink below the surface,
+                                         // so a bound one arcs back UP to apoapsis and returns to rest on the ground (it never falls
+                                         // through the singular core). This is the faithful setup; the split is read from it.
                 let p = &mut agg.particles[0];
                 let r = p.pos.length();
                 if r < r0 {
@@ -1706,7 +1800,11 @@ mod tests {
         let r = (3.0 * m / (4.0 * std::f64::consts::PI * 2900.0)).cbrt();
         let contact = crate::granular::contact_from_material(&mats[basalt], r, m);
         let mut agg = Aggregate::new(
-            vec![Body { pos: DVec3::ZERO, vel: DVec3::ZERO, mass: m }],
+            vec![Body {
+                pos: DVec3::ZERO,
+                vel: DVec3::ZERO,
+                mass: m,
+            }],
             1.0,
         )
         .with_contact(contact, m)
@@ -1722,7 +1820,10 @@ mod tests {
         // (real magma bodies: millennia). Analytic: ΔT = σ·ε·A·T⁴·t/(m·c) ≈ 0.54 K here. What reality
         // adds that we can't resolve yet is the thin cooled CRUST (fast surface fade over days, molten
         // interior) — a surface/interior temperature split, flagged for the roadmap.
-        let expect = crate::blackbody::SIGMA * 0.9 * (4.0 * std::f64::consts::PI * r * r) * 4600.0f64.powi(4)
+        let expect = crate::blackbody::SIGMA
+            * 0.9
+            * (4.0 * std::f64::consts::PI * r * r)
+            * 4600.0f64.powi(4)
             * 14_400.0
             / (m * 840.0);
         let cooled = 4_600.0 - agg.temps[0] as f64;
@@ -1738,11 +1839,23 @@ mod tests {
         let mut agg = Aggregate::new(
             vec![
                 // resting on the surface, co-moving: settled ⇒ drained
-                Body { pos: DVec3::new(0.0, r0 + 1.0e3, 0.0), vel: DVec3::ZERO, mass: 5.0 },
+                Body {
+                    pos: DVec3::new(0.0, r0 + 1.0e3, 0.0),
+                    vel: DVec3::ZERO,
+                    mass: 5.0,
+                },
                 // aloft: stays
-                Body { pos: DVec3::new(0.0, 3.0 * r0, 0.0), vel: DVec3::new(4.0e3, 0.0, 0.0), mass: 7.0 },
+                Body {
+                    pos: DVec3::new(0.0, 3.0 * r0, 0.0),
+                    vel: DVec3::new(4.0e3, 0.0, 0.0),
+                    mass: 7.0,
+                },
                 // near the surface but FAST (falling through): stays
-                Body { pos: DVec3::new(r0 + 1.0e3, 0.0, 0.0), vel: DVec3::new(-2.0e3, 0.0, 0.0), mass: 3.0 },
+                Body {
+                    pos: DVec3::new(r0 + 1.0e3, 0.0, 0.0),
+                    vel: DVec3::new(-2.0e3, 0.0, 0.0),
+                    mass: 3.0,
+                },
             ],
             1.0,
         );
@@ -1750,7 +1863,11 @@ mod tests {
         let (n, m, _l) = agg.drain_settled(DVec3::ZERO, r0, DVec3::ZERO, 30.0, 1.0e6);
         assert_eq!(n, 1, "only the settled particle drains");
         assert!((m - 5.0).abs() < 1e-9, "its mass returns to the planet");
-        assert_eq!(agg.particles.len(), 2, "orbiting + falling matter keeps simulating");
+        assert_eq!(
+            agg.particles.len(),
+            2,
+            "orbiting + falling matter keeps simulating"
+        );
     }
 
     #[test]
@@ -1761,7 +1878,11 @@ mod tests {
         let (m, r0) = (5.972e24_f64, 6.371e6_f64);
         let g_at = |r: f64| -> f64 {
             let mut agg = Aggregate::new(
-                vec![Body { pos: DVec3::new(r, 0.0, 0.0), vel: DVec3::ZERO, mass: 1.0 }],
+                vec![Body {
+                    pos: DVec3::new(r, 0.0, 0.0),
+                    vel: DVec3::ZERO,
+                    mass: 1.0,
+                }],
                 1.0,
             )
             .with_gravity_source(DVec3::ZERO, m, r0);
@@ -1769,10 +1890,22 @@ mod tests {
             agg.accelerations()[0].length()
         };
         let g_surface = G * m / (r0 * r0); // ≈ 9.82 m/s²
-        assert!((g_at(r0) - g_surface).abs() / g_surface < 1e-6, "surface: full 1/r²");
-        assert!((g_at(0.5 * r0) - 0.5 * g_surface).abs() / g_surface < 1e-6, "half depth: HALF g, not 4×");
-        assert!(g_at(1.0e3) < 1.0e-2, "the centre pulls ~nothing — no singular attractor");
-        assert!((g_at(2.0 * r0) - 0.25 * g_surface).abs() / g_surface < 1e-6, "exterior unchanged: 1/r²");
+        assert!(
+            (g_at(r0) - g_surface).abs() / g_surface < 1e-6,
+            "surface: full 1/r²"
+        );
+        assert!(
+            (g_at(0.5 * r0) - 0.5 * g_surface).abs() / g_surface < 1e-6,
+            "half depth: HALF g, not 4×"
+        );
+        assert!(
+            g_at(1.0e3) < 1.0e-2,
+            "the centre pulls ~nothing — no singular attractor"
+        );
+        assert!(
+            (g_at(2.0 * r0) - 0.25 * g_surface).abs() / g_surface < 1e-6,
+            "exterior unchanged: 1/r²"
+        );
     }
 
     #[test]
@@ -1785,7 +1918,11 @@ mod tests {
         let site = DVec3::new(0.0, r0, 0.0); // crater at the north pole
         let probe = |pos: DVec3| -> DVec3 {
             let mut agg = Aggregate::new(
-                vec![Body { pos, vel: DVec3::ZERO, mass: 1.0 }],
+                vec![Body {
+                    pos,
+                    vel: DVec3::ZERO,
+                    mass: 1.0,
+                }],
                 1.0,
             )
             .with_boundary(DVec3::ZERO, r0, 1.0)
@@ -1795,14 +1932,20 @@ mod tests {
         };
         // Far side, just under the surface: pushed OUT radially (the planet is solid there).
         let a = probe(DVec3::new(0.0, -(r0 - 1.0e5), 0.0));
-        assert!(a.y < -1.0e4, "buried on the far side ⇒ pushed back out through the surface");
+        assert!(
+            a.y < -1.0e4,
+            "buried on the far side ⇒ pushed back out through the surface"
+        );
         // Inside the crater bowl: free space, no boundary force.
         let a = probe(site - DVec3::new(0.0, 0.5 * hole_r, 0.0));
         assert!(a.length() < 1.0e-9, "inside the excavated bowl ⇒ no force");
         // In solid just beyond the bowl wall: pushed INTO the bowl (the nearest free surface).
         let below_wall = site - DVec3::new(0.0, hole_r + 2.0e5, 0.0);
         let a = probe(below_wall);
-        assert!(a.y > 1.0e4, "just under the bowl floor ⇒ pushed up into the bowl");
+        assert!(
+            a.y > 1.0e4,
+            "just under the bowl floor ⇒ pushed up into the bowl"
+        );
     }
 
     #[test]
@@ -1823,8 +1966,16 @@ mod tests {
         };
         let mut agg = Aggregate::new(
             vec![
-                Body { pos: DVec3::new(-1.5, 0.0, 0.0), vel: DVec3::new(2.0, 0.0, 0.0), mass: 1.0 },
-                Body { pos: DVec3::new(1.5, 0.0, 0.0), vel: DVec3::new(-2.0, 0.0, 0.0), mass: 1.0 },
+                Body {
+                    pos: DVec3::new(-1.5, 0.0, 0.0),
+                    vel: DVec3::new(2.0, 0.0, 0.0),
+                    mass: 1.0,
+                },
+                Body {
+                    pos: DVec3::new(1.5, 0.0, 0.0),
+                    vel: DVec3::new(-2.0, 0.0, 0.0),
+                    mass: 1.0,
+                },
             ],
             0.1,
         )
@@ -1841,9 +1992,18 @@ mod tests {
         let p1: DVec3 = agg.particles.iter().map(|b| b.vel * b.mass).sum();
 
         let final_sep = (agg.particles[0].pos - agg.particles[1].pos).length();
-        assert!(min_sep < 2.0 * r, "they actually made contact (min_sep {min_sep:.3})");
-        assert!(min_sep > 0.5 * r, "they did NOT pass through each other (min_sep {min_sep:.3})");
-        assert!((p1 - p0).length() < 1.0e-9, "momentum conserved through the collision");
+        assert!(
+            min_sep < 2.0 * r,
+            "they actually made contact (min_sep {min_sep:.3})"
+        );
+        assert!(
+            min_sep > 0.5 * r,
+            "they did NOT pass through each other (min_sep {min_sep:.3})"
+        );
+        assert!(
+            (p1 - p0).length() < 1.0e-9,
+            "momentum conserved through the collision"
+        );
         assert!(final_sep > 2.0 * r, "they rebounded and separated");
     }
 }
@@ -1875,9 +2035,16 @@ impl Aggregate {
         // Bonds reference particles by index; the incoming cloud's indices shift by however many
         // particles were already here. Left unshifted they would bind the new cloud's fragments to the
         // old cloud's, inventing a solid where two separate impacts happened.
-        self.bonds.extend(other.bonds.into_iter().map(|b| Bond { a: b.a + offset, b: b.b + offset, ..b }));
+        self.bonds.extend(other.bonds.into_iter().map(|b| Bond {
+            a: b.a + offset,
+            b: b.b + offset,
+            ..b
+        }));
 
-        debug_assert!(self.arrays_in_step(), "absorb left the per-particle arrays out of step");
+        debug_assert!(
+            self.arrays_in_step(),
+            "absorb left the per-particle arrays out of step"
+        );
     }
 
     /// Every per-particle array is the same length, or something indexes past its end. Cheap, and checked
@@ -1918,11 +2085,26 @@ mod absorb_tests {
 
         first.absorb(second);
 
-        assert_eq!(first.particles.len(), m0 + m1, "both clouds' fragments survive");
-        assert_eq!(first.temps.len(), first.particles.len(), "temps stay in step");
-        assert_eq!(first.mat_ids.len(), first.particles.len(), "materials stay in step");
+        assert_eq!(
+            first.particles.len(),
+            m0 + m1,
+            "both clouds' fragments survive"
+        );
+        assert_eq!(
+            first.temps.len(),
+            first.particles.len(),
+            "temps stay in step"
+        );
+        assert_eq!(
+            first.mat_ids.len(),
+            first.particles.len(),
+            "materials stay in step"
+        );
         let mass_after: f64 = first.particles.iter().map(|p| p.mass).sum();
-        assert!((mass_after - mass_before).abs() < 1e-9, "and no mass is created or lost");
+        assert!(
+            (mass_after - mass_before).abs() < 1e-9,
+            "and no mass is created or lost"
+        );
     }
 
     /// **Every per-particle array must grow together.** The first version of `absorb` extended three of
@@ -1949,21 +2131,45 @@ mod absorb_tests {
             a.vapor_rho = vec![0.0; n];
             a.source = vec![tag; n];
             // A bond chain, so index offsetting is exercised.
-            a.bonds = (1..n).map(|i| super::Bond { a: i - 1, b: i, rest: 1.0, active: true }).collect();
+            a.bonds = (1..n)
+                .map(|i| super::Bond {
+                    a: i - 1,
+                    b: i,
+                    rest: 1.0,
+                    active: true,
+                })
+                .collect();
             a
         };
         let (mut first, second) = (mk(6, 0), mk(4, 1));
         first.absorb(second);
 
-        assert!(first.arrays_in_step(), "all per-particle arrays are the same length");
+        assert!(
+            first.arrays_in_step(),
+            "all per-particle arrays are the same length"
+        );
         assert_eq!(first.particles.len(), 10);
-        assert_eq!(first.per_grain_contact.len(), 10, "the array the panic came from");
+        assert_eq!(
+            first.per_grain_contact.len(),
+            10,
+            "the array the panic came from"
+        );
 
         // Bonds were offset, so none of the second cloud's bonds reach back into the first — two impacts
         // do not silently become one welded object.
-        assert!(first.bonds.iter().all(|b| b.a < 10 && b.b < 10), "no bond points past the end");
-        let crossing = first.bonds.iter().filter(|b| (b.a < 6) != (b.b < 6)).count();
-        assert_eq!(crossing, 0, "no bond joins the two clouds — they are separate events");
+        assert!(
+            first.bonds.iter().all(|b| b.a < 10 && b.b < 10),
+            "no bond points past the end"
+        );
+        let crossing = first
+            .bonds
+            .iter()
+            .filter(|b| (b.a < 6) != (b.b < 6))
+            .count();
+        assert_eq!(
+            crossing, 0,
+            "no bond joins the two clouds — they are separate events"
+        );
         // And the provenance tags survive, so the two clouds stay distinguishable.
         assert_eq!(first.source.iter().filter(|&&t| t == 0).count(), 6);
         assert_eq!(first.source.iter().filter(|&&t| t == 1).count(), 4);
@@ -2003,16 +2209,31 @@ mod multi_impact_tests {
         let after_two = field.particles.len();
         let mass_two: f64 = field.particles.iter().map(|p| p.mass).sum();
 
-        assert!(after_two > after_one, "a second impactor adds fragments ({after_one} → {after_two})");
+        assert!(
+            after_two > after_one,
+            "a second impactor adds fragments ({after_one} → {after_two})"
+        );
         assert!(
             (mass_two - 2.0 * mass_one).abs() < 1e-6 * mass_one,
-            "and its mass is all there: {mass_two:.3e} vs {:.3e}", 2.0 * mass_one
+            "and its mass is all there: {mass_two:.3e} vs {:.3e}",
+            2.0 * mass_one
         );
         // The two clouds stay distinguishable in space — they are separate events on one body, not a
         // single cloud twice as dense.
-        let spread = field.particles.iter().map(|p| p.pos.x).fold(f64::MIN, f64::max)
-            - field.particles.iter().map(|p| p.pos.x).fold(f64::MAX, f64::min);
-        assert!(spread > 4000.0, "the two impact sites remain distinct ({spread:.0} m apart)");
+        let spread = field
+            .particles
+            .iter()
+            .map(|p| p.pos.x)
+            .fold(f64::MIN, f64::max)
+            - field
+                .particles
+                .iter()
+                .map(|p| p.pos.x)
+                .fold(f64::MAX, f64::min);
+        assert!(
+            spread > 4000.0,
+            "the two impact sites remain distinct ({spread:.0} m apart)"
+        );
     }
 }
 
@@ -2045,7 +2266,9 @@ mod scaling_bench {
     fn debris_step_scaling() {
         let mut s = 0x1234_5678u64;
         let mut rng = || {
-            s ^= s << 13; s ^= s >> 7; s ^= s << 17;
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
             (s >> 40) as f64 / (1u64 << 24) as f64 - 0.5
         };
         let build = |n: usize, rng: &mut dyn FnMut() -> f64| -> Aggregate {
@@ -2054,13 +2277,19 @@ mod scaling_bench {
             for _ in 0..n {
                 let dir = DVec3::new(rng(), rng(), rng()).normalize_or_zero();
                 let r = 1.7e6 * (0.2 + rng().abs());
-                ps.push(Body { pos: dir * r + DVec3::new(6.4e6 + 1.0e7, 0.0, 0.0), vel: DVec3::ZERO, mass: 5.0e19 });
+                ps.push(Body {
+                    pos: dir * r + DVec3::new(6.4e6 + 1.0e7, 0.0, 0.0),
+                    vel: DVec3::ZERO,
+                    mass: 5.0e19,
+                });
             }
             let frag_r = 5.0e4;
             let frag_mass = 5.0e19;
             let contact = crate::granular::contact_from_material(
-                &crate::materials::load()[crate::materials::index_of(&crate::materials::load(), "basalt")],
-                frag_r, frag_mass,
+                &crate::materials::load()
+                    [crate::materials::index_of(&crate::materials::load(), "basalt")],
+                frag_r,
+                frag_mass,
             );
             Aggregate::new(ps, 2.5e4)
                 .with_gravity_source(DVec3::ZERO, 5.972e24, 6.371e6)
@@ -2074,13 +2303,17 @@ mod scaling_bench {
             let mk = |grav: bool, contact: bool, rng: &mut dyn FnMut() -> f64| -> Aggregate {
                 let mut a = build(3000, rng);
                 a.self_gravity = grav;
-                if !contact { a.contact = None; }
+                if !contact {
+                    a.contact = None;
+                }
                 a
             };
             let time_accel = |a: &mut Aggregate| -> f64 {
                 let _ = a.accelerations();
                 let t = Instant::now();
-                for _ in 0..8 { let _ = a.accelerations(); }
+                for _ in 0..8 {
+                    let _ = a.accelerations();
+                }
                 t.elapsed().as_secs_f64() * 1e3 / 8.0
             };
             let both = time_accel(&mut mk(true, true, &mut rng));
@@ -2098,17 +2331,23 @@ mod scaling_bench {
             let masses: Vec<f64> = a.particles.iter().map(|b| b.mass).collect();
             let t = Instant::now();
             let mut bh = crate::bhtree::BarnesHut::build(&sr_pos, &masses, 0.5, a.softening);
-            for _ in 0..7 { bh = crate::bhtree::BarnesHut::build(&sr_pos, &masses, 0.5, a.softening); }
+            for _ in 0..7 {
+                bh = crate::bhtree::BarnesHut::build(&sr_pos, &masses, 0.5, a.softening);
+            }
             let build_ms = t.elapsed().as_secs_f64() * 1e3 / 8.0;
             let t = Instant::now();
-            for _ in 0..8 { let _ = bh.accelerations(&sr_pos, &masses); }
+            for _ in 0..8 {
+                let _ = bh.accelerations(&sr_pos, &masses);
+            }
             let eval_ms = t.elapsed().as_secs_f64() * 1e3 / 8.0;
             println!("    BH build: {build_ms:6.2} ms   BH eval: {eval_ms:6.2} ms");
             // θ sensitivity: a wider opening angle approximates more aggressively → far fewer traversals.
             for theta in [0.5, 0.7, 1.0, 1.5] {
                 let bh = crate::bhtree::BarnesHut::build(&sr_pos, &masses, theta, a.softening);
                 let t = Instant::now();
-                for _ in 0..8 { let _ = bh.accelerations(&sr_pos, &masses); }
+                for _ in 0..8 {
+                    let _ = bh.accelerations(&sr_pos, &masses);
+                }
                 let ev = t.elapsed().as_secs_f64() * 1e3 / 8.0;
                 println!("    θ={theta:.1}: eval {ev:6.2} ms");
             }
@@ -2117,13 +2356,18 @@ mod scaling_bench {
             let mut acc = vec![DVec3::ZERO; sr_pos.len()];
             for i in 0..sr_pos.len() {
                 for j in 0..sr_pos.len() {
-                    if i == j { continue; }
+                    if i == j {
+                        continue;
+                    }
                     let d = sr_pos[j] - sr_pos[i];
                     let r2 = d.length_squared() + a.softening * a.softening;
                     acc[i] += d * (crate::orbit::G * masses[j] / (r2 * r2.sqrt()));
                 }
             }
-            println!("    brute O(N²) direct sum (1 pass, CPU): {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+            println!(
+                "    brute O(N²) direct sum (1 pass, CPU): {:.1} ms",
+                t.elapsed().as_secs_f64() * 1e3
+            );
         }
         for &n in &[1500usize, 3000usize] {
             let mut agg = build(n, &mut rng);
@@ -2131,7 +2375,9 @@ mod scaling_bench {
             let _ = agg.accelerations();
             // One acceleration pass alone.
             let t = Instant::now();
-            for _ in 0..5 { let _ = agg.accelerations(); }
+            for _ in 0..5 {
+                let _ = agg.accelerations();
+            }
             let accel_ms = t.elapsed().as_secs_f64() * 1e3 / 5.0;
             // A full frame's block step (dt matched to the debris frame rate).
             let t = Instant::now();
@@ -2142,8 +2388,14 @@ mod scaling_bench {
             println!("  {n:<5} {block_ms:8.1} ms  {per:9.4} ms   {accel_ms:6.2}ms  {evals:6.1}");
             if prev_per > 0.0 {
                 let ratio = per / prev_per;
-                println!("  → per-particle cost ×{ratio:.2} for 2× N  ({})",
-                    if ratio > 1.5 { "RISING → O(N²) somewhere" } else { "flat → O(N log N), good" });
+                println!(
+                    "  → per-particle cost ×{ratio:.2} for 2× N  ({})",
+                    if ratio > 1.5 {
+                        "RISING → O(N²) somewhere"
+                    } else {
+                        "flat → O(N log N), good"
+                    }
+                );
             }
             prev_per = per;
         }
@@ -2152,14 +2404,21 @@ mod scaling_bench {
         // Skips cleanly with no GPU, leaving the CPU baseline above intact.
         match crate::gpu_host::GpuHost::headless(None) {
             Ok(host) => {
-                println!("  with the GPU direct-sum dispatch attached ({}):", host.info.name);
+                println!(
+                    "  with the GPU direct-sum dispatch attached ({}):",
+                    host.info.name
+                );
                 for &n in &[1500usize, 3000usize] {
                     let mut agg = build(n, &mut rng);
-                    agg.gpu_gravity =
-                        Some(crate::gpu_gravity::GravityField::new(&host.device, &host.queue));
+                    agg.gpu_gravity = Some(crate::gpu_gravity::GravityField::new(
+                        &host.device,
+                        &host.queue,
+                    ));
                     let _ = agg.accelerations(); // warm up (pipeline, first alloc)
                     let t = Instant::now();
-                    for _ in 0..5 { let _ = agg.accelerations(); }
+                    for _ in 0..5 {
+                        let _ = agg.accelerations();
+                    }
                     let accel_ms = t.elapsed().as_secs_f64() * 1e3 / 5.0;
                     let t = Instant::now();
                     agg.step_block(8.0, 0.05);

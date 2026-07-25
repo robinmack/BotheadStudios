@@ -6,6 +6,21 @@ on:
     branches: [main]
 
 jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      # Stock rustfmt defaults — there is no rustfmt.toml, deliberately (see CLAUDE.md rule 2). This job
+      # exists so the tree cannot drift back out of conformance, which is what made the first sweep cost
+      # 47 files. It is the cheapest job here, so it is first.
+      - name: cargo fmt --check
+        working-directory: integrity-engine
+        run: cargo fmt --manifest-path crates/engine/Cargo.toml --all -- --check
+
   tests:
     name: native suite
     runs-on: ubuntu-latest

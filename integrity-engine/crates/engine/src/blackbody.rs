@@ -108,12 +108,21 @@ mod tests {
     #[test]
     fn the_suns_colour_index_recovers_the_suns_temperature() {
         let t = temperature_from_bv(0.65);
-        assert!((t - 5772.0).abs() < 60.0, "B−V 0.65 must give ~5772 K, got {t:.0} K");
+        assert!(
+            (t - 5772.0).abs() < 60.0,
+            "B−V 0.65 must give ~5772 K, got {t:.0} K"
+        );
         // Real stars, real colour indices, real temperatures (within the two-band method's accuracy).
         let vega = temperature_from_bv(0.00); // A0V, ~9,600 K
-        assert!((8_500.0..11_500.0).contains(&vega), "Vega (B−V 0) ≈ 9,600 K, got {vega:.0}");
+        assert!(
+            (8_500.0..11_500.0).contains(&vega),
+            "Vega (B−V 0) ≈ 9,600 K, got {vega:.0}"
+        );
         let betelgeuse = temperature_from_bv(1.85); // M1-2Ia, ~3,600 K
-        assert!((3_000.0..4_200.0).contains(&betelgeuse), "Betelgeuse (B−V 1.85) ≈ 3,600 K, got {betelgeuse:.0}");
+        assert!(
+            (3_000.0..4_200.0).contains(&betelgeuse),
+            "Betelgeuse (B−V 1.85) ≈ 3,600 K, got {betelgeuse:.0}"
+        );
         // Bluer is always hotter — the relation must be monotonic or the sky's colours scramble.
         let mut prev = f64::INFINITY;
         for i in 0..=40 {
@@ -129,28 +138,52 @@ mod tests {
         // The Sun is WHITE. Its spectrum peaks in the green and the integral lands near the white point —
         // the yellow sun is what our atmosphere does to it, from underneath.
         let sun = blackbody_srgb(5772.0);
-        let spread = sun.iter().cloned().fold(0.0f32, f32::max) - sun.iter().cloned().fold(1.0f32, f32::min);
-        assert!(spread < 0.30, "the Sun should be near-white, got {sun:?} (spread {spread:.2})");
+        let spread =
+            sun.iter().cloned().fold(0.0f32, f32::max) - sun.iter().cloned().fold(1.0f32, f32::min);
+        assert!(
+            spread < 0.30,
+            "the Sun should be near-white, got {sun:?} (spread {spread:.2})"
+        );
 
         // A cool red giant is red-dominant; a hot blue giant is blue-dominant.
         let cool = blackbody_srgb(3000.0);
-        assert!(cool[0] > cool[2] * 1.5, "3,000 K must be red-dominant, got {cool:?}");
+        assert!(
+            cool[0] > cool[2] * 1.5,
+            "3,000 K must be red-dominant, got {cool:?}"
+        );
         let hot = blackbody_srgb(20000.0);
-        assert!(hot[2] > hot[0] * 1.1, "20,000 K must be blue-dominant, got {hot:?}");
+        assert!(
+            hot[2] > hot[0] * 1.1,
+            "20,000 K must be blue-dominant, got {hot:?}"
+        );
 
         // Colour must shift monotonically from red toward blue as temperature climbs — no wobbles.
-        let ratio = |t: f64| { let c = blackbody_srgb(t); c[2] / c[0].max(1e-6) };
+        let ratio = |t: f64| {
+            let c = blackbody_srgb(t);
+            c[2] / c[0].max(1e-6)
+        };
         let mut prev = 0.0;
-        for t in [2000.0, 3000.0, 4000.0, 5000.0, 6500.0, 8000.0, 12000.0, 20000.0, 30000.0] {
+        for t in [
+            2000.0, 3000.0, 4000.0, 5000.0, 6500.0, 8000.0, 12000.0, 20000.0, 30000.0,
+        ] {
             let r = ratio(t);
-            assert!(r > prev, "blue/red must rise with temperature (at {t} K: {r:.3} vs {prev:.3})");
+            assert!(
+                r > prev,
+                "blue/red must rise with temperature (at {t} K: {r:.3} vs {prev:.3})"
+            );
             prev = r;
         }
         // Every channel stays in range, and the brightest is exactly 1 (chromaticity, not brightness).
         for t in [1500.0, 5772.0, 40000.0] {
             let c = blackbody_srgb(t);
-            assert!(c.iter().all(|v| (0.0..=1.0).contains(v)), "in gamut at {t} K: {c:?}");
-            assert!((c.iter().cloned().fold(0.0f32, f32::max) - 1.0).abs() < 1e-6, "normalised at {t} K");
+            assert!(
+                c.iter().all(|v| (0.0..=1.0).contains(v)),
+                "in gamut at {t} K: {c:?}"
+            );
+            assert!(
+                (c.iter().cloned().fold(0.0f32, f32::max) - 1.0).abs() < 1e-6,
+                "normalised at {t} K"
+            );
         }
     }
 
@@ -163,13 +196,16 @@ mod tests {
             let mut nm = 50.0;
             while nm < 4000.0 {
                 let v = planck(nm * 1e-9, t);
-                if v > best.1 { best = (nm, v); }
+                if v > best.1 {
+                    best = (nm, v);
+                }
                 nm += 0.5;
             }
             let expected_nm = 2.897_771_955e-3 / t * 1e9;
             assert!(
                 (best.0 - expected_nm).abs() < expected_nm * 0.01,
-                "Wien peak at {t} K: got {:.1} nm, expected {expected_nm:.1} nm", best.0
+                "Wien peak at {t} K: got {:.1} nm, expected {expected_nm:.1} nm",
+                best.0
             );
         }
     }
@@ -201,21 +237,35 @@ mod glow_tests {
     /// whether a magma ocean reads as a magma ocean.
     #[test]
     fn thermal_glow_follows_stefan_boltzmann() {
-        assert_eq!(thermal_glow_gain(288.0), 0.0, "modern Earth's surface does not glow");
+        assert_eq!(
+            thermal_glow_gain(288.0),
+            0.0,
+            "modern Earth's surface does not glow"
+        );
         assert_eq!(thermal_glow_gain(800.0), 0.0, "the visible-glow floor");
 
         // Proto-Earth's declared magma ocean, against the exposure's own reference.
         let magma = thermal_glow_gain(1900.0);
-        assert!((500.0..600.0).contains(&magma), "1,900 K glows ~547× a sunlit white surface, got {magma:.0}");
+        assert!(
+            (500.0..600.0).contains(&magma),
+            "1,900 K glows ~547× a sunlit white surface, got {magma:.0}"
+        );
 
         // T⁴, exactly: double the temperature, sixteen times the glow.
         let a = thermal_glow_gain(1500.0);
         let b = thermal_glow_gain(3000.0);
-        assert!((b / a - 16.0).abs() < 0.01, "Stefan–Boltzmann is T⁴ (got {:.2}×)", b / a);
+        assert!(
+            (b / a - 16.0).abs() < 0.01,
+            "Stefan–Boltzmann is T⁴ (got {:.2}×)",
+            b / a
+        );
 
         // And the colour comes from the same temperature, through Planck.
         let c = blackbody_srgb(1900.0);
-        assert!(c[0] > c[1] && c[1] > c[2], "1,900 K is orange: red > green > blue, got {c:?}");
+        assert!(
+            c[0] > c[1] && c[1] > c[2],
+            "1,900 K is orange: red > green > blue, got {c:?}"
+        );
     }
 }
 
@@ -252,7 +302,10 @@ mod tonemap_tests {
     #[test]
     fn brightness_is_compressed_but_hue_is_not_invented() {
         let magma = blackbody_srgb(1900.0).map(|v| v as f64);
-        assert!(magma[0] > 0.9 && magma[1] < 0.4 && magma[2] < 0.05, "1,900 K is deep orange: {magma:?}");
+        assert!(
+            magma[0] > 0.9 && magma[1] < 0.4 && magma[2] < 0.05,
+            "1,900 K is deep orange: {magma:?}"
+        );
 
         // At the radiance a magma ocean really emits, against the scene's sunlit exposure.
         let gain = thermal_glow_gain(1900.0) * 22.0;
@@ -260,22 +313,35 @@ mod tonemap_tests {
 
         // The old per-channel form, for the record: green saturates and the hue is gone.
         let per_channel = radiance.map(|v| v / (1.0 + v));
-        assert!(per_channel[1] > 0.99, "per channel, green saturates too ({:.3})", per_channel[1]);
+        assert!(
+            per_channel[1] > 0.99,
+            "per channel, green saturates too ({:.3})",
+            per_channel[1]
+        );
 
         // The shared law keeps the ratio the object actually has.
         let out = tonemap(radiance);
         assert!(out[1] < 0.75, "green must NOT saturate: {out:?}");
-        assert!(out[0] > out[1] && out[1] > out[2], "still orange after tone-mapping: {out:?}");
+        assert!(
+            out[0] > out[1] && out[1] > out[2],
+            "still orange after tone-mapping: {out:?}"
+        );
         // Chromaticity preserved where the gamut allows: G/R must survive the compression.
         let before = magma[1] / magma[0];
         let after = out[1] / out[0];
-        assert!((after - before).abs() < 0.4, "hue roughly preserved ({before:.2} -> {after:.2})");
+        assert!(
+            (after - before).abs() < 0.4,
+            "hue roughly preserved ({before:.2} -> {after:.2})"
+        );
 
         // Dim things are essentially untouched — this is not a look, it is a limit.
         let dim = [0.02, 0.01, 0.005];
         let t = tonemap(dim);
         for i in 0..3 {
-            assert!((t[i] - dim[i]).abs() < 0.02 * dim[i].max(1e-6) + 1e-3, "dim values pass through");
+            assert!(
+                (t[i] - dim[i]).abs() < 0.02 * dim[i].max(1e-6) + 1e-3,
+                "dim values pass through"
+            );
         }
         // Monotonic in brightness, and black stays black.
         assert_eq!(tonemap([0.0; 3]), [0.0; 3]);

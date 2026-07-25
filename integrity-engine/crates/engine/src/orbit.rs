@@ -210,7 +210,13 @@ pub fn swept_min_distance(rel_old: DVec3, rel_new: DVec3) -> f64 {
 /// The conservation laws know the true state at the surface no matter how coarsely we stepped — the
 /// simulation FORECASTS the collision, it doesn't sample it (docs/13). `n_hat` = outward surface normal
 /// at the contact point; the returned velocity has its radial part inward (it is arriving).
-pub fn contact_velocity(rel_old: DVec3, vel_old: DVec3, n_hat: DVec3, r_contact: f64, mu: f64) -> DVec3 {
+pub fn contact_velocity(
+    rel_old: DVec3,
+    vel_old: DVec3,
+    n_hat: DVec3,
+    r_contact: f64,
+    mu: f64,
+) -> DVec3 {
     let r0 = rel_old.length().max(1.0e-9);
     // Energy conservation: speed² at the contact radius.
     let v2 = (vel_old.length_squared() + 2.0 * mu * (1.0 / r_contact - 1.0 / r0)).max(0.0);
@@ -482,8 +488,16 @@ mod tests {
 
         let ran = |moon_vel: DVec3| -> bool {
             let mut bodies = vec![
-                Body { pos: DVec3::ZERO, vel: DVec3::ZERO, mass: m_earth },
-                Body { pos: DVec3::new(d, 0.0, 0.0), vel: moon_vel, mass: m_moon },
+                Body {
+                    pos: DVec3::ZERO,
+                    vel: DVec3::ZERO,
+                    mass: m_earth,
+                },
+                Body {
+                    pos: DVec3::new(d, 0.0, 0.0),
+                    vel: moon_vel,
+                    mass: m_moon,
+                },
             ];
             let mut acc = accelerations(&bodies);
             for _ in 0..4000 {
@@ -499,7 +513,10 @@ mod tests {
         };
 
         // Dropped (velocity cancelled) → radial plunge → the swept CCD forecasts the hit despite tunnelling.
-        assert!(ran(DVec3::ZERO), "a DROPPED moon is caught by the swept CCD in fast-forward");
+        assert!(
+            ran(DVec3::ZERO),
+            "a DROPPED moon is caught by the swept CCD in fast-forward"
+        );
         // Braked to half circular speed → perigee ~0.143 d ≈ 55,000 km → never reaches the surface.
         assert!(
             !ran(DVec3::new(0.0, 0.5 * vc, 0.0)),
@@ -519,8 +536,16 @@ mod tests {
 
         for &time_scale in &[118_000.0_f64, 2_000_000.0] {
             let mut bodies = vec![
-                Body { pos: DVec3::ZERO, vel: DVec3::ZERO, mass: sun_m },
-                Body { pos: DVec3::new(au, 0.0, 0.0), vel: DVec3::new(0.0, earth_helio, 0.0), mass: earth_m },
+                Body {
+                    pos: DVec3::ZERO,
+                    vel: DVec3::ZERO,
+                    mass: sun_m,
+                },
+                Body {
+                    pos: DVec3::new(au, 0.0, 0.0),
+                    vel: DVec3::new(0.0, earth_helio, 0.0),
+                    mass: earth_m,
+                },
                 Body {
                     pos: DVec3::new(au + moon_dist, 0.0, 0.0),
                     vel: DVec3::new(0.0, earth_helio + moon_speed, 0.0),
@@ -555,7 +580,11 @@ mod tests {
                 min_sep,
                 min_sep / contact
             );
-            assert!(impacted, "dropped moon must impact at time_scale {time_scale}; closest was {:.3}× contact", min_sep / contact);
+            assert!(
+                impacted,
+                "dropped moon must impact at time_scale {time_scale}; closest was {:.3}× contact",
+                min_sep / contact
+            );
         }
     }
 
@@ -574,8 +603,16 @@ mod tests {
         let v_true = (2.0 * mu * (1.0 / contact - 1.0 / d)).sqrt();
 
         let mut bodies = vec![
-            Body { pos: DVec3::ZERO, vel: DVec3::ZERO, mass: m_earth },
-            Body { pos: DVec3::new(d, 0.0, 0.0), vel: DVec3::ZERO, mass: m_moon },
+            Body {
+                pos: DVec3::ZERO,
+                vel: DVec3::ZERO,
+                mass: m_earth,
+            },
+            Body {
+                pos: DVec3::new(d, 0.0, 0.0),
+                vel: DVec3::ZERO,
+                mass: m_moon,
+            },
         ];
         let mut acc = accelerations(&bodies);
         let dt = 2.0e6 / 60.0 / 16.0; // the browser's max fast-forward substep
@@ -686,10 +723,14 @@ mod tests {
         // Straight through the centre, −5 → +5: both endpoints are outside (dist 5), yet it clearly hits.
         let t = swept_first_contact(DVec3::new(-5.0, 0.0, 0.0), DVec3::new(5.0, 0.0, 0.0), r_sum)
             .expect("a body tunnelling through the planet must be caught");
-        assert!((t - 0.4).abs() < 1.0e-6, "first contact at the near surface (x=−1 ⇒ t=0.4), got {t}");
+        assert!(
+            (t - 0.4).abs() < 1.0e-6,
+            "first contact at the near surface (x=−1 ⇒ t=0.4), got {t}"
+        );
         // A genuine miss: passes to the side (y = 3, never within r_sum = 1) ⇒ None.
         assert!(
-            swept_first_contact(DVec3::new(-5.0, 3.0, 0.0), DVec3::new(5.0, 3.0, 0.0), r_sum).is_none(),
+            swept_first_contact(DVec3::new(-5.0, 3.0, 0.0), DVec3::new(5.0, 3.0, 0.0), r_sum)
+                .is_none(),
             "a path that clears the planet is not a collision"
         );
         // Already inside at the start ⇒ t = 0.
@@ -722,7 +763,8 @@ pub fn solar_direction_earth_fixed(unix_seconds: f64) -> glam::DVec3 {
     let mean_anomaly = (357.528 + 0.985_600_3 * n).to_radians();
     // Ecliptic longitude: the mean longitude plus the equation of centre (Earth's orbit is an ellipse,
     // so the Sun runs ahead of / behind the mean by up to ~2°).
-    let ecliptic = mean_longitude + (1.915_f64.to_radians()) * mean_anomaly.sin()
+    let ecliptic = mean_longitude
+        + (1.915_f64.to_radians()) * mean_anomaly.sin()
         + (0.020_f64.to_radians()) * (2.0 * mean_anomaly).sin();
     let obliquity = (23.439 - 4.0e-7 * n).to_radians(); // Earth's axial tilt — the reason there are seasons
     let declination = (obliquity.sin() * ecliptic.sin()).asin();
@@ -764,15 +806,18 @@ mod solar_position_tests {
         // precisely three days of the Sun's own 0.39°/day march. The code was right and the fixture was
         // wrong; these are the published times.
         let cases = [
-            (1_710_903_960.0, 0.0, 0.2),    // 2024-03-20 03:06 equinox: Sun over the equator
-            (1_718_916_660.0, 23.44, 0.2),  // 2024-06-20 20:51 solstice: over the Tropic of Cancer
-            (1_727_009_040.0, 0.0, 0.2),    // 2024-09-22 12:44 equinox
+            (1_710_903_960.0, 0.0, 0.2), // 2024-03-20 03:06 equinox: Sun over the equator
+            (1_718_916_660.0, 23.44, 0.2), // 2024-06-20 20:51 solstice: over the Tropic of Cancer
+            (1_727_009_040.0, 0.0, 0.2), // 2024-09-22 12:44 equinox
             (1_734_772_800.0, -23.44, 0.2), // 2024-12-21 09:20 solstice: over the Tropic of Capricorn
         ];
         for (t, want, tol) in cases {
             let d = solar_direction_earth_fixed(t);
             let dec = crate::geo::lat_lon_from_dir(d).0;
-            assert!((dec - want).abs() < tol, "declination at {t}: got {dec:.2}°, want {want}±{tol}");
+            assert!(
+                (dec - want).abs() < tol,
+                "declination at {t}: got {dec:.2}°, want {want}±{tol}"
+            );
             assert!((d.length() - 1.0).abs() < 1e-12, "must be a unit vector");
         }
     }
@@ -782,15 +827,19 @@ mod solar_position_tests {
     #[test]
     fn the_subsolar_point_marches_west_at_fifteen_degrees_an_hour() {
         let noon = 1_718_884_800.0; // 2024-06-20 12:00 UTC
-        let lon_at = |t: f64| {
-            crate::geo::lat_lon_from_dir(solar_direction_earth_fixed(t)).1
-        };
+        let lon_at = |t: f64| crate::geo::lat_lon_from_dir(solar_direction_earth_fixed(t)).1;
         let at_noon = lon_at(noon);
-        assert!(at_noon.abs() < 4.0, "subsolar longitude at 12:00 UTC ≈ Greenwich, got {at_noon:.2}°");
+        assert!(
+            at_noon.abs() < 4.0,
+            "subsolar longitude at 12:00 UTC ≈ Greenwich, got {at_noon:.2}°"
+        );
         // Six hours later it must be ~90° west (allowing the equation of time).
         let later = lon_at(noon + 6.0 * 3600.0);
         let moved = (at_noon - later).rem_euclid(360.0);
-        assert!((moved - 90.0).abs() < 2.0, "6 h ⇒ ~90° west, got {moved:.2}°");
+        assert!(
+            (moved - 90.0).abs() < 2.0,
+            "6 h ⇒ ~90° west, got {moved:.2}°"
+        );
     }
 }
 
@@ -808,7 +857,10 @@ mod periapsis_tests {
         let r = 7.0e6;
         let v_circ = (MU / r).sqrt();
         let q = perigee(DVec3::new(r, 0.0, 0.0), DVec3::new(0.0, v_circ, 0.0), MU).unwrap();
-        assert!((q - r).abs() < 1.0, "a circular orbit's periapsis is its radius (got {q:.0})");
+        assert!(
+            (q - r).abs() < 1.0,
+            "a circular orbit's periapsis is its radius (got {q:.0})"
+        );
 
         // Hyperbolic flyby, well above escape speed, with a real impact parameter.
         let d = 1.0e8;
@@ -816,12 +868,20 @@ mod periapsis_tests {
         let b = 2.0e7; // offset ⇒ angular momentum ⇒ a genuine periapsis
         let q = perigee(DVec3::new(d, b, 0.0), DVec3::new(-v, 0.0, 0.0), MU)
             .expect("a hyperbolic pass has a periapsis");
-        assert!(q > 0.0 && q < b, "periapsis is inside the impact parameter (got {q:.3e}, b {b:.0e})");
+        assert!(
+            q > 0.0 && q < b,
+            "periapsis is inside the impact parameter (got {q:.3e}, b {b:.0e})"
+        );
         // Gravity focuses it: closest approach is nearer than the straight-line miss distance.
-        assert!(q < b * 0.995, "gravitational focusing pulls the pass in (q {q:.4e} vs b {b:.1e})");
+        assert!(
+            q < b * 0.995,
+            "gravitational focusing pulls the pass in (q {q:.4e} vs b {b:.1e})"
+        );
 
         // Aimed straight at the centre there is no periapsis to speak of — it goes in.
-        assert!(perigee(DVec3::new(d, 0.0, 0.0), DVec3::new(-v, 0.0, 0.0), MU).is_none(),
-            "a radial fall has no closest approach; it is a hit");
+        assert!(
+            perigee(DVec3::new(d, 0.0, 0.0), DVec3::new(-v, 0.0, 0.0), MU).is_none(),
+            "a radial fall has no closest approach; it is a hit"
+        );
     }
 }

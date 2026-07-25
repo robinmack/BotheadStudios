@@ -94,7 +94,9 @@ impl GpuGravity {
     pub fn new(device: &wgpu::Device) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("gpu-gravity"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/bh_gravity.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../../../shaders/bh_gravity.wgsl").into(),
+            ),
         });
         // cs_gravity_direct touches only bindings 0 (Params), 1 (bodies), 2 (acc).
         let entry = |binding: u32, read_only: bool, uniform: bool| wgpu::BindGroupLayoutEntry {
@@ -113,7 +115,11 @@ impl GpuGravity {
         };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("gpu-gravity-layout"),
-            entries: &[entry(0, true, true), entry(1, true, false), entry(2, false, false)],
+            entries: &[
+                entry(0, true, true),
+                entry(1, true, false),
+                entry(2, false, false),
+            ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("gpu-gravity-pipeline-layout"),
@@ -225,7 +231,8 @@ impl GpuGravity {
         if pos.is_empty() {
             return Vec::new();
         }
-        let staging = self.dispatch_tree_to_staging(device, queue, pos, mass, softening, theta, bucket_k);
+        let staging =
+            self.dispatch_tree_to_staging(device, queue, pos, mass, softening, theta, bucket_k);
         block_read(device, &staging)
     }
 
@@ -276,12 +283,22 @@ impl GpuGravity {
             label: Some("gravity-bind"),
             layout: &self.layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: params_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: bodies_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: acc_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: bodies_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: acc_buf.as_entire_binding(),
+                },
             ],
         });
-        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let mut enc =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("gravity-dispatch"),
@@ -352,7 +369,10 @@ impl GpuGravity {
                     let u = ((b[k] - lo[k]) / ext).clamp(0.0, 1.0);
                     q[k] = (u * 1024.0).floor().clamp(0.0, 1023.0) as u32;
                 }
-                (expand_bits(q[0]) * 4 + expand_bits(q[1]) * 2 + expand_bits(q[2]), i as u32)
+                (
+                    expand_bits(q[0]) * 4 + expand_bits(q[1]) * 2 + expand_bits(q[2]),
+                    i as u32,
+                )
             })
             .collect();
         // Sort by (code, index): the index tiebreak is Karras's duplicate handling, so coincident
@@ -424,14 +444,38 @@ impl GpuGravity {
                 label: Some("gravity-tree-bind"),
                 layout: &self.tree_layout,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: params_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: acc_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: code_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 5, resource: order_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 6, resource: node_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 8, resource: sbody_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 9, resource: src.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 10, resource: dst.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: params_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: acc_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: code_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: order_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: node_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: sbody_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: src.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 10,
+                        resource: dst.as_entire_binding(),
+                    },
                 ],
             })
         };
@@ -451,7 +495,8 @@ impl GpuGravity {
         };
         let dup_levels = (usize::BITS - (max_run - 1).leading_zeros()) as usize;
         let sweeps = 32 + dup_levels;
-        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let mut enc =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         // One pass per kernel: pass boundaries are the memory barriers between stages, the ONLY
         // cross-invocation ordering WGSL guarantees (which is exactly why the sweep exists). The Karras
         // build covers the L-1 internal nodes, each sweep the whole 2L-1 arena, the traversal one
@@ -474,7 +519,11 @@ impl GpuGravity {
         }
         // Resolve reads mom_src, so bind the buffer the LAST sweep wrote as the source: with an even
         // sweep count the final (odd-indexed) sweep wrote A, whose source-side bind group is bind_ab.
-        run_pass(&self.tree_resolve, if sweeps % 2 == 0 { &bind_ab } else { &bind_ba }, n_nodes as u32);
+        run_pass(
+            &self.tree_resolve,
+            if sweeps % 2 == 0 { &bind_ab } else { &bind_ba },
+            n_nodes as u32,
+        );
         run_pass(&self.tree_walk, &bind_ab, n as u32);
         drop(run_pass);
         let staging = device.create_buffer(&wgpu::BufferDescriptor {
@@ -509,7 +558,9 @@ fn block_read(device: &wgpu::Device, staging: &wgpu::Buffer) -> Vec<DVec3> {
     slice.map_async(wgpu::MapMode::Read, |_| {});
     device.poll(wgpu::Maintain::Wait);
     let raw: Vec<[f32; 4]> = bytemuck::cast_slice(&slice.get_mapped_range()).to_vec();
-    raw.iter().map(|a| DVec3::new(a[0] as f64, a[1] as f64, a[2] as f64)).collect()
+    raw.iter()
+        .map(|a| DVec3::new(a[0] as f64, a[1] as f64, a[2] as f64))
+        .collect()
 }
 
 /// **The live dispatch**: [`GpuGravity`] bound to the device and queue it runs on, attachable to a
@@ -553,7 +604,12 @@ impl GravityField {
 
     /// The self-gravity field for these positions, or `None` when the caller must take the CPU path for
     /// this pass (browser only: first pass, map still in flight, or a mid-flight count change).
-    pub fn accelerations(&mut self, pos: &[DVec3], mass: &[f64], softening: f64) -> Option<Vec<DVec3>> {
+    pub fn accelerations(
+        &mut self,
+        pos: &[DVec3],
+        mass: &[f64],
+        softening: f64,
+    ) -> Option<Vec<DVec3>> {
         if pos.is_empty() {
             return Some(Vec::new());
         }
@@ -594,15 +650,19 @@ impl GravityField {
                 BUCKET_K,
             )
         } else {
-            self.pipeline.dispatch_to_staging(&self.device, &self.queue, pos, mass, softening)
+            self.pipeline
+                .dispatch_to_staging(&self.device, &self.queue, pos, mass, softening)
         };
-        self.ready.store(false, std::sync::atomic::Ordering::Release);
+        self.ready
+            .store(false, std::sync::atomic::Ordering::Release);
         let flag = self.ready.clone();
-        staging.slice(..).map_async(wgpu::MapMode::Read, move |res| {
-            if res.is_ok() {
-                flag.store(true, std::sync::atomic::Ordering::Release);
-            }
-        });
+        staging
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |res| {
+                if res.is_ok() {
+                    flag.store(true, std::sync::atomic::Ordering::Release);
+                }
+            });
         self.staging = Some(staging);
     }
 
@@ -620,7 +680,8 @@ impl GravityField {
                 .collect()
         };
         staging.unmap();
-        self.ready.store(false, std::sync::atomic::Ordering::Release);
+        self.ready
+            .store(false, std::sync::atomic::Ordering::Release);
         Some(out)
     }
 }
@@ -666,7 +727,9 @@ mod tests {
         };
         let n = 1500;
         let pos: Vec<DVec3> = (0..n)
-            .map(|_| DVec3::new(rng(), rng(), rng()).normalize_or_zero() * (1.7e6 * (0.2 + rng().abs())))
+            .map(|_| {
+                DVec3::new(rng(), rng(), rng()).normalize_or_zero() * (1.7e6 * (0.2 + rng().abs()))
+            })
             .collect();
         let mass: Vec<f64> = (0..n).map(|_| 5.0e19).collect();
         let soft = 2.5e4;
@@ -799,8 +862,11 @@ mod tests {
 
         let g = GpuGravity::new(&host.device);
         let gpu = g.accelerations_tree(&host.device, &host.queue, &pos, &mass, soft);
-        let cpu = crate::bhtree::BarnesHut::build(&pos, &mass, 0.5, soft).accelerations(&pos, &mass);
-        assert!(gpu.iter().all(|a| a.x.is_finite() && a.y.is_finite() && a.z.is_finite()));
+        let cpu =
+            crate::bhtree::BarnesHut::build(&pos, &mass, 0.5, soft).accelerations(&pos, &mass);
+        assert!(gpu
+            .iter()
+            .all(|a| a.x.is_finite() && a.y.is_finite() && a.z.is_finite()));
         let rms = rms_rel(&gpu, &cpu);
         assert!(
             rms < 1e-2,
@@ -817,7 +883,10 @@ mod tests {
         // (relaxed atomics do not order the sibling moment reads), which is why the dispatch builds
         // moments with the ping-pong sweep. A rerun differing bit for bit means that race is back.
         let again = g.accelerations_tree(&host.device, &host.queue, &pos, &mass, soft);
-        assert_eq!(gpu, again, "the tree dispatch must be deterministic; the COM race is back");
+        assert_eq!(
+            gpu, again,
+            "the tree dispatch must be deterministic; the COM race is back"
+        );
     }
 
     /// **Theta to zero recovers the direct sum**, the strong structural check from `tools/gpu-bh-verify`
@@ -837,8 +906,15 @@ mod tests {
         let mass: Vec<f64> = bodies.iter().map(|b| b.mass).collect();
 
         let g = GpuGravity::new(&host.device);
-        let opened =
-            g.accelerations_tree_with(&host.device, &host.queue, &pos, &mass, soft, 1.0e-4, BUCKET_K);
+        let opened = g.accelerations_tree_with(
+            &host.device,
+            &host.queue,
+            &pos,
+            &mass,
+            soft,
+            1.0e-4,
+            BUCKET_K,
+        );
         let exact = cpu_direct(&pos, &mass, soft);
         let rms = rms_rel(&opened, &exact);
         assert!(
@@ -864,14 +940,18 @@ mod tests {
         let mass: Vec<f64> = bodies.iter().map(|b| b.mass).collect();
 
         let mut field = GravityField::new(&host.device, &host.queue);
-        let dispatched =
-            field.accelerations(&pos, &mass, soft).expect("native dispatch is synchronous");
-        let direct = field.pipeline.accelerations(&host.device, &host.queue, &pos, &mass, soft);
+        let dispatched = field
+            .accelerations(&pos, &mass, soft)
+            .expect("native dispatch is synchronous");
+        let direct = field
+            .pipeline
+            .accelerations(&host.device, &host.queue, &pos, &mass, soft);
         assert!(
             dispatched.iter().zip(&direct).any(|(a, b)| a != b),
             "identical fields mean the direct sum ran; the tree knee is not routing"
         );
-        let cpu = crate::bhtree::BarnesHut::build(&pos, &mass, 0.5, soft).accelerations(&pos, &mass);
+        let cpu =
+            crate::bhtree::BarnesHut::build(&pos, &mass, 0.5, soft).accelerations(&pos, &mass);
         let rms = rms_rel(&dispatched, &cpu);
         assert!(
             rms < 1e-2,
@@ -902,15 +982,24 @@ mod bench {
         };
         println!("  adapter: {} ({:?})", host.info.name, host.info.backend);
         let mut s = 0xBEEF_1234u64;
-        let mut rng = || { s ^= s << 13; s ^= s >> 7; s ^= s << 17; (s >> 40) as f64 / (1u64 << 24) as f64 - 0.5 };
+        let mut rng = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 40) as f64 / (1u64 << 24) as f64 - 0.5
+        };
         let g = GpuGravity::new(&host.device);
         for &n in &[200usize, 400, 750, 1000, 1500, 2000, 3000, 6000] {
-            let pos: Vec<DVec3> = (0..n).map(|_| DVec3::new(rng(), rng(), rng()).normalize_or_zero() * 1.7e6).collect();
+            let pos: Vec<DVec3> = (0..n)
+                .map(|_| DVec3::new(rng(), rng(), rng()).normalize_or_zero() * 1.7e6)
+                .collect();
             let mass: Vec<f64> = (0..n).map(|_| 5.0e19).collect();
             // Warm up (shader/pipeline, first alloc).
             let _ = g.accelerations(&host.device, &host.queue, &pos, &mass, 2.5e4);
             let t = Instant::now();
-            for _ in 0..10 { let _ = g.accelerations(&host.device, &host.queue, &pos, &mass, 2.5e4); }
+            for _ in 0..10 {
+                let _ = g.accelerations(&host.device, &host.queue, &pos, &mass, 2.5e4);
+            }
             let gpu_ms = t.elapsed().as_secs_f64() * 1e3 / 10.0;
             // CPU Barnes-Hut at the live per-pass cost: build the tree AND evaluate it, like the
             // aggregate's acceleration pass does (positions move every pass, so the tree cannot be reused).
@@ -942,28 +1031,73 @@ mod bench {
         };
         println!("  adapter: {} ({:?})", host.info.name, host.info.backend);
         let mut s = 0x7EE5_EED5u64;
-        let mut rng = || { s ^= s << 13; s ^= s >> 7; s ^= s << 17; (s >> 40) as f64 / (1u64 << 24) as f64 - 0.5 };
+        let mut rng = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 40) as f64 / (1u64 << 24) as f64 - 0.5
+        };
         let g = GpuGravity::new(&host.device);
         let soft = 2.5e4;
-        println!("  {:>7}  {:>10}  {:>10}  {:>10}  {:>10}  {:>11}  {:>8}", "N", "direct ms", "tree K=1", "tree K=8", "tree K=32", "CPU-BH ms", "dir/tree");
+        println!(
+            "  {:>7}  {:>10}  {:>10}  {:>10}  {:>10}  {:>11}  {:>8}",
+            "N", "direct ms", "tree K=1", "tree K=8", "tree K=32", "CPU-BH ms", "dir/tree"
+        );
         for &n in &[3000usize, 6000, 12000, 24000, 48000, 96000, 192000] {
             // The debris-cloud volume distribution (not a shell): the tree's depth and the traversal's
             // divergence depend on the spatial distribution, so measure the one the live path sees.
             let pos: Vec<DVec3> = (0..n)
-                .map(|_| DVec3::new(rng(), rng(), rng()).normalize_or_zero() * (1.7e6 * (0.2 + rng().abs())))
+                .map(|_| {
+                    DVec3::new(rng(), rng(), rng()).normalize_or_zero()
+                        * (1.7e6 * (0.2 + rng().abs()))
+                })
                 .collect();
             let mass: Vec<f64> = vec![5.0e19; n];
             let iters = if n >= 96_000 { 3 } else { 10 };
             let mut time_ms = |f: &mut dyn FnMut()| {
                 f(); // warm up (pipeline, first alloc)
                 let t = Instant::now();
-                for _ in 0..iters { f(); }
+                for _ in 0..iters {
+                    f();
+                }
                 t.elapsed().as_secs_f64() * 1e3 / iters as f64
             };
-            let t_dir = time_ms(&mut || { let _ = g.accelerations(&host.device, &host.queue, &pos, &mass, soft); });
-            let t_k1 = time_ms(&mut || { let _ = g.accelerations_tree_with(&host.device, &host.queue, &pos, &mass, soft, THETA, 1); });
-            let t_k8 = time_ms(&mut || { let _ = g.accelerations_tree_with(&host.device, &host.queue, &pos, &mass, soft, THETA, 8); });
-            let t_k32 = time_ms(&mut || { let _ = g.accelerations_tree_with(&host.device, &host.queue, &pos, &mass, soft, THETA, 32); });
+            let t_dir = time_ms(&mut || {
+                let _ = g.accelerations(&host.device, &host.queue, &pos, &mass, soft);
+            });
+            let t_k1 = time_ms(&mut || {
+                let _ = g.accelerations_tree_with(
+                    &host.device,
+                    &host.queue,
+                    &pos,
+                    &mass,
+                    soft,
+                    THETA,
+                    1,
+                );
+            });
+            let t_k8 = time_ms(&mut || {
+                let _ = g.accelerations_tree_with(
+                    &host.device,
+                    &host.queue,
+                    &pos,
+                    &mass,
+                    soft,
+                    THETA,
+                    8,
+                );
+            });
+            let t_k32 = time_ms(&mut || {
+                let _ = g.accelerations_tree_with(
+                    &host.device,
+                    &host.queue,
+                    &pos,
+                    &mass,
+                    soft,
+                    THETA,
+                    32,
+                );
+            });
             // CPU Barnes-Hut at the live per-pass cost (build + eval), single iteration at large N.
             let cpu_iters = if n >= 48_000 { 1 } else { 3 };
             let t = Instant::now();

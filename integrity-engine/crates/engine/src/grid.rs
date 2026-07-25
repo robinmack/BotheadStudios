@@ -80,7 +80,10 @@ pub fn pairs_within(items: &[(DVec3, f64)], base: f64, slack: f64) -> Vec<(usize
     let mut buckets: HashMap<(u32, i32, i32, i32), Vec<usize>> = HashMap::new();
     for (i, &(p, _)) in items.iter().enumerate() {
         let c = cell_of(p, base, levels[i]);
-        buckets.entry((levels[i], c.x, c.y, c.z)).or_default().push(i);
+        buckets
+            .entry((levels[i], c.x, c.y, c.z))
+            .or_default()
+            .push(i);
     }
     let mut out = Vec::new();
     for (i, &(pi, ri)) in items.iter().enumerate() {
@@ -156,7 +159,10 @@ mod tests {
                 2.0 * r
             );
             if l > 0 {
-                assert!(cell_size_at(base, l - 1) < 2.0 * r, "r={r} could have fitted a finer level");
+                assert!(
+                    cell_size_at(base, l - 1) < 2.0 * r,
+                    "r={r} could have fitted a finer level"
+                );
             }
         }
         // The kart's two scales differ by ~7 levels and coexist without either forcing the other's cell.
@@ -172,20 +178,36 @@ mod tests {
         let mut items = Vec::new();
         let mut s: u64 = 0x1234_5678;
         let mut next = || {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((s >> 33) as f64) / (u32::MAX as f64)
         };
         for k in 0..400 {
             let p = DVec3::new(next() * 4.0, next() * 2.0, next() * 4.0);
             // A few big grains among many small ones — the mixed-granularity case, not a uniform cloud.
-            let r = if k % 17 == 0 { 0.2 + next() * 0.3 } else { 0.005 + next() * 0.02 };
+            let r = if k % 17 == 0 {
+                0.2 + next() * 0.3
+            } else {
+                0.005 + next() * 0.02
+            };
             items.push((p, r));
         }
         let got = norm(pairs_within(&items, 0.01, 0.0));
         let want = norm(brute(&items, 0.0));
-        assert!(!want.is_empty(), "the fixture must actually produce contacts");
-        assert_eq!(got.len(), want.len(), "pair COUNT differs — a pair was missed or double-counted");
-        assert_eq!(got, want, "the hierarchy and brute force disagree on which pairs are in contact");
+        assert!(
+            !want.is_empty(),
+            "the fixture must actually produce contacts"
+        );
+        assert_eq!(
+            got.len(),
+            want.len(),
+            "pair COUNT differs — a pair was missed or double-counted"
+        );
+        assert_eq!(
+            got, want,
+            "the hierarchy and brute force disagree on which pairs are in contact"
+        );
         // No duplicates, stated separately so a double-count cannot hide behind a compensating miss.
         let mut d = got.clone();
         d.dedup();
@@ -207,7 +229,10 @@ mod tests {
         let want = norm(brute(&items, 0.0));
         assert_eq!(got, want, "mixed 50x size ratio disagrees with brute force");
         let touching = got.iter().filter(|&&(i, j)| i == 0 || j == 0).count();
-        assert_eq!(touching, 64, "every pebble on the inner ring must contact the boulder, once each");
+        assert_eq!(
+            touching, 64,
+            "every pebble on the inner ring must contact the boulder, once each"
+        );
     }
 
     /// Cohesion and other laws reach beyond touch, so the query must honour a slack — and still agree
@@ -218,8 +243,18 @@ mod tests {
             (DVec3::new(0.0, 0.0, 0.0), 0.05),
             (DVec3::new(0.13, 0.0, 0.0), 0.05), // 3 cm clear of touch
         ];
-        assert!(pairs_within(&items, 0.02, 0.0).is_empty(), "clear of touch ⇒ no pair");
-        assert_eq!(pairs_within(&items, 0.02, 0.05).len(), 1, "within slack ⇒ found");
-        assert_eq!(norm(pairs_within(&items, 0.02, 0.05)), norm(brute(&items, 0.05)));
+        assert!(
+            pairs_within(&items, 0.02, 0.0).is_empty(),
+            "clear of touch ⇒ no pair"
+        );
+        assert_eq!(
+            pairs_within(&items, 0.02, 0.05).len(),
+            1,
+            "within slack ⇒ found"
+        );
+        assert_eq!(
+            norm(pairs_within(&items, 0.02, 0.05)),
+            norm(brute(&items, 0.05))
+        );
     }
 }

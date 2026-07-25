@@ -138,8 +138,24 @@ computation it defers** (Law V) — recorded in `docs/46`'s ledger, not a quiet 
    - *"One feature branch at a time"* — no longer yours to enforce; more than one is now normal.
    Work worth keeping but not merging (measurements, evidence, a salvaged tool) still becomes an
    **annotated tag** `archive/<name>` whose message records WHY — same commits, zero branch clutter.
-2. **NEVER run `cargo fmt`** — the crate isn't rustfmt-conformant; it reformats the whole tree. Edit by
-   hand. (`CONTRIBUTING.md` says otherwise for outside contributors; the working rule is do-not-run.)
+2. **RUN `cargo fmt`; CI gates on it** (changed 2026-07-25 at Sean's request — this rule said the exact
+   opposite for most of the project's life). The old rule was *"NEVER run `cargo fmt` — the crate isn't
+   rustfmt-conformant, it reformats the whole tree"*: true, and it made the tree drift further from
+   conformant every day, so the cost of ever fixing it only grew. It is formatted now and
+   `cargo fmt --check` is a CI job, so it cannot drift again.
+   **STOCK defaults — there is no `rustfmt.toml`, deliberately.** A custom config was measured first
+   (`max_width=110` + `use_small_heuristics="Max"` reproduced the hand style at net +362 lines instead of
+   +5,782) and rejected: the 110 came from a width distribution dominated by COMMENT lines, which rustfmt
+   never reformats (`wrap_comments` is nightly-only and off). Code lines alone sit at p50=36, **p90=84** —
+   inside the default 100. So the custom width was fitted to prose the formatter ignores. Robin's call:
+   the defaults implement the official Rust Style Guide, most rustfmt options are nightly-only precisely to
+   discourage configuring it, and a newcomer should meet a codebase that looks like every other one.
+   ★ **`git blame` is mitigated, and it was verified.** The sweep is listed in `.git-blame-ignore-revs`.
+   Run **`git config blame.ignoreRevsFile .git-blame-ignore-revs`** once per clone (GitHub does it
+   automatically). Checked on a line rustfmt split: plain blame credits the formatter, blame with the file
+   credits the real authoring commit and still follows the `greenfield-engine/` rename.
+   ★ Anything added to that file must be formatting ONLY. A blame-ignored commit is one nobody will ever be
+   shown, so a decision hidden inside it is hidden for good.
 3. **Test:** `bash scripts/test.sh --fast [filter]` (inner loop) · full `bash scripts/test.sh` before any
    deploy (240 run by default). O(n²) measurement tests are `#[ignore]` (18 of them —
    `hydrostatic.rs` 9, `impact.rs` 8, `aggregate.rs` 1; run `--ignored`). Accelerated code is always pinned

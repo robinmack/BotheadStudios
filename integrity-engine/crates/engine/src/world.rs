@@ -119,8 +119,17 @@ impl World {
         max_top: usize,
         water_mat: Option<usize>,
     ) -> Self {
-        let mut world = World { w, h, d, voxels, max_top, water_mat,
-            displacement: vec![0.0; w * d], demoted: vec![false; w * d], tops: vec![-1; w * d] };
+        let mut world = World {
+            w,
+            h,
+            d,
+            voxels,
+            max_top,
+            water_mat,
+            displacement: vec![0.0; w * d],
+            demoted: vec![false; w * d],
+            tops: vec![-1; w * d],
+        };
         world.rebuild_tops();
         world
     }
@@ -483,9 +492,8 @@ impl World {
         let dir = eye.normalize_or_zero();
         let horiz = (dir.x * dir.x + dir.z * dir.z).sqrt();
         // World bounding-sphere radius (centered): any point past it is guaranteed outside the matter.
-        let bound = ((self.w * self.w + self.h * self.h + self.d * self.d) as f32).sqrt()
-            + clearance
-            + 4.0;
+        let bound =
+            ((self.w * self.w + self.h * self.h + self.d * self.d) as f32).sqrt() + clearance + 4.0;
 
         // Radial boom pull-back: only meaningful when the ray has real horizontal spread AND is not
         // aimed down into the ground (a down-pointing ray only burrows deeper as it lengthens).
@@ -730,7 +738,11 @@ impl World {
     /// `g` is the terrain's surface gravity (m/s²; the emergent ~9.88, the Engine's `surface_g`). This
     /// also subsumes pure disconnection — a floating chunk has no directly-supported voxel to brace from,
     /// so it is returned too. O(voxels).
-    pub fn find_structurally_unsupported(&self, materials: &[Material], g: f32) -> Vec<(i32, i32, i32)> {
+    pub fn find_structurally_unsupported(
+        &self,
+        materials: &[Material],
+        g: f32,
+    ) -> Vec<(i32, i32, i32)> {
         let n = self.w * self.h * self.d;
         // Cantilever reach per material, in voxels (≈ metres): L_max = sqrt(σ_t · t / (ρ · g)), t = 1 m.
         let reach: Vec<f32> = materials
@@ -842,7 +854,11 @@ fn sign(x: f32) -> i32 {
 /// map-driven land/ocean contrast isn't visible locally until that finer dataset arrives (docs/28). Do
 /// not fake continents in the meantime.
 pub fn terrain_height(world_x: f32, world_z: f32) -> f32 {
-    terrain_height_with(&crate::terra::world_def::GroundSurface::default(), world_x, world_z)
+    terrain_height_with(
+        &crate::terra::world_def::GroundSurface::default(),
+        world_x,
+        world_z,
+    )
 }
 
 /// The surface height from a DECLARED terrain (`docs/54`) — the same relief law, its shape given by the
@@ -868,7 +884,10 @@ pub fn terrain_height_with(
 /// column all come from the definition; the LAWS (how strata stack, how water fills, how the
 /// heightfield is sampled) stay in the engine. `generate` is this on the declared defaults, which
 /// reproduce the constants this used to hardcode.
-pub fn generate_from(def: &crate::terra::world_def::GroundSurface, materials: &[Material]) -> World {
+pub fn generate_from(
+    def: &crate::terra::world_def::GroundSurface,
+    materials: &[Material],
+) -> World {
     let (w, h, d) = (def.size_voxels[0], def.size_voxels[1], def.size_voxels[2]);
     // Resolve the declared column to material indices, top-down. The LAST entry fills everything below.
     let bands: Vec<(u16, Option<i32>)> = def
@@ -876,7 +895,10 @@ pub fn generate_from(def: &crate::terra::world_def::GroundSurface, materials: &[
         .iter()
         .map(|st| (index_of(materials, &st.material) as u16 + 1, st.thickness_m))
         .collect();
-    assert!(!bands.is_empty(), "a terrain must declare at least one stratum");
+    assert!(
+        !bands.is_empty(),
+        "a terrain must declare at least one stratum"
+    );
     let water_idx = index_of(materials, "water");
     let water = water_idx as u16 + 1;
 
@@ -891,7 +913,10 @@ pub fn generate_from(def: &crate::terra::world_def::GroundSurface, materials: &[
     let mut y = valley_floor;
     for (_, thickness) in bands.iter().skip(1) {
         match thickness {
-            Some(t) => { y -= t; bottoms.push(y); }
+            Some(t) => {
+                y -= t;
+                bottoms.push(y);
+            }
             None => bottoms.push(i32::MIN), // the last band fills the rest
         }
     }
@@ -936,7 +961,11 @@ pub fn generate_from(def: &crate::terra::world_def::GroundSurface, materials: &[
     }
 
     let mut world = World {
-        w, h, d, voxels, max_top,
+        w,
+        h,
+        d,
+        voxels,
+        max_top,
         water_mat: Some(water_idx),
         displacement: vec![0.0; w * d],
         demoted: vec![false; w * d],
@@ -1047,10 +1076,10 @@ pub fn surface_noise(x: f32, y: f32, z: f32) -> f32 {
         hash2(x0 + dx, (y0 + dy).wrapping_mul(7919) ^ (z0 + dz)) * 2.0 - 1.0
     };
     let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
-    let x00 = lerp(c(0,0,0), c(1,0,0), fx);
-    let x10 = lerp(c(0,1,0), c(1,1,0), fx);
-    let x01 = lerp(c(0,0,1), c(1,0,1), fx);
-    let x11 = lerp(c(0,1,1), c(1,1,1), fx);
+    let x00 = lerp(c(0, 0, 0), c(1, 0, 0), fx);
+    let x10 = lerp(c(0, 1, 0), c(1, 1, 0), fx);
+    let x01 = lerp(c(0, 0, 1), c(1, 0, 1), fx);
+    let x11 = lerp(c(0, 1, 1), c(1, 1, 1), fx);
     lerp(lerp(x00, x10, fy), lerp(x01, x11, fy), fz)
 }
 
@@ -1093,18 +1122,25 @@ pub(crate) fn value_noise(x: f32, z: f32, freq: f32) -> f32 {
 /// result stays in 0..1; the low-frequency term is weighted heaviest to give genuine map-wide relief
 /// (not a flat plateau) rather than only local bumps.
 fn fbm(x: f32, z: f32) -> f32 {
-    fbm_with(&crate::terra::world_def::GroundSurface::default_octaves_pub(), x, z)
+    fbm_with(
+        &crate::terra::world_def::GroundSurface::default_octaves_pub(),
+        x,
+        z,
+    )
 }
 
 /// fbm from DECLARED octaves (`docs/54`). The weights are the file's; the noise is the engine's.
 fn fbm_with(octaves: &[crate::terra::world_def::Octave], x: f32, z: f32) -> f32 {
-    let n: f32 = octaves.iter().map(|o| o.weight * value_noise(x, z, o.frequency)).sum();
+    let n: f32 = octaves
+        .iter()
+        .map(|o| o.weight * value_noise(x, z, o.frequency))
+        .sum();
     n.clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::terra::world_def::{Octave, Stratum, GroundSurface};
+    use crate::terra::world_def::{GroundSurface, Octave, Stratum};
 
     /// **The whole safety of moving the surface into data.** `generate` still hardcodes the world via
     /// the module constants; `generate_from` builds it from a definition. If the declared defaults drift
@@ -1115,8 +1151,14 @@ mod tests {
         let mats = crate::materials::load();
         let hardcoded = super::generate(&mats);
         let declared = super::generate_from(&GroundSurface::default(), &mats);
-        assert_eq!((declared.w, declared.h, declared.d), (hardcoded.w, hardcoded.h, hardcoded.d));
-        assert_eq!(declared.max_top, hardcoded.max_top, "surface envelope must match");
+        assert_eq!(
+            (declared.w, declared.h, declared.d),
+            (hardcoded.w, hardcoded.h, hardcoded.d)
+        );
+        assert_eq!(
+            declared.max_top, hardcoded.max_top,
+            "surface envelope must match"
+        );
         assert_eq!(declared.water_mat, hardcoded.water_mat);
         assert_eq!(
             declared.voxels, hardcoded.voxels,
@@ -1139,29 +1181,52 @@ mod tests {
         let mut flat = GroundSurface::default();
         flat.amplitude_m = 0.0;
         let w = super::generate_from(&flat, &mats);
-        let tops: Vec<i32> = (0..w.w as i32).map(|x| w.surface_top_voxel(x, 0).unwrap_or(-1)).collect();
-        assert!(tops.windows(2).all(|p| p[0] == p[1]), "zero declared amplitude must give a flat surface");
+        let tops: Vec<i32> = (0..w.w as i32)
+            .map(|x| w.surface_top_voxel(x, 0).unwrap_or(-1))
+            .collect();
+        assert!(
+            tops.windows(2).all(|p| p[0] == p[1]),
+            "zero declared amplitude must give a flat surface"
+        );
 
         let mut rough = GroundSurface::default();
-        rough.octaves = vec![Octave { frequency: 0.4, weight: 1.0 }];
+        rough.octaves = vec![Octave {
+            frequency: 0.4,
+            weight: 1.0,
+        }];
         let w = super::generate_from(&rough, &mats);
-        assert_ne!(w.voxels, base.voxels, "different declared octaves must give different relief");
+        assert_ne!(
+            w.voxels, base.voxels,
+            "different declared octaves must give different relief"
+        );
 
         let mut dry = GroundSurface::default();
         dry.sea_level_m = 0.0;
         let w = super::generate_from(&dry, &mats);
         let water = w.water_mat.expect("water material");
-        let wet = w.voxels.iter().filter(|&&v| v > 0 && (v - 1) as usize == water).count();
+        let wet = w
+            .voxels
+            .iter()
+            .filter(|&&v| v > 0 && (v - 1) as usize == water)
+            .count();
         assert_eq!(wet, 0, "a sea level of 0 must leave no water");
 
         let mut basalt_skin = GroundSurface::default();
         basalt_skin.strata = vec![
-            Stratum { material: "basalt".into(), thickness_m: Some(1) },
-            Stratum { material: "iron".into(), thickness_m: None },
+            Stratum {
+                material: "basalt".into(),
+                thickness_m: Some(1),
+            },
+            Stratum {
+                material: "iron".into(),
+                thickness_m: None,
+            },
         ];
         let w = super::generate_from(&basalt_skin, &mats);
         let top = w.surface_top_voxel(10, 10).expect("solid column");
-        let surface_mat = w.material_at(10, top - 1, 10).expect("material at the surface");
+        let surface_mat = w
+            .material_at(10, top - 1, 10)
+            .expect("material at the surface");
         assert_eq!(
             surface_mat,
             crate::materials::index_of(&mats, "basalt"),
@@ -1185,7 +1250,10 @@ mod tests {
                 for x in 0..w.w as i32 {
                     let cached = w.surface_top_voxel(x, z).unwrap_or(-1);
                     let fresh = w.scan_top(x, z);
-                    assert_eq!(cached, fresh, "column ({x},{z}) stale {when}: cached {cached}, real {fresh}");
+                    assert_eq!(
+                        cached, fresh,
+                        "column ({x},{z}) stale {when}: cached {cached}, real {fresh}"
+                    );
                 }
             }
         };
@@ -1199,13 +1267,20 @@ mod tests {
             w.set_voxel(cx, y, cz, None);
         }
         check(&w, "after digging the surface away");
-        assert!(w.surface_top_voxel(cx, cz).unwrap_or(-1) < top, "digging must lower the top");
+        assert!(
+            w.surface_top_voxel(cx, cz).unwrap_or(-1) < top,
+            "digging must lower the top"
+        );
 
         // Put matter back ABOVE the old surface: the top must rise.
         let rock = 0usize;
         w.set_voxel(cx, top + 3, cz, Some(rock));
         check(&w, "after depositing above the surface");
-        assert_eq!(w.surface_top_voxel(cx, cz), Some(top + 4), "deposit must raise the top");
+        assert_eq!(
+            w.surface_top_voxel(cx, cz),
+            Some(top + 4),
+            "deposit must raise the top"
+        );
 
         // Remove a voxel in the MIDDLE of a column (top unchanged) — the case incremental logic gets wrong.
         w.set_voxel(cx, (top / 2).max(1), cz, None);
@@ -1220,7 +1295,11 @@ mod tests {
             w.set_voxel(cx + 2, y, cz, None);
         }
         check(&w, "after excavating a column to nothing");
-        assert_eq!(w.surface_top_voxel(cx + 2, cz), None, "an empty column has no top");
+        assert_eq!(
+            w.surface_top_voxel(cx + 2, cz),
+            None,
+            "an empty column has no top"
+        );
     }
 
     /// The guard must be ABLE to fail: a comparison that cannot detect a stale cache is worse than none,
@@ -1236,8 +1315,16 @@ mod tests {
             let i = w.idx(cx as usize, y, cz as usize);
             w.voxels[i] = 0;
         }
-        assert_eq!(w.surface_top_voxel(cx, cz).unwrap_or(-1), before, "cache is stale by construction here");
-        assert_ne!(w.scan_top(cx, cz), before, "a fresh scan must disagree — otherwise the guard is blind");
+        assert_eq!(
+            w.surface_top_voxel(cx, cz).unwrap_or(-1),
+            before,
+            "cache is stale by construction here"
+        );
+        assert_ne!(
+            w.scan_top(cx, cz),
+            before,
+            "a fresh scan must disagree — otherwise the guard is blind"
+        );
     }
 
     use super::*;
@@ -1255,9 +1342,14 @@ mod tests {
         for &(x, z) in &[(30i32, 30i32), (48, 48), (12, 70), (80, 20)] {
             let before_top = w.surface_top_voxel(x, z).expect("column has ground");
             let voxel_surface = before_top as f32 - 0.5 - c.y;
-            let freed = w.demote_column_to_field(x, z).expect("a generated column is bakeable");
+            let freed = w
+                .demote_column_to_field(x, z)
+                .expect("a generated column is bakeable");
             assert!(freed > 0, "demotion should free the column's voxels");
-            assert!(w.surface_top_voxel(x, z).is_none(), "voxels must be gone after demotion");
+            assert!(
+                w.surface_top_voxel(x, z).is_none(),
+                "voxels must be gone after demotion"
+            );
             // Sample the BULK field at the column centre, in centered coords.
             let after = w.bulk_height(x as f32 + 0.5 - c.x, z as f32 + 0.5 - c.z);
             assert!(
@@ -1266,7 +1358,6 @@ mod tests {
             );
         }
     }
-
 
     /// A patch with no sea, for demotion tests. Water columns are legitimately unbakeable (a sea column
     /// has two surfaces, the field stores one), so a generated world — 7.4% of whose columns are wet,
@@ -1300,9 +1391,17 @@ mod tests {
         let mut w = dry_world(&mats);
         for &(x, z) in &[(30i32, 30i32), (48, 48), (12, 70), (80, 20), (5, 5)] {
             let before = w.ground_top_voxel(x, z).expect("column has ground");
-            assert_eq!(before, w.surface_top_voxel(x, z).unwrap(), "resolved: voxels answer");
-            w.demote_column_to_field(x, z).expect("a generated column is bakeable");
-            assert!(w.surface_top_voxel(x, z).is_none(), "the voxels really are gone");
+            assert_eq!(
+                before,
+                w.surface_top_voxel(x, z).unwrap(),
+                "resolved: voxels answer"
+            );
+            w.demote_column_to_field(x, z)
+                .expect("a generated column is bakeable");
+            assert!(
+                w.surface_top_voxel(x, z).is_none(),
+                "the voxels really are gone"
+            );
             assert_eq!(
                 w.ground_top_voxel(x, z),
                 Some(before),
@@ -1331,7 +1430,11 @@ mod tests {
         );
         let before = w.ground_top_voxel(kept.0, kept.1).unwrap();
         w.demote_column_to_field(kept.0, kept.1).unwrap();
-        assert_eq!(w.ground_top_voxel(kept.0, kept.1), Some(before), "a demoted column still has ground");
+        assert_eq!(
+            w.ground_top_voxel(kept.0, kept.1),
+            Some(before),
+            "a demoted column still has ground"
+        );
     }
 
     /// Re-resolving hands authority back to the voxels. Putting matter into a demoted column must clear
@@ -1366,14 +1469,19 @@ mod tests {
             .flat_map(|z| (0..w.w as i32).map(move |x| (x, z)))
             .map(|(x, z)| w.ground_top_voxel(x, z))
             .collect();
-        let freed = w.demote_patch_to_field().expect("a pristine patch is bakeable");
+        let freed = w
+            .demote_patch_to_field()
+            .expect("a pristine patch is bakeable");
         assert!(freed > 0, "demotion should free the patch's voxels");
         assert_eq!(w.solid_count(), 0, "every column's voxels are gone");
         let after: Vec<Option<i32>> = (0..w.d as i32)
             .flat_map(|z| (0..w.w as i32).map(move |x| (x, z)))
             .map(|(x, z)| w.ground_top_voxel(x, z))
             .collect();
-        assert_eq!(before, after, "the ground moved somewhere in the patch when it de-resolved");
+        assert_eq!(
+            before, after,
+            "the ground moved somewhere in the patch when it de-resolved"
+        );
     }
 
     /// All-or-nothing, and it must be atomic: a refusal has to leave the patch EXACTLY as it was. A
@@ -1387,15 +1495,20 @@ mod tests {
         let top = w.surface_top_voxel(x, z).unwrap();
         w.set_voxel(x, top - 4, z, None); // one cave, anywhere in the 96 m patch
         let solid_before = w.solid_count();
-        assert!(w.demote_patch_to_field().is_none(), "an unbakeable column must refuse the patch");
+        assert!(
+            w.demote_patch_to_field().is_none(),
+            "an unbakeable column must refuse the patch"
+        );
         assert_eq!(
             w.solid_count(),
             solid_before,
             "a refused demotion freed voxels anyway — the patch is now half-resolved and unrenderable"
         );
-        assert!(w.demoted.iter().all(|&d| !d), "and no column may be left flagged as demoted");
+        assert!(
+            w.demoted.iter().all(|&d| !d),
+            "and no column may be left flagged as demoted"
+        );
     }
-
 
     /// **The sea refuses to demote, and that is the finding that blocks the whole-patch trigger.** A
     /// column under water has TWO surfaces — seabed and waterline — and the field stores one per column.
@@ -1413,8 +1526,14 @@ mod tests {
             .flat_map(|z| (0..w.w as i32).map(move |x| (x, z)))
             .find(|&(x, z)| (0..w.h as i32).any(|y| w.material_at(x, y, z) == Some(wm)))
             .expect("some column is under water");
-        assert!(!w.column_is_bakeable(wet.0, wet.1), "a column under the sea is not bakeable");
-        assert!(w.demote_column_to_field(wet.0, wet.1).is_none(), "it must refuse, not strand the sea");
+        assert!(
+            !w.column_is_bakeable(wet.0, wet.1),
+            "a column under the sea is not bakeable"
+        );
+        assert!(
+            w.demote_column_to_field(wet.0, wet.1).is_none(),
+            "it must refuse, not strand the sea"
+        );
         assert!(
             w.demote_patch_to_field().is_none(),
             "and one wet column pins the whole patch — the reason the trigger needs per-column demotion"
@@ -1430,12 +1549,24 @@ mod tests {
         let mut w = generate(&mats);
         let (x, z) = (40, 40);
         let top = w.surface_top_voxel(x, z).unwrap();
-        assert!(w.column_is_bakeable(x, z), "an intact generated column is bakeable");
+        assert!(
+            w.column_is_bakeable(x, z),
+            "an intact generated column is bakeable"
+        );
         // Hollow out a cell well below the surface -> a void the single-height field cannot express.
         w.set_voxel(x, top - 4, z, None);
-        assert!(!w.column_is_bakeable(x, z), "a column with a void is NOT bakeable");
-        assert!(w.demote_column_to_field(x, z).is_none(), "demotion must refuse, not silently flatten");
-        assert!(w.surface_top_voxel(x, z).is_some(), "the refused column keeps its voxels");
+        assert!(
+            !w.column_is_bakeable(x, z),
+            "a column with a void is NOT bakeable"
+        );
+        assert!(
+            w.demote_column_to_field(x, z).is_none(),
+            "demotion must refuse, not silently flatten"
+        );
+        assert!(
+            w.surface_top_voxel(x, z).is_some(),
+            "the refused column keeps its voxels"
+        );
     }
 
     /// T0 starts flat: an untouched world is EXACTLY the procedural relief, so adding the field changed
@@ -1448,7 +1579,11 @@ mod tests {
         for i in 0..25 {
             let (x, z) = (-30.0 + i as f32 * 2.4, 20.0 - i as f32 * 1.7);
             let expect = terrain_height(x + c.x, z + c.z) - c.y;
-            assert_eq!(w.bulk_height(x, z), expect, "T0 must start flat at ({x},{z})");
+            assert_eq!(
+                w.bulk_height(x, z),
+                expect,
+                "T0 must start flat at ({x},{z})"
+            );
         }
     }
 
@@ -1498,8 +1633,14 @@ mod tests {
             const E: f32 = 0.02;
             let fd_x = (hq(x + E, z) - hq(x - E, z)) / (2.0 * E);
             let fd_z = (hq(x, z + E) - hq(x, z - E)) / (2.0 * E);
-            assert!((dhdx - fd_x).abs() < 1e-3, "∂h/∂x {dhdx} vs fd {fd_x} at ({x},{z})");
-            assert!((dhdz - fd_z).abs() < 1e-3, "∂h/∂z {dhdz} vs fd {fd_z} at ({x},{z})");
+            assert!(
+                (dhdx - fd_x).abs() < 1e-3,
+                "∂h/∂x {dhdx} vs fd {fd_x} at ({x},{z})"
+            );
+            assert!(
+                (dhdz - fd_z).abs() < 1e-3,
+                "∂h/∂z {dhdz} vs fd {fd_z} at ({x},{z})"
+            );
         }
     }
 
@@ -1511,7 +1652,10 @@ mod tests {
         let w = stepped_world(&mats);
         // Well inside the left (uniformly 2-deep) half, away from the step at x == 4.
         let (_, dhdx, dhdz) = w.surface_bilinear_grad(Vec3::new(-2.5, 0.0, -1.5));
-        assert!(dhdx.abs() < 1e-6 && dhdz.abs() < 1e-6, "flat ground sloped: {dhdx}, {dhdz}");
+        assert!(
+            dhdx.abs() < 1e-6 && dhdz.abs() < 1e-6,
+            "flat ground sloped: {dhdx}, {dhdz}"
+        );
     }
 
     /// TRACTION — the property the old `vel.x *= 0.5` fudge could not express at any μ.
@@ -1523,7 +1667,10 @@ mod tests {
         let mats = materials::load();
         let mu_ice = mats[materials::index_of(&mats, "ice")].friction_coefficient as f64;
         let mu_rock = mats[materials::index_of(&mats, "basalt")].friction_coefficient as f64;
-        assert!(mu_ice < mu_rock, "test premise: ice must be slipperier than basalt");
+        assert!(
+            mu_ice < mu_rock,
+            "test premise: ice must be slipperier than basalt"
+        );
 
         // A body sliding along a 1:1 slope, driven into it (so there IS a normal impulse to bound
         // friction with). dhdx = 1 ⇒ the surface climbs with +x.
@@ -1587,8 +1734,10 @@ mod tests {
         let len = 6;
         let y0 = 15;
         let w = overhang_world(grass, len, y0);
-        let unsup: std::collections::HashSet<(i32, i32, i32)> =
-            w.find_structurally_unsupported(&mats, g).into_iter().collect();
+        let unsup: std::collections::HashSet<(i32, i32, i32)> = w
+            .find_structurally_unsupported(&mats, g)
+            .into_iter()
+            .collect();
         let z0 = (w.d / 2) as i32;
         // Beam voxels at lateral distance d (= x) from the wall hold iff d ≤ reach; the rest fall.
         for x in 1..=len {
@@ -1615,7 +1764,10 @@ mod tests {
         assert!(reach > 10.0, "basalt holds a real lip (reach {reach:.1} m)");
 
         let len = 6;
-        assert!((len as f32) < reach, "the test overhang is shorter than the reach");
+        assert!(
+            (len as f32) < reach,
+            "the test overhang is shorter than the reach"
+        );
         let y0 = 15;
         let w = overhang_world(basalt, len, y0);
         assert!(
@@ -1656,10 +1808,15 @@ mod tests {
                 }
             }
         }
-        let unsup: std::collections::HashSet<(i32, i32, i32)> =
-            w.find_structurally_unsupported(&mats, g).into_iter().collect();
+        let unsup: std::collections::HashSet<(i32, i32, i32)> = w
+            .find_structurally_unsupported(&mats, g)
+            .into_iter()
+            .collect();
         for e in expected {
-            assert!(unsup.contains(&e), "floating chunk voxel {e:?} must collapse");
+            assert!(
+                unsup.contains(&e),
+                "floating chunk voxel {e:?} must collapse"
+            );
         }
     }
 
@@ -1675,7 +1832,12 @@ mod tests {
         let c = w.center();
 
         // (a) exactly terrain_height, converted to centered coords, at arbitrary (incl. fractional) points.
-        for &(x, z) in &[(10.0f32, 20.0f32), (48.5, 48.5), (0.0, 95.0), (-500.0, 800.0)] {
+        for &(x, z) in &[
+            (10.0f32, 20.0f32),
+            (48.5, 48.5),
+            (0.0, 95.0),
+            (-500.0, 800.0),
+        ] {
             let expect = terrain_height(x + c.x, z + c.z) - c.y;
             assert!(
                 (w.bulk_height(x, z) - expect).abs() < 1e-4,
@@ -1698,7 +1860,10 @@ mod tests {
 
         // (c) far OFF the footprint the bulk still returns finite real terrain (the old patch had none).
         let off = w.bulk_height(5000.0, -3000.0);
-        assert!(off.is_finite(), "bulk terrain must extend off the footprint");
+        assert!(
+            off.is_finite(),
+            "bulk terrain must extend off the footprint"
+        );
     }
 
     #[test]
@@ -1714,7 +1879,10 @@ mod tests {
                 let top = w.surface_top_voxel(x, z).expect("solid column");
                 let th = (terrain_height(x as f32, z as f32).round() as i32)
                     .clamp(GRASS_THICKNESS as i32 + 1, H as i32 - 1);
-                assert_eq!(top, th, "patch top disagrees with terrain_height at ({x},{z})");
+                assert_eq!(
+                    top, th,
+                    "patch top disagrees with terrain_height at ({x},{z})"
+                );
             }
         }
     }
@@ -1762,8 +1930,14 @@ mod tests {
                         }
                     }
                     assert!(w.is_water(x, land_top, z), "the seabed voxel is water");
-                    assert!(!w.is_solid(x, land_top, z), "water is matter but NOT solid ground");
-                    assert!(w.is_solid(x, land_top - 1, z), "solid seabed directly under the water");
+                    assert!(
+                        !w.is_solid(x, land_top, z),
+                        "water is matter but NOT solid ground"
+                    );
+                    assert!(
+                        w.is_solid(x, land_top - 1, z),
+                        "solid seabed directly under the water"
+                    );
                 } else {
                     land_cols += 1;
                     // (c) a dry column carries no water anywhere.
@@ -1775,7 +1949,10 @@ mod tests {
                     }
                 }
                 // No water ever sits at or above the waterline datum (the surface is flat AT sea level).
-                assert!(!w.is_water(x, sea, z), "no water at the waterline voxel ({x},{sea},{z})");
+                assert!(
+                    !w.is_water(x, sea, z),
+                    "no water at the waterline voxel ({x},{sea},{z})"
+                );
             }
         }
         assert!(
@@ -1813,8 +1990,15 @@ mod tests {
         let land_top = w.surface_top_voxel(x, z).unwrap();
 
         // Water directly above the seabed; grass is the seabed skin just below it.
-        assert!(w.is_water(x, land_top, z), "water fills the air space above the seabed");
-        assert_eq!(w.material_at(x, land_top - 1, z), Some(id("grass")), "seabed skin is grass");
+        assert!(
+            w.is_water(x, land_top, z),
+            "water fills the air space above the seabed"
+        );
+        assert_eq!(
+            w.material_at(x, land_top - 1, z),
+            Some(id("grass")),
+            "seabed skin is grass"
+        );
 
         // The solid strata below, top to bottom, are Earth's real radial order — unchanged by the sea.
         let mut seq: Vec<usize> = Vec::new();
@@ -1881,7 +2065,11 @@ mod tests {
         let top = w.surface_top_voxel(cx, cz).expect("solid column at centre");
 
         // Surface skin is grass; the first solid below it is basalt crust.
-        assert_eq!(w.material_at(cx, top - 1, cz), Some(id("grass")), "surface skin");
+        assert_eq!(
+            w.material_at(cx, top - 1, cz),
+            Some(id("grass")),
+            "surface skin"
+        );
         // Walk down and record the sequence of DISTINCT materials encountered.
         let mut seq: Vec<usize> = Vec::new();
         for y in (0..top).rev() {
@@ -1926,9 +2114,11 @@ mod tests {
         let n = tops.len() as f64;
         let mean = tops.iter().sum::<f64>() / n;
         let std = (tops.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / n).sqrt();
-        let (min, max) = tops.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &t| {
-            (lo.min(t), hi.max(t))
-        });
+        let (min, max) = tops
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &t| {
+                (lo.min(t), hi.max(t))
+            });
         let range = max - min;
 
         // Threshold justification: 1 voxel ≈ 1 m. The old amplitude-6 heightfield was a near-flat
@@ -2072,7 +2262,7 @@ mod tests {
         let w = generate(&mats);
 
         let radius = planet::earth().radius() as f32; // ≈6.371e6 m — the SAME body the space band draws
-        // The patch centre's surface height in centered coords; the Earth centre is `radius` below it.
+                                                      // The patch centre's surface height in centered coords; the Earth centre is `radius` below it.
         let c = w.center();
         let surf_y = w
             .surface_top_voxel(c.x as i32, c.z as i32)
@@ -2132,7 +2322,10 @@ mod tests {
             }
         }
         for &e in &extra_lateral {
-            assert!(below_sphere(e), "lateral guard {e:?} must start below the sphere");
+            assert!(
+                below_sphere(e),
+                "lateral guard {e:?} must start below the sphere"
+            );
             let clamped = w.clamp_eye_above_earth(e, earth_center, radius, clearance);
             assert!(
                 !below_sphere(clamped),
@@ -2180,7 +2373,10 @@ mod tests {
 
         // The bilinear surface here is ~lerp(5,10,0.9)=9.5 voxels ⇒ centered 9.5 - 5 - 0.5 = 4.0.
         let surf = world.surface_height_bilinear(pos_xz);
-        assert!((surf - 4.0).abs() < 1e-4, "bilinear slope surface should be ~4.0, got {surf}");
+        assert!(
+            (surf - 4.0).abs() < 1e-4,
+            "bilinear slope surface should be ~4.0, got {surf}"
+        );
 
         // The single LOW column (x=3) top in the same centered convention: 5 - 5 - 0.5 = -0.5. Far below.
         let single_low = world.surface_top_voxel(3, 0).unwrap() as f32 - c.y - 0.5;
@@ -2227,13 +2423,18 @@ mod one_ground_height_tests {
                 let shared = w.ground_height(x, z);
                 // The integer answer the camera, the meteor and resting grains all used to use.
                 let (xi, zi) = ((x + c.x).floor() as i32, (z + c.z).floor() as i32);
-                let Some(top) = w.surface_top_voxel(xi, zi) else { continue };
+                let Some(top) = w.surface_top_voxel(xi, zi) else {
+                    continue;
+                };
                 let stepped = top as f32 - c.y;
                 worst_gap = worst_gap.max((shared - stepped).abs());
                 checked += 1;
             }
         }
-        assert!(checked > 100, "the sweep must actually find ground ({checked} columns)");
+        assert!(
+            checked > 100,
+            "the sweep must actually find ground ({checked} columns)"
+        );
         // The gap is REAL — this is the defect that existed, recorded so nobody reunifies onto the wrong
         // one thinking they agreed all along.
         assert!(

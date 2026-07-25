@@ -212,8 +212,14 @@ impl HydroBody {
         let cat = crate::materials::catalogue();
         let total_mass = matter.total_mass();
         let m_i = (total_mass / resolution.max(1) as f64).max(1.0); // equal particle mass
-        let (mut pos, mut mass, mut eos, mut h, mut u, mut rho) =
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut pos, mut mass, mut eos, mut h, mut u, mut rho) = (
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
         let mut inner_r = 0.0_f64;
         for (li, layer) in matter.layers.iter().enumerate() {
             let (ri3, ro3) = (inner_r.powi(3), layer.outer_r.powi(3));
@@ -245,7 +251,16 @@ impl HydroBody {
         let n = pos.len();
         // Softening = half the finest particle spacing (the densest layer's). h = 2·spacing ⇒ ¼h = ½ spacing.
         let softening = 0.25 * h.iter().cloned().fold(f64::INFINITY, f64::min);
-        HydroBody { vel: vec![DVec3::ZERO; n], mass, u, eos, h, softening, rho, pos }
+        HydroBody {
+            vel: vec![DVec3::ZERO; n],
+            mass,
+            u,
+            eos,
+            h,
+            softening,
+            rho,
+            pos,
+        }
     }
 
     /// Concatenate another body's particles into this one (used to union multiple impact-site caps into one
@@ -306,7 +321,11 @@ impl HydroBody {
         // The floor sits at the cap's inner edge (its deepest particle); the cap rests on the un-resolved
         // interior there. `bulk_mass` is the planet minus the cap so the cap's own gravity isn't double-counted
         // (the SPH direct-sum already carries it).
-        let r_core = body.pos.iter().map(|p| p.length()).fold(f64::INFINITY, f64::min);
+        let r_core = body
+            .pos
+            .iter()
+            .map(|p| p.length())
+            .fold(f64::INFINITY, f64::min);
         Cap {
             r_core: if r_core.is_finite() { r_core } else { r_surf },
             bulk_mass: (matter.total_mass() - cap_mass).max(0.0),
@@ -320,7 +339,9 @@ impl HydroBody {
         let n = self.pos.len();
         let cell = self.h.iter().cloned().fold(0.0, f64::max);
         let grid = crate::neighbors::NeighborGrid::build(&self.pos, cell);
-        let mut rho: Vec<f64> = (0..n).map(|i| self.mass[i] * crate::atmosphere::sph_w(0.0, self.h[i])).collect();
+        let mut rho: Vec<f64> = (0..n)
+            .map(|i| self.mass[i] * crate::atmosphere::sph_w(0.0, self.h[i]))
+            .collect();
         grid.for_each_pair(&self.pos, |i, j| {
             let r = (self.pos[i] - self.pos[j]).length();
             let hij = 0.5 * (self.h[i] + self.h[j]);
@@ -339,7 +360,9 @@ impl HydroBody {
         let n = self.pos.len();
         let bh = crate::bhtree::BarnesHut::build(&self.pos, &self.mass, 0.5, self.softening);
         let mut acc = bh.accelerations(&self.pos, &self.mass);
-        let p: Vec<f64> = (0..n).map(|i| self.eos[i].pressure(self.rho[i], self.u[i])).collect();
+        let p: Vec<f64> = (0..n)
+            .map(|i| self.eos[i].pressure(self.rho[i], self.u[i]))
+            .collect();
         let cell = self.h.iter().cloned().fold(0.0, f64::max);
         let grid = crate::neighbors::NeighborGrid::build(&self.pos, cell);
         grid.for_each_pair(&self.pos, |i, j| {
@@ -380,8 +403,12 @@ impl HydroBody {
         let bh = crate::bhtree::BarnesHut::build(&self.pos, &self.mass, 0.5, self.softening);
         let mut acc = bh.accelerations(&self.pos, &self.mass);
         let mut dudt = vec![0.0f64; n];
-        let p: Vec<f64> = (0..n).map(|i| self.eos[i].pressure(self.rho[i], self.u[i])).collect();
-        let c: Vec<f64> = (0..n).map(|i| self.eos[i].sound_speed_sq(self.rho[i], self.u[i]).sqrt()).collect();
+        let p: Vec<f64> = (0..n)
+            .map(|i| self.eos[i].pressure(self.rho[i], self.u[i]))
+            .collect();
+        let c: Vec<f64> = (0..n)
+            .map(|i| self.eos[i].sound_speed_sq(self.rho[i], self.u[i]).sqrt())
+            .collect();
         // Monaghan artificial-viscosity coefficients (standard giant-impact values).
         const AV_ALPHA: f64 = 1.0;
         const AV_BETA: f64 = 2.0;
@@ -405,11 +432,12 @@ impl HydroBody {
             } else {
                 0.0
             };
-            let coeff = p[i] / (self.rho[i] * self.rho[i]) + p[j] / (self.rho[j] * self.rho[j]) + pi_ij;
+            let coeff =
+                p[i] / (self.rho[i] * self.rho[i]) + p[j] / (self.rho[j] * self.rho[j]) + pi_ij;
             let grad = (dpos / r) * crate::atmosphere::sph_dw(r, hij); // ∇_i W (dW<0)
             acc[i] += grad * (-coeff * self.mass[j]);
             acc[j] += grad * (coeff * self.mass[i]); // ∇_j W = −∇_i W ⇒ equal & opposite force
-            // Energy: du_i/dt = ½ m_j·coeff·(v_i−v_j)·∇_i W (symmetric ⇒ same term feeds j; heats on compression).
+                                                     // Energy: du_i/dt = ½ m_j·coeff·(v_i−v_j)·∇_i W (symmetric ⇒ same term feeds j; heats on compression).
             let vdotgrad = dvel.dot(grad);
             dudt[i] += 0.5 * self.mass[j] * coeff * vdotgrad;
             dudt[j] += 0.5 * self.mass[i] * coeff * vdotgrad;
@@ -465,14 +493,24 @@ impl HydroBody {
 
     pub fn com(&self) -> DVec3 {
         let m: f64 = self.mass.iter().sum();
-        self.pos.iter().zip(&self.mass).map(|(p, &mi)| *p * mi).sum::<DVec3>() / m.max(1e-30)
+        self.pos
+            .iter()
+            .zip(&self.mass)
+            .map(|(p, &mi)| *p * mi)
+            .sum::<DVec3>()
+            / m.max(1e-30)
     }
 
     /// Mass-weighted RMS radius about the COM — the stability yardstick (a settled body holds it steady).
     pub fn rms_radius(&self) -> f64 {
         let c = self.com();
         let m: f64 = self.mass.iter().sum();
-        let s: f64 = self.pos.iter().zip(&self.mass).map(|(p, &mi)| mi * (*p - c).length_squared()).sum();
+        let s: f64 = self
+            .pos
+            .iter()
+            .zip(&self.mass)
+            .map(|(p, &mi)| mi * (*p - c).length_squared())
+            .sum();
         (s / m.max(1e-30)).sqrt()
     }
 }
@@ -483,13 +521,20 @@ mod tests {
     use crate::orbit::G;
 
     fn enclosed_mass(b: &HydroBody, c: DVec3, r: f64) -> f64 {
-        b.pos.iter().zip(&b.mass).filter(|(p, _)| (**p - c).length() <= r).map(|(_, &m)| m).sum()
+        b.pos
+            .iter()
+            .zip(&b.mass)
+            .filter(|(p, _)| (**p - c).length() <= r)
+            .map(|(_, &m)| m)
+            .sum()
     }
 
     /// Total energy (kinetic, internal, gravitational) — softened PE matches the BH force's Plummer kernel.
     fn total_energy(b: &HydroBody) -> (f64, f64, f64) {
         let n = b.pos.len();
-        let ke: f64 = (0..n).map(|i| 0.5 * b.mass[i] * b.vel[i].length_squared()).sum();
+        let ke: f64 = (0..n)
+            .map(|i| 0.5 * b.mass[i] * b.vel[i].length_squared())
+            .sum();
         let ie: f64 = (0..n).map(|i| b.mass[i] * b.u[i]).sum();
         let s2 = b.softening * b.softening;
         let mut pe = 0.0;
@@ -512,7 +557,11 @@ mod tests {
                 cnt += 1;
             }
         }
-        if cnt == 0 { (0.0, 0.0, 0) } else { (sp / cnt as f64, sr / cnt as f64, cnt) }
+        if cnt == 0 {
+            (0.0, 0.0, 0)
+        } else {
+            (sp / cnt as f64, sr / cnt as f64, cnt)
+        }
     }
 
     #[test]
@@ -537,9 +586,19 @@ mod tests {
         let last = &rms_hist[rms_hist.len().saturating_sub(4)..];
         let mean: f64 = last.iter().sum::<f64>() / last.len() as f64;
         let spread = last.iter().map(|r| (r - mean).abs()).fold(0.0, f64::max) / mean;
-        println!("2a settled RMS radius {:.0} km (spread {:.1}%)", mean / 1e3, spread * 100.0);
-        assert!(spread < 0.05, "body must settle to a steady RMS radius (spread {spread:.2})");
-        assert!(mean > 0.3 * r0 && mean < 1.2 * r0, "RMS radius {mean:.3e} sane vs R₀={r0:.3e}");
+        println!(
+            "2a settled RMS radius {:.0} km (spread {:.1}%)",
+            mean / 1e3,
+            spread * 100.0
+        );
+        assert!(
+            spread < 0.05,
+            "body must settle to a steady RMS radius (spread {spread:.2})"
+        );
+        assert!(
+            mean > 0.3 * r0 && mean < 1.2 * r0,
+            "RMS radius {mean:.3e} sane vs R₀={r0:.3e}"
+        );
 
         let dr = 0.12 * mean;
         let mut checked = 0;
@@ -554,9 +613,18 @@ mod tests {
             let dpdr = (p_hi - p_lo) / (2.0 * dr);
             let expect = -rho_mid * G * enclosed_mass(&b, c, r) / (r * r);
             let rel = (dpdr - expect).abs() / expect.abs().max(1.0);
-            println!("2a hydrostatic @ r={:.0} km: dP/dr {:.3e} vs −ρg {:.3e} (rel {:.2})", r / 1e3, dpdr, expect, rel);
+            println!(
+                "2a hydrostatic @ r={:.0} km: dP/dr {:.3e} vs −ρg {:.3e} (rel {:.2})",
+                r / 1e3,
+                dpdr,
+                expect,
+                rel
+            );
             assert!(dpdr < 0.0, "pressure must DECREASE outward at r={r:.3e}");
-            assert!(rel < 0.5, "hydrostatic balance within operator error at r={r:.3e} (rel {rel:.2})");
+            assert!(
+                rel < 0.5,
+                "hydrostatic balance within operator error at r={r:.3e} (rel {rel:.2})"
+            );
             checked += 1;
         }
         assert!(checked >= 1, "at least one interior shell must be testable");
@@ -585,7 +653,10 @@ mod tests {
         // Fill the shell at equal-volume radii (uniform number density ⇒ ρ≈ρ0).
         let (rc3, rs3) = (r_core.powi(3), r_surf.powi(3));
         let pos: Vec<DVec3> = (0..n_target)
-            .map(|i| fib_dir(i, n_target, 1.7) * (rc3 + (rs3 - rc3) * (i as f64 + 0.5) / n_target as f64).cbrt())
+            .map(|i| {
+                fib_dir(i, n_target, 1.7)
+                    * (rc3 + (rs3 - rc3) * (i as f64 + 0.5) / n_target as f64).cbrt()
+            })
             .collect();
         let n = pos.len();
         // The mantle is a FLUID COLUMN resting on the non-injecting floor at R_core (a hard-wall boundary
@@ -615,7 +686,11 @@ mod tests {
                     // Gauss-correct bulk gravity: monopole G·M/r² OUTSIDE R_core, linear G·M·r/R_core³ INSIDE
                     // (a uniform core → g ∝ r → 0 at the centre). A raw 1/r² inside singularity-sucks any
                     // particle that penetrates the boundary; this is the vector form of 39a's acceleration_at.
-                    let g_bulk = if r >= r_core { g * m_bulk / (r * r) } else { g * m_bulk * r / r_core.powi(3) };
+                    let g_bulk = if r >= r_core {
+                        g * m_bulk / (r * r)
+                    } else {
+                        g * m_bulk * r / r_core.powi(3)
+                    };
                     acc[i] += -(body.pos[i] / r) * g_bulk;
                 }
             }
@@ -639,7 +714,10 @@ mod tests {
                 }
             }
             if step % 200 == 0 {
-                let outer = (0..n).filter(|&i| !fixed[i]).map(|i| body.pos[i].length()).fold(0.0, f64::max);
+                let outer = (0..n)
+                    .filter(|&i| !fixed[i])
+                    .map(|i| body.pos[i].length())
+                    .fold(0.0, f64::max);
                 hist.push(outer);
             }
         }
@@ -650,14 +728,26 @@ mod tests {
         let last = &hist[hist.len().saturating_sub(4)..];
         let mean: f64 = last.iter().sum::<f64>() / last.len() as f64;
         let spread = last.iter().map(|r| (r - mean).abs()).fold(0.0, f64::max) / mean;
-        let inner = (0..n).filter(|&i| !fixed[i]).map(|i| body.pos[i].length()).fold(f64::INFINITY, f64::min);
+        let inner = (0..n)
+            .filter(|&i| !fixed[i])
+            .map(|i| body.pos[i].length())
+            .fold(f64::INFINITY, f64::min);
         println!(
             "39b ({n} particles, fluid column on the R_core floor) settled: mantle outer {:.0} km (spread {:.1}%), inner {:.0} km (R_core {:.0} km)",
             mean / 1e3, spread * 100.0, inner / 1e3, r_core / 1e3
         );
-        assert!(spread < 0.06, "mantle must settle to a steady outer radius (spread {spread:.2})");
-        assert!(mean > 0.7 * r_surf && mean < 1.15 * r_surf, "mantle outer radius stays sane (got {mean:.3e})");
-        assert!(inner > 0.8 * r_core, "mantle did NOT collapse into the core (inner {inner:.3e} vs R_core {r_core:.3e})");
+        assert!(
+            spread < 0.06,
+            "mantle must settle to a steady outer radius (spread {spread:.2})"
+        );
+        assert!(
+            mean > 0.7 * r_surf && mean < 1.15 * r_surf,
+            "mantle outer radius stays sane (got {mean:.3e})"
+        );
+        assert!(
+            inner > 0.8 * r_core,
+            "mantle did NOT collapse into the core (inner {inner:.3e} vs R_core {r_core:.3e})"
+        );
 
         // (2) HYDROSTATIC BALANCE in the mobile mantle: dP/dr = −ρ·g_total, g_total = G(M_bulk + M_particles(<r))/r²
         // — the mantle settles to the CORRECT profile, not just a stable one. The interface is the non-injecting
@@ -677,9 +767,18 @@ mod tests {
             let m_enc = m_bulk + enclosed_mass(&body, c, r);
             let expect = -rho_mid * g * m_enc / (r * r);
             let rel = (dpdr - expect).abs() / expect.abs().max(1.0);
-            println!("39b hydrostatic @ r={:.0} km: dP/dr {:.3e} vs −ρg_total {:.3e} (rel {:.2})", r / 1e3, dpdr, expect, rel);
+            println!(
+                "39b hydrostatic @ r={:.0} km: dP/dr {:.3e} vs −ρg_total {:.3e} (rel {:.2})",
+                r / 1e3,
+                dpdr,
+                expect,
+                rel
+            );
             assert!(dpdr < 0.0, "pressure must DECREASE outward at r={r:.3e}");
-            assert!(rel < 0.5, "mantle holds hydrostatic balance (bulk + self) at r={r:.3e} (rel {rel:.2})");
+            assert!(
+                rel < 0.5,
+                "mantle holds hydrostatic balance (bulk + self) at r={r:.3e} (rel {rel:.2})"
+            );
             checked += 1;
         }
         assert!(checked >= 1, "at least one mantle shell must be testable");
@@ -701,7 +800,11 @@ mod tests {
             if r < 1.0 {
                 return DVec3::ZERO;
             }
-            let gg = if r >= self.r_base { G * self.mass / (r * r) } else { G * self.mass * r / self.r_base.powi(3) };
+            let gg = if r >= self.r_base {
+                G * self.mass / (r * r)
+            } else {
+                G * self.mass * r / self.r_base.powi(3)
+            };
             -(d / r) * gg
         }
     }
@@ -764,7 +867,12 @@ mod tests {
     }
 
     fn total_momentum(body: &HydroBody, bulk: &Bulk) -> DVec3 {
-        body.vel.iter().zip(&body.mass).map(|(v, &m)| *v * m).sum::<DVec3>() + bulk.vel * bulk.mass
+        body.vel
+            .iter()
+            .zip(&body.mass)
+            .map(|(v, &m)| *v * m)
+            .sum::<DVec3>()
+            + bulk.vel * bulk.mass
     }
 
     /// docs/39 39e — BAKE-BACK: demote settled particles (fallen back within `r_settle` of the bulk) into the
@@ -805,22 +913,54 @@ mod tests {
         let eos = Tillotson::basalt();
         let mut cap = build_mantle_cap(eos, 0.6e6, 1.2e6, 400);
         for (k, v) in cap.vel.iter_mut().enumerate() {
-            *v = DVec3::new(50.0 * (k as f64).sin(), -30.0, 20.0 * (k as f64).cos()); // arbitrary motion
+            *v = DVec3::new(50.0 * (k as f64).sin(), -30.0, 20.0 * (k as f64).cos());
+            // arbitrary motion
         }
-        let mut bulk = Bulk { pos: DVec3::new(1.0e5, -2.0e5, 3.0e5), vel: DVec3::new(10.0, 0.0, -5.0), mass: 5.0e21, r_base: 0.6e6 };
+        let mut bulk = Bulk {
+            pos: DVec3::new(1.0e5, -2.0e5, 3.0e5),
+            vel: DVec3::new(10.0, 0.0, -5.0),
+            mass: 5.0e21,
+            r_base: 0.6e6,
+        };
         let mass_before = bulk.mass + cap.mass.iter().sum::<f64>();
         let p_before = total_momentum(&cap, &bulk);
-        let com_before = (bulk.pos * bulk.mass + cap.pos.iter().zip(&cap.mass).map(|(p, &m)| *p * m).sum::<DVec3>()) / mass_before;
+        let com_before = (bulk.pos * bulk.mass
+            + cap
+                .pos
+                .iter()
+                .zip(&cap.mass)
+                .map(|(p, &m)| *p * m)
+                .sum::<DVec3>())
+            / mass_before;
         let n0 = cap.pos.len();
         let baked = bake_back(&mut cap, &mut bulk, 0.9e6); // settle radius above R_core → absorbs the inner cap
         let mass_after = bulk.mass + cap.mass.iter().sum::<f64>();
         let p_after = total_momentum(&cap, &bulk);
-        let com_after = (bulk.pos * bulk.mass + cap.pos.iter().zip(&cap.mass).map(|(p, &m)| *p * m).sum::<DVec3>()) / mass_after;
+        let com_after = (bulk.pos * bulk.mass
+            + cap
+                .pos
+                .iter()
+                .zip(&cap.mass)
+                .map(|(p, &m)| *p * m)
+                .sum::<DVec3>())
+            / mass_after;
         println!("39e bake-back: {baked}/{n0} particles demoted into the bulk (bulk mass {:.3e} → {:.3e})", 5.0e21, bulk.mass);
-        assert!(baked > 0 && cap.pos.len() == n0 - baked, "some particles baked back and were removed");
-        assert!((mass_after - mass_before).abs() / mass_before < 1e-12, "mass conserved");
-        assert!((p_after - p_before).length() / p_before.length().max(1.0) < 1e-12, "momentum conserved");
-        assert!((com_after - com_before).length() / com_before.length().max(1.0) < 1e-12, "COM conserved");
+        assert!(
+            baked > 0 && cap.pos.len() == n0 - baked,
+            "some particles baked back and were removed"
+        );
+        assert!(
+            (mass_after - mass_before).abs() / mass_before < 1e-12,
+            "mass conserved"
+        );
+        assert!(
+            (p_after - p_before).length() / p_before.length().max(1.0) < 1e-12,
+            "momentum conserved"
+        );
+        assert!(
+            (com_after - com_before).length() / com_before.length().max(1.0) < 1e-12,
+            "COM conserved"
+        );
     }
 
     /// Build a mantle shell [r_core, r_surf] of `n` basalt SPH particles at ρ₀ number density (docs/39 cap).
@@ -854,7 +994,12 @@ mod tests {
         let (r_core, r_surf) = (0.6e6_f64, 1.5e6_f64);
         let mut cap = build_mantle_cap(eos, r_core, r_surf, 1500);
         let m_bulk = FOUR_THIRDS_PI * r_core.powi(3) * eos.rho0;
-        let mut bulk = Bulk { pos: DVec3::ZERO, vel: DVec3::ZERO, mass: m_bulk, r_base: r_core };
+        let mut bulk = Bulk {
+            pos: DVec3::ZERO,
+            vel: DVec3::ZERO,
+            mass: m_bulk,
+            r_base: r_core,
+        };
         // Relax the cap onto the (fixed) bulk first (as 39b), then start the dynamical recoil test.
         let dt_relax = cap.relax_dt(0.2);
         for _ in 0..1500 {
@@ -885,25 +1030,47 @@ mod tests {
         let drift = (p1 - p0).length() / p0.length().max(1.0);
         println!(
             "39c momentum: Σp₀ {:.3e} → Σp₁ {:.3e} (drift {:.2e}); bulk recoiled to v={:.1} m/s",
-            p0.length(), p1.length(), drift, bulk.vel.length()
+            p0.length(),
+            p1.length(),
+            drift,
+            bulk.vel.length()
         );
-        assert!(bulk.vel.length() > 1.0, "the bulk must actually RECOIL (got {:.2e} m/s)", bulk.vel.length());
-        assert!(drift < 1.0e-3, "total momentum (bulk + particles) conserved (drift {drift:.2e})");
+        assert!(
+            bulk.vel.length() > 1.0,
+            "the bulk must actually RECOIL (got {:.2e} m/s)",
+            bulk.vel.length()
+        );
+        assert!(
+            drift < 1.0e-3,
+            "total momentum (bulk + particles) conserved (drift {drift:.2e})"
+        );
     }
 
     /// docs/39 39d — run ONE capped-Earth giant impact and return (earth_disk_fraction, disk_mass_kg,
     /// n_cap_particles). Earth = a coarse BULK core (mass below `r_core`, iron core + lower mantle) + a
     /// particalized basalt mantle CAP [r_core, r_surf]; Theia is a basalt sphere at ~1/7 Earth mass. Theia
     /// strikes obliquely; the cap's Earth material sheds into the disk. The cap size (via r_core) is the dial.
-    fn run_capped_impact(r_core: f64, r_surf: f64, m_i: f64, impact_steps: usize) -> (f64, f64, usize) {
+    fn run_capped_impact(
+        r_core: f64,
+        r_surf: f64,
+        m_i: f64,
+        impact_steps: usize,
+    ) -> (f64, f64, usize) {
         let (iron, basalt) = (Tillotson::iron(), Tillotson::basalt());
         let r_ironcore = 0.5 * r_surf;
         // The particalized mantle cap [r_core, r_surf], relaxed onto the bulk.
-        let n_cap = (basalt.rho0 * FOUR_THIRDS_PI * (r_surf.powi(3) - r_core.powi(3)) / m_i).round().max(50.0) as usize;
+        let n_cap = (basalt.rho0 * FOUR_THIRDS_PI * (r_surf.powi(3) - r_core.powi(3)) / m_i)
+            .round()
+            .max(50.0) as usize;
         let mut cap = build_mantle_cap(basalt, r_core, r_surf, n_cap);
         let m_bulk = iron.rho0 * FOUR_THIRDS_PI * r_ironcore.powi(3)
             + basalt.rho0 * FOUR_THIRDS_PI * (r_core.powi(3) - r_ironcore.powi(3));
-        let mut bulk = Bulk { pos: DVec3::ZERO, vel: DVec3::ZERO, mass: m_bulk, r_base: r_core };
+        let mut bulk = Bulk {
+            pos: DVec3::ZERO,
+            vel: DVec3::ZERO,
+            mass: m_bulk,
+            r_base: r_core,
+        };
         let dtr = cap.relax_dt(0.2);
         for _ in 0..2000 {
             cap.compute_density();
@@ -989,7 +1156,12 @@ mod tests {
     /// docs/39 #1 — variable-resolution ("LOD") Earth: a COARSE (cheap, deformable) iron core + a FINE basalt
     /// mantle, all self-gravitating particles. Tests whether a DEFORMABLE-but-coarse bulk recovers the
     /// all-particle 58% (vs the rigid bulk's 25%). Returns (earth_disk_fraction, disk_kg, n_total).
-    fn run_lod_impact(r_surf: f64, m_fine: f64, coarse_factor: f64, steps: usize) -> (f64, f64, usize) {
+    fn run_lod_impact(
+        r_surf: f64,
+        m_fine: f64,
+        coarse_factor: f64,
+        steps: usize,
+    ) -> (f64, f64, usize) {
         let (iron, basalt) = (Tillotson::iron(), Tillotson::basalt());
         let r_ic = 0.5 * r_surf;
         let m_coarse = m_fine * coarse_factor;
@@ -1066,8 +1238,16 @@ mod tests {
         }
         let com = body.com();
         let m_total: f64 = body.mass.iter().sum();
-        let vcom: DVec3 = body.vel.iter().zip(&body.mass).map(|(v, &m)| *v * m).sum::<DVec3>() / m_total;
-        let mut rs: Vec<(f64, f64)> = (0..body.pos.len()).map(|i| ((body.pos[i] - com).length(), body.mass[i])).collect();
+        let vcom: DVec3 = body
+            .vel
+            .iter()
+            .zip(&body.mass)
+            .map(|(v, &m)| *v * m)
+            .sum::<DVec3>()
+            / m_total;
+        let mut rs: Vec<(f64, f64)> = (0..body.pos.len())
+            .map(|i| ((body.pos[i] - com).length(), body.mass[i]))
+            .collect();
         rs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         let (mut cum, mut r_rem) = (0.0, 0.0);
         for &(r, m) in &rs {
@@ -1105,13 +1285,25 @@ mod tests {
         // too stiff and reaching 58% needs full resolution (the JIT coarse-bulk win is small for a giant
         // impact — the shock is global). Sub-scale + coarse-N + O(N²): the DIRECTION, not a converged number.
         let r_surf = 5.0e6_f64;
-        let m_fine = Tillotson::basalt().rho0 * FOUR_THIRDS_PI * (r_surf.powi(3) - (2.5e6f64).powi(3)) / 900.0;
+        let m_fine =
+            Tillotson::basalt().rho0 * FOUR_THIRDS_PI * (r_surf.powi(3) - (2.5e6f64).powi(3))
+                / 900.0;
         let (f_fine, d_fine, n_fine) = run_lod_impact(r_surf, m_fine, 1.0, 3500);
         let (f_coarse, d_coarse, n_coarse) = run_lod_impact(r_surf, m_fine, 8.0, 3500);
         let m_moon = 7.35e22;
-        println!("39d #1 deformable bulk — does a coarse deformable core reach the all-fine fraction?");
-        println!("  ALL-FINE    ({n_fine} particles): Earth {:.0}% of a {:.2} M☾ disk", f_fine * 100.0, d_fine / m_moon);
-        println!("  COARSE-CORE ({n_coarse} particles): Earth {:.0}% of a {:.2} M☾ disk", f_coarse * 100.0, d_coarse / m_moon);
+        println!(
+            "39d #1 deformable bulk — does a coarse deformable core reach the all-fine fraction?"
+        );
+        println!(
+            "  ALL-FINE    ({n_fine} particles): Earth {:.0}% of a {:.2} M☾ disk",
+            f_fine * 100.0,
+            d_fine / m_moon
+        );
+        println!(
+            "  COARSE-CORE ({n_coarse} particles): Earth {:.0}% of a {:.2} M☾ disk",
+            f_coarse * 100.0,
+            d_coarse / m_moon
+        );
         // FINDING (docs/39 #1): a DEFORMABLE bulk sheds Earth's own mantle — even a COARSE, cheap iron core
         // ({n_coarse} particles) produces a healthy Earth-rich disk (unlike the RIGID bulk's ~25% plateau,
         // 39d) — so the rigid bulk was the limiter, and a coarse deformable core is a viable cheap bulk. BUT
@@ -1133,8 +1325,9 @@ mod tests {
         // representation reproduces the deformable-Earth mechanism at a fraction of the particle count — the
         // whole point of planetary scale. (Sub-Earth scale + coarse N + O(N²): the TREND, not a converged number.)
         let r_surf = 5.0e6_f64;
-        let m_i = Tillotson::basalt().rho0 * FOUR_THIRDS_PI * (r_surf.powi(3) - (2.5e6f64).powi(3)) / 900.0; // full mantle ≈ 900
-        // THICK cap (interface at 0.55·R — nearly the whole mantle particalized) vs THIN cap (0.85·R).
+        let m_i = Tillotson::basalt().rho0 * FOUR_THIRDS_PI * (r_surf.powi(3) - (2.5e6f64).powi(3))
+            / 900.0; // full mantle ≈ 900
+                     // THICK cap (interface at 0.55·R — nearly the whole mantle particalized) vs THIN cap (0.85·R).
         let (thick, thin) = (0.55 * r_surf, 0.85 * r_surf);
         let (f_thick, d_thick, n_thick) = run_capped_impact(thick, r_surf, m_i, 3500);
         let (f_thin, d_thin, n_thin) = run_capped_impact(thin, r_surf, m_i, 3500);
@@ -1146,7 +1339,10 @@ mod tests {
         // whose Earth fraction (25–33%) is CLEARLY above the rigid-boundary 7–12% ceiling (docs/31) — so
         // particalizing the cap sheds Earth's own mantle, reproducing the deformable-Earth mechanism at a
         // fraction of the particle count. The APPROACH works.
-        assert!(d_thick > 0.0 && d_thin > 0.0, "both impacts must produce a disk");
+        assert!(
+            d_thick > 0.0 && d_thin > 0.0,
+            "both impacts must produce a disk"
+        );
         assert!(f_thick > 0.15 && f_thin > 0.15, "the particalized cap must shed Earth above the rigid 7–12% ceiling (thick {f_thick:.2}, thin {f_thin:.2})");
         // FINDING (docs/39 decision #1): the Earth-SHED mass is ~constant (~0.055 M☾) regardless of cap
         // thickness — only the cap's near-surface shocks and sheds; the RIGID bulk reflects the shock instead
@@ -1201,7 +1397,10 @@ mod tests {
         body.compute_density();
         let (ke0, ie0, pe0) = total_energy(&body);
         let e0 = ke0 + ie0 + pe0;
-        println!("initial: KE {:.3e} IE {:.3e} PE {:.3e} · E {:.3e}", ke0, ie0, pe0, e0);
+        println!(
+            "initial: KE {:.3e} IE {:.3e} PE {:.3e} · E {:.3e}",
+            ke0, ie0, pe0, e0
+        );
         // ADAPTIVE Courant timestep recomputed each step. Print energy over time to localize any injection.
         for s in 0..2000 {
             body.compute_density();
@@ -1209,20 +1408,47 @@ mod tests {
             body.step(dt);
             if s % 400 == 0 {
                 let (k, ie, pe) = total_energy(&body);
-                println!("  step {s}: KE {:.3e} IE {:.3e} PE {:.3e} E {:.3e} (ΔE/E {:.3})", k, ie, pe, k + ie + pe, (k + ie + pe - e0) / e0.abs());
+                println!(
+                    "  step {s}: KE {:.3e} IE {:.3e} PE {:.3e} E {:.3e} (ΔE/E {:.3})",
+                    k,
+                    ie,
+                    pe,
+                    k + ie + pe,
+                    (k + ie + pe - e0) / e0.abs()
+                );
             }
         }
         let (ke1, ie1, pe1) = total_energy(&body);
         let e1 = ke1 + ie1 + pe1;
-        println!("final:   KE {:.3e} IE {:.3e} PE {:.3e} · E {:.3e}", ke1, ie1, pe1, e1);
-        println!("ΔE/E {:.3}, IE gain {:.3e} ({:.1}× initial)", (e1 - e0).abs() / e0.abs(), ie1 - ie0, ie1 / ie0);
+        println!(
+            "final:   KE {:.3e} IE {:.3e} PE {:.3e} · E {:.3e}",
+            ke1, ie1, pe1, e1
+        );
+        println!(
+            "ΔE/E {:.3}, IE gain {:.3e} ({:.1}× initial)",
+            (e1 - e0).abs() / e0.abs(),
+            ie1 - ie0,
+            ie1 / ie0
+        );
 
         // (1) Total energy conserved to a few % — the SPH internal-energy formulation injects a small,
         // one-time amount at the shock front (measured ~3%, then flat); 5% is a faithful bound, not a fudge.
-        assert!((e1 - e0).abs() / e0.abs() < 0.05, "total energy must be conserved (ΔE/E {:.3})", (e1 - e0).abs() / e0.abs());
+        assert!(
+            (e1 - e0).abs() / e0.abs() < 0.05,
+            "total energy must be conserved (ΔE/E {:.3})",
+            (e1 - e0).abs() / e0.abs()
+        );
         // (2) Shock heating: internal energy rose substantially (bulk KE → heat), and KE fell.
-        assert!(ie1 > 3.0 * ie0, "shock must heat the material (IE {:.2e} → {:.2e})", ie0, ie1);
-        assert!(ke1 < ke0, "bulk kinetic energy must drop (converted to heat + PE)");
+        assert!(
+            ie1 > 3.0 * ie0,
+            "shock must heat the material (IE {:.2e} → {:.2e})",
+            ie0,
+            ie1
+        );
+        assert!(
+            ke1 < ke0,
+            "bulk kinetic energy must drop (converted to heat + PE)"
+        );
     }
 
     /// Radius enclosing ~all of a body's particles from its COM (settled outer radius).
@@ -1245,9 +1471,12 @@ mod tests {
         // A FAST, smaller version of the stage-3c impact that writes the final particle state (position,
         // provenance, orbiting-disk flag) to the JSON path in $VIZ_OUT — for a visualisation of the
         // Earth-derived disk. Same physics, coarser N so it's quick.
-        let Some(out) = std::env::var("VIZ_OUT").ok() else { return };
+        let Some(out) = std::env::var("VIZ_OUT").ok() else {
+            return;
+        };
         let (core, mantle) = (Tillotson::iron(), Tillotson::basalt());
-        let mut earth = HydroBody::new_differentiated(core, mantle, 0.5 * 5.0e6, 5.0e6, 1.0e6, 1800);
+        let mut earth =
+            HydroBody::new_differentiated(core, mantle, 0.5 * 5.0e6, 5.0e6, 1.0e6, 1800);
         let mut theia = HydroBody::new_differentiated(core, mantle, 0.5 * 2.7e6, 2.7e6, 1.0e6, 300);
         relax(&mut earth, 2200);
         relax(&mut theia, 1200);
@@ -1257,15 +1486,23 @@ mod tests {
         let contact = r_e + r_t;
         let v = 1.15 * (2.0 * G * (m_earth + m_theia) / contact).sqrt();
         let ec = earth.com();
-        for i in 0..earth.pos.len() { earth.pos[i] -= ec; earth.vel[i] = DVec3::ZERO; }
+        for i in 0..earth.pos.len() {
+            earth.pos[i] -= ec;
+            earth.vel[i] = DVec3::ZERO;
+        }
         let tc = theia.com();
         for i in 0..theia.pos.len() {
             theia.pos[i] = theia.pos[i] - tc + DVec3::new(1.6 * contact, 1.0 * r_e, 0.0);
             theia.vel[i] = DVec3::new(-v, 0.0, 0.0);
         }
         let mut body = earth;
-        body.pos.extend(theia.pos); body.vel.extend(theia.vel); body.mass.extend(theia.mass);
-        body.u.extend(theia.u); body.eos.extend(theia.eos); body.h.extend(theia.h); body.rho.extend(theia.rho);
+        body.pos.extend(theia.pos);
+        body.vel.extend(theia.vel);
+        body.mass.extend(theia.mass);
+        body.u.extend(theia.u);
+        body.eos.extend(theia.eos);
+        body.h.extend(theia.h);
+        body.rho.extend(theia.rho);
         for _ in 0..4000 {
             body.compute_density();
             let dt = body.courant_dt(0.1);
@@ -1274,11 +1511,26 @@ mod tests {
         // Classify each particle (remnant / orbiting disk / escaped) as in the measurement test.
         let com = body.com();
         let m_total: f64 = body.mass.iter().sum();
-        let v_com: DVec3 = { let mut p = DVec3::ZERO; for i in 0..body.pos.len() { p += body.vel[i] * body.mass[i]; } p / m_total };
-        let mut radii: Vec<(f64, f64)> = (0..body.pos.len()).map(|i| ((body.pos[i] - com).length(), body.mass[i])).collect();
+        let v_com: DVec3 = {
+            let mut p = DVec3::ZERO;
+            for i in 0..body.pos.len() {
+                p += body.vel[i] * body.mass[i];
+            }
+            p / m_total
+        };
+        let mut radii: Vec<(f64, f64)> = (0..body.pos.len())
+            .map(|i| ((body.pos[i] - com).length(), body.mass[i]))
+            .collect();
         radii.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         let (mut cum, mut r_rem, mut m_rem) = (0.0, 0.0, m_total);
-        for &(r, m) in &radii { cum += m; if cum >= 0.85 * m_total { r_rem = r; m_rem = cum; break; } }
+        for &(r, m) in &radii {
+            cum += m;
+            if cum >= 0.85 * m_total {
+                r_rem = r;
+                m_rem = cum;
+                break;
+            }
+        }
         let mu = G * m_rem;
         let scale = 1.0e6; // metres → the JSON is in units of 1000 km, centred on the remnant COM
         let mut s = String::from("{\"r_remnant\":");
@@ -1286,9 +1538,22 @@ mod tests {
         for i in 0..body.pos.len() {
             let rel_p = body.pos[i] - com;
             let peri = crate::orbit::perigee(rel_p, body.vel[i] - v_com, mu);
-            let cls = match peri { None => 2, Some(p) if p > r_rem => 1, Some(_) => 0 }; // 0 remnant,1 disk,2 escaped
-            if i > 0 { s.push(','); }
-            s.push_str(&format!("[{:.3},{:.3},{:.3},{},{}]", rel_p.x / scale, rel_p.y / scale, rel_p.z / scale, if i < n_earth { 0 } else { 1 }, cls));
+            let cls = match peri {
+                None => 2,
+                Some(p) if p > r_rem => 1,
+                Some(_) => 0,
+            }; // 0 remnant,1 disk,2 escaped
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!(
+                "[{:.3},{:.3},{:.3},{},{}]",
+                rel_p.x / scale,
+                rel_p.y / scale,
+                rel_p.z / scale,
+                if i < n_earth { 0 } else { 1 },
+                cls
+            ));
         }
         s.push_str("]}");
         std::fs::write(&out, s).unwrap();
@@ -1308,7 +1573,8 @@ mod tests {
         // the DIRECTION the deformable Earth moves the disk, not a converged number.)
         let (core, mantle) = (Tillotson::iron(), Tillotson::basalt());
         // Proto-Earth: differentiated, ~5000 km (sub-Earth, tractable N).
-        let mut earth = HydroBody::new_differentiated(core, mantle, 0.5 * 5.0e6, 5.0e6, 1.0e6, 1800);
+        let mut earth =
+            HydroBody::new_differentiated(core, mantle, 0.5 * 5.0e6, 5.0e6, 1.0e6, 1800);
         // Theia: ~1/7 Earth's mass (Mars-like), same differentiated construction.
         let mut theia = HydroBody::new_differentiated(core, mantle, 0.5 * 2.7e6, 2.7e6, 1.0e6, 300);
         relax(&mut earth, 2200);
@@ -1362,7 +1628,9 @@ mod tests {
         let m_total: f64 = body.mass.iter().sum();
         let v_com: DVec3 = {
             let mut p = DVec3::ZERO;
-            for i in 0..body.pos.len() { p += body.vel[i] * body.mass[i]; }
+            for i in 0..body.pos.len() {
+                p += body.vel[i] * body.mass[i];
+            }
             p / m_total
         };
         // Remnant radius = radius enclosing 85% of the mass about the COM; remnant mass = mass within it.
@@ -1370,7 +1638,8 @@ mod tests {
             .map(|i| ((body.pos[i] - com).length(), body.mass[i]))
             .collect();
         radii.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-        let (mut cum, mut r_remnant, mut m_remnant) = (0.0, radii.last().map_or(0.0, |x| x.0), m_total);
+        let (mut cum, mut r_remnant, mut m_remnant) =
+            (0.0, radii.last().map_or(0.0, |x| x.0), m_total);
         for &(r, m) in &radii {
             cum += m;
             if cum >= 0.85 * m_total {
@@ -1380,31 +1649,66 @@ mod tests {
             }
         }
         let mu = G * m_remnant;
-        let (mut e_disk, mut t_disk, mut e_esc, mut t_esc, mut e_rem, mut t_rem) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let (mut e_disk, mut t_disk, mut e_esc, mut t_esc, mut e_rem, mut t_rem) =
+            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         for i in 0..body.pos.len() {
             let rel_p = body.pos[i] - com;
             let rel_v = body.vel[i] - v_com;
             let is_earth = i < n_earth;
             let peri = crate::orbit::perigee(rel_p, rel_v, mu); // None if unbound
             match peri {
-                None => { if is_earth { e_esc += body.mass[i] } else { t_esc += body.mass[i] } }
-                Some(p) if p > r_remnant => { if is_earth { e_disk += body.mass[i] } else { t_disk += body.mass[i] } }
-                Some(_) => { if is_earth { e_rem += body.mass[i] } else { t_rem += body.mass[i] } } // in/re-impacts remnant
+                None => {
+                    if is_earth {
+                        e_esc += body.mass[i]
+                    } else {
+                        t_esc += body.mass[i]
+                    }
+                }
+                Some(p) if p > r_remnant => {
+                    if is_earth {
+                        e_disk += body.mass[i]
+                    } else {
+                        t_disk += body.mass[i]
+                    }
+                }
+                Some(_) => {
+                    if is_earth {
+                        e_rem += body.mass[i]
+                    } else {
+                        t_rem += body.mass[i]
+                    }
+                } // in/re-impacts remnant
             }
         }
         let disk = e_disk + t_disk;
-        let earth_frac = if disk > 0.0 { 100.0 * e_disk / disk } else { 0.0 };
+        let earth_frac = if disk > 0.0 {
+            100.0 * e_disk / disk
+        } else {
+            0.0
+        };
         let m_moon = 7.342e22;
-        println!("DEFORMABLE-EARTH IMPACT (M_e={:.2e}, M_t={:.2e}, v={:.0} m/s, R_remnant={:.0} km):", m_earth, m_theia, v_esc, r_remnant / 1e3);
+        println!(
+            "DEFORMABLE-EARTH IMPACT (M_e={:.2e}, M_t={:.2e}, v={:.0} m/s, R_remnant={:.0} km):",
+            m_earth,
+            m_theia,
+            v_esc,
+            r_remnant / 1e3
+        );
         println!("  ORBITING DISK (perigee > remnant): Earth {:.3e} | Theia {:.3e} kg = {:.3} M☾  → {:.0}% EARTH", e_disk, t_disk, disk / m_moon, earth_frac);
-        println!("  remnant: Earth {:.3e} | Theia {:.3e} kg · escaped: Earth {:.3e} | Theia {:.3e} kg", e_rem, t_rem, e_esc, t_esc);
+        println!(
+            "  remnant: Earth {:.3e} | Theia {:.3e} kg · escaped: Earth {:.3e} | Theia {:.3e} kg",
+            e_rem, t_rem, e_esc, t_esc
+        );
 
         // THE SCIENTIFIC CLAIM (isotopic crisis, docs/31): with a DEFORMABLE Earth, Earth-derived material
         // genuinely reaches ORBIT — which the rigid boundary forbade (it capped Earth at the excavated cap).
         // We assert the MECHANISM (Earth material orbits at all), not a converged fraction (coarse N,
         // sub-scale — the number waits for the GPU N, stage 4). If instead this geometry merged with no
         // orbiting disk, the test tells us that honestly (disk ≈ 0) and the geometry is the next tuning.
-        println!("  → Earth material {} reach orbit", if e_disk > 0.0 { "DID" } else { "did NOT" });
+        println!(
+            "  → Earth material {} reach orbit",
+            if e_disk > 0.0 { "DID" } else { "did NOT" }
+        );
         assert!(disk >= 0.0); // measurement sanity; the finding is the printed provenance split
     }
 
@@ -1418,13 +1722,18 @@ mod tests {
         // pressure of the ORDER of Earth's real 364 GPa (Wissing & Hobbs 2020) — coarse-N, so order not exact.
         let core = Tillotson::iron(); // compressed branch verified (Wissing & Hobbs 2020)
         let mantle = Tillotson::basalt(); // verified (Benz & Asphaug 1999)
-        // Uncompressed radii giving ≈ Earth mass with an Earth-like core fraction (compresses under gravity).
+                                          // Uncompressed radii giving ≈ Earth mass with an Earth-like core fraction (compresses under gravity).
         let total_r = 7.37e6;
         let core_r = 0.55 * total_r;
         let mut b = HydroBody::new_differentiated(core, mantle, core_r, total_r, 1.0e6, 3000);
         let is_core: Vec<bool> = b.eos.iter().map(|e| e.rho0() == core.rho0).collect();
         let m_total: f64 = b.mass.iter().sum();
-        println!("differentiated: N={}, M={:.2e} kg (Earth 5.97e24), initial R≈{:.0} km", b.pos.len(), m_total, total_r / 1e3);
+        println!(
+            "differentiated: N={}, M={:.2e} kg (Earth 5.97e24), initial R≈{:.0} km",
+            b.pos.len(),
+            m_total,
+            total_r / 1e3
+        );
 
         let dt = b.relax_dt(0.2);
         let mut rms_hist = Vec::new();
@@ -1442,27 +1751,55 @@ mod tests {
         let mean: f64 = last.iter().sum::<f64>() / last.len() as f64;
         let spread = last.iter().map(|r| (r - mean).abs()).fold(0.0, f64::max) / mean;
         let rms_init = (3.0f64 / 5.0).sqrt() * total_r;
-        println!("settled RMS {:.0} km (init ≈{:.0} km, spread {:.1}%)", mean / 1e3, rms_init / 1e3, spread * 100.0);
+        println!(
+            "settled RMS {:.0} km (init ≈{:.0} km, spread {:.1}%)",
+            mean / 1e3,
+            rms_init / 1e3,
+            spread * 100.0
+        );
         assert!(spread < 0.06, "body must settle (spread {spread:.2})");
-        assert!(mean <= 1.05 * rms_init, "body must COMPRESS not puff up (settled {mean:.3e} vs init {rms_init:.3e})");
+        assert!(
+            mean <= 1.05 * rms_init,
+            "body must COMPRESS not puff up (settled {mean:.3e} vs init {rms_init:.3e})"
+        );
 
         // (2) STRATIFICATION + core compression.
         let mean_r = |sel: bool| {
             let (mut s, mut n) = (0.0, 0usize);
-            for i in 0..b.pos.len() { if is_core[i] == sel { s += (b.pos[i] - c).length(); n += 1; } }
+            for i in 0..b.pos.len() {
+                if is_core[i] == sel {
+                    s += (b.pos[i] - c).length();
+                    n += 1;
+                }
+            }
             s / n.max(1) as f64
         };
         let dens = |sel: bool| {
             let (mut s, mut n) = (0.0, 0usize);
-            for i in 0..b.pos.len() { if is_core[i] == sel { s += b.rho[i]; n += 1; } }
+            for i in 0..b.pos.len() {
+                if is_core[i] == sel {
+                    s += b.rho[i];
+                    n += 1;
+                }
+            }
             s / n.max(1) as f64
         };
         let (rc, rm) = (mean_r(true), mean_r(false));
         let (dc, dm) = (dens(true), dens(false));
         println!("mean radius: core {:.0} km, mantle {:.0} km · settled ρ: core {:.0}, mantle {:.0} kg/m³", rc / 1e3, rm / 1e3, dc, dm);
-        assert!(rc < 0.7 * rm, "iron core must stay stratified inside the mantle");
-        assert!(dc > 1.5 * dm, "iron core must be denser than the rock mantle");
-        assert!(dc > core.rho0, "iron core must be COMPRESSED above its ρ₀ (got {dc:.0} vs {:.0})", core.rho0);
+        assert!(
+            rc < 0.7 * rm,
+            "iron core must stay stratified inside the mantle"
+        );
+        assert!(
+            dc > 1.5 * dm,
+            "iron core must be denser than the rock mantle"
+        );
+        assert!(
+            dc > core.rho0,
+            "iron core must be COMPRESSED above its ρ₀ (got {dc:.0} vs {:.0})",
+            core.rho0
+        );
 
         // (3) hydrostatic balance at an interior shell.
         let dr = 0.14 * mean;
@@ -1470,17 +1807,32 @@ mod tests {
         let (p_lo, _, n_lo) = shell(&b, c, r - dr, dr);
         let (p_hi, _, n_hi) = shell(&b, c, r + dr, dr);
         let (_, rho_mid, n_mid) = shell(&b, c, r, dr);
-        assert!(n_lo >= 20 && n_hi >= 20 && n_mid >= 20, "interior shell must be populated");
+        assert!(
+            n_lo >= 20 && n_hi >= 20 && n_mid >= 20,
+            "interior shell must be populated"
+        );
         let dpdr = (p_hi - p_lo) / (2.0 * dr);
         let expect = -rho_mid * G * enclosed_mass(&b, c, r) / (r * r);
         let rel = (dpdr - expect).abs() / expect.abs().max(1.0);
-        println!("hydrostatic @ r={:.0} km: dP/dr {:.3e} vs −ρg {:.3e} (rel {:.2})", r / 1e3, dpdr, expect, rel);
-        assert!(dpdr < 0.0 && rel < 0.6, "hydrostatic balance within operator error (rel {rel:.2})");
+        println!(
+            "hydrostatic @ r={:.0} km: dP/dr {:.3e} vs −ρg {:.3e} (rel {:.2})",
+            r / 1e3,
+            dpdr,
+            expect,
+            rel
+        );
+        assert!(
+            dpdr < 0.0 && rel < 0.6,
+            "hydrostatic balance within operator error (rel {rel:.2})"
+        );
 
         // (4) central pressure of the ORDER of Earth's 364 GPa (coarse-N: order, not exact).
         let (p_center, _, _) = shell(&b, c, 0.12 * mean, 0.12 * mean);
         println!("central P {:.3e} Pa (Earth ≈ 3.64e11)", p_center);
-        assert!(p_center > 5.0e10 && p_center < 2.0e12, "central pressure must be ~100s of GPa, got {p_center:.2e}");
+        assert!(
+            p_center > 5.0e10 && p_center < 2.0e12,
+            "central pressure must be ~100s of GPa, got {p_center:.2e}"
+        );
     }
 
     /// **`particalize` reads the body's REAL layers and ANY material — no iron/basalt, no "Earth" (docs/58
@@ -1501,9 +1853,18 @@ mod tests {
         let mut rho0s: Vec<i64> = hb.eos.iter().map(|e| e.rho0().round() as i64).collect();
         rho0s.sort_unstable();
         rho0s.dedup();
-        assert!(rho0s.len() >= 3, "≥3 distinct material EOS from the real layers (got {rho0s:?})");
-        assert!(hb.eos[0].rho0() > 7000.0, "the deepest particles carry the iron-core EOS");
-        assert!(hb.u[0] > *hb.u.last().unwrap(), "u follows the declared geotherm (core hotter than crust)");
+        assert!(
+            rho0s.len() >= 3,
+            "≥3 distinct material EOS from the real layers (got {rho0s:?})"
+        );
+        assert!(
+            hb.eos[0].rho0() > 7000.0,
+            "the deepest particles carry the iron-core EOS"
+        );
+        assert!(
+            hb.u[0] > *hb.u.last().unwrap(),
+            "u follows the declared geotherm (core hotter than crust)"
+        );
 
         // ANY material: a pure-ice body builds with the ICE EOS (ρ₀ 917), not a defaulted rock.
         let ice: crate::planet::LayeredBody = serde_json::from_str(
@@ -1511,10 +1872,16 @@ mod tests {
         )
         .expect("parses");
         let hi = HydroBody::particalize(&ice, 400);
-        assert!(hi.eos.iter().all(|e| (e.rho0() - 917.0).abs() < 30.0), "an ice body is ice EOS, not basalt");
+        assert!(
+            hi.eos.iter().all(|e| (e.rho0() - 917.0).abs() < 30.0),
+            "an ice body is ice EOS, not basalt"
+        );
         let mi: f64 = hi.mass.iter().sum();
         let real = 917.0 * 4.0 / 3.0 * std::f64::consts::PI * 1.0e6_f64.powi(3);
-        assert!((mi - real).abs() / real < 0.03, "ice body mass conserved (got {mi:.3e} vs {real:.3e})");
+        assert!(
+            (mi - real).abs() / real < 0.03,
+            "ice body mass conserved (got {mi:.3e} vs {real:.3e})"
+        );
     }
 
     /// docs/39 resolution-on-demand: a localized CAP is a crater's worth of the PLANET'S OWN matter near the
@@ -1531,7 +1898,10 @@ mod tests {
         //    side of the planet stays the abstract bulk, so the render can keep it a solid globe).
         let site_pt = site * r_surf;
         assert!(
-            cap.body.pos.iter().all(|p| (*p - site_pt).length() <= cap_radius + 1.0),
+            cap.body
+                .pos
+                .iter()
+                .all(|p| (*p - site_pt).length() <= cap_radius + 1.0),
             "the cap is localized to the impact region"
         );
         // 2) It's a small FRACTION of the planet — not all of Earth melted for a surface impact.
@@ -1554,10 +1924,20 @@ mod tests {
             r_surf
         );
         let r_max = cap.body.pos.iter().map(|p| p.length()).fold(0.0, f64::max);
-        assert!(r_max > r_surf - 0.05 * r_surf, "the cap reaches the surface");
+        assert!(
+            r_max > r_surf - 0.05 * r_surf,
+            "the cap reaches the surface"
+        );
         // 5) The planet's OWN near-surface material (crust/mantle, ρ₀ < 3,500) — filtered from the real
         //    layered seed, not a defaulted rock — and a workable particle count for a cap.
-        assert!(cap.body.pos.len() > 200, "the cap keeps a workable particle count, got {}", cap.body.pos.len());
-        assert!(cap.body.eos.iter().any(|e| e.rho0() < 3500.0), "the near-surface crust/mantle material is present");
+        assert!(
+            cap.body.pos.len() > 200,
+            "the cap keeps a workable particle count, got {}",
+            cap.body.pos.len()
+        );
+        assert!(
+            cap.body.eos.iter().any(|e| e.rho0() < 3500.0),
+            "the near-surface crust/mantle material is present"
+        );
     }
 }

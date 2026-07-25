@@ -92,7 +92,8 @@ impl Raster {
     /// Bilinear over the RECONSTRUCTED 16-bit value at the 4 corners (packing bytes can't be lerped directly).
     pub fn elevation_m_at(&self, lat: f64, lon: f64, lo: f64, hi: f64) -> f64 {
         let (xs, ys, tx, ty) = self.bilin(lat, lon);
-        let v16 = |x: usize, y: usize| ((self.at(x, y, 0) as u32) << 8 | self.at(x, y, 1) as u32) as f64;
+        let v16 =
+            |x: usize, y: usize| ((self.at(x, y, 0) as u32) << 8 | self.at(x, y, 1) as u32) as f64;
         let top = v16(xs[0], ys[0]) * (1.0 - tx) + v16(xs[1], ys[0]) * tx;
         let bot = v16(xs[0], ys[1]) * (1.0 - tx) + v16(xs[1], ys[1]) * tx;
         let v = (top * (1.0 - ty) + bot * ty) / 65535.0;
@@ -170,6 +171,9 @@ mod tests {
         assert!((r.elevation_m_at(0.0, 0.0, lo, hi) - hi).abs() < 1.0);
         // lon −90 → texel-x 0.5 (halfway between the two columns) → ~mid range (bilinear).
         let mid = r.elevation_m_at(0.0, -90.0, lo, hi);
-        assert!(mid > lo + 0.4 * (hi - lo) && mid < lo + 0.6 * (hi - lo), "mid was {mid}");
+        assert!(
+            mid > lo + 0.4 * (hi - lo) && mid < lo + 0.6 * (hi - lo),
+            "mid was {mid}"
+        );
     }
 }

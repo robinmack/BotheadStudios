@@ -182,12 +182,17 @@ pub fn detect_swept(
                 continue;
             };
             // The more massive body is struck; the lighter is the impactor.
-            let (struck, striker) = if ba.mass_kg >= bb.mass_kg { (a, b) } else { (b, a) };
+            let (struck, striker) = if ba.mass_kg >= bb.mass_kg {
+                (a, b)
+            } else {
+                (b, a)
+            };
             let (sbody, kbody) = (before[struck], before[striker]);
             // Relative kinematics in the struck body's frame — the frame `contact_velocity` works in.
             let rel_old_s = kbody.pos - sbody.pos;
             let vel_old_s = kbody.vel - sbody.vel;
-            let rel_contact = rel_old_s + ((after_pos[striker] - after_pos[struck]) - rel_old_s) * toi;
+            let rel_contact =
+                rel_old_s + ((after_pos[striker] - after_pos[struck]) - rel_old_s) * toi;
             let n_hat = rel_contact.normalize_or_zero();
             let mu_grav = crate::orbit::G * (sbody.mass_kg + kbody.mass_kg);
             let contact_velocity =
@@ -202,7 +207,10 @@ pub fn detect_swept(
                 energy_j,
                 strength_pa: sbody.strength_pa,
                 separation_m: r_sum,
-                bodies: [(sbody.mass_kg, sbody.radius_m), (kbody.mass_kg, kbody.radius_m)],
+                bodies: [
+                    (sbody.mass_kg, sbody.radius_m),
+                    (kbody.mass_kg, kbody.radius_m),
+                ],
                 at: site,
             });
             out.push(DetectedCollision {
@@ -267,7 +275,9 @@ pub fn detect_atmospheric(
 ) -> Vec<AtmosphericContact> {
     let mut out = Vec::new();
     for host in 0..before.len() {
-        let Some(air) = before[host].air else { continue };
+        let Some(air) = before[host].air else {
+            continue;
+        };
         if !air.exists() || !active[host] {
             continue;
         }
@@ -279,14 +289,19 @@ pub fn detect_atmospheric(
             let rel_old = b.pos - h.pos;
             let rel_new = after_pos[body] - after_pos[host];
             let altitude_m = (rel_old.length() - h.radius_m).max(0.0);
-            let min_altitude_m = (crate::orbit::swept_min_distance(rel_old, rel_new) - h.radius_m).max(0.0);
+            let min_altitude_m =
+                (crate::orbit::swept_min_distance(rel_old, rel_new) - h.radius_m).max(0.0);
             // Relative to the AIR, which moves with its host.
             let rel_vel = b.vel - h.vel;
             // The air reaches this body if it reaches it ANYWHERE on the path — judged at the deepest
             // point, so a body that dips into the atmosphere mid-step is not missed. The density it is
             // then stepped with is the one where it actually is.
             if !crate::atmosphere::air_reaches(
-                air.density_at(min_altitude_m), rel_vel, b.mass_kg, b.radius_m, dt,
+                air.density_at(min_altitude_m),
+                rel_vel,
+                b.mass_kg,
+                b.radius_m,
+                dt,
             ) {
                 continue;
             }
@@ -333,11 +348,18 @@ mod tests {
 
         for (what, i) in [("the giant impact", giant), ("the raindrop", drop)] {
             match respond(&i) {
-                Response::ResolveMatter { volume_m3, radius_m } => {
-                    assert!(volume_m3 > 0.0 && radius_m > 0.0, "{what} excavates something");
+                Response::ResolveMatter {
+                    volume_m3,
+                    radius_m,
+                } => {
+                    assert!(
+                        volume_m3 > 0.0 && radius_m > 0.0,
+                        "{what} excavates something"
+                    );
                     // E/σ, exactly — the same law, not a scaled copy of it.
                     assert!(
-                        (volume_m3 - i.energy_j / i.strength_pa).abs() < 1e-9 * volume_m3.max(1e-12),
+                        (volume_m3 - i.energy_j / i.strength_pa).abs()
+                            < 1e-9 * volume_m3.max(1e-12),
                         "{what} is sized by E/σ"
                     );
                 }
@@ -353,8 +375,14 @@ mod tests {
         };
         let ratio = vol(&giant) / vol(&drop);
         let expected = (giant.energy_j / giant.strength_pa) / (drop.energy_j / drop.strength_pa);
-        assert!((ratio / expected - 1.0).abs() < 1e-9, "the ratio is the physics, not a special case");
-        assert!(ratio > 1e30, "and they really are worlds apart ({ratio:.1e})");
+        assert!(
+            (ratio / expected - 1.0).abs() < 1e-9,
+            "the ratio is the physics, not a special case"
+        );
+        assert!(
+            ratio > 1e30,
+            "and they really are worlds apart ({ratio:.1e})"
+        );
     }
 
     /// Approach, contact, and the quiet in between — one function decides all three.
@@ -368,15 +396,30 @@ mod tests {
             at: DVec3::ZERO,
         };
         // Far out: two bodies, nothing to do, nothing to pay for.
-        assert_eq!(respond(&mk(4.0e8, 0.0)), Response::Untouched, "far apart ⇒ whole bodies");
+        assert_eq!(
+            respond(&mk(4.0e8, 0.0)),
+            Response::Untouched,
+            "far apart ⇒ whole bodies"
+        );
         // Inside the tidal distance (~17,700 km): the point-mass description has stopped being true.
-        assert_eq!(respond(&mk(1.5e7, 0.0)), Response::ResolveBodies, "tides ⇒ resolve the bodies");
+        assert_eq!(
+            respond(&mk(1.5e7, 0.0)),
+            Response::ResolveBodies,
+            "tides ⇒ resolve the bodies"
+        );
         // Touching, with energy: matter.
-        assert!(matches!(respond(&mk(9.0e6, 7.0e30)), Response::ResolveMatter { .. }), "contact ⇒ matter");
+        assert!(
+            matches!(respond(&mk(9.0e6, 7.0e30)), Response::ResolveMatter { .. }),
+            "contact ⇒ matter"
+        );
 
         // A grazing touch with NO energy excavates nothing — the response follows the physics, not the
         // geometry alone.
-        assert_eq!(respond(&mk(9.0e6, 0.0)), Response::ResolveBodies, "contact without energy ⇒ no crater");
+        assert_eq!(
+            respond(&mk(9.0e6, 0.0)),
+            Response::ResolveBodies,
+            "contact without energy ⇒ no crater"
+        );
     }
 
     /// **The engine finds the collision itself.** No `Interaction` is constructed here — the test hands
@@ -386,7 +429,14 @@ mod tests {
     fn the_engine_detects_and_prepares_a_collision_from_bodies_alone() {
         // A small fast body aimed at a large slow one.
         let bodies = [
-            BodyState { pos: DVec3::ZERO, vel: DVec3::ZERO, mass_kg: 5.972e24, radius_m: 6.371e6, strength_pa: 1.0e8, air: None },
+            BodyState {
+                pos: DVec3::ZERO,
+                vel: DVec3::ZERO,
+                mass_kg: 5.972e24,
+                radius_m: 6.371e6,
+                strength_pa: 1.0e8,
+                air: None,
+            },
             BodyState {
                 pos: DVec3::new(2.0e7, 0.0, 0.0),
                 vel: DVec3::new(-1.1e4, 0.0, 0.0),
@@ -402,15 +452,28 @@ mod tests {
         let h = hits[0];
         assert_eq!(h.struck, 0, "the more massive body is the one struck");
         assert_eq!(h.striker, 1, "the lighter one is the impactor");
-        assert!((0.0..=1.0).contains(&h.toi), "contact is forecast within the step ({})", h.toi);
-        assert!(matches!(h.response, Response::ResolveMatter { .. }), "a real hit resolves matter");
+        assert!(
+            (0.0..=1.0).contains(&h.toi),
+            "contact is forecast within the step ({})",
+            h.toi
+        );
+        assert!(
+            matches!(h.response, Response::ResolveMatter { .. }),
+            "a real hit resolves matter"
+        );
 
         // Bodies flying apart are not a collision, however close they pass.
         let apart = [
             bodies[0],
-            BodyState { vel: DVec3::new(1.1e4, 0.0, 0.0), ..bodies[1] },
+            BodyState {
+                vel: DVec3::new(1.1e4, 0.0, 0.0),
+                ..bodies[1]
+            },
         ];
-        assert!(detect(&apart, 2000.0).is_empty(), "receding bodies do not collide");
+        assert!(
+            detect(&apart, 2000.0).is_empty(),
+            "receding bodies do not collide"
+        );
     }
 
     /// Earth's air, built the way a scene would get it: from the body's own declared matter.
@@ -454,16 +517,34 @@ mod tests {
     /// the contact — the same way `detect_swept` reports a solid one.
     #[test]
     fn the_engine_detects_a_body_flying_through_another_bodys_air() {
-        let bodies = [planet_with_air(Some(earth_air())), incoming(80_000.0, 2.0e4)];
+        let bodies = [
+            planet_with_air(Some(earth_air())),
+            incoming(80_000.0, 2.0e4),
+        ];
         let dt = 0.5;
         let after: Vec<DVec3> = bodies.iter().map(|b| b.pos + b.vel * dt).collect();
         let hits = detect_atmospheric(&bodies, &after, &[true, true], dt);
         assert_eq!(hits.len(), 1, "the rock is in the planet's air");
         let h = hits[0];
-        assert_eq!((h.host, h.body), (0, 1), "the air belongs to the planet, the flight to the rock");
-        assert!((h.altitude_m - 80_000.0).abs() < 1.0, "altitude is above the SURFACE, got {}", h.altitude_m);
-        assert!(h.rho > 0.0 && h.rho < 1.0e-3, "80 km air is real but thin ({:.2e} kg/m³)", h.rho);
-        assert!(h.min_altitude_m < h.altitude_m, "the swept path goes deeper than where it started");
+        assert_eq!(
+            (h.host, h.body),
+            (0, 1),
+            "the air belongs to the planet, the flight to the rock"
+        );
+        assert!(
+            (h.altitude_m - 80_000.0).abs() < 1.0,
+            "altitude is above the SURFACE, got {}",
+            h.altitude_m
+        );
+        assert!(
+            h.rho > 0.0 && h.rho < 1.0e-3,
+            "80 km air is real but thin ({:.2e} kg/m³)",
+            h.rho
+        );
+        assert!(
+            h.min_altitude_m < h.altitude_m,
+            "the swept path goes deeper than where it started"
+        );
 
         // An airless planet is not something to fly through. Same geometry, same speeds.
         let airless = [planet_with_air(None), incoming(80_000.0, 2.0e4)];
@@ -487,27 +568,52 @@ mod tests {
         // point: the derived bound is nowhere near any altitude convention, and it is not the same
         // altitude for two different bodies. 320 km sits between the two.
         let alt = 320_000.0;
-        let dense = BodyState { mass_kg: 3.3e4, radius_m: 1.0, ..incoming(alt, 2.0e4) };
+        let dense = BodyState {
+            mass_kg: 3.3e4,
+            radius_m: 1.0,
+            ..incoming(alt, 2.0e4)
+        };
         // Same size, a thousandth of the mass: a thousand times more drag per kilogram.
-        let fluffy = BodyState { mass_kg: 33.0, ..dense };
+        let fluffy = BodyState {
+            mass_kg: 33.0,
+            ..dense
+        };
 
         let reach = |b: BodyState| {
             let bodies = [planet_with_air(Some(air)), b];
             let after: Vec<DVec3> = bodies.iter().map(|x| x.pos + x.vel * dt).collect();
             !detect_atmospheric(&bodies, &after, &[true, true], dt).is_empty()
         };
-        assert!(reach(fluffy), "the light body is still flying through air at {alt} m");
-        assert!(!reach(dense), "the dense one, in the same place at the same speed, is not");
+        assert!(
+            reach(fluffy),
+            "the light body is still flying through air at {alt} m"
+        );
+        assert!(
+            !reach(dense),
+            "the dense one, in the same place at the same speed, is not"
+        );
 
         // And the bound really is "the arithmetic cannot see it": at the altitude where the dense body
         // drops out, adding a step of drag does not change its speed at all.
         let rho = air.density_at(alt);
         let step = crate::atmosphere::atmospheric_step(
-            rho, dense.vel, dense.mass_kg, dense.radius_m, 300.0, dense.radius_m, air.ambient_temp_k,
-            &crate::materials::load()[crate::materials::index_of(&crate::materials::load(), "iron")], dt,
+            rho,
+            dense.vel,
+            dense.mass_kg,
+            dense.radius_m,
+            300.0,
+            dense.radius_m,
+            air.ambient_temp_k,
+            &crate::materials::load()
+                [crate::materials::index_of(&crate::materials::load(), "iron")],
+            dt,
         );
         let v0 = dense.vel;
-        assert_eq!((v0 + step.drag_accel * dt).length(), v0.length(), "the air it left changes nothing");
+        assert_eq!(
+            (v0 + step.drag_accel * dt).length(),
+            v0.length(),
+            "the air it left changes nothing"
+        );
     }
 
     /// **A body cannot skim the atmosphere between two frames and be recorded as never having entered.**
@@ -540,16 +646,22 @@ mod tests {
         for p in [bodies[1].pos, after[1]] {
             assert!(
                 !crate::atmosphere::air_reaches(
-                    air.density_at(alt_of(p)), grazer.vel, grazer.mass_kg, grazer.radius_m, dt
+                    air.density_at(alt_of(p)),
+                    grazer.vel,
+                    grazer.mass_kg,
+                    grazer.radius_m,
+                    dt
                 ),
-                "endpoint at {:.0} km is out of the air", alt_of(p) / 1000.0
+                "endpoint at {:.0} km is out of the air",
+                alt_of(p) / 1000.0
             );
         }
         let hits = detect_atmospheric(&bodies, &after, &[true, true], dt);
         assert_eq!(hits.len(), 1, "but the swept path went through it");
         assert!(
             (hits[0].min_altitude_m - 60_000.0).abs() < 1.0,
-            "and the caller is told how deep it got ({:.0} m)", hits[0].min_altitude_m
+            "and the caller is told how deep it got ({:.0} m)",
+            hits[0].min_altitude_m
         );
     }
 
@@ -558,7 +670,14 @@ mod tests {
     /// per-frame `pos == pos` check a scene could fumble.
     #[test]
     fn a_body_that_would_tunnel_through_in_one_step_is_still_caught() {
-        let target = BodyState { pos: DVec3::ZERO, vel: DVec3::ZERO, mass_kg: 6.0e24, radius_m: 6.4e6, strength_pa: 1.0e8, air: None };
+        let target = BodyState {
+            pos: DVec3::ZERO,
+            vel: DVec3::ZERO,
+            mass_kg: 6.0e24,
+            radius_m: 6.4e6,
+            strength_pa: 1.0e8,
+            air: None,
+        };
         // Starts one side, ends the other side, in a single step — never sampled inside.
         let bullet = BodyState {
             pos: DVec3::new(-5.0e7, 0.0, 0.0),
@@ -572,7 +691,14 @@ mod tests {
         let start_overlap = (bullet.pos - target.pos).length() < target.radius_m + bullet.radius_m;
         let end = bullet.pos + bullet.vel * 50.0;
         let end_overlap = (end - target.pos).length() < target.radius_m + bullet.radius_m;
-        assert!(!start_overlap && !end_overlap, "neither endpoint overlaps — sampling would miss it");
-        assert_eq!(detect(&[target, bullet], 50.0).len(), 1, "but the engine forecasts the tunneling hit");
+        assert!(
+            !start_overlap && !end_overlap,
+            "neither endpoint overlaps — sampling would miss it"
+        );
+        assert_eq!(
+            detect(&[target, bullet], 50.0).len(),
+            1,
+            "but the engine forecasts the tunneling hit"
+        );
     }
 }

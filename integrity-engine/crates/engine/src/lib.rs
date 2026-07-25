@@ -25,22 +25,22 @@ mod aggregate;
 mod atmosphere;
 mod axle; // docs/47 §3 — the revolute joint: holds a wheel's hub, frees ONE spin axis
 mod bhtree;
+mod blackbody; // Planck + the CIE observer: colour from temperature, for stars and (a follow-up) hot ejecta
+mod body;
 /// The physics clock: real elapsed time into whole fixed steps, so a slow machine simulates the same
 /// world as a fast one. Not scene code — every scene needs it, and there is one right answer.
 pub mod clock;
-mod blackbody; // Planck + the CIE observer: colour from temperature, for stars and (a follow-up) hot ejecta
-mod body;
 mod damage;
 mod emission;
-mod geo; // THE lat/lon <-> direction conversion (one place, so the world cannot be mirrored in six)
 mod eos;
+mod geo; // THE lat/lon <-> direction conversion (one place, so the world cannot be mirrored in six)
+/// GPU direct-sum self-gravity: the exact per-particle N-body force on the GPU, dispatched to when a
+/// foreseen collision materialises particles above the CPU/GPU knee.
+mod gpu_gravity;
 /// docs/52 — acquiring a GPU with no browser and no canvas: the standalone engine's device entry point.
 /// Native only; in the browser the device comes from the canvas context.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod gpu_host;
-/// GPU direct-sum self-gravity: the exact per-particle N-body force on the GPU, dispatched to when a
-/// foreseen collision materialises particles above the CPU/GPU knee.
-mod gpu_gravity;
 mod gpu_layout; // docs/47 — GPU repr(C) layouts, pinned to the shader by test
 /// docs/33 — THE GPU particle container (granular). Lifted out of `#[cfg(wasm32)] mod app`, where a
 /// scene-agnostic container looked like the terrain scene's private machinery and no native build
@@ -51,12 +51,12 @@ mod gpu_particles;
 mod gpu_store;
 mod granular;
 mod grid; // docs/47 §1 — the hierarchical spatial hash: no global cell size
-// WebGPU host for sph_step.wgsl. Compiled on EVERY target, deliberately: it used to be wasm-only, but the
-// only thing that actually required wasm was one `Rc<Cell<bool>>` in a `map_async` callback (see
-// `gpu_sph::GpuSph::readback_ready`). That accident hid ~700 lines of shipping GPU host code from native
-// `cargo check`/`cargo test` — the very trap CLAUDE.md rule 3 flags ("no in-crate tests") and that once
-// shipped a non-compiling commit. Building it natively costs nothing (wgpu's types exist without a
-// backend) and puts its shader-facing layouts under the suite. Running still needs a browser.
+          // WebGPU host for sph_step.wgsl. Compiled on EVERY target, deliberately: it used to be wasm-only, but the
+          // only thing that actually required wasm was one `Rc<Cell<bool>>` in a `map_async` callback (see
+          // `gpu_sph::GpuSph::readback_ready`). That accident hid ~700 lines of shipping GPU host code from native
+          // `cargo check`/`cargo test` — the very trap CLAUDE.md rule 3 flags ("no in-crate tests") and that once
+          // shipped a non-compiling commit. Building it natively costs nothing (wgpu's types exist without a
+          // backend) and puts its shader-facing layouts under the suite. Running still needs a browser.
 mod gpu_sph;
 pub mod gravity;
 mod hydrostatic;
@@ -68,34 +68,34 @@ mod planet;
 mod render;
 /// What the engine is holding, as it must be drawn — the one physics→picture mapping (docs/50).
 pub use render::Drawn;
-pub mod resolution; // docs/44 — resolution by necessity: the quasi-static admission test
-/// docs/49 — surface detail that follows the camera CONTINUOUSLY. The consumer
-/// `ResolutionController::camera_grain_radius` never had.
-mod sky;
-mod surface_detail;
-mod tides;
 /// docs/53 — the engine driven by a DEFINITION: builds the world, applies declared matter events through
 /// the shared primitives, and steps. No scene struct, no canvas. This is what re-consumes the systems
 /// deleting terrain orphaned (docs/46 ledger row 15).
 pub mod flight;
-pub mod simulation;
 /// docs/55 — the ground scene, rebuilt from a DEFINITION. Browser-only (it owns a canvas surface).
 #[cfg(target_arch = "wasm32")]
 pub mod ground_scene;
-#[cfg(test)]
-/// docs/00 — the Laws, made checkable: fails the build when a world file declares a quantity that must
-/// emerge from matter. Availability of the Laws proved insufficient on its own (2026-07-21).
-mod laws;
 /// ONE entry point for "two things met — what does the engine do?". Delegates to the laws that already
 /// own each half, so a new scene finds them instead of writing a third path.
 pub mod interaction;
 mod isotropy;
+#[cfg(test)]
+/// docs/00 — the Laws, made checkable: fails the build when a world file declares a quantity that must
+/// emerge from matter. Availability of the Laws proved insufficient on its own (2026-07-21).
+mod laws;
 pub mod materials;
 pub mod matter;
 mod mesher;
 mod neighbors;
 mod orbit;
-pub mod terra; // docs/43 — worlds-as-data: the world schema (+ later raster/mesh/camera). The wasm `Terra` scene
+pub mod resolution; // docs/44 — resolution by necessity: the quasi-static admission test
+pub mod simulation;
+/// docs/49 — surface detail that follows the camera CONTINUOUSLY. The consumer
+/// `ResolutionController::camera_grain_radius` never had.
+mod sky;
+mod surface_detail;
+pub mod terra;
+mod tides; // docs/43 — worlds-as-data: the world schema (+ later raster/mesh/camera). The wasm `Terra` scene
            // struct lives in `mod app` below to reuse its render helpers.
 mod texture;
 /// Test-only: the ONE WGSL↔Rust layout checker, shared by every module with a `#[repr(C)]` shader mirror.
@@ -160,18 +160,31 @@ mod body_spec_tests {
         d.radius_m = Some(1.0);
         let m = super::declared_body_mass(&d);
         let r = super::declared_body_radius(&d);
-        assert!((m - crate::planet::body("moon").total_mass()).abs() < 1.0, "mass is Luna's, not 1 kg");
-        assert!((r - 1.737e6).abs() < 1.0e4, "radius is Luna's, not 1 m (got {r})");
+        assert!(
+            (m - crate::planet::body("moon").total_mass()).abs() < 1.0,
+            "mass is Luna's, not 1 kg"
+        );
+        assert!(
+            (r - 1.737e6).abs() < 1.0e4,
+            "radius is Luna's, not 1 m (got {r})"
+        );
 
         // Earth likewise.
         let mut e = BodyDef::default();
         e.profile = Some("earth".into());
-        assert!((super::declared_body_radius(&e) - 6.371e6).abs() < 1e3, "Terra's radius from the definition");
+        assert!(
+            (super::declared_body_radius(&e) - 6.371e6).abs() < 1e3,
+            "Terra's radius from the definition"
+        );
 
         // A BARE point mass (no profile) keeps its declared mass — a scene may still place one.
         let mut point = BodyDef::default();
         point.mass_kg = Some(5.0e20);
-        assert_eq!(super::declared_body_mass(&point), 5.0e20, "an undefined body keeps its declared mass");
+        assert_eq!(
+            super::declared_body_mass(&point),
+            5.0e20,
+            "an undefined body keeps its declared mass"
+        );
     }
 }
 
@@ -254,7 +267,6 @@ mod app {
     use wasm_bindgen::prelude::*;
     use web_sys::HtmlCanvasElement;
 
-
     // Probe / simulation parameters.
     const SPAWN_HEIGHT: f32 = 12.0; // metres of clearance above the surface at spawn
     const SPHERE_RADIUS: f32 = 3.0; // rendered/collision radius — enlarged for visibility (a real
@@ -328,8 +340,8 @@ mod app {
                                        // (tools/gpu-verify scene I: total mechanical energy only ever decreases). A real angle of repose
                                        // emerges from the friction (docs/23).
     const CONTACT_STIFFNESS: f32 = 5.0e5; // normal repulsion (1/s²) per metre of overlap
-    // Normal damping is no longer a constant — it's DERIVED per-material from restitution (docs/24
-    // Stage 1), see `granular::damping_for_restitution` in `gpu_step_params`.
+                                          // Normal damping is no longer a constant — it's DERIVED per-material from restitution (docs/24
+                                          // Stage 1), see `granular::damping_for_restitution` in `gpu_step_params`.
     const CONTACT_TANGENT_DAMP: f32 = 100.0; // friction ramp with slip speed
     /// Air temperature (K) for the surface band's density. ISA sea level; the isothermal assumption is
     /// the same one `scale_height` and the settling-column emergence test make (docs/26).
@@ -399,13 +411,6 @@ mod app {
     // Render scaffolding (Camera/GpuMesh/UniformSlot/Uniforms/... + the generic helpers) moved
     // to `crate::render` (docs/33).
     use crate::render::*;
-
-
-
-
-
-
-
 
     // GPU-compute debris particles moved to `crate::gpu_particles` (docs/33) — see that module.
     use crate::gpu_layout::{GpuParticle, GpuStepParams};
@@ -567,7 +572,9 @@ mod app {
             // (JOURNAL 2026-07-19: that mistake made a 2.5× hardware gap look like 17%).
             let mut enc = self
                 .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gpu-probe") });
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("gpu-probe"),
+                });
             for _ in 0..self.frames {
                 for _ in 0..DEBRIS_SUBSTEPS {
                     parts.dispatch(&mut enc);
@@ -692,8 +699,6 @@ mod app {
         }
     }
 
-
-
     // ============================================================================================
     // Space band (scale-relative "orbit-to-ground", Step A): render the Earth + Moon as two lit
     // spheres whose positions come from the *validated* N-body physics (orbit.rs), so what you watch
@@ -761,7 +766,7 @@ mod app {
         light_dir: [f32; 4], // xyz = direction to the "sun"
         tint: [f32; 4],      // body color
         emissive: [f32; 4],  // rgb = incandescent glow, w = intensity (self-lit hot ejecta)
-        atm: [f32; 4],       // xyz = Rayleigh optical depth per band, w = sun gain (the SAME air the ground sky uses)
+        atm: [f32; 4], // xyz = Rayleigh optical depth per band, w = sun gain (the SAME air the ground sky uses)
         /// rgb = the Planck colour of this body's own surface temperature, w = how brightly it glows as a
         /// multiple of a sunlit white surface (`blackbody::thermal_glow_gain`). A cold planet sends zeros
         /// and pays nothing; a magma ocean sends ~547 and lights itself.
@@ -791,10 +796,10 @@ mod app {
     /// (The CPU debris cloud's per-fragment fields are gone with the Aggregate path, docs/58 #7:
     /// resolved impact matter lives in the GPU SPH buffer and is drawn straight from it.)
     struct FrameSnap {
-        t: f64,                   // physics wall-clock (s) when taken
+        t: f64, // physics wall-clock (s) when taken
         bodies: Vec<glam::DVec3>, // positions of [Sun, Earth, Moon(s)] — the only thing the render lags.
-        // (The live GPU SPH particle field is drawn straight from `sph_snapshot`, not lagged through here;
-        // a struck moon hides on its own `materialized` flag, so no per-snapshot debris state is needed.)
+                                  // (The live GPU SPH particle field is drawn straight from `sph_snapshot`, not lagged through here;
+                                  // a struck moon hides on its own `materialized` flag, so no per-snapshot debris state is needed.)
     }
 
     /// Resolution-on-demand plan for a small-impactor collision (docs/39): the target stays an abstract
@@ -802,10 +807,10 @@ mod app {
     /// approach as solid bodies; the `Assembling` phase reads it to particalize the cap at the LIVE impact
     /// site(s) and configure the GPU bulk. `None` ⇒ a whole-body collision (birth), which resolves everything.
     struct CapPlan {
-        planet: usize,          // self.bodies index of the target (the bulk)
-        impactors: Vec<usize>,  // self.bodies indices of the impactor(s), whole-resolved (prov 1.. in the relax)
-        r_core: f64,            // the bulk floor radius (the cap's inner edge) — the cap relaxes seated here
-        bulk_mass: f64,         // the un-resolved remainder (planet − cap): the Gauss gravity source
+        planet: usize,         // self.bodies index of the target (the bulk)
+        impactors: Vec<usize>, // self.bodies indices of the impactor(s), whole-resolved (prov 1.. in the relax)
+        r_core: f64, // the bulk floor radius (the cap's inner edge) — the cap relaxes seated here
+        bulk_mass: f64, // the un-resolved remainder (planet − cap): the Gauss gravity source
     }
 
     /// Setup phase of the GPU SPH impact (docs/35): relax the two bodies on the GPU (placed far apart so each
@@ -821,8 +826,8 @@ mod app {
         /// until an interaction cannot be represented any other way; `accretion::resolution_distance`
         /// says when that is, from the tides, and the relax happens here where nobody is looking.
         Approaching,
-        Assembling,    // relax done; awaiting the async read-back to compute the collision geometry
-        Dynamics,      // colliding — KDK substeps + read-back
+        Assembling, // relax done; awaiting the async read-back to compute the collision geometry
+        Dynamics,   // colliding — KDK substeps + read-back
     }
 
     /// The orbital ("space band") demo handle exposed to JavaScript.
@@ -933,7 +938,7 @@ mod app {
         /// GPU each frame via the verified `sph_step.wgsl` kernels). `None` until triggered.
         gpu_sph: Option<crate::gpu_sph::GpuSph>,
         sph_pipeline: wgpu::RenderPipeline, // instanced billboard particles (sph_render.wgsl)
-        sph_cam: UniformSlot,               // view-proj + Earth display origin + scale for the particle shader
+        sph_cam: UniformSlot, // view-proj + Earth display origin + scale for the particle shader
         sph_active: bool,
         sph_dt: f32, // fixed integration timestep (chosen at build; WebGPU forbids the adaptive read-back)
         sph_soft: f64, // gravitational softening (for the energy diagnostic's PE term)
@@ -1114,14 +1119,21 @@ mod app {
             let (tex_view, normal_view, sampler) = upload_material_textures(&device, &queue, &mats);
             let num_moons = num_moons.clamp(1, 2) as usize;
             let debris_unis: Vec<UniformSlot> = (0..MOONLET_UNIS_N)
-                .map(|_| make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler))
+                .map(|_| {
+                    make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler)
+                })
                 .collect();
             let shell_unis: Vec<UniformSlot> = (0..SHELL_N)
-                .map(|_| make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler))
+                .map(|_| {
+                    make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler)
+                })
                 .collect();
-            let interior_uni = make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
-            let impactor_uni = make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
-            let sun_uni = make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
+            let interior_uni =
+                make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
+            let impactor_uni =
+                make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
+            let sun_uni =
+                make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
             // Rayleigh optical depths from the EMERGENT surface pressure (planet::earth's declared
             // atmosphere mass) — the blue marble is derived from the air, never painted (docs/26).
             let atm_tau = crate::atmosphere::rayleigh_tau(
@@ -1132,27 +1144,40 @@ mod app {
                 let h = mats
                     .iter()
                     .find(|m| m.id == "air")
-                    .map(|air| crate::atmosphere::scale_height(air, 288.0, e.gravity_at(e.radius())))
+                    .map(|air| {
+                        crate::atmosphere::scale_height(air, 288.0, e.gravity_at(e.radius()))
+                    })
                     .unwrap_or(0.0);
                 crate::atmosphere::twilight_half_angle(h, e.radius())
             };
             let moon_unis: Vec<UniformSlot> = (0..num_moons * MOON_SHELL_N)
-                .map(|_| make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler))
+                .map(|_| {
+                    make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler)
+                })
                 .collect();
             let pipeline = build_space_pipeline(&device, &bind_layout, config.format);
-            let globe_pipeline =
-                build_globe_pipeline(&device, &bind_layout, config.format, wgpu::BlendState::REPLACE);
-            let globe_uni = make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
+            let globe_pipeline = build_globe_pipeline(
+                &device,
+                &bind_layout,
+                config.format,
+                wgpu::BlendState::REPLACE,
+            );
+            let globe_uni =
+                make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
             // GPU SPH deformable-Earth impact (stage 4c.4): its instanced-particle pipeline + a camera
             // uniform (reuses the uniform-only `bind_layout`; the buffer is sized for `SphCam`).
             // The SPH particle render is NOT a textured surface — it draws particles from the physics
             // buffer and needs only a camera uniform. It gets its own layout rather than carrying the
             // surface layout's material arrays. (Universality is about every SURFACE being the same
             // rendered world; it is not a reason to hand texture bindings to a particle shader.)
-            let particle_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("particle-bind-layout"),
-                entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT)],
-            });
+            let particle_bind_layout =
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("particle-bind-layout"),
+                    entries: &[uniform_entry(
+                        0,
+                        wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    )],
+                });
             let sph_pipeline = build_sph_pipeline(&device, &particle_bind_layout, config.format);
             let sph_cam = {
                 let buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1164,7 +1189,10 @@ mod app {
                 let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("sph-cam-bind"),
                     layout: &particle_bind_layout,
-                    entries: &[wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() }],
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buf.as_entire_binding(),
+                    }],
                 });
                 UniformSlot { buf, bind }
             };
@@ -1333,8 +1361,7 @@ mod app {
         /// reappearing: nothing decided where the matter actually was, so both answers were drawn at once
         /// and a dial chose how much of each. Representation is now derived from the matter itself
         /// (`body_coherence`).
-        pub fn set_render_blend(&mut self, _blend: f32) {
-        }
+        pub fn set_render_blend(&mut self, _blend: f32) {}
 
         /// docs/43 — load a "system" world (Sun/Earth/Moon initial conditions) from JSON, replacing the built-in
         /// constants with declared DATA. `create(canvas, num_moons)` must have been called with the world's moon
@@ -1370,9 +1397,15 @@ mod app {
         #[allow(clippy::too_many_arguments)]
         pub fn load_earth_surface(
             &mut self,
-            landmask: &[u8], lm_w: usize, lm_h: usize,
-            elevation: &[u8], ev_w: usize, ev_h: usize,
-            landcover: &[u8], lc_w: usize, lc_h: usize,
+            landmask: &[u8],
+            lm_w: usize,
+            lm_h: usize,
+            elevation: &[u8],
+            ev_w: usize,
+            ev_h: usize,
+            landcover: &[u8],
+            lc_w: usize,
+            lc_h: usize,
         ) -> Result<(), JsValue> {
             let body = crate::planet::body("earth");
             let def = body
@@ -1386,10 +1419,19 @@ mod app {
                     .flatten()
             };
             let biome_mats = {
-                let max_idx = def.biomes.keys().filter_map(|k| k.parse::<usize>().ok()).max().unwrap_or(0);
+                let max_idx = def
+                    .biomes
+                    .keys()
+                    .filter_map(|k| k.parse::<usize>().ok())
+                    .max()
+                    .unwrap_or(0);
                 (0..=max_idx)
                     .map(|i| {
-                        let id = def.biomes.get(&i.to_string()).map(String::as_str).unwrap_or("granite");
+                        let id = def
+                            .biomes
+                            .get(&i.to_string())
+                            .map(String::as_str)
+                            .unwrap_or("granite");
                         materials::index_of(&self.mats, id)
                     })
                     .collect::<Vec<_>>()
@@ -1416,7 +1458,10 @@ mod app {
                 surf.landcover.as_ref(),
                 surf.elev_range,
             );
-            log::info!("space: definitive Earth built — {} triangles", mesh.indices.len() / 3);
+            log::info!(
+                "space: definitive Earth built — {} triangles",
+                mesh.indices.len() / 3
+            );
             self.globe_mesh = Some(upload_mesh(&self.device, "earth-globe", &mesh));
             self.earth_surface = Some(surf);
             Ok(())
@@ -1487,7 +1532,9 @@ mod app {
                             // reproduces when the rotation reads the same emergent I back (spin_inertia()).
                             let inertia = crate::body_definition(d.profile.as_deref())
                                 .map(|b| b.moment_of_inertia())
-                                .unwrap_or_else(|| crate::tides::moment_of_inertia(body_mass(d), body_radius(d)));
+                                .unwrap_or_else(|| {
+                                    crate::tides::moment_of_inertia(body_mass(d), body_radius(d))
+                                });
                             self.spin_l = glam::DVec3::new(0.0, 0.0, 1.0)
                                 * (inertia * (2.0 * std::f64::consts::PI / p));
                             self.initial_spin_l = self.spin_l;
@@ -1623,10 +1670,16 @@ mod app {
                 let mut r_core = planet_r;
                 let mut cap_mass = 0.0f64;
                 for &bi in &prov_to_body[1..] {
-                    let site_dir = (self.bodies[bi].pos - self.bodies[planet].pos).normalize_or_zero();
-                    let imp_r = self.body_meta.get(bi).map_or(self.impactor_radius, |m| m.radius_m);
+                    let site_dir =
+                        (self.bodies[bi].pos - self.bodies[planet].pos).normalize_or_zero();
+                    let imp_r = self
+                        .body_meta
+                        .get(bi)
+                        .map_or(self.impactor_radius, |m| m.radius_m);
                     let cap_radius = (2.0 * imp_r).min(0.55 * planet_r);
-                    let c = crate::hydrostatic::HydroBody::particalize_cap(&mats[0], site_dir, cap_radius, 2000);
+                    let c = crate::hydrostatic::HydroBody::particalize_cap(
+                        &mats[0], site_dir, cap_radius, 2000,
+                    );
                     r_core = r_core.min(c.r_core);
                     cap_mass += c.body.mass.iter().sum::<f64>();
                     match &mut cap_body {
@@ -1755,7 +1808,6 @@ mod app {
             (self.bodies[2].vel - self.bodies[1].vel).length() / 1000.0
         }
 
-
         /// Whether the Moon has struck the planet (HUD).
         pub fn has_impacted(&self) -> bool {
             self.impacted
@@ -1765,7 +1817,11 @@ mod app {
         /// HUD diagnostic. Resolved impact matter lives in the GPU SPH machine, so this counts its
         /// latest read-back; the CPU Aggregate cloud this used to count is retired (docs/58 #7).
         pub fn debris_count(&self) -> u32 {
-            if self.sph_active { self.sph_snapshot.len() as u32 } else { 0 }
+            if self.sph_active {
+                self.sph_snapshot.len() as u32
+            } else {
+                0
+            }
         }
 
         /// Energy (J) the impact released — what would become heat, fracture, and ejecta.
@@ -1827,7 +1883,8 @@ mod app {
         /// body through its orbit rather than smearing against inertial space; the focus buttons
         /// snap it back to zero. Representation only — no matter moves.
         pub fn pan_view(&mut self, dx_px: f32, dy_px: f32) {
-            self.camera.pan_by_pixels(dx_px, dy_px, 0.9, self.config.height.max(1) as f32);
+            self.camera
+                .pan_by_pixels(dx_px, dy_px, 0.9, self.config.height.max(1) as f32);
         }
 
         /// Name of the currently-focused body (for the HUD / focus button).
@@ -1923,14 +1980,22 @@ mod app {
                 return t / 3600.0;
             }
             let t = crate::tides::spin_period_from_inertia(self.spin_l, self.spin_inertia());
-            if t.is_finite() { t / 3600.0 } else { -1.0 }
+            if t.is_finite() {
+                t / 3600.0
+            } else {
+                -1.0
+            }
         }
 
         /// SIM seconds since the impact (−1 before it), for the HUD's T+ aftermath clock. Only
         /// geologic time accumulates it now; the live SPH aftermath reports through its own
         /// stats (`gpu_disk_stats_json`), exactly as it did before the CPU cloud retired.
         pub fn sim_since_impact_s(&self) -> f64 {
-            if self.geologic { self.sim_since_impact } else { -1.0 }
+            if self.geologic {
+                self.sim_since_impact
+            } else {
+                -1.0
+            }
         }
 
         /// Real seconds until the forecast impact (−1 once it has happened / no closing approach).
@@ -1997,7 +2062,10 @@ mod app {
                 .iter()
                 .filter(|p| p.prov == prov)
                 .map(|p| {
-                    (glam::DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64), p.mass as f64)
+                    (
+                        glam::DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64),
+                        p.mass as f64,
+                    )
                 })
                 .unzip()
         }
@@ -2022,9 +2090,8 @@ mod app {
                 acc[i].1 += glam::DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64) * m;
                 acc[i].2 += glam::DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64) * m;
             }
-            (acc[0].0 > 0.0 && acc[1].0 > 0.0).then(|| {
-                [0, 1].map(|i| (acc[i].0, acc[i].1 / acc[i].0, acc[i].2 / acc[i].0))
-            })
+            (acc[0].0 > 0.0 && acc[1].0 > 0.0)
+                .then(|| [0, 1].map(|i| (acc[i].0, acc[i].1 / acc[i].0, acc[i].2 / acc[i].0)))
         }
 
         /// The TARGET's spin period (s) measured from the particle field: its own angular momentum about
@@ -2052,7 +2119,9 @@ mod app {
                 .get(p)
                 .and_then(|m| m.matter.as_ref())
                 .map(|b| b.moment_of_inertia())
-                .unwrap_or_else(|| crate::tides::moment_of_inertia(self.bodies[p].mass, EARTH_RADIUS_M))
+                .unwrap_or_else(|| {
+                    crate::tides::moment_of_inertia(self.bodies[p].mass, EARTH_RADIUS_M)
+                })
         }
 
         fn sph_target_spin_period_s(&self) -> Option<f64> {
@@ -2084,7 +2153,8 @@ mod app {
         /// `start_gpu_impact`. Without it the engine uses `ImpactDef::default()`, which reproduces the
         /// constants this replaced exactly — so an un-migrated caller is unchanged.
         pub fn load_impact_world(&mut self, world_json: &str) -> Result<(), JsValue> {
-            let w = crate::terra::world_def::World::parse(world_json).map_err(|e| JsValue::from_str(&e))?;
+            let w = crate::terra::world_def::World::parse(world_json)
+                .map_err(|e| JsValue::from_str(&e))?;
             self.impact_def = w.impact.unwrap_or_default();
             Ok(())
         }
@@ -2142,7 +2212,11 @@ mod app {
                     wsum += m * sig;
                     msum += m;
                 }
-                if msum > 0.0 { wsum / msum } else { 1.0e8 }
+                if msum > 0.0 {
+                    wsum / msum
+                } else {
+                    1.0e8
+                }
             };
             let Some(c) = clumps
                 .into_iter()
@@ -2159,7 +2233,11 @@ mod app {
                 (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
             for &i in &idx {
                 let p = &snap[i];
-                pos.push(DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64));
+                pos.push(DVec3::new(
+                    p.pos[0] as f64,
+                    p.pos[1] as f64,
+                    p.pos[2] as f64,
+                ));
                 mass.push(p.mass as f64);
                 rho.push(p.rho.max(1.0) as f64);
                 mat.push(p.mat as usize);
@@ -2171,7 +2249,8 @@ mod app {
                     .unwrap_or(840.0);
                 temp.push((p.u as f64 / sh.max(1.0)).max(0.0));
             }
-            let layers = crate::accretion::sample_layers(&pos, &mass, &rho, &mat, &names, &temp, 12);
+            let layers =
+                crate::accretion::sample_layers(&pos, &mass, &rho, &mat, &names, &temp, 12);
             if layers.is_empty() {
                 self.sph_snapshot = snap;
                 return false;
@@ -2191,7 +2270,12 @@ mod app {
                 idx.len(),
                 body.mass,
                 matter.layers.len(),
-                matter.layers.iter().map(|l| l.material.as_str()).collect::<Vec<_>>().join(" / ")
+                matter
+                    .layers
+                    .iter()
+                    .map(|l| l.material.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" / ")
             );
             self.sph_promoted.push(PromotedBody { body, matter });
 
@@ -2208,8 +2292,11 @@ mod app {
                 self.sph_promoted.pop();
                 return false;
             }
-            let ext: Vec<(DVec3, f64)> =
-                self.sph_promoted.iter().map(|p| (p.body.pos, p.body.mass)).collect();
+            let ext: Vec<(DVec3, f64)> = self
+                .sph_promoted
+                .iter()
+                .map(|p| (p.body.pos, p.body.mass))
+                .collect();
             let soft = self.sph_soft as f32;
             let dt = self.sph_dt;
             let budget = self.sph_merge_budget;
@@ -2249,7 +2336,8 @@ mod app {
                 let b = self.sph_promoted[i].body;
                 let mut a = DVec3::ZERO;
                 for pt in &self.sph_snapshot {
-                    let d = DVec3::new(pt.pos[0] as f64, pt.pos[1] as f64, pt.pos[2] as f64) - b.pos;
+                    let d =
+                        DVec3::new(pt.pos[0] as f64, pt.pos[1] as f64, pt.pos[2] as f64) - b.pos;
                     let r2 = d.length_squared() + s2;
                     a += d * (g * pt.mass as f64 / (r2 * r2.sqrt()));
                 }
@@ -2268,8 +2356,11 @@ mod app {
                 p.body.pos += p.body.vel * dt; // drift
             }
             // Keep the shader's copy of where they are in step with where they actually are.
-            let ext: Vec<(DVec3, f64)> =
-                self.sph_promoted.iter().map(|p| (p.body.pos, p.body.mass)).collect();
+            let ext: Vec<(DVec3, f64)> = self
+                .sph_promoted
+                .iter()
+                .map(|p| (p.body.pos, p.body.mass))
+                .collect();
             if let Some(sph) = self.gpu_sph.as_mut() {
                 sph.set_external_masses(&self.queue, &ext);
             }
@@ -2278,8 +2369,13 @@ mod app {
         /// far apart; the material EOS table is kept (`sph_eos`) for the assemble + dynamics uploads. `live`
         /// selects the assembly geometry when the relax completes — the LIVE N-body trajectory (a moon-drop)
         /// or the declared canonical giant impact (birth). Shared by `start_gpu_impact` and `drop_moon`.
-        fn begin_sph_relax(&mut self, bodies: &[(&crate::planet::LayeredBody, usize)], separation: f64) {
-            let (particles, eos, softening, relax_dt) = crate::gpu_sph::build_far_apart_n(bodies, separation);
+        fn begin_sph_relax(
+            &mut self,
+            bodies: &[(&crate::planet::LayeredBody, usize)],
+            separation: f64,
+        ) {
+            let (particles, eos, softening, relax_dt) =
+                crate::gpu_sph::build_far_apart_n(bodies, separation);
             self.sph_eos = eos;
             self.sph_soft = softening as f64;
             let cap = particles.len() as u32;
@@ -2322,7 +2418,13 @@ mod app {
             sph.set_dt(&self.queue, relax_dt, 0.94);
             sph.set_av(&self.queue, 0.0, 0.0);
             // The un-resolved planet bulk the cap relaxes on (docs/39 39b — a bare floor beats a boundary shell).
-            sph.set_bulk(&self.queue, glam::DVec3::ZERO, r_core, glam::DVec3::ZERO, bulk_mass);
+            sph.set_bulk(
+                &self.queue,
+                glam::DVec3::ZERO,
+                r_core,
+                glam::DVec3::ZERO,
+                bulk_mass,
+            );
             self.gpu_sph = Some(sph);
             self.sph_dt = relax_dt;
             self.sph_active = true;
@@ -2347,33 +2449,46 @@ mod app {
             // The proto-Earth's DECLARED spin becomes the target's live spin (spin_l = ω·I about +z), so the
             // ONE assembly path — which reads spin from self.spin_l — flings the rotationally-sustained disk
             // (docs/41 spin IOU) with no birth-only branch.
-            self.spin_l = glam::DVec3::new(0.0, 0.0, self.impact_def.target_spin_rad_s * self.spin_inertia());
-            self.begin_sph_relax(&[(&t_def, n_target), (&i_def, n_impactor)], self.impact_def.relax_separation);
+            self.spin_l = glam::DVec3::new(
+                0.0,
+                0.0,
+                self.impact_def.target_spin_rad_s * self.spin_inertia(),
+            );
+            self.begin_sph_relax(
+                &[(&t_def, n_target), (&i_def, n_impactor)],
+                self.impact_def.relax_separation,
+            );
             self.sph_prov_to_body = vec![1, 2]; // planet at bodies[1], impactor at bodies[2] (placed just below)
             self.sph_cap = None; // birth is a WHOLE-BODY giant impact — resolve both bodies, no bulk
-            // **Put the two bodies on their approach, AS BODIES.** The scene declares what they are and
-            // how they meet (which bodies, the approach speed as a multiple of mutual escape, the impact
-            // parameter); the engine turns that into a trajectory and integrates it. No particle exists
-            // yet and none should: nothing has happened to either body.
-            //
-            // The approach starts well outside `accretion::resolution_distance` so the bodies are visibly
-            // whole and closing before matter is resolved — that distance is where tides begin to matter,
-            // and it is the engine's call, not the scene's.
+                                 // **Put the two bodies on their approach, AS BODIES.** The scene declares what they are and
+                                 // how they meet (which bodies, the approach speed as a multiple of mutual escape, the impact
+                                 // parameter); the engine turns that into a trajectory and integrates it. No particle exists
+                                 // yet and none should: nothing has happened to either body.
+                                 //
+                                 // The approach starts well outside `accretion::resolution_distance` so the bodies are visibly
+                                 // whole and closing before matter is resolved — that distance is where tides begin to matter,
+                                 // and it is the engine's call, not the scene's.
             {
                 let t_def = self.impact_def.target.definition();
                 let i_def = self.impact_def.impactor.definition();
                 let (m_t, r_t) = (t_def.total_mass(), t_def.radius());
                 let (m_i, r_i) = (i_def.total_mass(), i_def.radius());
                 let contact = r_t + r_i;
-                let resolve_at =
-                    crate::accretion::resolution_distance(m_t, r_t, m_i, crate::accretion::RESOLVE_TIDAL_FRACTION);
+                let resolve_at = crate::accretion::resolution_distance(
+                    m_t,
+                    r_t,
+                    m_i,
+                    crate::accretion::RESOLVE_TIDAL_FRACTION,
+                );
                 let d0 = 3.0 * resolve_at; // room to watch two solid worlds converge
                 let v_esc = (2.0 * crate::orbit::G * (m_t + m_i) / contact).sqrt();
                 // Speed at d0 for a trajectory whose speed at contact is the declared multiple of escape:
                 // energy conservation, v² = v_c² − 2GM(1/contact − 1/d0).
                 let v_c = self.impact_def.v_esc_multiple * v_esc;
                 let mu = crate::orbit::G * (m_t + m_i);
-                let v0 = (v_c * v_c - 2.0 * mu * (1.0 / contact - 1.0 / d0)).max(0.0).sqrt();
+                let v0 = (v_c * v_c - 2.0 * mu * (1.0 / contact - 1.0 / d0))
+                    .max(0.0)
+                    .sqrt();
                 let b = self.impact_def.impact_parameter * r_t;
                 let earth = self.bodies[1];
                 self.bodies.truncate(2);
@@ -2433,7 +2548,13 @@ mod app {
                 return String::from("null");
             }
             let (ke, ie, pe) = crate::gpu_sph::total_energy(&self.sph_snapshot, self.sph_soft);
-            format!("{{\"ke\":{:.4e},\"ie\":{:.4e},\"pe\":{:.4e},\"tot\":{:.4e}}}", ke, ie, pe, ke + ie + pe)
+            format!(
+                "{{\"ke\":{:.4e},\"ie\":{:.4e},\"pe\":{:.4e},\"tot\":{:.4e}}}",
+                ke,
+                ie,
+                pe,
+                ke + ie + pe
+            )
         }
 
         /// Advance the PHYSICS by `real_dt` wall-clock seconds. Fixed sim-timestep substeps whose
@@ -2444,10 +2565,10 @@ mod app {
         /// the physics with an oversized step — time slows before truth breaks.
         pub fn advance(&mut self, real_dt: f64) {
             let real_dt = real_dt.clamp(0.0, 0.25); // tab-sleep / hiccup guard
-            // docs/42 — ADAPTIVE GPU-load control: keep each frame's encoded work inside a wall-clock budget so
-            // the sim can never monopolize the GPU and freeze the tab / OS. `real_dt` is the previous frame's
-            // total time; a slow frame shrinks the substep count (multiplicative, down to 1), headroom grows it
-            // by one (additive, capped). The heavy direct-sum O(N²) step is exactly what this throttles.
+                                                    // docs/42 — ADAPTIVE GPU-load control: keep each frame's encoded work inside a wall-clock budget so
+                                                    // the sim can never monopolize the GPU and freeze the tab / OS. `real_dt` is the previous frame's
+                                                    // total time; a slow frame shrinks the substep count (multiplicative, down to 1), headroom grows it
+                                                    // by one (additive, capped). The heavy direct-sum O(N²) step is exactly what this throttles.
             if self.sph_active {
                 if real_dt > 0.060 {
                     self.sph_substeps = (self.sph_substeps * 3 / 4).max(1);
@@ -2506,7 +2627,11 @@ mod app {
                         let chunk: u32 = (8 * self.sph_substeps).clamp(64, 512);
                         const TARGET: u32 = 2400; // AV-free relax is stable at the normal Courant dt ⇒ few steps
                         if let Some(sph) = self.gpu_sph.as_mut() {
-                            let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sph-relax") });
+                            let mut enc = self.device.create_command_encoder(
+                                &wgpu::CommandEncoderDescriptor {
+                                    label: Some("sph-relax"),
+                                },
+                            );
                             sph.encode_relax(&mut enc, chunk);
                             self.queue.submit(std::iter::once(enc.finish()));
                             let done = steps + chunk >= TARGET;
@@ -2538,7 +2663,10 @@ mod app {
                             Some(c) => (c.planet, c.impactors.clone()),
                             None => (
                                 self.sph_prov_to_body.first().copied().unwrap_or(1),
-                                self.sph_prov_to_body.get(1..).map(<[usize]>::to_vec).unwrap_or_default(),
+                                self.sph_prov_to_body
+                                    .get(1..)
+                                    .map(<[usize]>::to_vec)
+                                    .unwrap_or_default(),
                             ),
                         };
                         let planet_pos = self.bodies[planet_i].pos;
@@ -2551,8 +2679,14 @@ mod app {
                                     .total_cmp(&(self.bodies[y].pos - planet_pos).length())
                             })
                             .unwrap_or(2);
-                        let r_t = self.body_meta.get(planet_i).map_or(EARTH_RADIUS_M, |m| m.radius_m);
-                        let r_imp = self.body_meta.get(imp_i).map_or(self.impactor_radius, |m| m.radius_m);
+                        let r_t = self
+                            .body_meta
+                            .get(planet_i)
+                            .map_or(EARTH_RADIUS_M, |m| m.radius_m);
+                        let r_imp = self
+                            .body_meta
+                            .get(imp_i)
+                            .map_or(self.impactor_radius, |m| m.radius_m);
                         // Matter resolves when EITHER tides start to dominate OR the surfaces meet —
                         // whichever comes first. For a heavy impactor (Theia) the tidal distance is well
                         // outside contact, so it resolves early; for a LIGHT one (the Moon, ~9× lighter
@@ -2626,7 +2760,13 @@ mod app {
                                     sph.upload(&self.queue, &particles, &self.sph_eos, softening);
                                     sph.set_dt(&self.queue, dt, 1.0);
                                     sph.set_av(&self.queue, 1.0, 2.0);
-                                    sph.set_bulk(&self.queue, glam::DVec3::ZERO, r_core, glam::DVec3::ZERO, bulk_mass);
+                                    sph.set_bulk(
+                                        &self.queue,
+                                        glam::DVec3::ZERO,
+                                        r_core,
+                                        glam::DVec3::ZERO,
+                                        bulk_mass,
+                                    );
                                 }
                                 self.sph_phase = SphPhase::Dynamics;
                                 return;
@@ -2636,9 +2776,14 @@ mod app {
                             // to the planet (`prov 0`), which spins at its own live rate (ω = spin_l / I, a
                             // VECTOR). Birth's live bodies ARE its designed approach; the moon-drop's are its
                             // real orbit — same code, no branch, no flag.
-                            let planet_b = self.bodies[self.sph_prov_to_body.first().copied().unwrap_or(1)];
+                            let planet_b =
+                                self.bodies[self.sph_prov_to_body.first().copied().unwrap_or(1)];
                             let inertia = self.spin_inertia();
-                            let omega = if inertia > 0.0 { self.spin_l / inertia } else { glam::DVec3::ZERO };
+                            let omega = if inertia > 0.0 {
+                                self.spin_l / inertia
+                            } else {
+                                glam::DVec3::ZERO
+                            };
                             let placements: Vec<crate::gpu_sph::BodyPlacement> = self
                                 .sph_prov_to_body
                                 .iter()
@@ -2649,7 +2794,8 @@ mod app {
                                     spin: if k == 0 { omega } else { glam::DVec3::ZERO },
                                 })
                                 .collect();
-                            let (particles, softening, dt) = crate::gpu_sph::assemble_from_relaxed_n(&relaxed, &placements);
+                            let (particles, softening, dt) =
+                                crate::gpu_sph::assemble_from_relaxed_n(&relaxed, &placements);
                             self.sph_soft = softening as f64;
                             self.sph_dt = dt; // the SMALL shock dt (resolves the collision)
                             self.sph_dt_aftermath = dt * 5.0; // switch to this once the shock has passed
@@ -2686,7 +2832,11 @@ mod app {
                             }
                         } // adaptive (frame-budget controlled) — never a fixed 100
                         if let Some(sph) = self.gpu_sph.as_mut() {
-                            let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sph-step") });
+                            let mut enc = self.device.create_command_encoder(
+                                &wgpu::CommandEncoderDescriptor {
+                                    label: Some("sph-step"),
+                                },
+                            );
                             sph.encode_kdk(&mut enc, substeps);
                             // Coarsen only while over budget (docs/08/44). `encode_merge` rebuilds the grid
                             // itself, so it is safe after the KDK batch; at budget 0 the kernels early-out.
@@ -2706,7 +2856,9 @@ mod app {
                         // field they gravitate on.
                         self.step_promoted_bodies(substeps as f64 * self.sph_dt as f64);
                         self.sph_sim_t += substeps as f64 * self.sph_dt as f64;
-                        if self.sph_dt < self.sph_dt_aftermath && self.sph_sim_t > SPH_SHOCK_WINDOW_S {
+                        if self.sph_dt < self.sph_dt_aftermath
+                            && self.sph_sim_t > SPH_SHOCK_WINDOW_S
+                        {
                             self.sph_dt = self.sph_dt_aftermath;
                             if let Some(sph) = self.gpu_sph.as_mut() {
                                 sph.set_dt(&self.queue, self.sph_dt, 1.0);
@@ -2778,7 +2930,8 @@ mod app {
         /// engine routes the whole colliding set through the ONE SPH engine (docs/58) and the GPU resolves
         /// the touch. The legacy CPU Aggregate that used to materialise debris here is retired.
         fn step_substep(&mut self, dt: f64) {
-            let strength = self.mats[materials::index_of(&self.mats, "basalt")].fracture_strength as f64;
+            let strength =
+                self.mats[materials::index_of(&self.mats, "basalt")].fracture_strength as f64;
             // Each body's radius comes from its OWN metadata — no shared `impactor_radius`, so two moons
             // of different sizes would collide at their own contact distances.
             let radii: Vec<f64> = self.body_meta.iter().map(|m| m.radius_m).collect();
@@ -2918,9 +3071,15 @@ mod app {
                     // EJECTA — it keeps a glowing mote size (0.006) even at the pretty end, so the sphere wears a
                     // real ejecta plume.
                     // Particles fade IN exactly as the surface fades out — one matter, one budget.
-                    params: [DISPLAY_SCALE as f32, 0.013 * self.render_blend as f32, 6.5e6, 0.006],
+                    params: [
+                        DISPLAY_SCALE as f32,
+                        0.013 * self.render_blend as f32,
+                        6.5e6,
+                        0.006,
+                    ],
                 };
-                self.queue.write_buffer(&self.sph_cam.buf, 0, bytemuck::bytes_of(&cam));
+                self.queue
+                    .write_buffer(&self.sph_cam.buf, 0, bytemuck::bytes_of(&cam));
             }
 
             // Light direction = TO the real Sun from each body (per-body; the Sun is the illuminant,
@@ -2949,7 +3108,11 @@ mod app {
                 let r_dec = self.impact_def.target.radius_m();
                 let resolved = (!pos.is_empty()).then_some((&pos[..], &mass[..]));
                 match crate::accretion::representation(resolved, earth_center, r_dec, 0.75) {
-                    crate::accretion::Representation::Surface { centre, radius, coherence } => Some((centre, radius, coherence)),
+                    crate::accretion::Representation::Surface {
+                        centre,
+                        radius,
+                        coherence,
+                    } => Some((centre, radius, coherence)),
                     crate::accretion::Representation::Particles => None,
                 }
             };
@@ -2977,17 +3140,17 @@ mod app {
             let coherence = target.map_or(1.0, |(_, _, c)| c);
             let pretty_fade = crate::accretion::surface_weight(coherence, 0.55);
             self.render_blend = 1.0 - pretty_fade as f64; // particles take over as the surface loses meaning
-            // **The impactor, by the same rule.** Measured position, measured radius, drawn as a solid
-            // body for as long as it IS one — and it is one, all the way in, because nothing has touched
-            // it yet. Its own declared geotherm decides whether it glows: Theia's mantle is 1,200 K, hot
-            // from accretion, so it does.
-            // Where the impactor is, and how big — from its PARTICLES once they exist, and from the body
-            // itself before that. The first cut asked only the particles, so during the approach (when
-            // there are none, by design) it drew nothing at all and Theia was invisible until it came
-            // apart. A body is drawn as a body from the moment the scene places it.
-            // THE shared representation rule (accretion::representation) — the same call a droplet
-            // striking a petal would make. The scene supplies this body's particles (if any) and its
-            // declared place and size; the engine decides whether that is a surface or a debris field.
+                                                          // **The impactor, by the same rule.** Measured position, measured radius, drawn as a solid
+                                                          // body for as long as it IS one — and it is one, all the way in, because nothing has touched
+                                                          // it yet. Its own declared geotherm decides whether it glows: Theia's mantle is 1,200 K, hot
+                                                          // from accretion, so it does.
+                                                          // Where the impactor is, and how big — from its PARTICLES once they exist, and from the body
+                                                          // itself before that. The first cut asked only the particles, so during the approach (when
+                                                          // there are none, by design) it drew nothing at all and Theia was invisible until it came
+                                                          // apart. A body is drawn as a body from the moment the scene places it.
+                                                          // THE shared representation rule (accretion::representation) — the same call a droplet
+                                                          // striking a petal would make. The scene supplies this body's particles (if any) and its
+                                                          // declared place and size; the engine decides whether that is a surface or a debris field.
             let impactor = {
                 let (pos, mass) = self.body_particles(1);
                 let declared = self
@@ -2998,23 +3161,33 @@ mod app {
                 let r_dec = self.impact_def.impactor.definition().radius();
                 let resolved = (!pos.is_empty()).then_some((&pos[..], &mass[..]));
                 match crate::accretion::representation(resolved, declared, r_dec, 0.75) {
-                    crate::accretion::Representation::Surface { centre, radius, coherence } => Some((centre, radius, coherence)),
+                    crate::accretion::Representation::Surface {
+                        centre,
+                        radius,
+                        coherence,
+                    } => Some((centre, radius, coherence)),
                     crate::accretion::Representation::Particles => None,
                 }
             };
             // Its OWN coherence, independent of the target's — the two bodies are disrupted at different
             // times by different amounts, and each is drawn as what it currently is.
-            let impactor_fade = impactor.map_or(0.0, |(_, _, c)| crate::accretion::surface_weight(c, 0.55));
+            let impactor_fade =
+                impactor.map_or(0.0, |(_, _, c)| crate::accretion::surface_weight(c, 0.55));
             if let Some((ic, ir, _)) = impactor {
                 let ipos = ((ic - focus) * pretty_scale).as_vec3();
                 let idef = self.impact_def.impactor.definition();
-                let imat = idef.layers.last().map(|l| l.material.clone()).unwrap_or_else(|| "peridotite".into());
+                let imat = idef
+                    .layers
+                    .last()
+                    .map(|l| l.material.clone())
+                    .unwrap_or_else(|| "peridotite".into());
                 let ialb = self.mats[materials::index_of(&self.mats, &imat)].albedo;
                 write_space_uniform(
                     &self.queue,
                     &self.impactor_uni,
                     view_proj,
-                    Mat4::from_translation(ipos) * Mat4::from_scale(Vec3::splat((ir * pretty_scale) as f32)),
+                    Mat4::from_translation(ipos)
+                        * Mat4::from_scale(Vec3::splat((ir * pretty_scale) as f32)),
                     earth_light,
                     [ialb[0], ialb[1], ialb[2], impactor_fade],
                     {
@@ -3028,26 +3201,39 @@ mod app {
             // docs/42 Phase 3 — atmosphere MIST: the giant impact vaporizes rock into a thick, shocked vapor
             // atmosphere, so the Rayleigh veil is boosted while the impact is live → a hazy, glowing limb.
             let atm_tau_eff = if self.sph_active {
-                [self.atm_tau[0] * 2.6, self.atm_tau[1] * 2.6, self.atm_tau[2] * 2.6]
+                [
+                    self.atm_tau[0] * 2.6,
+                    self.atm_tau[1] * 2.6,
+                    self.atm_tau[2] * 2.6,
+                ]
             } else {
                 self.atm_tau
             };
-            let shell_spacing = pretty_r_surf * (4.0 * std::f64::consts::PI / SHELL_N as f64).sqrt();
+            let shell_spacing =
+                pretty_r_surf * (4.0 * std::f64::consts::PI / SHELL_N as f64).sqrt();
             // Grains overlap MORE while the GPU impact is live (0.90 vs 0.62 of the spacing) so the crust reads
             // as opaque — the glowing interior then shows ONLY through the actual crater hole, not every crevice.
             let grain_overlap = if self.sph_active { 0.90 } else { 0.62 };
-            let shell_grain_r = ((grain_overlap * shell_spacing) * pretty_scale) as f32 * pretty_fade;
+            let shell_grain_r =
+                ((grain_overlap * shell_spacing) * pretty_scale) as f32 * pretty_fade;
             // docs/42 Phase 2 — capture the giant-impact crater site from the GPU field: at first Theia (prov 1)
             // contact with Earth (prov 0) freeze the impact DIRECTION (Earth-relative), then open the bowl over
             // ~1 s. Persists after (bake-back). The bowl radius grows with `gpu_crater_frac` (set in the crater
             // block below). `earth_center + dir·pretty_r_surf` lands it on the sub-scale surface, same frame as
             // the shell grains, so the `hidden` test carves the crust exactly where Theia struck.
             if self.sph_active && !self.sph_snapshot.is_empty() {
-                let (mut ec, mut me, mut tc, mut mt) = (glam::DVec3::ZERO, 0.0f64, glam::DVec3::ZERO, 0.0f64);
+                let (mut ec, mut me, mut tc, mut mt) =
+                    (glam::DVec3::ZERO, 0.0f64, glam::DVec3::ZERO, 0.0f64);
                 for p in &self.sph_snapshot {
                     let pos = glam::DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
                     let m = p.mass as f64;
-                    if p.prov == 0 { ec += pos * m; me += m; } else { tc += pos * m; mt += m; }
+                    if p.prov == 0 {
+                        ec += pos * m;
+                        me += m;
+                    } else {
+                        tc += pos * m;
+                        mt += m;
+                    }
                 }
                 if me > 0.0 && mt > 0.0 {
                     let (ec, tc) = (ec / me, tc / mt);
@@ -3070,7 +3256,8 @@ mod app {
                             if p.prov != 0 {
                                 continue;
                             }
-                            let pos = glam::DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
+                            let pos =
+                                glam::DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
                             if pos.length() > r_surf {
                                 let m = p.mass as f64;
                                 m_exc += m;
@@ -3118,7 +3305,10 @@ mod app {
             // co-rotating `impact_site_rel` bowl went with the Aggregate debris path (docs/58 #7).
             let (crater_site, crater_r) = if self.sph_active {
                 match self.gpu_impact_site {
-                    Some(dir) => (Some(earth_center + dir * pretty_r_surf), self.gpu_crater_frac * 0.72 * pretty_r_surf),
+                    Some(dir) => (
+                        Some(earth_center + dir * pretty_r_surf),
+                        self.gpu_crater_frac * 0.72 * pretty_r_surf,
+                    ),
                     None => (None, 0.0),
                 }
             } else {
@@ -3130,7 +3320,9 @@ mod app {
             // (imperceptible); at the post-impact 3.8-h day it's ~13% — a visibly squashed world.
             let spin_omega_r = self.spin_l.length() / self.spin_inertia();
             let flat = crate::tides::flattening_from_spin(
-                spin_omega_r, self.bodies[self.planet_idx()].mass, EARTH_RADIUS_M,
+                spin_omega_r,
+                self.bodies[self.planet_idx()].mass,
+                EARTH_RADIUS_M,
             );
             // **The definitive Earth's transform.** One draw: spin the CRUST (so continents co-rotate,
             // exactly as they must), flatten it by the spin's own oblateness, and scale to the display.
@@ -3152,7 +3344,10 @@ mod app {
                     r * (1.0 + f / 3.0),
                 ));
                 let spin_m = Mat4::from_quat(glam::Quat::from_xyzw(
-                    spin_rot.x as f32, spin_rot.y as f32, spin_rot.z as f32, spin_rot.w as f32,
+                    spin_rot.x as f32,
+                    spin_rot.y as f32,
+                    spin_rot.z as f32,
+                    spin_rot.w as f32,
                 ));
                 write_space_uniform(
                     &self.queue,
@@ -3179,13 +3374,17 @@ mod app {
                 // MODEL space, and the model matrix spins with the crust — so the bowl is un-rotated by the
                 // same spin, exactly as `crater_site` is rotated INTO world space for the shell grains. The
                 // crater and the matter it is cut from must share one frame.
-                let r_surf_now = self.body_meta.get(self.planet_idx()).map_or(EARTH_RADIUS_M, |m| m.radius_m);
+                let r_surf_now = self
+                    .body_meta
+                    .get(self.planet_idx())
+                    .map_or(EARTH_RADIUS_M, |m| m.radius_m);
                 if self.gpu_crater_r_frac > 0.0 && self.gpu_crater_depth_frac > 0.0 {
                     if let Some(dir) = self.gpu_impact_site {
                         let axis = spin_rot.inverse() * dir;
                         // Angular radius of the bowl on the sphere: asin(R_bowl / R_surface).
                         let theta = self.gpu_crater_r_frac.clamp(0.0, 0.95).asin();
-                        let c: [f32; 4] = [axis.x as f32, axis.y as f32, axis.z as f32, theta as f32];
+                        let c: [f32; 4] =
+                            [axis.x as f32, axis.y as f32, axis.z as f32, theta as f32];
                         let c2: [f32; 4] = [self.gpu_crater_depth_frac as f32, 0.0, 0.0, 0.0];
                         // DIAGNOSTIC: is the bowl actually reaching the shader, and how big is it? A render
                         // change cannot be trusted from a screenshot alone when the impact site may be on
@@ -3216,8 +3415,8 @@ mod app {
                 let body_dir = crate::impact::fib_dir(i, SHELL_N); // this grain's fixed BODY direction
                 let dir = spin_rot * body_dir; // its current WORLD direction (rotated by the spin)
                 let u = dir.dot(spin_axis);
-                let r_oblate = (pretty_r_surf - 0.62 * shell_spacing)
-                    * (1.0 + flat * (1.0 / 3.0 - u * u)); // +f/3 equator, −2f/3 poles
+                let r_oblate =
+                    (pretty_r_surf - 0.62 * shell_spacing) * (1.0 + flat * (1.0 / 3.0 - u * u)); // +f/3 equator, −2f/3 poles
                 let pos_w = earth_center + dir * r_oblate;
                 let hidden = crater_site.map_or(false, |s| (pos_w - s).length() < crater_r);
                 let scale = if hidden { 0.0 } else { shell_grain_r }; // zero-scale ⇒ not drawn
@@ -3236,9 +3435,21 @@ mod app {
                 let mu_v = dir.dot(v_dir);
                 let mu_s = dir.dot(sun_dir_earth);
                 let cos_th = v_dir.dot(sun_dir_earth);
-                let veil = crate::atmosphere::rayleigh_veil(mu_v, mu_s, cos_th, atm_tau_eff, crate::atmosphere::SUN_GAIN as f64, self.atm_twilight);
+                let veil = crate::atmosphere::rayleigh_veil(
+                    mu_v,
+                    mu_s,
+                    cos_th,
+                    atm_tau_eff,
+                    crate::atmosphere::SUN_GAIN as f64,
+                    self.atm_twilight,
+                );
                 let tr = crate::atmosphere::rayleigh_transmit(mu_v, mu_s, atm_tau_eff);
-                let tint = [m.albedo[0] * tr[0], m.albedo[1] * tr[1], m.albedo[2] * tr[2], 1.0];
+                let tint = [
+                    m.albedo[0] * tr[0],
+                    m.albedo[1] * tr[1],
+                    m.albedo[2] * tr[2],
+                    1.0,
+                ];
                 write_space_uniform(
                     &self.queue,
                     uni,
@@ -3282,7 +3493,12 @@ mod app {
                     // and `thermal_glow_gain(5772)` returns 46,530, so the law reproduces the number that
                     // was measured. One Stefan–Boltzmann for the Sun and for a magma ocean; any exposure
                     // set for sunlit surfaces saturates on both, which is what looking at them is like.
-                    [glow[0], glow[1], glow[2], crate::blackbody::thermal_glow_gain(photosphere) as f32],
+                    [
+                        glow[0],
+                        glow[1],
+                        glow[2],
+                        crate::blackbody::thermal_glow_gain(photosphere) as f32,
+                    ],
                     AIRLESS,
                     NO_GLOW,
                 );
@@ -3328,28 +3544,31 @@ mod app {
             // docs/42 Phase 4 — accreting MOONLET spheres: self-bound disk clumps resolve out of the ejecta into
             // growing rock spheres (borrowing the debris uni pool, unused while the GPU impact runs). Warm-tinted
             // — freshly accreted, still cooling. They grow as the clump gathers mass; the largest is the Moon.
-            let n_moonlets = if self.sph_active && pretty_fade > 0.0 && !self.sph_snapshot.is_empty() {
-                let bodies = crate::gpu_sph::moonlet_bodies(&self.sph_snapshot);
-                let n = bodies.len().min(self.debris_unis.len());
-                for (uni, &(com_pos, radius, _mass)) in self.debris_unis.iter().zip(bodies.iter()).take(n) {
-                    let spos = ((earth_center + com_pos - focus) * pretty_scale).as_vec3();
-                    let r_disp = (radius * pretty_scale * 1.6) as f32 * pretty_fade;
-                    write_space_uniform(
-                        &self.queue,
-                        uni,
-                        view_proj,
-                        Mat4::from_translation(spos) * Mat4::from_scale(Vec3::splat(r_disp)),
-                        earth_light,
-                        [0.45, 0.34, 0.28, 1.0], // cooling rock
-                        [1.0, 0.55, 0.25, 0.5],  // a faint warm glow — recently molten,
-                        AIRLESS,
-                        NO_GLOW,
-                    );
-                }
-                n
-            } else {
-                0
-            };
+            let n_moonlets =
+                if self.sph_active && pretty_fade > 0.0 && !self.sph_snapshot.is_empty() {
+                    let bodies = crate::gpu_sph::moonlet_bodies(&self.sph_snapshot);
+                    let n = bodies.len().min(self.debris_unis.len());
+                    for (uni, &(com_pos, radius, _mass)) in
+                        self.debris_unis.iter().zip(bodies.iter()).take(n)
+                    {
+                        let spos = ((earth_center + com_pos - focus) * pretty_scale).as_vec3();
+                        let r_disp = (radius * pretty_scale * 1.6) as f32 * pretty_fade;
+                        write_space_uniform(
+                            &self.queue,
+                            uni,
+                            view_proj,
+                            Mat4::from_translation(spos) * Mat4::from_scale(Vec3::splat(r_disp)),
+                            earth_light,
+                            [0.45, 0.34, 0.28, 1.0], // cooling rock
+                            [1.0, 0.55, 0.25, 0.5],  // a faint warm glow — recently molten,
+                            AIRLESS,
+                            NO_GLOW,
+                        );
+                    }
+                    n
+                } else {
+                    0
+                };
             // **MOONS ARE SOLID BODIES.** Each intact moon is ONE sphere at its position, and it stops
             // being drawn the moment it has struck Earth, because its matter is the planet's (or the
             // SPH field's) then, not a shell. What stood here drew each moon as 128 grain billboards, so a
@@ -3367,8 +3586,15 @@ mod app {
                     && meta.map_or(false, |m| m.role == BodyRole::Moon && !m.materialized);
                 if !visible {
                     write_space_uniform(
-                        &self.queue, uni, view_proj, Mat4::from_scale(Vec3::ZERO),
-                        earth_light, [0.0; 4], [0.0; 4], AIRLESS, NO_GLOW,
+                        &self.queue,
+                        uni,
+                        view_proj,
+                        Mat4::from_scale(Vec3::ZERO),
+                        earth_light,
+                        [0.0; 4],
+                        [0.0; 4],
+                        AIRLESS,
+                        NO_GLOW,
                     );
                     continue;
                 }
@@ -3470,15 +3696,22 @@ mod app {
                     let eye_from_sol = (focus + eye_disp / DISPLAY_SCALE) - r_bodies[0];
                     let cam_pc = (eye_from_sol / PC_M).as_vec3();
                     stars.draw(
-                        &self.queue, &mut pass, view_proj, Mat4::IDENTITY,
-                        eye_disp.as_vec3(), cam_pc, 50_000.0,
-                        self.config.width as f32, self.config.height as f32, 80.0,
+                        &self.queue,
+                        &mut pass,
+                        view_proj,
+                        Mat4::IDENTITY,
+                        eye_disp.as_vec3(),
+                        cam_pc,
+                        50_000.0,
+                        self.config.width as f32,
+                        self.config.height as f32,
+                        80.0,
                     );
                 }
                 pass.set_pipeline(&self.pipeline);
                 draw(&mut pass, &self.sun_uni, &self.sphere_gpu); // the Sun, where it really is
-                // The rigid-Earth + moon spheres draw only when the GPU SPH impact is NOT running
-                // (docs/33 stage 4c.4): with the deformable impact active, the particle field IS the planet.
+                                                                  // The rigid-Earth + moon spheres draw only when the GPU SPH impact is NOT running
+                                                                  // (docs/33 stage 4c.4): with the deformable impact active, the particle field IS the planet.
                 if !self.sph_active {
                     // Every moon's sphere slot; the write pass above zero-scaled the ones that have
                     // struck (invisible) and the unused pool entries, so no per-moon special case here.
@@ -3600,7 +3833,11 @@ mod app {
                         wgpu::TexelCopyTextureInfo {
                             texture: which,
                             mip_level: mip as u32,
-                            origin: wgpu::Origin3d { x: 0, y: 0, z: layer as u32 },
+                            origin: wgpu::Origin3d {
+                                x: 0,
+                                y: 0,
+                                z: layer as u32,
+                            },
                             aspect: wgpu::TextureAspect::All,
                         },
                         data,
@@ -3609,7 +3846,11 @@ mod app {
                             bytes_per_row: Some(4 * msize),
                             rows_per_image: Some(msize),
                         },
-                        wgpu::Extent3d { width: msize, height: msize, depth_or_array_layers: 1 },
+                        wgpu::Extent3d {
+                            width: msize,
+                            height: msize,
+                            depth_or_array_layers: 1,
+                        },
                     );
                 }
             }
@@ -3654,10 +3895,22 @@ mod app {
             label: Some("space-bind"),
             layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(tex) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(samp) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(normal) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(tex),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(samp),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(normal),
+                },
             ],
         });
         UniformSlot { buf, bind }
@@ -3782,7 +4035,13 @@ mod app {
     ) -> wgpu::RenderPipeline {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("space-shader"),
-            source: wgpu::ShaderSource::Wgsl(concat!(include_str!("../../../shaders/tonemap.wgsl"), include_str!("../../../shaders/space.wgsl")).into()),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("../../../shaders/tonemap.wgsl"),
+                    include_str!("../../../shaders/space.wgsl")
+                )
+                .into(),
+            ),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("space-pipeline-layout"),
@@ -3853,7 +4112,15 @@ mod app {
     ) -> wgpu::RenderPipeline {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("globe-shader"),
-            source: wgpu::ShaderSource::Wgsl(concat!(include_str!("../../../shaders/tonemap.wgsl"), include_str!("../../../shaders/rayleigh.wgsl"), include_str!("../../../shaders/surface_normal.wgsl"), include_str!("../../../shaders/globe.wgsl")).into()),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("../../../shaders/tonemap.wgsl"),
+                    include_str!("../../../shaders/rayleigh.wgsl"),
+                    include_str!("../../../shaders/surface_normal.wgsl"),
+                    include_str!("../../../shaders/globe.wgsl")
+                )
+                .into(),
+            ),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("globe-pipeline-layout"),
@@ -3895,7 +4162,11 @@ mod app {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
@@ -3911,7 +4182,6 @@ mod app {
         })
     }
 
-
     /// The instanced particle pipeline for the GPU SPH impact (docs/33 stage 4c.4). One camera-facing
     /// billboard quad per particle, generated in the vertex shader; the instance buffer is the `sph_step.wgsl`
     /// particle buffer itself (48-byte stride, pos at offset 0, provenance u32 at offset 44). No mesh, no
@@ -3923,7 +4193,9 @@ mod app {
     ) -> wgpu::RenderPipeline {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("sph-render-shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/sph_render.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../../../shaders/sph_render.wgsl").into(),
+            ),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("sph-render-pipeline-layout"),
@@ -3932,8 +4204,16 @@ mod app {
         });
         // Instance-step layout over the SPH particle buffer: pos (vec3 @ 0) + provenance (u32 @ 44).
         const ATTRS: [wgpu::VertexAttribute; 2] = [
-            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
-            wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32, offset: 44, shader_location: 1 },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 0,
+                shader_location: 0,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Uint32,
+                offset: 44,
+                shader_location: 1,
+            },
         ];
         let instance_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<crate::gpu_sph::SphParticle>() as u64,
@@ -3965,7 +4245,11 @@ mod app {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
@@ -4151,13 +4435,22 @@ mod app {
             let matter = crate::planet::body(body_id);
             let air = match mats.iter().find(|m| m.id == "air") {
                 Some(a) => crate::atmosphere::AirShell::new(
-                    matter.surface_pressure(), a, 288.0, matter.gravity_at(matter.radius()),
+                    matter.surface_pressure(),
+                    a,
+                    288.0,
+                    matter.gravity_at(matter.radius()),
                 ),
                 None => crate::atmosphere::AirShell {
-                    rho_surface: 0.0, scale_height_m: 0.0, ambient_temp_k: 288.0,
+                    rho_surface: 0.0,
+                    scale_height_m: 0.0,
+                    ambient_temp_k: 288.0,
                 },
             };
-            PlanetAir { matter, air, radius_m }
+            PlanetAir {
+                matter,
+                air,
+                radius_m,
+            }
         }
     }
 
@@ -4170,7 +4463,10 @@ mod app {
             if !self.air.exists() {
                 return None; // an airless body: real vacuum, and its bodies fly ballistically
             }
-            Some((self.air.density_at(pos.length() - self.radius_m), self.air.ambient_temp_k))
+            Some((
+                self.air.density_at(pos.length() - self.radius_m),
+                self.air.ambient_temp_k,
+            ))
         }
         fn arrival(
             &self,
@@ -4193,7 +4489,11 @@ mod app {
             let at = crate::flight::surface_crossing(from, to, |p| p.length() <= self.radius_m);
             // A planet is immovable: the reduced mass is the arriving body's own.
             let (energy_j, momentum) = crate::flight::delivered(body, glam::DVec3::ZERO, None);
-            Some(crate::flight::Met { at, energy_j, momentum })
+            Some(crate::flight::Met {
+                at,
+                energy_j,
+                momentum,
+            })
         }
         fn air_scale_height_m(&self) -> f64 {
             self.air.scale_height_m
@@ -4245,7 +4545,12 @@ mod app {
                 .await
                 .map_err(|e| JsValue::from_str(&format!("request_device failed: {e}")))?;
             let caps = surface.get_capabilities(&adapter);
-            let format = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]);
+            let format = caps
+                .formats
+                .iter()
+                .copied()
+                .find(|f| f.is_srgb())
+                .unwrap_or(caps.formats[0]);
             let config = wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 format,
@@ -4267,7 +4572,7 @@ mod app {
             );
             // Materials first: the surface layout and its textures are built FROM them.
             let mats = materials::load();
-// **One surface bind layout for every scene.** There is nothing special about the orbit
+            // **One surface bind layout for every scene.** There is nothing special about the orbit
             // view: it is a camera position looking at the same rendered world, so it carries the same
             // material albedo + NORMAL arrays. Giving the space band a uniform-only layout was what made
             // "Earth in orbit" a differently-rendered object from "Earth underfoot".
@@ -4297,29 +4602,61 @@ mod app {
             });
             let (tex_view, normal_view, sampler) = upload_material_textures(&device, &queue, &mats);
             let pipeline = build_space_pipeline(&device, &bind_layout, config.format);
-            let globe_pipeline =
-                build_globe_pipeline(&device, &bind_layout, config.format, wgpu::BlendState::REPLACE);
-            let globe_uni = make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
+            let globe_pipeline = build_globe_pipeline(
+                &device,
+                &bind_layout,
+                config.format,
+                wgpu::BlendState::REPLACE,
+            );
+            let globe_uni =
+                make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
             // The ground cap: same shader, alpha-blended for the cross-fade; a writable vertex buffer rebuilt each
             // frame, fixed index topology.
-            let cap_pipeline =
-                build_globe_pipeline(&device, &bind_layout, config.format, wgpu::BlendState::ALPHA_BLENDING);
+            let cap_pipeline = build_globe_pipeline(
+                &device,
+                &bind_layout,
+                config.format,
+                wgpu::BlendState::ALPHA_BLENDING,
+            );
             let cap_indices = crate::terra::ground_cap::cap_indices(TERRA_CAP_RES);
             let cap_gpu: Vec<GpuMesh> = (0..TERRA_CAP_TIERS)
-                .map(|_| make_dynamic_mesh(&device, "terra-cap", TERRA_CAP_RES * TERRA_CAP_RES, &cap_indices))
+                .map(|_| {
+                    make_dynamic_mesh(
+                        &device,
+                        "terra-cap",
+                        TERRA_CAP_RES * TERRA_CAP_RES,
+                        &cap_indices,
+                    )
+                })
                 .collect();
             let cap_uni: Vec<UniformSlot> = (0..TERRA_CAP_TIERS)
-                .map(|_| make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler))
+                .map(|_| {
+                    make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler)
+                })
                 .collect();
             let shell_count = 4096; // ~2.8° grain spacing — resolves continents/biomes (Phase 2, grain shell)
-            let shell_unis: Vec<UniformSlot> =
-                (0..shell_count).map(|_| make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler)).collect();
+            let shell_unis: Vec<UniformSlot> = (0..shell_count)
+                .map(|_| {
+                    make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler)
+                })
+                .collect();
             let earth = crate::planet::earth();
             let atm_tau = crate::atmosphere::rayleigh_tau(earth.surface_pressure() / 101_325.0);
-            let atm_twilight = twilight_of(earth.radius(), earth.gravity_at(earth.radius()), &mats, atm_tau);
+            let atm_twilight = twilight_of(
+                earth.radius(),
+                earth.gravity_at(earth.radius()),
+                &mats,
+                atm_tau,
+            );
             // Default fly camera: orbital over the equator (a world file overrides this in `load_world`).
             let fly = crate::terra::fly_camera::FlyCamera::new(
-                20.0, 0.0, 12_000_000.0, 0.0, -1.2, 2.0, 40_000_000.0,
+                20.0,
+                0.0,
+                12_000_000.0,
+                0.0,
+                -1.2,
+                2.0,
+                40_000_000.0,
             );
             let matter = MatterField::new(&device, config.format, 200_000);
             let flight_env = PlanetAir::of(&mats, "earth", EARTH_RADIUS_M);
@@ -4385,7 +4722,8 @@ mod app {
             lc_w: u32,
             lc_h: u32,
         ) -> Result<(), JsValue> {
-            let w = crate::terra::world_def::World::parse(world_json).map_err(|e| JsValue::from_str(&e))?;
+            let w = crate::terra::world_def::World::parse(world_json)
+                .map_err(|e| JsValue::from_str(&e))?;
             let planet = w
                 .planet
                 .as_ref()
@@ -4455,10 +4793,19 @@ mod app {
                 if let Some(x) = s.relief_exaggeration {
                     self.relief_exag = x.max(0.0);
                 }
-                let max_idx = s.biomes.keys().filter_map(|k| k.parse::<usize>().ok()).max().unwrap_or(0);
+                let max_idx = s
+                    .biomes
+                    .keys()
+                    .filter_map(|k| k.parse::<usize>().ok())
+                    .max()
+                    .unwrap_or(0);
                 self.biome_mats = (0..=max_idx)
                     .map(|i| {
-                        let mat_id = s.biomes.get(&i.to_string()).map(String::as_str).unwrap_or("granite");
+                        let mat_id = s
+                            .biomes
+                            .get(&i.to_string())
+                            .map(String::as_str)
+                            .unwrap_or("granite");
                         materials::index_of(&self.mats, mat_id)
                     })
                     .collect();
@@ -4515,7 +4862,8 @@ mod app {
             // a MIRRORED longitude and arrived nowhere near where the camera was pointed. CLAUDE.md warns
             // about exactly this: the tangent frame was once six hand-written copies, and the one sign they
             // all shared was wrong.
-            let target = crate::geo::dir_from_lat_lon(self.fly.lat, self.fly.lon) * self.planet_radius;
+            let target =
+                crate::geo::dir_from_lat_lon(self.fly.lat, self.fly.lon) * self.planet_radius;
             // Released 500 km above, offset so the path is a slanting entry rather than straight down —
             // a real Earth-crosser almost never arrives on the local vertical.
             let up = target.normalize();
@@ -4536,13 +4884,22 @@ mod app {
             //   more finely. 1,200 spans the size range where the air's share falls from ~15% to under 1%,
             //   so small pieces are consumed and large ones reach the ground — what a real fall does.
             let parent_r = 3.0_f64;
-            let parent_m =
-                self.mats[iron].density as f64 * (4.0 / 3.0) * std::f64::consts::PI * parent_r.powi(3);
+            let parent_m = self.mats[iron].density as f64
+                * (4.0 / 3.0)
+                * std::f64::consts::PI
+                * parent_r.powi(3);
             // The trail resolves up to a fraction of the instance budget; past that the shed mass is
             // booked into the air (same mass, coarser). Law IV: representation, not existence.
             self.flight.set_trail_budget(120_000);
             self.flight.introduce_swarm(
-                start, approach, parent_m, parent_r, iron, count.max(1), 86_400.0, 250.0,
+                start,
+                approach,
+                parent_m,
+                parent_r,
+                iron,
+                count.max(1),
+                86_400.0,
+                250.0,
             );
             log::info!(
                 "swarm: {count} fragments of a {:.0} kg asteroid, entering at {:.1} km/s toward lat {:.1} lon {:.1}",
@@ -4561,9 +4918,15 @@ mod app {
         #[allow(clippy::too_many_arguments)]
         pub fn set_camera_pose(
             &mut self,
-            eye_x: f64, eye_y: f64, eye_z: f64,
-            fwd_x: f64, fwd_y: f64, fwd_z: f64,
-            up_x: f64, up_y: f64, up_z: f64,
+            eye_x: f64,
+            eye_y: f64,
+            eye_z: f64,
+            fwd_x: f64,
+            fwd_y: f64,
+            fwd_z: f64,
+            up_x: f64,
+            up_y: f64,
+            up_z: f64,
             fov_y: f64,
         ) {
             let eye = glam::DVec3::new(eye_x, eye_y, eye_z);
@@ -4600,8 +4963,15 @@ mod app {
         pub fn heaviest_fragment(&self) -> Vec<f64> {
             match self.flight.heaviest() {
                 Some(b) => vec![
-                    b.id as f64, b.pos.x, b.pos.y, b.pos.z,
-                    b.vel.x, b.vel.y, b.vel.z, b.radius_m, b.temp_k,
+                    b.id as f64,
+                    b.pos.x,
+                    b.pos.y,
+                    b.pos.z,
+                    b.vel.x,
+                    b.vel.y,
+                    b.vel.z,
+                    b.radius_m,
+                    b.temp_k,
                 ],
                 None => Vec::new(),
             }
@@ -4612,8 +4982,15 @@ mod app {
         pub fn fragment(&self, id: f64) -> Vec<f64> {
             match self.flight.body(id as u64) {
                 Some(b) => vec![
-                    b.id as f64, b.pos.x, b.pos.y, b.pos.z,
-                    b.vel.x, b.vel.y, b.vel.z, b.radius_m, b.temp_k,
+                    b.id as f64,
+                    b.pos.x,
+                    b.pos.y,
+                    b.pos.z,
+                    b.vel.x,
+                    b.vel.y,
+                    b.vel.z,
+                    b.radius_m,
+                    b.temp_k,
                 ],
                 None => Vec::new(),
             }
@@ -4659,7 +5036,11 @@ mod app {
         }
 
         pub fn swarm_speed_kms(&self) -> f64 {
-            self.flight.bodies().iter().map(|b| b.vel.length() / 1000.0).fold(0.0, f64::max)
+            self.flight
+                .bodies()
+                .iter()
+                .map(|b| b.vel.length() / 1000.0)
+                .fold(0.0, f64::max)
         }
 
         /// How the trail is FADING: parcels still resolved, the hottest and mass-mean temperature of
@@ -4699,7 +5080,8 @@ mod app {
         pub fn move_tangent(&mut self, forward: f64, right: f64) {
             // Step ≈ a small fraction of the current altitude per frame, floored so ground movement still works.
             let step = (self.fly.alt_m * 0.02).max(2.0);
-            self.fly.move_tangent(forward * step, right * step, self.planet_radius);
+            self.fly
+                .move_tangent(forward * step, right * step, self.planet_radius);
         }
 
         /// Zoom = altitude change. `notches` is the wheel delta (or +/−1); positive climbs, negative descends.
@@ -4720,10 +5102,11 @@ mod app {
         /// viewpoint west; screen y grows downward, and dragging down carries it north). The FOV is
         /// read from the same constant the projection is built from, never a second copy.
         pub fn pan_tangent(&mut self, dx_px: f64, dy_px: f64) {
-            let m_per_px = 2.0 * self.fly.alt_m
-                * (0.5 * crate::terra::fly_camera::DEFAULT_FOV_Y).tan()
-                / self.config.height.max(1) as f64;
-            self.fly.move_tangent(dy_px * m_per_px, -dx_px * m_per_px, self.planet_radius);
+            let m_per_px =
+                2.0 * self.fly.alt_m * (0.5 * crate::terra::fly_camera::DEFAULT_FOV_Y).tan()
+                    / self.config.height.max(1) as f64;
+            self.fly
+                .move_tangent(dy_px * m_per_px, -dx_px * m_per_px, self.planet_radius);
         }
 
         pub fn altitude_m(&self) -> f64 {
@@ -4740,11 +5123,18 @@ mod app {
         /// land ("grass", "sand", "snow", …) or "ocean" over water.
         pub fn ground_biome(&self) -> String {
             let (lat, lon) = (self.fly.lat, self.fly.lon);
-            let is_land = self.landmask.as_ref().map(|r| r.land_at(lat, lon)).unwrap_or(false);
+            let is_land = self
+                .landmask
+                .as_ref()
+                .map(|r| r.land_at(lat, lon))
+                .unwrap_or(false);
             if !is_land {
                 return "ocean".to_string();
             }
-            let biome = self.landcover.as_ref().map_or(1, |r| r.biome_at(lat, lon) as usize);
+            let biome = self
+                .landcover
+                .as_ref()
+                .map_or(1, |r| r.biome_at(lat, lon) as usize);
             let mi = self.biome_mats.get(biome).copied().unwrap_or(0);
             self.mats.get(mi).map(|m| m.id.clone()).unwrap_or_default()
         }
@@ -4761,9 +5151,9 @@ mod app {
 
         pub fn render(&mut self) -> Result<(), JsValue> {
             let r_disp = self.planet_radius * DISPLAY_SCALE; // = 1.0 for Earth
-            // docs/43 Phase 4/5 — the fly camera builds the frame (absolute + camera-relative view·projection, the
-            // f64 eye, and the tangent frame). The terrain height under the camera keeps "altitude" above the
-            // local ground (not sea level).
+                                                             // docs/43 Phase 4/5 — the fly camera builds the frame (absolute + camera-relative view·projection, the
+                                                             // f64 eye, and the tangent frame). The terrain height under the camera keeps "altitude" above the
+                                                             // local ground (not sea level).
             let aspect = self.config.width as f64 / self.config.height.max(1) as f64;
             let ground_disp = self.ground_disp_at(self.fly.lat, self.fly.lon);
             // An externally supplied pose is the authority when there is one; otherwise the fly camera.
@@ -4805,7 +5195,8 @@ mod app {
             // oriented to real time, so a decorative sun put noon in the wrong ocean and the day/night line
             // wherever it happened to land. Now the terminator is where the Sun actually puts it, and the
             // seasons come from the same declination that makes them real.
-            let sun_dir = crate::orbit::solar_direction_earth_fixed(crate::orbit::unix_now_seconds());
+            let sun_dir =
+                crate::orbit::solar_direction_earth_fixed(crate::orbit::unix_now_seconds());
             let sun_light = Vec3::new(sun_dir.x as f32, sun_dir.y as f32, sun_dir.z as f32);
 
             // docs/43 Phase 5 — build the fine ground cap under the camera and cross-fade it in as we descend.
@@ -4831,7 +5222,11 @@ mod app {
                 // backgrounded tab) must not turn into a large catch-up step: the work that step implies
                 // is what stalls the next frame, and the sim falling briefly behind wall-clock is a far
                 // smaller lie than the page ceasing to respond.
-                let dt = if self.last_frame_s <= 0.0 { 1.0 / 60.0 } else { (now - self.last_frame_s).clamp(0.0, 1.0 / 30.0) };
+                let dt = if self.last_frame_s <= 0.0 {
+                    1.0 / 60.0
+                } else {
+                    (now - self.last_frame_s).clamp(0.0, 1.0 / 30.0)
+                };
                 self.last_frame_s = now;
                 if !self.flight.bodies().is_empty() || !self.flight.trail().parcels().is_empty() {
                     // ONE call: the engine sizes its own substeps from the air's scale height. This used
@@ -4843,14 +5238,18 @@ mod app {
                     for a in self.flight.step(env, &self.mats, dt) {
                         log::info!(
                             "arrival: {:.1} kg at {:.1} km/s, {:.0} K = {:.2e} J",
-                            a.body.mass_kg, a.body.vel.length() / 1000.0, a.body.temp_k, a.energy_j
+                            a.body.mass_kg,
+                            a.body.vel.length() / 1000.0,
+                            a.body.temp_k,
+                            a.energy_j
                         );
                     }
                     // What the engine is holding, as it must be drawn — mapped once, by the engine's rule,
                     // into buffers that persist across frames.
                     if self.draw_matter >= 1 {
                         let (drawn, inst) = (&mut self.drawn_buf, &mut self.inst_buf);
-                        self.flight.drawn_into(drawn, &self.flight_env, |p| (p * DISPLAY_SCALE).as_vec3());
+                        self.flight
+                            .drawn_into(drawn, &self.flight_env, |p| (p * DISPLAY_SCALE).as_vec3());
                         inst.clear();
                         inst.extend(drawn.iter().map(|d| GpuParticle::of_matter(d, &self.mats)));
                         self.matter.upload(&self.queue, inst);
@@ -4882,8 +5281,8 @@ mod app {
                 );
             } else {
                 // Fallback: the Phase-2 grain shell (used until a world's surface rasters build the globe mesh).
-                let shell_spacing =
-                    self.planet_radius * (4.0 * std::f64::consts::PI / self.shell_count as f64).sqrt();
+                let shell_spacing = self.planet_radius
+                    * (4.0 * std::f64::consts::PI / self.shell_count as f64).sqrt();
                 let grain_r = ((0.62 * shell_spacing) * DISPLAY_SCALE) as f32;
                 const EXAG: f64 = TERRA_RELIEF_EXAG;
                 let water_idx = materials::index_of(&self.mats, "water");
@@ -4898,12 +5297,17 @@ mod app {
                         .unwrap_or_else(|| crate::planet::earth_surface_material(dir) == "granite");
                     // Land: biome material (land-cover) + real elevation displacement. Ocean: water at sea level.
                     let (mat_idx, elev_m) = if is_land {
-                        let biome = self.landcover.as_ref().map_or(1, |r| r.biome_at(lat, lon) as usize);
+                        let biome = self
+                            .landcover
+                            .as_ref()
+                            .map_or(1, |r| r.biome_at(lat, lon) as usize);
                         let mi = self.biome_mats.get(biome).copied().unwrap_or(water_idx);
                         let e = self
                             .elevation
                             .as_ref()
-                            .map_or(0.0, |r| r.elevation_m_at(lat, lon, self.elev_range[0], self.elev_range[1]))
+                            .map_or(0.0, |r| {
+                                r.elevation_m_at(lat, lon, self.elev_range[0], self.elev_range[1])
+                            })
                             .max(0.0);
                         (mi, e)
                     } else {
@@ -4917,9 +5321,21 @@ mod app {
                     let mu_v = dir.dot(v_dir);
                     let mu_s = dir.dot(sun_dir);
                     let cos_th = v_dir.dot(sun_dir);
-                    let veil = crate::atmosphere::rayleigh_veil(mu_v, mu_s, cos_th, self.atm_tau, crate::atmosphere::SUN_GAIN as f64, self.atm_twilight);
+                    let veil = crate::atmosphere::rayleigh_veil(
+                        mu_v,
+                        mu_s,
+                        cos_th,
+                        self.atm_tau,
+                        crate::atmosphere::SUN_GAIN as f64,
+                        self.atm_twilight,
+                    );
                     let tr = crate::atmosphere::rayleigh_transmit(mu_v, mu_s, self.atm_tau);
-                    let tint = [m.albedo[0] * tr[0], m.albedo[1] * tr[1], m.albedo[2] * tr[2], 1.0];
+                    let tint = [
+                        m.albedo[0] * tr[0],
+                        m.albedo[1] * tr[1],
+                        m.albedo[2] * tr[2],
+                        1.0,
+                    ];
                     write_space_uniform(
                         &self.queue,
                         uni,
@@ -4937,10 +5353,14 @@ mod app {
                 .surface
                 .get_current_texture()
                 .map_err(|e| JsValue::from_str(&format!("get_current_texture failed: {e}")))?;
-            let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let view = output
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
             let mut encoder = self
                 .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("terra-frame") });
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("terra-frame"),
+                });
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("terra-pass"),
@@ -4948,13 +5368,21 @@ mod app {
                         view: &view,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.01, g: 0.01, b: 0.03, a: 1.0 }),
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.01,
+                                g: 0.01,
+                                b: 0.03,
+                                a: 1.0,
+                            }),
                             store: wgpu::StoreOp::Store,
                         },
                     })],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: &self.depth_view,
-                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
                         stencil_ops: None,
                     }),
                     timestamp_writes: None,
@@ -4994,7 +5422,12 @@ mod app {
                         pass.set_pipeline(&self.cap_pipeline);
                         // OUTERMOST first: each finer tier is drawn over the coarser one it sits inside,
                         // lifted a hair further toward the camera so it wins the depth fight.
-                        for (uni, gpu) in self.cap_uni.iter().zip(self.cap_gpu.iter()).take(self.cap_tiers) {
+                        for (uni, gpu) in self
+                            .cap_uni
+                            .iter()
+                            .zip(self.cap_gpu.iter())
+                            .take(self.cap_tiers)
+                        {
                             draw(&mut pass, uni, gpu);
                         }
                     }
@@ -5044,7 +5477,9 @@ mod app {
         /// solid matter?" test against the material field (voxel/SDF/particle), which is where camera collision
         /// must move once terrain is a real matter field (docs/39/42). Kept as a heightfield only as a stand-in.
         fn ground_disp_at(&self, lat: f64, lon: f64) -> f64 {
-            let Some(elev) = self.elevation.as_ref() else { return 0.0 };
+            let Some(elev) = self.elevation.as_ref() else {
+                return 0.0;
+            };
             let land = self.landmask.as_ref();
             // ±0.2° (~22 km) 3×3 max = the local terrain envelope: enough to clear any terrain the camera could
             // reach before the floor rises (forced-up look-ahead), without floating far above a plain that merely
@@ -5057,7 +5492,9 @@ mod app {
                     if !is_land {
                         continue;
                     }
-                    let e = elev.elevation_m_at(la, lo, self.elev_range[0], self.elev_range[1]).max(0.0);
+                    let e = elev
+                        .elevation_m_at(la, lo, self.elev_range[0], self.elev_range[1])
+                        .max(0.0);
                     peak = peak.max(e);
                 }
             }
@@ -5085,7 +5522,12 @@ mod app {
         /// the index topology is fixed). It samples the SAME surface as the globe (real elevation × the world's
         /// declared exaggeration, biome albedo) at high resolution, curving to a true horizon, emitted relative to
         /// the eye for ground-scale precision. `cap_fade` is the cross-fade alpha, carried in tint.a.
-        fn build_cap(&mut self, view: &crate::terra::fly_camera::View, sun_light: Vec3, cap_fade: f32) {
+        fn build_cap(
+            &mut self,
+            view: &crate::terra::fly_camera::View,
+            sun_light: Vec3,
+            cap_fade: f32,
+        ) {
             let r_disp = self.planet_radius * DISPLAY_SCALE;
             let exag = self.relief_exag;
             let ds = DISPLAY_SCALE;
@@ -5098,10 +5540,9 @@ mod app {
             let water_alb = self.mats[water_idx].albedo;
             // The elevation raster's own ground resolution — where MEASUREMENT runs out and anything finer
             // has to be generated. Derived from the raster's width, not assumed.
-            let raster_step_m = self
-                .elevation
-                .as_ref()
-                .map_or(90.0, |r| 2.0 * std::f64::consts::PI * self.planet_radius / r.w.max(1) as f64);
+            let raster_step_m = self.elevation.as_ref().map_or(90.0, |r| {
+                2.0 * std::f64::consts::PI * self.planet_radius / r.w.max(1) as f64
+            });
             let elev_lo = self.elev_range[0];
             let elev_hi = self.elev_range[1];
 
@@ -5125,7 +5566,9 @@ mod app {
                     let (lat, lon) = (self.fly.lat, self.fly.lon);
                     let d = 360.0 / self.elevation.as_ref().map_or(2048, |r| r.w.max(1)) as f64;
                     let e_at = |la: f64, lo: f64| {
-                        self.elevation.as_ref().map_or(0.0, |r| r.elevation_m_at(la, lo, elev_lo, elev_hi))
+                        self.elevation
+                            .as_ref()
+                            .map_or(0.0, |r| r.elevation_m_at(la, lo, elev_lo, elev_hi))
                     };
                     let run = (2.0 * raster_step_m).max(1.0);
                     let dn = (e_at(lat + d, lon) - e_at(lat - d, lon)) / run;
@@ -5141,15 +5584,16 @@ mod app {
                     let detail = &self.detail;
                     let sample = |dir: glam::DVec3| -> ([f32; 3], f64, u32) {
                         let (lat, lon) = crate::geo::lat_lon_from_dir(dir);
-                        let is_land = landmask
-                            .map(|r| r.land_at(lat, lon))
-                            .unwrap_or_else(|| crate::planet::earth_surface_material(dir) == "granite");
+                        let is_land = landmask.map(|r| r.land_at(lat, lon)).unwrap_or_else(|| {
+                            crate::planet::earth_surface_material(dir) == "granite"
+                        });
                         if !is_land {
                             return (water_alb, lift, water_idx as u32);
                         }
                         let biome = landcover.map_or(1, |r| r.biome_at(lat, lon) as usize);
                         let mi = biome_mats.get(biome).copied().unwrap_or(water_idx);
-                        let e = elevation.map_or(0.0, |r| r.elevation_m_at(lat, lon, elev_lo, elev_hi));
+                        let e =
+                            elevation.map_or(0.0, |r| r.elevation_m_at(lat, lon, elev_lo, elev_hi));
 
                         // SUB-RASTER RELIEF (`crate::surface_detail`). Below the raster there is no
                         // measurement, so the relief is generated — bounded by what this material can
@@ -5157,36 +5601,59 @@ mod app {
                         // scaled by how steep this ground already MEASURES, so a plain stays a plain.
                         let m = &mats[mi];
                         let mu = m.friction_coefficient as f64;
-                        let h_crit =
-                            crate::granular::critical_bank_height(m.fracture_strength, m.density, 9.81) as f64;
+                        let h_crit = crate::granular::critical_bank_height(
+                            m.fracture_strength,
+                            m.density,
+                            9.81,
+                        ) as f64;
                         // How many halvings below the raster this tier's cells can actually show. The tier's
                         // own cell size is the limit: generating finer than the mesh can carry costs time and
                         // draws nothing (the measured reason the first attempt at this was removed).
-                        let octaves = crate::surface_detail::detail_octaves(detail, cell_m, raster_step_m)
-                            .min((raster_step_m / cell_m).max(1.0).log2())
-                            .min(octave_budget);
+                        let octaves =
+                            crate::surface_detail::detail_octaves(detail, cell_m, raster_step_m)
+                                .min((raster_step_m / cell_m).max(1.0).log2())
+                                .min(octave_budget);
                         let relief = if octaves > 0.0 {
                             // How close this ground already is to what the material can hold — the measured
                             // slope against its own limit. It is what turns a CEILING into this ground's
                             // roughness, so a plain stays a plain instead of coming out like a mountainside.
-                            let frac = if mu > 0.0 { (tier_slope / mu).clamp(0.0, 1.0) } else { 0.0 };
+                            let frac = if mu > 0.0 {
+                                (tier_slope / mu).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
                             // Position in a surface-tangent frame, in metres, so the lattice is stable in the
                             // WORLD and not in the view — look away and back, same ground (Law IV).
                             let px = lon.to_radians() * self.planet_radius * lat.to_radians().cos();
                             let pz = lat.to_radians() * self.planet_radius;
                             crate::surface_detail::micro_relief_m(
-                                px, pz, raster_step_m, octaves, mu, h_crit, frac,
+                                px,
+                                pz,
+                                raster_step_m,
+                                octaves,
+                                mu,
+                                h_crit,
+                                frac,
                             )
                         } else {
                             0.0
                         };
-                        (m.albedo, (e.max(0.0) + relief) * ds * exag + lift, mi as u32)
+                        (
+                            m.albedo,
+                            (e.max(0.0) + relief) * ds * exag + lift,
+                            mi as u32,
+                        )
                     };
                     crate::terra::ground_cap::fill_ground_cap(
-                        &mut verts, view.up, view.east, view.north, view.eye, r_disp, cap_angle, res, sample,
+                        &mut verts, view.up, view.east, view.north, view.eye, r_disp, cap_angle,
+                        res, sample,
                     );
                 }
-                self.queue.write_buffer(&self.cap_gpu[tier].vertex_buf, 0, bytemuck::cast_slice(&verts));
+                self.queue.write_buffer(
+                    &self.cap_gpu[tier].vertex_buf,
+                    0,
+                    bytemuck::cast_slice(&verts),
+                );
                 // Camera-relative draw: identity model, eye at the ORIGIN. tint.a = the cross-fade alpha.
                 write_space_uniform(
                     &self.queue,
@@ -5225,7 +5692,11 @@ mod tests {
         const M_MOON: f64 = 7.342e22;
         let f = crate::accretion::RESOLVE_TIDAL_FRACTION;
         let resolve_at = crate::accretion::resolution_distance(M_EARTH, R_EARTH, M_MOON, f);
-        let sun = Body { pos: DVec3::ZERO, vel: DVec3::ZERO, mass: 1.989e30 };
+        let sun = Body {
+            pos: DVec3::ZERO,
+            vel: DVec3::ZERO,
+            mass: 1.989e30,
+        };
         let earth = Body {
             pos: DVec3::new(1.496e11, 0.0, 0.0),
             vel: DVec3::new(0.0, 29_780.0, 0.0),
@@ -5247,10 +5718,21 @@ mod tests {
         let (i, offset, rel_vel) =
             crate::live_resolution_crossing(&bodies, 1, R_EARTH, &[true; 4], f)
                 .expect("a body inside the resolution distance must be reported");
-        assert_eq!(i, 3, "the body OUTSIDE the threshold must not fire; the one INSIDE must");
+        assert_eq!(
+            i, 3,
+            "the body OUTSIDE the threshold must not fire; the one INSIDE must"
+        );
         // EXACT equality: the pair is handed straight to the SPH assembly, so nothing may drift here.
-        assert_eq!(offset, bodies[3].pos - bodies[1].pos, "body-centric offset, bit-exact");
-        assert_eq!(rel_vel, bodies[3].vel - bodies[1].vel, "body-centric velocity, bit-exact");
+        assert_eq!(
+            offset,
+            bodies[3].pos - bodies[1].pos,
+            "body-centric offset, bit-exact"
+        );
+        assert_eq!(
+            rel_vel,
+            bodies[3].vel - bodies[1].vel,
+            "body-centric velocity, bit-exact"
+        );
 
         // A PERMUTED body order reports the same crossing with the same geometry (docs/58: bodies
         // are addressed by declared role, so the planet's slot in the list must not matter).
@@ -5260,7 +5742,10 @@ mod tests {
                 .expect("the same crossing must be found wherever the planet sits");
         assert_eq!(pi, 2, "the inside body, at its permuted index");
         assert_eq!(poffset, offset, "identical body-centric offset, bit-exact");
-        assert_eq!(prel_vel, rel_vel, "identical body-centric velocity, bit-exact");
+        assert_eq!(
+            prel_vel, rel_vel,
+            "identical body-centric velocity, bit-exact"
+        );
 
         // Nobody inside ⇒ no crossing (the point-mass representation is still honest).
         assert!(
@@ -5286,7 +5771,10 @@ mod tests {
         let d = 100.0_f64;
         let mpp = crate::metres_per_pixel_at(d, fov, vh);
         let expected = 2.0 * d * (fov * 0.5).tan() / vh;
-        assert!((mpp - expected).abs() < 1e-12, "closed form: {mpp} vs {expected}");
+        assert!(
+            (mpp - expected).abs() < 1e-12,
+            "closed form: {mpp} vs {expected}"
+        );
         // Linear in distance: twice as far away ⇒ twice the metres per pixel (zooming out coarsens).
         assert!(
             (crate::metres_per_pixel_at(2.0 * d, fov, vh) - 2.0 * mpp).abs() < 1e-12,
@@ -5308,8 +5796,20 @@ mod tests {
         // gases were catalogued — pinning the size of a catalogue that is meant to grow turns standing
         // procedure ("source and catalogue any new substance") into a chore that breaks a test each time.
         // What matters is that the database loads and that the materials the engine names are present.
-        assert!(mats.len() >= 24, "the catalogue should not SHRINK (got {})", mats.len());
-        for id in ["granite", "basalt", "peridotite", "iron", "water", "air", "carbon_dioxide"] {
+        assert!(
+            mats.len() >= 24,
+            "the catalogue should not SHRINK (got {})",
+            mats.len()
+        );
+        for id in [
+            "granite",
+            "basalt",
+            "peridotite",
+            "iron",
+            "water",
+            "air",
+            "carbon_dioxide",
+        ] {
             assert!(
                 mats.iter().any(|m| m.id == id),
                 "{id} must be catalogued — the engine names it"
@@ -5323,9 +5823,19 @@ mod tests {
         // impact.rs, 1000 in aggregate.rs, 1000 in matter.rs). It now says the true thing: a specific
         // heat, a pyrolysis temperature, and no melting point.
         let rubber = &mats[materials::index_of(&mats, "rubber")];
-        assert!(rubber.specific_heat().is_some(), "rubber has a heat capacity like everything else");
-        assert_eq!(rubber.melt_point(), None, "but no melting point — it pyrolyses");
-        assert!(rubber.decomposition_point().is_some(), "and it says where it breaks down");
+        assert!(
+            rubber.specific_heat().is_some(),
+            "rubber has a heat capacity like everything else"
+        );
+        assert_eq!(
+            rubber.melt_point(),
+            None,
+            "but no melting point — it pyrolyses"
+        );
+        assert!(
+            rubber.decomposition_point().is_some(),
+            "and it says where it breaks down"
+        );
         for id in ["granite", "dirt", "grass", "iron", "nickel", "rubber"] {
             let i = materials::index_of(&mats, id);
             assert!(mats[i].density > 0.0, "{id} must have positive density");
@@ -5361,7 +5871,9 @@ mod tests {
         let mut layers = 0usize;
         let mut last_mat: Option<usize> = None;
         for y in (0..top).rev() {
-            let m = w.material_at(x, y, z).expect("solid below the surface top (no holes)");
+            let m = w
+                .material_at(x, y, z)
+                .expect("solid below the surface top (no holes)");
             let d = mats[m].density;
             assert!(
                 d >= prev_density - 1e-3,

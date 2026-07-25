@@ -89,7 +89,18 @@ mod tests {
     #[test]
     fn gpu_particle_matches_the_shader_field_for_field() {
         let rust = offsets!(
-            GpuParticle, offset, u, vel, resting, color, material, emission, rho, radius, _p0, _p1,
+            GpuParticle,
+            offset,
+            u,
+            vel,
+            resting,
+            color,
+            material,
+            emission,
+            rho,
+            radius,
+            _p0,
+            _p1,
             _p2,
         );
         let shader = wgsl_offsets(&wgsl_typed(SHADER, "Particle"));
@@ -111,9 +122,31 @@ mod tests {
     #[test]
     fn gpu_step_params_matches_the_shader_field_for_field() {
         let rust = offsets!(
-            GpuStepParams, gravity, dt, center, c_cohesion, air_rho, contact_damp, settle_speed,
-            part_half, cool_rate, count, world_w, world_d, cell_size, table_mask, bucket_k, c_radius,
-            c_stiffness, c_normal_damp, c_friction, c_tangent_damp, specific_heat, drag_cd, base_cell, max_level,
+            GpuStepParams,
+            gravity,
+            dt,
+            center,
+            c_cohesion,
+            air_rho,
+            contact_damp,
+            settle_speed,
+            part_half,
+            cool_rate,
+            count,
+            world_w,
+            world_d,
+            cell_size,
+            table_mask,
+            bucket_k,
+            c_radius,
+            c_stiffness,
+            c_normal_damp,
+            c_friction,
+            c_tangent_damp,
+            specific_heat,
+            drag_cd,
+            base_cell,
+            max_level,
         );
         let shader = wgsl_offsets(&wgsl_typed(SHADER, "Params"));
         assert_eq!(
@@ -150,6 +183,10 @@ mod tests {
         // The comma-split case: two fields sharing one line at the very end of Params.
         let p = wgsl_typed(SHADER, "Params");
         let tail: Vec<&str> = p[p.len() - 2..].iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(tail, ["base_cell", "max_level"], "the tail pair must both be seen");
+        assert_eq!(
+            tail,
+            ["base_cell", "max_level"],
+            "the tail pair must both be seen"
+        );
     }
 }
