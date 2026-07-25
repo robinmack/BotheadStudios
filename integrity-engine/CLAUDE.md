@@ -1,3 +1,11 @@
+@AGENTS.md
+
+<!-- The line above IMPORTS the vendor-neutral contract. `AGENTS.md` holds the rules that must hold no
+     matter whose coding agent is working — numbering, merge method, the gates, how to resolve someone
+     else's conflict — because this repo has more than one contributor and their assistants have to agree
+     with each other. It is imported rather than duplicated so the two can never drift; everything below is
+     the Claude-specific detail on top of it. -->
+
 # THE LAWS OF INTEGRITY — read first, every session
 
 The moral compass of this engine. When a decision is unclear or a long session has lost its way, these
