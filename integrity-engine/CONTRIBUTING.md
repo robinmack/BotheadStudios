@@ -37,7 +37,11 @@ Requires a **WebGPU-capable browser** (recent Chrome/Edge/Firefox, or Safari 26+
 
 ## Before opening a PR
 
-- `cargo fmt` and `cargo clippy` clean.
+- `cargo fmt` and `cargo clippy` clean. CI enforces `cargo fmt --check`, on **stock rustfmt defaults** —
+  there is no `rustfmt.toml`, so your editor's format-on-save already agrees with us.
+- **One-time, after cloning:** `git config blame.ignoreRevsFile .git-blame-ignore-revs`. The tree was
+  formatted in a single sweep on 2026-07-25; that file makes `git blame` look through it to whoever last
+  changed the code's meaning. GitHub's blame view does this automatically.
 - `cargo test` passes (solver unit tests, Barnes-Hut vs O(N²) accuracy checks, etc.).
 - Explain *what physical behavior* your change produces and how you verified it.
 
