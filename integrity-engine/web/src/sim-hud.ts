@@ -46,6 +46,11 @@ export interface SimHud {
    *  producers, ONE sink — engaging one releases the other, so "where is the camera" always has exactly
    *  one answer. Passing fewer than two producers hides the control rather than showing a dead choice. */
   cameras(producers: CameraProducer[]): void;
+  /** A TRANSIENT announcement — "following the largest fragment", "camera released". Appears well below
+   *  centre so it never sits over the action, and fades on its own. Distinct from the `#status` overlay,
+   *  which is for LOADING and ERRORS and must persist until the condition it reports actually changes;
+   *  auto-fading those would hide "WebGPU is not available" while the screen is still black. */
+  notify(message: string): void;
   /** Switch producers programmatically. Needed because a producer can END ITSELF — Terra's follow camera
    *  releases when the fragment it is riding lands — and the HUD must not go on showing it as engaged. */
   selectCamera(id: string): void;
@@ -89,7 +94,10 @@ const REGION_PLACEMENT: Record<HudRegion, Partial<CSSStyleDeclaration>> = {
   // Choosing a camera system is a MODE. Kept away from the one-shot action buttons on purpose: a mode
   // control sitting among actions gets pressed by accident.
   camera: { right: "16px", top: "16px", alignItems: "flex-end" },
-  actions: { left: "16px", bottom: "16px" },
+  // Down the LEFT EDGE, below the nav — not bottom-left, which sits on top of the #stats panel that
+  // spans the bottom of the viewport (seen in a screenshot: "Send Shot" and "Meteor swarm" overlapping
+  // the readout). The left strip is empty in every scene.
+  actions: { left: "16px", top: "160px" },
   status: { right: "16px", bottom: "16px", alignItems: "flex-end" },
 };
 
@@ -221,6 +229,48 @@ export function createSimHud(sceneName: string): SimHud {
   }
   document.body.appendChild(layer);
 
+  // GLOBAL widget: transient announcements. Horizontally centred but WELL BELOW the middle of the
+  // viewport — a message centred on screen sits exactly where the action is, which is the one place it
+  // must not be. High enough to clear the bottom-corner HUD regions.
+  const note = document.createElement("div");
+  note.id = "hud-note";
+  Object.assign(note.style, {
+    position: "fixed",
+    left: "50%",
+    top: "72%",
+    transform: "translateX(-50%)",
+    padding: "8px 14px",
+    font: "600 14px/1.4 system-ui, sans-serif",
+    color: "#eaf2ff",
+    background: "rgba(12,16,28,0.66)",
+    border: "1px solid rgba(255,255,255,0.18)",
+    borderRadius: "10px",
+    backdropFilter: "blur(6px)",
+    pointerEvents: "none",
+    textAlign: "center",
+    opacity: "0",
+    // Fades out over a second; the fade-IN is immediate so an announcement is never missed.
+    transition: "opacity 900ms ease",
+  });
+  layer.appendChild(note);
+  let noteTimer: number | undefined;
+  function notify(message: string): void {
+    note.textContent = message;
+    window.clearTimeout(noteTimer);
+    note.style.transition = "none";
+    note.style.opacity = "1";
+    // Two frames: one to apply opacity:1 with no transition, one to re-arm the transition before the
+    // fade is scheduled — setting both in the same frame makes the browser collapse them and skip it.
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        note.style.transition = "opacity 900ms ease";
+        noteTimer = window.setTimeout(() => {
+          note.style.opacity = "0";
+        }, 2600);
+      }),
+    );
+  }
+
   // GLOBAL widget: the camera selector. Rendered only once a scene declares two or more producers —
   // a selector offering one choice is noise, and a scene with one camera has nothing to select.
   const cameraBox = document.createElement("div");
@@ -241,6 +291,9 @@ export function createSimHud(sceneName: string): SimHud {
     engaged = next;
     next.engage();
     repaint();
+    // Announce the switch here, once, rather than in each scene's producer: who is driving the camera
+    // just changed, and that is the HUD's own news.
+    notify(`camera: ${next.label.replace(/^\S+\s/, "")}`);
   }
   function renderCameras(producers: CameraProducer[]): void {
     registered = producers;
@@ -281,6 +334,9 @@ export function createSimHud(sceneName: string): SimHud {
     },
     selectCamera(id: string): void {
       selectById(id);
+    },
+    notify(message: string): void {
+      notify(message);
     },
     update(frame: SimHudFrame): void {
       if (!statsEl) return;
