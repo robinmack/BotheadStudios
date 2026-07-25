@@ -156,6 +156,14 @@ pub struct Aggregate {
     /// and lets the disk's composition be measured and tinted by origin (the real Moon is Earth-like, so
     /// "the disk is 100% impactor" is a bug the tag makes visible).
     pub source: Vec<u8>,
+    /// The GPU self-gravity dispatch (docs/30): when attached, and the pass's gravity-active count is
+    /// at or above the measured [`crate::gpu_gravity::DIRECT_SUM_KNEE`], the GPU replaces the CPU tree
+    /// in `accelerations` (the exact parallel sum, or from the second measured knee
+    /// [`crate::gpu_gravity::TREE_KNEE`] the GPU's own LBVH Barnes-Hut tree); the engine shunts a
+    /// per-particle N-body force to the processor that handles it best. `None` (every constructor's
+    /// default) keeps the CPU path; a scene attaches the field from its shared device when it
+    /// materialises a debris cloud.
+    pub gpu_gravity: Option<crate::gpu_gravity::GravityField>,
 }
 
 /// Provenance tags for [`Aggregate::source`]. The impactor is the default (0) so a bare aggregate with
@@ -198,6 +206,7 @@ impl Aggregate {
             vapor_latent_k: 0.0,
             vapor_rho: Vec::new(),
             source: vec![SOURCE_IMPACTOR; n],
+            gpu_gravity: None,
         }
     }
 
@@ -372,6 +381,7 @@ impl Aggregate {
             vapor_latent_k: 0.0,
             vapor_rho: Vec::new(),
             source: vec![SOURCE_IMPACTOR; n],
+            gpu_gravity: None,
         }
     }
 
@@ -537,15 +547,44 @@ impl Aggregate {
         // (docs/30). Positions are fixed within one accelerations pass.
         let sr_pos: Vec<DVec3> = p.iter().map(|b| b.pos).collect();
         let masses: Vec<f64> = p.iter().map(|b| b.mass).collect();
-        // N-body SELF-GRAVITY via Barnes–Hut → O(N log N) (docs/30 stage 1c): a distant clump pulls like a
-        // single mass at its centre of mass. θ=0.5 (RMS error <1%, unbiased — below the FP/chaos noise the
-        // disk tolerates), softened exactly like the direct sum; brute-force below ~1k bodies. Only for a
-        // self-gravitating pile — a cohesive solid's own gravity is ~0 and skips it.
+        // N-body SELF-GRAVITY, shunted to the processor that handles it best, by the measured knee and
+        // never by guess (docs/30). At or above `gpu_gravity::DIRECT_SUM_KNEE`, with a GPU field
+        // attached, the GPU takes the pass: the EXACT softened direct sum (embarrassingly parallel; no
+        // theta multipole error, so higher fidelity AND faster than the single-thread tree it replaces,
+        // measured in `gpu_gravity_speedup`), until at `gpu_gravity::TREE_KNEE` the quadratic sum loses
+        // to the GPU's own LBVH Barnes-Hut tree, the second measured knee (`gpu_tree_speedup`; theta
+        // 0.5, the same bounded multipole this CPU tree already accepts). The routing between the two
+        // GPU forms lives inside the field. Below the first knee, with no field attached, or while a
+        // browser dispatch is still in flight, the CPU path stands: Barnes–Hut → O(N log N) (docs/30
+        // stage 1c), θ=0.5 (RMS error <1%, unbiased, below the FP/chaos noise the disk tolerates),
+        // softened exactly like the direct sum; brute-force below ~1k bodies. Only for a
+        // self-gravitating pile; a cohesive solid's own gravity is ~0 and skips it.
         if self.self_gravity {
-            let bh = crate::bhtree::BarnesHut::build(&sr_pos, &masses, 0.5, self.softening);
-            let g = match grav_active {
-                Some(active) => bh.accelerations_active(&sr_pos, &masses, active),
-                None => bh.accelerations(&sr_pos, &masses),
+            // The knee is compared against the ACTIVE count, not the cloud size: under a gravity-active
+            // mask the CPU tree only evaluates the active subset, so a sub-tick refreshing a handful of
+            // shocked particles is CPU work regardless of how big the cloud is, and dispatching it would
+            // pay the full GPU round trip to replace microseconds of traversal (measured: gating on
+            // total N left step_block at 1.27x; gating on the active count is where the pass-level win
+            // survives to the frame). The GPU sum itself covers every particle: the masked entries are
+            // simply fresher than the contract requires (step_block reads only the active ones).
+            let active_n = grav_active.map_or(sr_pos.len(), |m| m.iter().filter(|&&a| a).count());
+            let gpu_g = if active_n >= crate::gpu_gravity::DIRECT_SUM_KNEE {
+                self.gpu_gravity
+                    .as_mut()
+                    .and_then(|f| f.accelerations(&sr_pos, &masses, self.softening))
+            } else {
+                None
+            };
+            let g = match (gpu_g, grav_active) {
+                (Some(g), _) => g,
+                (None, Some(active)) => {
+                    let bh = crate::bhtree::BarnesHut::build(&sr_pos, &masses, 0.5, self.softening);
+                    bh.accelerations_active(&sr_pos, &masses, active)
+                }
+                (None, None) => {
+                    let bh = crate::bhtree::BarnesHut::build(&sr_pos, &masses, 0.5, self.softening);
+                    bh.accelerations(&sr_pos, &masses)
+                }
             };
             for (a, gi) in acc.iter_mut().zip(g) {
                 *a += gi;
@@ -2084,6 +2123,28 @@ mod scaling_bench {
                     if ratio > 1.5 { "RISING → O(N²) somewhere" } else { "flat → O(N log N), good" });
             }
             prev_per = per;
+        }
+        // The SAME configuration with the GPU direct-sum dispatch attached (the live moon-drop wiring),
+        // so the move off the CPU tree is measured end to end (full step_block, not just one kernel).
+        // Skips cleanly with no GPU, leaving the CPU baseline above intact.
+        match crate::gpu_host::GpuHost::headless(None) {
+            Ok(host) => {
+                println!("  with the GPU direct-sum dispatch attached ({}):", host.info.name);
+                for &n in &[1500usize, 3000usize] {
+                    let mut agg = build(n, &mut rng);
+                    agg.gpu_gravity =
+                        Some(crate::gpu_gravity::GravityField::new(&host.device, &host.queue));
+                    let _ = agg.accelerations(); // warm up (pipeline, first alloc)
+                    let t = Instant::now();
+                    for _ in 0..5 { let _ = agg.accelerations(); }
+                    let accel_ms = t.elapsed().as_secs_f64() * 1e3 / 5.0;
+                    let t = Instant::now();
+                    agg.step_block(8.0, 0.05);
+                    let block_ms = t.elapsed().as_secs_f64() * 1e3;
+                    println!("  {n:<5} {block_ms:8.1} ms  accel×1 {accel_ms:6.2} ms");
+                }
+            }
+            Err(e) => println!("  no GPU, dispatch rows skipped ({e})"),
         }
     }
 }

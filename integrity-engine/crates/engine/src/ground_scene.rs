@@ -299,6 +299,10 @@ fn build_particle_pipeline(
 /// Near-clip distance. The camera shell's half-extent must be at least this, or the frustum's near
 /// plane can cross into matter even while the shell itself cannot — which is exactly how a camera ends
 /// up seeing under the skin.
+/// The ground scene's vertical field of view (radians) — 60°, named rather than written inline at the
+/// projection. Sean's `upstream-5-ground-ball` introduces the same constant independently; converging fixes.
+const FOV_Y: f32 = std::f32::consts::FRAC_PI_3;
+
 const NEAR_CLIP: f32 = 0.2;
 
 /// The ground scene: a world defined by data, rendered and made destructible.
@@ -947,7 +951,7 @@ impl Ground {
     fn view_proj(&self) -> (Mat4, Vec3) {
         let (eye, target) = self.eye_and_target();
         let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
-        let proj = Mat4::perspective_rh(60f32.to_radians(), aspect, NEAR_CLIP, 4_000.0);
+        let proj = Mat4::perspective_rh(FOV_Y, aspect, NEAR_CLIP, 4_000.0);
         let view = Mat4::look_at_rh(eye, target, Vec3::Y);
         (proj * view, eye)
     }

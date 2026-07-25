@@ -171,3 +171,41 @@ Pick up option A if/when **either**:
 `cd tools/gpu-bh-verify && cargo run --release` (RTX 2070, native Vulkan). Prints PASS for every stage +
 the scaling/bucketing table. Correctness bars: bbox exact, morton bit-exact, tree structural, COM <1e-6,
 θ=0.5 RMS <1 %, θ→0 recovers direct, direct-sum → O(N²).
+
+## MEASURED ON APPLE SILICON (2026-07-22): the crossover drops to N≈24k, and the tree is wired in
+
+The "unmeasured, needs a run on that silicon" prediction above is now measured, on an Apple M4 Max
+(Metal), with the tree ENABLED in the engine's live dispatch (`gpu_gravity::GravityField`), not just in
+the standalone verifier. Full pipeline per call, honestly costed: the tree column pays its whole build
+(CPU Morton sort + upload + Karras + COM + traversal + readback), the direct column its upload +
+dispatch + readback. `cargo test -p engine gpu_tree_speedup -- --ignored --nocapture`:
+
+| N | direct ms | tree ms (K=1) | CPU-BH ms | tree speedup vs direct |
+|------:|------:|------:|------:|------:|
+| 3 000 | 3.7 | 5.3 | 12.7 | 0.7x |
+| 12 000 | 4.1 | 4.0 | 86 | ~1.0x (dead heat) |
+| 24 000 | 6.0 | 4.8 | 211 | 1.2x |
+| 48 000 | 20 | 8.9 | 490 | ~2x |
+| 96 000 | 72 | 15 | 1 103 | ~5x |
+| 192 000 | 413 | 35-46 | 2 574 | 9-12x |
+
+The prediction held, direction and rough magnitude: the crossover fell from ~128k (2070, traversal-only)
+to ~24k (M4 Max, full pipeline). `gpu_gravity::TREE_KNEE = 24_000` is read off this table: the first N
+where the tree wins in every run; the 12k dead heat stays with the direct sum because the direct sum is
+exact, so fidelity breaks the tie. K=1 remains the fastest bucket at every N (K=8/32 swept, all slower),
+agreeing with the 2070 finding. The GPU radix sort is STILL not built; the CPU sort leg is inside the
+tree column above and the tree wins anyway.
+
+**A real coherence defect surfaced on Metal.** `cs_com`'s bottom-up climb needs the second-arriving
+child to see its sibling subtree's non-atomic com/bmin/bmax writes, i.e. release/acquire ordering around
+the `ready` atomic. WGSL atomics are relaxed and WGSL has no device-scope fence, so the pattern is
+coherent on the 2070 by hardware grace, not by the language. On the M4 Max it is measurably incoherent:
+run-to-run differing fields, tree-vs-direct RMS error GROWING with N (6.4e-2 at 24k on the debris cloud,
+2.2e-1 on a uniform box) while θ→0 stayed exact (the traversal never reads internal COMs there). The
+engine dispatch therefore builds moments with a level-synchronous ping-pong sweep (`cs_com_sweep` xR +
+`cs_com_resolve`, R = root-height bound of 32 + duplicate-run levels): each sweep reads only the buffer
+the previous DISPATCH wrote, and pass boundaries are the one cross-invocation ordering WGSL does
+guarantee. Deterministic and θ-bounded at every N after the change (RMS 3.4e-3 at 24k), pinned in-crate
+by `the_gpu_tree_matches_the_cpu_tree_within_the_theta_bound` (which also asserts bitwise
+repeatability). The climb kernel stays for hardware where it is coherent; the verifier still exercises
+it on Vulkan.

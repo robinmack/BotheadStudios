@@ -244,6 +244,64 @@ mod single_source_tests {
 }
 
 #[cfg(test)]
+mod fov_tests {
+    /// **A frame's field of view must come from a NAMED source, never a literal at the projection.**
+    ///
+    /// Robin's condition for letting scenes switch between camera-handling systems (2026-07-25): *"As long as
+    /// we can unify FOV within the engine for rendering, we should be good."* Several camera systems producing
+    /// poses is fine — but every one of them ends at a projection, and if the FOV is written inline there,
+    /// then switching systems can silently change how wide the world is.
+    ///
+    /// It was already broken when this was written, in the quietest possible way: the space band wrote `0.9`
+    /// TWICE — once building its projection and once in `meters_per_pixel`, the HUD's scale bar. Change the
+    /// projection and the bar goes on measuring a frustum the scene is no longer drawing, reporting confident
+    /// wrong metres with nothing failing. The ground scene had a bare `60f32.to_radians()` at its projection.
+    ///
+    /// So the rule is mechanical and checkable: the first argument to `perspective_rh` must not begin with a
+    /// digit. A named constant or a parameter can be traced, shared and tested; a literal cannot.
+    #[test]
+    fn no_projection_is_built_from_a_bare_field_of_view_literal() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        let mut sins = Vec::new();
+        let mut checked = 0usize;
+        let mut stack = vec![std::path::PathBuf::from(dir)];
+        while let Some(p) = stack.pop() {
+            for e in std::fs::read_dir(&p).expect("engine sources are readable").flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|x| x != "rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                for (i, line) in text.lines().enumerate() {
+                    let t = line.trim_start();
+                    if t.starts_with("//") || t.starts_with("///") {
+                        continue; // prose may name a number freely
+                    }
+                    let Some(at) = line.find("perspective_rh(") else { continue };
+                    checked += 1;
+                    let arg = line[at + "perspective_rh(".len()..].trim_start();
+                    if arg.starts_with(|c: char| c.is_ascii_digit()) {
+                        sins.push(format!(
+                            "{}:{}: builds a projection from a literal field of view ({}…) — name it, so a \
+                             scale bar and a frustum cannot disagree",
+                            path.file_name().unwrap_or_default().to_string_lossy(),
+                            i + 1,
+                            arg.chars().take(12).collect::<String>()
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(checked >= 3, "expected to find the engine's projections, found {checked}");
+        assert!(sins.is_empty(), "field of view written inline at a projection:\n  {}", sins.join("\n  "));
+    }
+}
+
+#[cfg(test)]
 mod pinned_constant_tests {
     /// `EARTH_RADIUS_M` has to be a `const` — `DISPLAY_SCALE` is derived from it in a const context — so
     /// it cannot simply ask `planet::body("earth")` at runtime. That makes it the one legitimate second

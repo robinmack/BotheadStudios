@@ -3,6 +3,33 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-25 — two PRs said MERGED and `main` never got them
+
+**What.** Sean's step-4 (GPU gravity dispatch) and the `merge-reports/` convention are on `main`. They were
+supposed to arrive as PRs #87 and #88, which both merged cleanly and both closed as **MERGED** — into their
+*base branches*, not into `main`. The six-PR stack was retargeted to `main` as it landed for #83–#86 and not
+for the last two, so #87 merged into `integrate-sean-3-sph-live-drop` and #88 into
+`integrate-sean-4-gpu-gravity`. Both branches are still alive on the remote, holding content nobody knew was
+missing. This merge recovers both.
+
+**Why it stayed invisible.** Every signal said done. The PRs were closed, the checks were green, the branches
+merged without conflict, and the PR list was empty but for dependabot. Nothing anywhere reports "this merge
+did not reach `main`" — a PR's state describes the PR. The question has a one-line answer and it has to be
+asked deliberately: `git merge-base --is-ancestor <branch> origin/main`.
+
+**The second casualty, which is the more interesting one.** #88 deleted `docs/60-integrating-the-fork.md`,
+having moved it to `merge-reports/2026-07-25-sean-reid.md`; #86 had added `docs/60` to `main`. Because the
+split put those two changes on opposite sides, the three-way merge saw a file created on one side only and
+kept it. Git behaved exactly as specified and the result was wrong: `main` would have carried **two audit
+trails of one integration**, each editable without the other — Law II in the documentation rather than the
+code, and a merge is precisely where that gets welded in silently. `docs/60` is deleted here after checking
+line by line that the report carries all of it.
+
+**Verified.** Native suite **380/380** (23 skipped) after the resolution; `cargo build --lib --target
+wasm32-unknown-unknown` clean, which is the check that catches `mod app` (WASM-only, invisible to a native
+`cargo check`). Both recovered branches confirmed ancestors of the merge; no conflict markers survive.
+Conflicts were `CHANGELOG.md` and `JOURNAL.md`, both append-only logs with an empty side, unioned.
+
 ## 2026-07-24 (tier wired) — the mesh is the budget, not the maths
 
 **What.** `surface_detail` now has a consumer: Terra's ground cap generates sub-raster relief, bounded by
@@ -602,6 +629,94 @@ seconds, i.e. the operator gets catastrophically expensive at the moment it star
 prerequisite is an O(N log N) binding energy: `bhtree::BarnesHut` exists and is verified but has only
 `accelerations`, no POTENTIAL traversal. Adding one (same tree, same opening criterion, sum `Gm/r`), pinned
 to the exact O(N²) sum, is the next step — then the pass hooks in where `sph_snapshot` lands.
+
+## 2026-07-22: the GPU gravity dispatch grows its second knee, and the LBVH tree goes live
+
+**What.** The GPU Barnes-Hut tree banked by docs/36/37 is enabled in the live gravity dispatch.
+`GpuGravity` builds the tree pipelines from the same verified `bh_gravity.wgsl`, and `GravityField`
+routes within the GPU by a SECOND measured knee: below `TREE_KNEE` the exact direct sum (the ideal GPU
+workload, and exact), at or above it the theta=0.5 LBVH tree, whose O(N log N) eventually beats the
+quadratic sum even counting its full per-call build. The dispatch order is the verifier's, with two
+deliberate deviations, both recorded at the site: (1) bbox+Morton+sort run on the CPU, bit-identically
+to `cs_bbox`/`cs_morton` (the verifier pinned that equality), because the GPU radix sort was never
+built, so the codes must visit the CPU anyway and a mid-pipeline blocking read-back would be illegal in
+the browser; (2) the single-pass `cs_com` climb is replaced by new level-synchronous ping-pong sweep
+kernels (`cs_com_sweep` xR, `cs_com_resolve`), because enabling the climb on Metal produced
+NONDETERMINISTIC internal COMs: the climb needs release/acquire ordering around its `ready` atomic, and
+WGSL atomics are relaxed with no device-scope fence, so its coherence on the Vulkan/NVIDIA verifier box
+was hardware grace, not a guarantee. The sweep's only cross-invocation ordering is the pass boundary,
+the one ordering WGSL does guarantee; R is the root-height bound (32 plus duplicate-run levels), and
+each sweep costs microseconds. Theta stays 0.5 and K stays 1 particle per leaf, both the values the
+measurements justify; `Aggregate` needed no wiring change, since the routing lives inside the field.
+`GpuHost` now requests the WebGPU baseline limits (8 storage buffers per stage) instead of the
+downlevel set (4): the tree binds 7, and the browser scenes already run with the adapter's full limits,
+so the stricter native host was rejecting pipelines the shipping page accepts.
+
+**Why.** The direct-sum dispatch bought the moon-drop its frame back, but a quadratic sum has an
+expiry date, and docs/37 predicted Apple silicon would pull the tree's crossover far below the 2070's
+128k. Measured, it did: into the range a large debris cloud actually reaches. Above the knee the tree
+is the most physical thing the budget buys (same bounded multipole the CPU tree already accepts, at a
+fraction of the wall time); below it the exact sum keeps both fidelity and speed, so each range keeps
+its honest winner.
+
+**Verified.** On this box (Apple M4 Max, Metal): new `gpu_tree_speedup` (both columns full per-call
+cost, K in {1,8,32} swept, three runs) reads the knee off the table: dead heat at N=12000
+(0.98x/1.02x/1.19x), tree wins every 24000 measurement (direct 5.5-6.6 ms vs tree 4.8-5.3 ms), then
+~2x at 48k, ~5x at 96k (72 ms vs 15 ms), 9-12x at 192k (413 ms vs 35-46 ms, against 2.6 s for the
+single-thread CPU tree); K=1 fastest at every N, matching the 2070 finding. `TREE_KNEE = 24000` sits at
+the first DECIDED N, with the dead heat kept by the exact sum because fidelity breaks ties. A parallel
+session used the GPU intermittently; runs were repeated and the crossover location held in every run.
+Correctness on Metal, in-crate: `the_gpu_tree_matches_the_cpu_tree_within_the_theta_bound` (RMS rel
+5.8e-3 vs the CPU octree and 5.4e-3 vs the exact f64 sum at N=6000, inside the 1e-2 verifier bound,
+plus bitwise-repeatability, which the racy climb measurably failed);
+`the_gpu_tree_opened_fully_recovers_the_direct_sum` (theta 1e-4: RMS 2.1e-6, every particle reached
+exactly once); `at_the_tree_knee_the_field_dispatches_the_tree` (at N=24000 the dispatched field
+carries the tree's nonzero multipole signature against the exact sum AND matches the CPU tree, RMS
+3.9e-3, so the routing is pinned by physics, not inspection). Before the sweep fix the tree-vs-exact
+error GREW with N (6.4e-2 at 24k, 2.2e-1 on a uniform box) and differed run to run; after it, 3.4e-3
+and bit-stable. Full native suite 338/338 green; wasm32-unknown-unknown check clean;
+`tools/gpu-bh-verify` still compiles untouched in behaviour (its Vulkan box cannot be reached from this
+Mac, noted in docs/37). fmt untouched (hand-edited).
+
+## 2026-07-22: orbital debris self-gravity dispatches to the GPU above a measured knee
+
+**What.** The verified GPU direct-sum gravity kernel is now the live self-gravity path for large
+debris clouds. `gpu_gravity` gains `GravityField`: the `cs_gravity_direct` pipeline bound to the
+device and queue it runs on (cloned handles of the scene's SHARED device, the `gpu_sph` pattern,
+never a second adapter). `Aggregate` carries an optional `GravityField`, and `accelerations_masked`
+shunts the self-gravity of any pass whose gravity-ACTIVE count is at or above
+`gpu_gravity::DIRECT_SUM_KNEE` to the exact GPU sum; below the knee, with no field attached, or
+while a browser dispatch is in flight, the θ=0.5 CPU tree stands unchanged. The knee gates on the
+active count because under a block-timestep mask the CPU tree only evaluates the active subset:
+gating on total N paid a full GPU round trip to replace microseconds of traversal on the
+few-particle sub-ticks (measured below). `OrbitDemo` attaches the field when a swept impact
+materialises its debris cloud; an absorbed second impact joins the first cloud's field. Natively the
+dispatch is synchronous and exact at the pass's own positions. In the browser, where WebGPU forbids
+blocking, it is the engine's two-phase read-back: a pass harvests the previously submitted field
+(one submission old, the same class of deferral step_block already accepts when a coasting particle
+keeps its last kick's acceleration) and the CPU tree covers passes with nothing landed, so no pass
+blocks and none goes without gravity.
+
+**Why.** The moon-drop bottleneck measurement found 64% of the debris accel pass in a single-thread
+CPU tree walk while the exact parallel sum it approximates sat verified on the GPU, wired into
+nothing. Self-gravity is a per-particle N-body force; the engine's stated architecture is to shunt
+each job to the processor that handles it best by a MEASURED knee. The direct sum has no multipole
+error, so above the knee this is higher fidelity and higher speed at once.
+
+**Verified.** On this box (Apple M4 Max, Metal): `gpu_gravity_matches_the_cpu_direct_sum` passes
+(worst per-particle relative error under the 1e-3 bound); the new
+`the_aggregate_dispatch_matches_the_cpu_tree_within_the_theta_bound` pins the dispatched field to
+the CPU tree within RMS relative 1e-2, the same bound `tools/gpu-bh-verify` enforces between tree
+and direct sum (that harness itself requests a Vulkan adapter and cannot run on this Mac; the
+in-crate tests carry the bound here); the new
+`below_the_knee_the_cpu_path_stands_even_with_a_field_attached` pins the gate by bitwise identity.
+`gpu_gravity_speedup` (now sweeping N=200..6000 against the tree's true per-pass build+eval cost):
+GPU round trip ~1.3 ms and nearly flat, CPU crosses it between N=400 (0.5x) and N=750 (1.9x), then
+GPU 1.5x at N=2000, 1.7x at N=3000, 3.6x at N=6000; the knee interpolates to ~550 and is set at
+600, on the CPU-favoured side of both measured boxes. End to end, `debris_step_scaling` with the
+dispatch attached: accel pass at N=3000 15.2 ms to 7.0 ms (2.2x), full step_block frame 117 ms to
+78 ms (1.5x); at N=1500, 31.5 ms to 24.4 ms. Full native suite 335/335 green (the two new GPU tests
+included); wasm32-unknown-unknown check clean. fmt untouched (hand-edited).
 
 ## 2026-07-23: the CPU Aggregate debris path is deleted; one collision resolution remains
 
