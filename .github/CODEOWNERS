@@ -1,0 +1,28 @@
+# Code owners — the reviewers GitHub requires on every pull request.
+#
+# WHY THIS FILE EXISTS: `main`'s ruleset sets `require_code_owner_review: true`, and until now the repo had
+# no CODEOWNERS at all — `.github/` was gitignored wholesale, so one could not be committed. A code-owner
+# requirement with no code owners defined cannot be satisfied by anyone, so a finished PR (#81) sat BLOCKED
+# with no route through it. This is that fix.
+#
+# GitHub semantics worth knowing before editing. Every one of these fails SILENTLY:
+#
+#   * An entry only takes effect for accounts with WRITE access. Naming someone who has not been added as a
+#     repository collaborator does nothing at all — no error, no warning, simply no owner.
+#   * An unknown or misspelled username is ignored the same way. There is no validation anywhere.
+#   * The LAST matching pattern wins, not the first, so a catch-all belongs at the TOP and any narrower
+#     rule goes below it.
+#   * GitHub reads this file from a pull request's BASE branch, so a change here only affects PRs opened
+#     against a branch that already has it. That is why this arrives on its own branch instead of inside a
+#     feature branch — shipping it inside #81 would not have unblocked #81.
+
+# Everything, unless a narrower rule below says otherwise.
+* @robinmack
+
+# TODO (2026-07-24): add Sean alongside — `* @robinmack @his-username`. Two things are needed and neither
+# could be settled from here:
+#   1. his GitHub USERNAME. We have seanreid.mail@gmail.com, but the address is not public so an API search
+#      by email returns nothing, and a name search returns several plausible `seanreid*` accounts. Naming
+#      the wrong person is worse than leaving the line out, and a wrong name fails silently.
+#   2. a collaborator invite — the repo currently lists one collaborator (robinmack), and an entry for an
+#      account without write access is inert.
