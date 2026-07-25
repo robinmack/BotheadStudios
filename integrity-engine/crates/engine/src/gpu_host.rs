@@ -71,7 +71,12 @@ impl GpuHost {
             &wgpu::DeviceDescriptor {
                 label: Some("integrity-headless"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
+                // The WebGPU baseline (8 storage buffers per stage), not the downlevel one (4): the
+                // browser scenes request the adapter's full limits, and the LBVH gravity tree binds 6
+                // storage buffers, so a downlevel headless device would be STRICTER than the browser
+                // and reject pipelines the shipping page runs. Baseline, not adapter-full, so a kernel
+                // that creeps past what a browser guarantees still fails here first.
+                required_limits: wgpu::Limits::default(),
                 memory_hints: wgpu::MemoryHints::Performance,
             },
             None,
