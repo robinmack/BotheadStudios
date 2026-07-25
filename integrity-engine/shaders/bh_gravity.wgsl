@@ -188,6 +188,15 @@ fn cs_tree(@builtin(global_invocation_id) gid: vec3<u32>) {
 // the root: at each ancestor it atomically registers arrival; the FIRST child to arrive stops (its sibling's
 // subtree isn't done), the SECOND merges both children (COM mass-weighted, AABB unioned) and keeps climbing.
 // So every internal node is computed exactly once, by whichever child finishes last. No float atomics needed.
+//
+// COHERENCE CAVEAT, measured: the climb needs the second-arriving child to SEE the sibling subtree's
+// non-atomic com/bmin/bmax writes, i.e. release/acquire ordering around the `ready` atomic. WGSL atomics
+// are relaxed and WGSL has no device-scope fence, so that ordering is not guaranteed by the language. On
+// the Vulkan/NVIDIA box that verified this file the climb is coherent in practice; on Metal (Apple M4
+// Max) it is NOT: stale sibling reads corrupt internal COMs nondeterministically (run-to-run differing
+// fields, RMS error vs the exact sum growing with N). The engine therefore builds the moments with the
+// race-free ping-pong sweep below (cs_com_sweep/cs_com_resolve); this kernel remains the single-pass
+// form for hardware where the climb is coherent, and the standalone verifier still exercises it.
 @compute @workgroup_size(64)
 fn cs_com(@builtin(global_invocation_id) gid: vec3<u32>) {
   let c = gid.x;                  // cluster / leaf index
@@ -229,6 +238,74 @@ fn cs_com(@builtin(global_invocation_id) gid: vec3<u32>) {
     nodes[node].bmax = vec4<f32>(max(nodes[l].bmax.xyz, nodes[r].bmax.xyz), 0.0);
     node = nodes[node].parent;
   }
+}
+
+// --- Stage 5, race-free form: level-synchronous ping-pong sweep ---
+// The only cross-invocation ordering WGSL actually guarantees is the barrier between dispatches, so the
+// bottom-up moments are computed as REPEATED full sweeps: every sweep reads the moments the PREVIOUS
+// dispatch wrote (mom_src) and writes its own (mom_dst), buffers swapped each round. A leaf's moment is
+// exact from sweep 1 (it reads only sbodies); an internal node at height h is exact from sweep h+1
+// (its children were exact in the previous sweep's output). After (root height + 1) sweeps every node
+// is exact, with no invocation ever reading what a peer wrote in the SAME dispatch. Intermediate sweeps
+// hold garbage in the not-yet-converged internal nodes; nothing reads a sweep's output except the next
+// sweep, and the final buffer is copied into nodes[] by cs_com_resolve for the traversal.
+struct Moment {
+  com: vec4<f32>,   // subtree centre of mass (xyz) + total mass (w)
+  bmin: vec4<f32>,  // subtree AABB min (xyz)
+  bmax: vec4<f32>,  // subtree AABB max (xyz)
+}
+@group(0) @binding(9) var<storage, read> mom_src: array<Moment>;
+@group(0) @binding(10) var<storage, read_write> mom_dst: array<Moment>;
+
+@compute @workgroup_size(64)
+fn cs_com_sweep(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= 2u * P.n_leaves - 1u) { return; }
+  let leaf0 = P.n_leaves - 1u;
+  if (i >= leaf0) {
+    // Leaf: accumulate its sorted bucket, the same arithmetic as cs_com's leaf setup. Recomputed every
+    // sweep (idempotent) so no separate init pass and no read of mom_src is needed here.
+    let c = i - leaf0;
+    let start = c * P.bucket_k;
+    let end = min(start + P.bucket_k, P.n);
+    var m: f32 = 0.0;
+    var mx = vec3<f32>(0.0);
+    var lo = vec3<f32>(1.0e30);
+    var hi = vec3<f32>(-1.0e30);
+    for (var s: u32 = start; s < end; s++) {
+      let b = sbodies[s];
+      m += b.w;
+      mx += b.xyz * b.w;
+      lo = min(lo, b.xyz);
+      hi = max(hi, b.xyz);
+    }
+    let com = select(vec3<f32>(0.0), mx / m, m > 0.0);
+    mom_dst[i] = Moment(vec4<f32>(com, m), vec4<f32>(lo, 0.0), vec4<f32>(hi, 0.0));
+    return;
+  }
+  // Internal: merge the children's moments from the previous sweep (mass-weighted COM, unioned AABB).
+  let l = nodes[i].left;
+  let r = nodes[i].right;
+  let cl = mom_src[l].com;
+  let cr = mom_src[r].com;
+  let m = cl.w + cr.w;
+  let com = select(vec3<f32>(0.0), (cl.xyz * cl.w + cr.xyz * cr.w) / m, m > 0.0);
+  mom_dst[i] = Moment(
+    vec4<f32>(com, m),
+    vec4<f32>(min(mom_src[l].bmin.xyz, mom_src[r].bmin.xyz), 0.0),
+    vec4<f32>(max(mom_src[l].bmax.xyz, mom_src[r].bmax.xyz), 0.0)
+  );
+}
+
+// Copy the converged moments (bound as mom_src) into the node arena for cs_gravity_bh, which reads
+// com/bmin/bmax from nodes[] so the same traversal serves both stage-5 forms.
+@compute @workgroup_size(64)
+fn cs_com_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= 2u * P.n_leaves - 1u) { return; }
+  nodes[i].com = mom_src[i].com;
+  nodes[i].bmin = mom_src[i].bmin;
+  nodes[i].bmax = mom_src[i].bmax;
 }
 
 // --- direct O(N²) gravity: the reference the Barnes-Hut tree is verified against ---

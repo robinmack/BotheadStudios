@@ -3532,12 +3532,12 @@ mod app {
         pub fn meters_per_pixel(&self) -> f64 {
             let dist_disp = (self.camera.base_distance * self.camera.zoom) as f64;
             let dist_m = dist_disp / DISPLAY_SCALE; // display units → metres
-            crate::metres_per_pixel_at(dist_m, 0.9, self.config.height.max(1) as f64)
+            crate::metres_per_pixel_at(dist_m, SPACE_FOV_Y as f64, self.config.height.max(1) as f64)
         }
 
         fn view_proj(&self) -> Mat4 {
             let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
-            let proj = Mat4::perspective_rh(0.9, aspect, 0.05, 100_000.0);
+            let proj = Mat4::perspective_rh(SPACE_FOV_Y, aspect, 0.05, 100_000.0);
             let cp = self.camera.pitch.cos();
             let dir = Vec3::new(
                 cp * self.camera.yaw.sin(),
@@ -3975,6 +3975,17 @@ mod app {
     const TERRA_RELIEF_EXAG: f64 = 1.0;
     /// Ground-cap grid resolution per side (Phase 5). The vertex buffer is rebuilt each frame; the index buffer
     /// (fixed topology) is built once.
+    /// **The space band's vertical field of view** (radians) — ONE definition, because it was written out
+    /// twice: once building the projection and once in `meters_per_pixel`, the HUD's scale bar. Change one
+    /// and the bar silently measures against a frustum the scene is not drawing, which is the quietest
+    /// possible way for a readout to lie.
+    ///
+    /// Deliberately NOT shared with `fly_camera::DEFAULT_FOV_Y`, which is also 0.9. Two scenes asking "what
+    /// field of view do I render at" are two questions that happen to have the same answer today; coupling
+    /// them would assert that one scene's framing must follow another's. (Same trap as `MOONLET_UNIS_N` —
+    /// see `merge-reports/2026-07-25-sean-reid.md`.)
+    const SPACE_FOV_Y: f32 = 0.9;
+
     const TERRA_CAP_RES: usize = 192;
     /// **How many nested ground tiers** (docs/08's ladder; docs/46 row on `surface_detail`). ONE tier could
     /// never work: a 192² grid over a horizon-sized cap is ~34 m per cell at 2 m altitude while the eye
