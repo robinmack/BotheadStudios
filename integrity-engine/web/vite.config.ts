@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { defineConfig, type Plugin } from "vite";
 import basicSsl from "@vitejs/plugin-basic-ssl";
 
@@ -92,11 +93,26 @@ const lan = process.env.LAN === "1";
 // per dev-server start). Injected as the global `__BUILD_ID__` and shown in the HUD, so we can tell at a
 // glance whether the browser is running the code we just shipped — the antidote to Safari serving a stale
 // cache. Format: YYYYMMDD.HHMMSS (sortable). (Node context here, so `new Date()` is fine.)
+//
+// The stamp says WHEN the bundle was built; `__BUILD_REL__` says WHAT is in it — the commit, plus a `+`
+// when the tree was dirty at build time. A timestamp alone cannot answer "is the fix I just merged live?",
+// which is the question actually asked after every deploy (and was being answered by curling asset hashes).
+// Falls back to "nogit" rather than failing the build: a tarball with no .git must still build.
 const pad = (n: number): string => String(n).padStart(2, "0");
 const now = new Date();
 const BUILD_ID =
   `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
   `.${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
+const BUILD_REL = (() => {
+  try {
+    const sha = execSync("git rev-parse --short HEAD", { cwd: root, encoding: "utf8" }).trim();
+    const dirty = execSync("git status --porcelain", { cwd: root, encoding: "utf8" }).trim() !== "";
+    return dirty ? `${sha}+` : sha;
+  } catch {
+    return "nogit";
+  }
+})();
 
 // Belt-and-suspenders cache defeat for Safari: the built JS/CSS/wasm are content-hashed (safe to cache
 // forever), but a stale HTML or a stable-URL dev wasm will pin old code. Tell the dev AND preview servers
@@ -113,7 +129,10 @@ const BASE_PATH = process.env.BASE_PATH ?? "/";
 export default defineConfig({
   base: BASE_PATH,
   assetsInclude: ["**/*.wasm"],
-  define: { __BUILD_ID__: JSON.stringify(BUILD_ID) },
+  define: {
+    __BUILD_ID__: JSON.stringify(BUILD_ID),
+    __BUILD_REL__: JSON.stringify(BUILD_REL),
+  },
   plugins: [logRelay(), shotSink(), ...(lan ? [basicSsl()] : [])],
   preview: { headers: NO_STORE },
   server: {
