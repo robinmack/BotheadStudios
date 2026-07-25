@@ -8,6 +8,7 @@ import "./scene-nav";
 import { createShareView } from "./share-view";
 import { createSimHud } from "./sim-hud";
 import { attachCameraInput, CAMERA_HINT } from "./camera-input";
+import { withBase } from "./base-url";
 
 const statusEl = document.getElementById("status");
 function setStatus(html: string, isError = false): void {
@@ -30,7 +31,7 @@ function sizeCanvas(canvas: HTMLCanvasElement): void {
 
 async function main(): Promise<void> {
   report("info", `build ${__BUILD_ID__}`);
-  const worldUrl = document.body.getAttribute("data-world") ?? "/worlds/earth/world.json";
+  const worldUrl = withBase(document.body.getAttribute("data-world") ?? "/worlds/earth/world.json");
 
   const canvas = document.getElementById("gpu-canvas") as HTMLCanvasElement | null;
   if (!canvas) {
@@ -61,7 +62,7 @@ async function main(): Promise<void> {
     type Raster = { data: Uint8Array; w: number; h: number };
     async function decode(url?: string): Promise<Raster> {
       if (!url) return { data: new Uint8Array(0), w: 0, h: 0 };
-      const bmp = await fetch(url.startsWith("/") ? url : base + url)
+      const bmp = await fetch(url.startsWith("/") ? withBase(url) : base + url)
         .then((r) => r.blob())
         .then((b) => createImageBitmap(b));
       const cv = new OffscreenCanvas(bmp.width, bmp.height);
@@ -84,7 +85,7 @@ async function main(): Promise<void> {
     // planet, nor of a scene: it is the universe everything here is inside. A scene contributes only where
     // the observer stands. Failure is non-fatal: you lose the stars, never the scene.
     try {
-      const bytes = new Uint8Array(await fetch("/sky/stars.bin").then((r) => r.arrayBuffer()));
+      const bytes = new Uint8Array(await fetch(withBase("/sky/stars.bin")).then((r) => r.arrayBuffer()));
       terra.load_star_catalog(bytes);
       report("info", `sky: ${bytes.length / 16} catalogued stars`);
     } catch (e) {

@@ -9,6 +9,16 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Wasm download weight is now tracked.** The release `engine_bg.wasm` baseline is recorded in
+  the versioning doc (811,915 bytes raw, 322,386 bytes gzipped on 2026-07-23), measuring it is a
+  release-checklist step alongside the `wgpu` version note, and the CI wasm job prints the raw and
+  gzipped sizes on every PR so growth lands attributed. No behaviour change.
+
+- **The site can be served from a subpath.** A `BASE_PATH` build variable sets Vite's base, and
+  the runtime joins root-absolute URLs (worlds, surface rasters, the star catalogue, the scene nav)
+  onto it through `withBase` (`web/src/base-url.ts`), so the URLs the engine hands back at runtime
+  land under the prefix too instead of escaping the site. Serving from the domain root is unchanged.
+
 - **Resolution-on-demand cap impacts (docs/39) — the moon-drop caps modern Earth instead of melting it.**
   A small impactor now resolves the impactor(s) whole + a CAP of the target, keeping the target's bulk an
   abstract gravity source + boundary (`GpuSph::set_bulk`), so a Moon on Earth is a localized surface impact

@@ -6,6 +6,7 @@ import "./scene-nav";
 import { createSimHud } from "./sim-hud";
 import { createShareView } from "./share-view";
 import { attachCameraInput, CAMERA_HINT } from "./camera-input";
+import { withBase } from "./base-url";
 
 const canvas = document.getElementById("gpu-canvas") as HTMLCanvasElement;
 const stats = document.getElementById("stats");
@@ -23,7 +24,7 @@ async function main() {
     setStatus("This browser has no WebGPU. Try Chrome/Edge 113+ or Safari 18+.", true);
     return;
   }
-  const worldUrl = document.body.getAttribute("data-world") ?? "/worlds/ground/world.json";
+  const worldUrl = withBase(document.body.getAttribute("data-world") ?? "/worlds/ground/world.json");
   const worldJson = await fetch(worldUrl).then((r) => {
     if (!r.ok) throw new Error(`world fetch ${worldUrl} → HTTP ${r.status}`);
     return r.text();

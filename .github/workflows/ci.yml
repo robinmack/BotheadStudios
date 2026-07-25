@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  tests:
+    name: native suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: integrity-engine
+      - name: run the deploy gate
+        run: bash integrity-engine/scripts/test.sh
+
+  wasm-build:
+    name: wasm production build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: integrity-engine
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: integrity-engine/web/package-lock.json
+      - name: install web deps
+        working-directory: integrity-engine/web
+        run: npm ci
+      - name: production build
+        working-directory: integrity-engine/web
+        run: npm run build
+      - name: wasm size
+        working-directory: integrity-engine/web
+        run: |
+          echo "engine_bg.wasm raw bytes:    $(stat -c%s src/wasm/engine_bg.wasm)"
+          echo "engine_bg.wasm gzip-9 bytes: $(gzip -9 -c src/wasm/engine_bg.wasm | wc -c)"
