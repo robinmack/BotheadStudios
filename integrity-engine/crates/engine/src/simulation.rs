@@ -82,6 +82,9 @@ impl crate::flight::FlightEnvironment for GroundAir<'_> {
         let ground = self.world.ground_height(to.x as f32, to.z as f32) as f64;
         (to.y <= ground).then_some(to)
     }
+    fn air_scale_height_m(&self) -> f64 {
+        self.air.map_or(0.0, |a| crate::atmosphere::scale_height(a, AMBIENT_TEMP_K as f64, self.g))
+    }
 }
 
 /// A meteor is just matter in flight, so it is the engine's [`crate::flight::FlyingBody`] — same mass,

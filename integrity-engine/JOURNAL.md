@@ -3,6 +3,73 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-24 (late) — "we lose camera controls when the engine is working"
+
+**What.** Robin reported losing camera control during an entry. Two separate things turned out to be true:
+a real defect I had introduced, and a measurement artifact I chased further than I should have.
+
+**The real defect: a feedback loop of my own making.** Terra clamped its frame `dt` to a QUARTER SECOND and
+then derived the flight's substep count FROM that `dt` — and the trail was re-aged inside every substep. So
+a slow frame produced a bigger `dt`, which asked for more substeps, each of which walked every trail parcel,
+which made the next frame slower still. That is a compounding stall, and it is exactly what "the page stops
+answering the mouse" looks like.
+
+Fixed by moving the judgement where it belongs: `FlightEnvironment` now reports its air's scale height, and
+`Flight::step` sizes its OWN substeps from the distance a body actually travels against it — never from the
+caller's frame time. The trail ages once per call, not once per substep (shed vapour is dragged to rest in
+milliseconds and needs none of the resolution a hypervelocity body does). Terra's `dt` clamp is a thirtieth
+of a second, so a stalled frame or a backgrounded tab cannot turn into a large catch-up step. Also: the
+flight step was calling `planet::body()` EVERY FRAME, which deserializes the body's JSON — rebuilding the
+planet, in full, to ask what gravity is. Resolved once now, and re-resolved only when a world loads.
+
+**The artifact, and how far it got.** With ~1,200 instanced billboards the rig showed roughly one frame per
+second taking **450–520 ms** inside `render()` while the median was **1.5 ms** — reproducible across runs
+and scaling with the swarm. I priced it properly rather than guessing, and the ablation ladder was worth
+having:
+
+| what ran | frames/8 s | p50 | max | stalls >200 ms |
+|---|---|---|---|---|
+| physics + upload + draw | 1372 | 1.5 ms | 507 ms | 8 |
+| physics + upload | 1362 | 1.5 ms | 516 ms | 9 |
+| physics only | 2839 | 1.1 ms | 53 ms | **0** |
+
+A valid ablation (the physics is identical in all three — 1,200 bodies in flight either way), and it priced
+the **upload**, not the physics and not the draw. I then tried a three-buffer ring, on the theory that the
+GPU was still reading the buffer being overwritten. **It measured no improvement, so I removed it** rather
+than keep plausible-looking complexity with a comment claiming a fix.
+
+Then the actual answer: `scripts/rig.sh` runs Chromium with `--disable-frame-rate-limit`, so the page
+rendered at **170–350 fps** and pushed several times more per second through `queue.write_buffer` than any
+vsynced browser will. **Paced to ~60 fps, the same scene never exceeded ~10 ms and never stalled at all.**
+
+| pacing | renders/10 s | p50 | p99 | max | stalls |
+|---|---|---|---|---|---|
+| uncapped (170–350 fps) | 1724 | 1.5 ms | 18.2 ms | 499 ms | 10 |
+| ~60 fps | 369 | 1.6 ms | 3.0 ms | **4 ms** | **0** |
+
+This is the same flag as the 1 Hz trap in `CLAUDE.md` rule 4b, in the opposite direction: that one HID a
+real collapse, this one INVENTS one. Both entries now sit together there, with the pacing check and the
+ablation ladder named as rigs (`terra_vsync_check.mjs`, `terra_price_stage.mjs`).
+
+**Verified.** 367/367. `terra_controls_60.mjs` drives a real right-drag and wheel zoom before, during and
+after an entry at realistic pacing: the camera moves 41–43.6° each time and the worst render during the
+entry is 3.3 ms. Worst render across a whole entry, paced: **9.8 ms**, inside a 16.7 ms budget.
+
+**What I did NOT verify, and will not claim:** the paced cost at PEAK TRAIL (~24,000 instances). Both
+attempts to catch that phase missed it — the first because my own camera drag moved the swarm's target
+before launch, the second because the entry ran slightly slower than the sampling window. The uncapped
+number at that phase (~27 ms/frame) is contaminated by the artifact above and is not usable. If a real
+browser does drop frames at peak trail, `Flight::set_trail_budget` is the lever, and it should be set from a
+measurement rather than from a guess.
+
+**Robin's suggestion, recorded not built:** *"camera placement can be controlled in the scene and handed
+over to the engine for rendering… That would allow us to place camera control monitoring in a separate
+thread."* Worth doing on its own merits — it is the same scene-declares/engine-computes split as the rest of
+this work, and moving input off the render thread makes responsiveness independent of frame cost rather
+than merely good. Not built here: the measurements above say the immediate cause was the compounding step,
+not the input path (the camera answered input even while stalling), so threading would have hidden the
+defect rather than fixed it.
+
 ## 2026-07-24 (night) — row 21 closed: only the skin heats, so a metre-class body glows
 
 **What.** `atmospheric_step` raised the temperature of a body's WHOLE mass at its bulk heat capacity.

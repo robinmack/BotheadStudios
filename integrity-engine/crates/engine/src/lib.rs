@@ -4053,6 +4053,19 @@ mod app {
         last_frame_s: f64,
         /// The scene-agnostic renderer for whatever the engine is holding (`render::MatterField`).
         matter: MatterField,
+        /// Diagnostic: skip UPLOADING and DRAWING the engine's matter while still simulating it. The
+        /// physics and the render path both scale with the same number, so measuring either one alone is
+        /// impossible without a knob that moves one and not the other (the gpu-perf rule: price a stage,
+        /// do not delete it and re-time the whole). A rig switch, not a feature.
+        draw_matter: u32, // 0 = neither, 1 = upload only, 2 = upload + draw
+        /// Reused per-frame scratch for the engine's matter: a render loop that allocates and frees these
+        /// every frame churns megabytes a second for nothing.
+        drawn_buf: Vec<Drawn>,
+        inst_buf: Vec<GpuParticle>,
+        /// The placed body's own matter and air, resolved ONCE. `planet::body()` deserializes its JSON on
+        /// every call, and the flight step was calling it every frame — rebuilding the planet, in full,
+        /// to ask what gravity is.
+        flight_env: PlanetAir,
     }
 
     /// **A planet as a world to fly through** — the whole of what Terra contributes to entry physics:
@@ -4063,6 +4076,23 @@ mod app {
         matter: crate::planet::LayeredBody,
         air: crate::atmosphere::AirShell,
         radius_m: f64,
+    }
+
+    impl PlanetAir {
+        /// Resolve a placed body's matter and its emergent air once, so the flight step does not have to
+        /// rebuild the planet to ask what gravity is.
+        fn of(mats: &[materials::Material], body_id: &str, radius_m: f64) -> Self {
+            let matter = crate::planet::body(body_id);
+            let air = match mats.iter().find(|m| m.id == "air") {
+                Some(a) => crate::atmosphere::AirShell::new(
+                    matter.surface_pressure(), a, 288.0, matter.gravity_at(matter.radius()),
+                ),
+                None => crate::atmosphere::AirShell {
+                    rho_surface: 0.0, scale_height_m: 0.0, ambient_temp_k: 288.0,
+                },
+            };
+            PlanetAir { matter, air, radius_m }
+        }
     }
 
     impl crate::flight::FlightEnvironment for PlanetAir {
@@ -4078,6 +4108,9 @@ mod app {
         }
         fn arrival(&self, _from: glam::DVec3, to: glam::DVec3) -> Option<glam::DVec3> {
             (to.length() <= self.radius_m).then_some(to)
+        }
+        fn air_scale_height_m(&self) -> f64 {
+            self.air.scale_height_m
         }
     }
 
@@ -4203,11 +4236,16 @@ mod app {
                 20.0, 0.0, 12_000_000.0, 0.0, -1.2, 2.0, 40_000_000.0,
             );
             let matter = MatterField::new(&device, config.format, 200_000);
+            let flight_env = PlanetAir::of(&mats, "earth", EARTH_RADIUS_M);
             Ok(Terra {
                 detail: Default::default(),
                 flight: crate::flight::Flight::default(),
                 last_frame_s: 0.0,
                 matter,
+                flight_env,
+                draw_matter: 2,
+                drawn_buf: Vec::new(),
+                inst_buf: Vec::new(),
                 surface,
                 device,
                 queue,
@@ -4276,6 +4314,9 @@ mod app {
                 .unwrap_or_else(|| crate::planet::earth().surface_pressure())
                 / 101_325.0;
             self.atm_tau = crate::atmosphere::rayleigh_tau(p_ratio);
+            // The flight environment is this body's own matter and air — re-resolve it when the world
+            // changes, and never again per frame.
+            self.flight_env = PlanetAir::of(&self.mats, &self.body_id, planet.radius_m);
             self.atm_twilight = twilight_of(planet.radius_m, g_surface, &self.mats, self.atm_tau);
             self.world_name = w.name.clone();
 
@@ -4372,6 +4413,13 @@ mod app {
         ///   point. That is the USER aiming, not the camera deciding physics — the fragments fall, ablate
         ///   and arrive whether or not anyone watches (Law IV).
         pub fn launch_swarm(&mut self) {
+            self.launch_swarm_n(1_200);
+        }
+
+        /// The same, with the fragment COUNT given — the resolution the disruption is divided at (docs/44),
+        /// which is a declaration a caller is allowed to make. Exposed so a rig can vary the workload and
+        /// measure what actually costs frame time instead of guessing.
+        pub fn launch_swarm_n(&mut self, count: usize) {
             let iron = materials::index_of(&self.mats, "iron");
             // Where the swarm is headed: the point on the surface under the camera.
             let (lat, lon) = (self.fly.lat.to_radians(), self.fly.lon.to_radians());
@@ -4404,12 +4452,17 @@ mod app {
             // booked into the air (same mass, coarser). Law IV: representation, not existence.
             self.flight.set_trail_budget(120_000);
             self.flight.introduce_swarm(
-                start, approach, parent_m, parent_r, iron, 1_200, 86_400.0, 250.0,
+                start, approach, parent_m, parent_r, iron, count.max(1), 86_400.0, 250.0,
             );
             log::info!(
-                "swarm: 1200 fragments of a {:.0} kg asteroid, entering at {:.1} km/s toward lat {:.1} lon {:.1}",
+                "swarm: {count} fragments of a {:.0} kg asteroid, entering at {:.1} km/s toward lat {:.1} lon {:.1}",
                 parent_m, approach.length() / 1000.0, self.fly.lat, self.fly.lon
             );
+        }
+
+        /// Diagnostic knob — see `draw_matter`. Simulation is unaffected.
+        pub fn set_draw_matter(&mut self, mode: u32) {
+            self.draw_matter = mode;
         }
 
         /// How many pieces of matter the engine is holding in flight — for a HUD, and so a rig can assert
@@ -4564,47 +4617,36 @@ mod app {
             {
                 let now = crate::orbit::unix_now_seconds();
                 // First frame, or a tab that was backgrounded: take one frame's worth rather than a gap.
-                let dt = if self.last_frame_s <= 0.0 { 1.0 / 60.0 } else { (now - self.last_frame_s).clamp(0.0, 0.25) };
+                // Clamped to a THIRTIETH of a second, not a quarter. A long gap (a stalled frame, a
+                // backgrounded tab) must not turn into a large catch-up step: the work that step implies
+                // is what stalls the next frame, and the sim falling briefly behind wall-clock is a far
+                // smaller lie than the page ceasing to respond.
+                let dt = if self.last_frame_s <= 0.0 { 1.0 / 60.0 } else { (now - self.last_frame_s).clamp(0.0, 1.0 / 30.0) };
                 self.last_frame_s = now;
-                if !self.flight.bodies().is_empty() || self.flight.trail().parcels().len() > 0 {
-                    let body = crate::planet::body(&self.body_id);
-                    let air_mat = self.mats.iter().find(|m| m.id == "air");
-                    let env = PlanetAir {
-                        air: match air_mat {
-                            Some(a) => crate::atmosphere::AirShell::new(
-                                body.surface_pressure(), a, 288.0, body.gravity_at(body.radius()),
-                            ),
-                            None => crate::atmosphere::AirShell {
-                                rho_surface: 0.0, scale_height_m: 0.0, ambient_temp_k: 288.0,
-                            },
-                        },
-                        radius_m: self.planet_radius,
-                        matter: body,
-                    };
-                    // SUBSTEP so a hypervelocity body cannot cross the atmosphere between two frames. At
-                    // 17 km/s a 60 Hz frame is 280 m, already small against the ~8.4 km scale height, but a
-                    // slow frame is not — so the count follows the distance actually travelled, not a
-                    // chosen number: keep each substep under a tenth of a scale height.
-                    let fastest = self.flight.bodies().iter().map(|b| b.vel.length()).fold(0.0_f64, f64::max);
-                    let span = (fastest * dt).max(1.0);
-                    let n = ((span / (0.1 * env.air.scale_height_m.max(1.0))).ceil() as usize).clamp(1, 256);
-                    let sub = dt / n as f64;
-                    for _ in 0..n {
-                        for a in self.flight.step(&env, &self.mats, sub) {
-                            log::info!(
-                                "arrival: {:.1} kg at {:.1} km/s, {:.0} K = {:.2e} J",
-                                a.body.mass_kg, a.body.vel.length() / 1000.0, a.body.temp_k, a.energy_j
-                            );
-                        }
+                if !self.flight.bodies().is_empty() || !self.flight.trail().parcels().is_empty() {
+                    // ONE call: the engine sizes its own substeps from the air's scale height. This used
+                    // to substep HERE, from the frame time, which was a feedback loop — a slow frame asked
+                    // for more substeps, which made the next frame slower, until the page stopped
+                    // answering the mouse. (Robin: "we seem to lose camera controls when the engine is
+                    // working.")
+                    let env = &self.flight_env;
+                    for a in self.flight.step(env, &self.mats, dt) {
+                        log::info!(
+                            "arrival: {:.1} kg at {:.1} km/s, {:.0} K = {:.2e} J",
+                            a.body.mass_kg, a.body.vel.length() / 1000.0, a.body.temp_k, a.energy_j
+                        );
                     }
-                    // What the engine is holding, as it must be drawn — mapped once, by the engine's rule.
-                    let inst: Vec<GpuParticle> = self
-                        .flight
-                        .drawn(&env, |p| (p * DISPLAY_SCALE).as_vec3())
-                        .iter()
-                        .map(|d| GpuParticle::of_matter(d, &self.mats))
-                        .collect();
-                    self.matter.upload(&self.queue, &inst);
+                    // What the engine is holding, as it must be drawn — mapped once, by the engine's rule,
+                    // into buffers that persist across frames.
+                    if self.draw_matter >= 1 {
+                        let (drawn, inst) = (&mut self.drawn_buf, &mut self.inst_buf);
+                        self.flight.drawn_into(drawn, &self.flight_env, |p| (p * DISPLAY_SCALE).as_vec3());
+                        inst.clear();
+                        inst.extend(drawn.iter().map(|d| GpuParticle::of_matter(d, &self.mats)));
+                        self.matter.upload(&self.queue, inst);
+                    } else {
+                        self.matter.upload(&self.queue, &[]);
+                    }
                 } else {
                     self.matter.upload(&self.queue, &[]);
                 }
@@ -4754,14 +4796,16 @@ mod app {
                 // one pixel instead of losing it.
                 let proj_y = 1.0 / (0.45_f32).tan();
                 let proj_x = proj_y / aspect.max(1e-3) as f32;
-                self.matter.draw(
-                    &mut pass,
-                    &self.queue,
-                    view_proj,
-                    DISPLAY_SCALE as f32,
-                    (proj_x, proj_y),
-                    self.config.height as f32,
-                );
+                if self.draw_matter >= 2 {
+                    self.matter.draw(
+                        &mut pass,
+                        &self.queue,
+                        view_proj,
+                        DISPLAY_SCALE as f32,
+                        (proj_x, proj_y),
+                        self.config.height as f32,
+                    );
+                }
             }
             self.queue.submit(std::iter::once(encoder.finish()));
             output.present();

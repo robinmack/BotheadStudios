@@ -70,6 +70,16 @@ pub trait FlightEnvironment {
     /// FLUID branch to the SOLID one (docs/58 "it's all impact"): whatever mass survives the air arrives
     /// here, and the caller excavates.
     fn arrival(&self, from: DVec3, to: DVec3) -> Option<DVec3>;
+
+    /// The e-folding height of this world's air (m), or 0 for vacuum — the length over which the density
+    /// a body is flying through changes appreciably.
+    ///
+    /// It is here so [`Flight::step`] can size its OWN substeps: a hypervelocity body must not cross a
+    /// large density change in one step, and the world is the only thing that knows how long that distance
+    /// is. Asking the caller to substep put that judgement in a scene, and a scene deriving it from its
+    /// frame time produced a feedback loop — a slow frame asked for more substeps, which made the next
+    /// frame slower.
+    fn air_scale_height_m(&self) -> f64;
 }
 
 /// A body that has reached hard matter — everything an excavation needs, computed from the matter that
@@ -154,9 +164,42 @@ impl Flight {
         mats: &[Material],
         dt: f64,
     ) -> Vec<Arrival> {
+        // **The engine sizes its own substeps.** A body at 17 km/s must not cross a large slice of the
+        // atmosphere in one step, so the count follows the distance actually travelled against the air's
+        // scale height — never the caller's frame time. The cap is a COMPUTE bound, and reaching it means
+        // the entry is being integrated more coarsely than it deserves, not that more work is spawned.
+        let h = env.air_scale_height_m();
+        let fastest = self.bodies.iter().map(|b| b.vel.length()).fold(0.0_f64, f64::max);
+        let n = if h > 0.0 && fastest > 0.0 {
+            (((fastest * dt) / (0.1 * h)).ceil() as usize).clamp(1, 32)
+        } else {
+            1
+        };
+        let sub = dt / n as f64;
         let mut arrivals = Vec::new();
-        let mut still = Vec::with_capacity(self.bodies.len());
-        for mut b in self.bodies.drain(..) {
+        for _ in 0..n {
+            arrivals.extend(self.step_bodies(env, mats, sub));
+        }
+        // The trail ages ONCE per call, not once per substep. Shed vapour is dragged to rest in
+        // milliseconds and never travels far, so it needs none of the resolution a hypervelocity body
+        // does — and stepping tens of thousands of parcels per substep was pure cost.
+        self.trail.step(mats, dt, |at| env.air_at(at).unwrap_or((0.0, 0.0)));
+        arrivals
+    }
+
+    /// One substep of the bodies alone (the trail is aged by [`Flight::step`], which owns the substepping).
+    fn step_bodies(
+        &mut self,
+        env: &impl FlightEnvironment,
+        mats: &[Material],
+        dt: f64,
+    ) -> Vec<Arrival> {
+        let mut arrivals = Vec::new();
+        let (trail, burned) = (&mut self.trail, &mut self.burned_up);
+        // In place: this drained the body list into a fresh `Vec` every substep, which at a thousand
+        // bodies and a few hundred frames a second is megabytes of allocation churn per second for no
+        // reason. `retain_mut` mutates and removes without building a second list.
+        self.bodies.retain_mut(|b| {
             // THE FLUID BRANCH. Nothing here is meteor-specific: it is the body's own material against
             // whatever air this world has at this point.
             if let (Some((rho, ambient)), Some(mat)) = (env.air_at(b.pos), mats.get(b.material)) {
@@ -165,7 +208,7 @@ impl Flight {
                 );
                 // The vaporised mass LEAVES the body; it does not leave the simulation.
                 if s.ablated_mass > 0.0 {
-                    self.trail.shed(s.ablated_mass, b.material, b.pos, b.vel, s.temp_k);
+                    trail.shed(s.ablated_mass, b.material, b.pos, b.vel, s.temp_k);
                 }
                 // Integrate the drag EXACTLY over the substep instead of sampling it. An entry
                 // decelerates at hundreds of g, and `v += a·dt` at that stiffness overshoots — the same
@@ -195,8 +238,8 @@ impl Flight {
             // takes `min(net/L_v·dt, mass)` per step, so a body that is being consumed reaches exactly
             // zero on its own — and a gram of iron at 15 km/s still carries ~110 kJ, which is not nothing.
             if b.mass_kg <= 0.0 || b.radius_m <= 0.0 {
-                self.burned_up += 1;
-                continue;
+                *burned += 1;
+                return false;
             }
             let from = b.pos;
             b.vel += env.gravity_at(b.pos) * dt;
@@ -204,13 +247,11 @@ impl Flight {
             // THE SOLID BRANCH: whatever survived the air arrives, carrying the energy it actually has.
             if let Some(at) = env.arrival(from, b.pos) {
                 let speed = b.vel.length();
-                arrivals.push(Arrival { body: b, at, energy_j: 0.5 * b.mass_kg * speed * speed });
-            } else {
-                still.push(b);
+                arrivals.push(Arrival { body: *b, at, energy_j: 0.5 * b.mass_kg * speed * speed });
+                return false;
             }
-        }
-        self.bodies = still;
-        self.trail.step(mats, dt, |at| env.air_at(at).unwrap_or((0.0, 0.0)));
+            true
+        });
         arrivals
     }
 
@@ -220,18 +261,29 @@ impl Flight {
     /// Bodies come before trail parcels for the reason `Simulation::drawn` orders matter in flight first:
     /// a caller with a finite instance budget should lose the least informative matter.
     pub fn drawn(&self, env: &impl FlightEnvironment, to_scene: impl Fn(DVec3) -> glam::Vec3) -> Vec<crate::Drawn> {
-        let mut out: Vec<crate::Drawn> = self
-            .bodies
-            .iter()
-            .map(|b| crate::Drawn {
-                pos: to_scene(b.pos),
-                vel: b.vel.as_vec3(),
-                radius_m: b.radius_m as f32,
-                material: b.material,
-                temp_k: b.temp_k as f32,
-                resting: false,
-            })
-            .collect();
+        let mut out = Vec::new();
+        self.drawn_into(&mut out, env, to_scene);
+        out
+    }
+
+    /// The same, into a buffer the caller owns and REUSES. A render loop calling [`Flight::drawn`] every
+    /// frame allocates and frees the whole list every frame — tens of thousands of items at a few hundred
+    /// frames a second — and that churn is worth not doing.
+    pub fn drawn_into(
+        &self,
+        out: &mut Vec<crate::Drawn>,
+        env: &impl FlightEnvironment,
+        to_scene: impl Fn(DVec3) -> glam::Vec3,
+    ) {
+        out.clear();
+        out.extend(self.bodies.iter().map(|b| crate::Drawn {
+            pos: to_scene(b.pos),
+            vel: b.vel.as_vec3(),
+            radius_m: b.radius_m as f32,
+            material: b.material,
+            temp_k: b.temp_k as f32,
+            resting: false,
+        }));
         out.extend(self.trail.parcels().iter().map(|p| crate::Drawn {
             pos: to_scene(p.pos),
             vel: p.vel.as_vec3(),
@@ -242,7 +294,6 @@ impl Flight {
             temp_k: p.temp_k as f32,
             resting: false,
         }));
-        out
     }
 }
 
@@ -265,6 +316,9 @@ mod tests {
         fn arrival(&self, _from: DVec3, to: DVec3) -> Option<DVec3> {
             (to.y <= 0.0).then_some(to)
         }
+        fn air_scale_height_m(&self) -> f64 {
+            self.air.scale_height_m
+        }
     }
 
     /// A whole planet: radial gravity from its real layered mass, its own air, and a spherical surface.
@@ -282,6 +336,9 @@ mod tests {
         }
         fn arrival(&self, _from: DVec3, to: DVec3) -> Option<DVec3> {
             (to.length() <= self.matter.radius()).then_some(to)
+        }
+        fn air_scale_height_m(&self) -> f64 {
+            self.air.scale_height_m
         }
     }
 
@@ -590,6 +647,9 @@ mod tests {
             }
             fn arrival(&self, _f: DVec3, t: DVec3) -> Option<DVec3> {
                 (t.y <= 0.0).then_some(t)
+            }
+            fn air_scale_height_m(&self) -> f64 {
+                0.0 // airless
             }
         }
         let mats = crate::materials::load();

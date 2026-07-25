@@ -404,6 +404,16 @@ struct MatterUniforms {
 /// taught about meteors.
 pub(crate) struct MatterField {
     pipeline: wgpu::RenderPipeline,
+    /// One buffer, rewritten each frame.
+    ///
+    /// A RING of three was tried here and **measured no improvement**, so it was removed rather than kept
+    /// as plausible-looking complexity. The stall it was meant to fix (roughly one frame per second taking
+    /// 450–520 ms while the median was 1.5 ms) turned out to be an artifact of the RIG: `scripts/rig.sh`
+    /// runs with `--disable-frame-rate-limit`, so the page rendered at 170–350 fps and pushed several
+    /// times more per second through `queue.write_buffer` than any vsynced browser will. Paced at ~60 fps
+    /// the same scene never exceeds ~10 ms and never stalls at all. Recorded because the ablation ladder
+    /// that found it is reusable: upload-only stalled as badly as upload+draw, and with the upload skipped
+    /// there were no stalls — which priced the write, not the physics and not the draw.
     instances: wgpu::Buffer,
     capacity: u32,
     count: u32,

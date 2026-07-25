@@ -160,6 +160,15 @@ computation it defers** (Law V) — recorded in `docs/46`'s ledger, not a quiet 
    INDEPENDENT empty rAF loop reading 1.0 fps on all three scenes is what exposed it. `web/rig/_launch.mjs`
    is the one place the flags live. True rates on the 5060 Ti (2026-07-21): **terra ~354, birth ~52,
    terrain ~23 fps.**
+   **The SAME flag has an opposite trap, and it cost a session on 2026-07-24: uncapped rendering INVENTS
+   stalls.** Terra with ~1,200 instanced billboards showed roughly one frame per second taking 450–520 ms
+   inside `render()` while the median frame was 1.5 ms — a real, reproducible, and completely misleading
+   measurement. Unpaced, the page ran at 170–350 fps and pushed several times more per second through
+   `queue.write_buffer` than any vsynced browser ever will; **paced to ~60 fps in the rig, the same scene
+   never exceeded ~10 ms and never stalled at all.** So: before believing a frame-time pathology, PACE the
+   rig's render calls to ~16.7 ms and re-measure (`web/rig/terra_vsync_check.mjs` does exactly this, and
+   the ablation ladder in `terra_price_stage.mjs` — physics / upload / draw priced separately — is the way
+   to find which stage a real cost belongs to). A number from an uncapped rig is a number about the rig.
 4. **Rig-watch every visual claim** (Law: physics drives the render — verify the render). `npm run wasm`
    + serve (`npx vite` in `web/`), start the GPU-backed X server ONCE with
    `scripts/start-render-xorg.sh`, then `scripts/rigshot.sh <scene>.mjs`. That wrapper composites a real

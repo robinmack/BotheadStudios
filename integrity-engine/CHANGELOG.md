@@ -9,6 +9,17 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Fixed: the engine could stall a scene's frame loop into unresponsiveness.** `Flight::step` now sizes its
+  own substeps from the air's scale height (new `FlightEnvironment::air_scale_height_m`) instead of the
+  caller doing it from frame time, which was a compounding loop — a slow frame asked for more substeps,
+  which made the next frame slower. The trail ages once per call rather than once per substep. Terra clamps
+  its frame `dt` to 1/30 s and resolves the placed body's matter and air ONCE instead of deserializing the
+  body's JSON every frame. New `Flight::drawn_into` fills a caller-owned buffer so a render loop need not
+  allocate the whole list per frame. **Breaking:** `FlightEnvironment` has a new required method.
+- **New `Terra::launch_swarm_n(count)`** — the swarm at a given fragment count (the resolution the
+  disruption is divided at), and `Terra::set_draw_matter(mode)`, a rig knob for pricing the physics, upload
+  and draw stages separately. Simulation is unaffected by the latter.
+
 - **Only a body's SKIN heats on atmospheric entry, so metre-class bodies glow (docs/46 row 21, CLOSED).**
   New `atmosphere::soak_depth` and `atmosphere::heated_mass`; `atmospheric_step` gains a `skin_m` parameter
   and returns the updated depth, and `flight::FlyingBody` carries it (`FlyingBody::fresh` builds an unheated
