@@ -9,6 +9,22 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **A meteor swarm you can watch (docs/59 Stage A).** `Terra::launch_swarm()` and a "Meteor swarm" button:
+  the scene declares initial conditions, the engine flies the entry. New `render::MatterField` — a
+  scene-agnostic renderer for whatever the engine is holding — and `shaders/matter.wgsl`, whose billboard
+  half-size is `max(true projected size, one pixel)` so a genuinely sub-pixel trail is point-sampled rather
+  than lost. New Terra readouts for HUDs and rigs: `flight_count`, `drawn_count`, `trail_mass_kg`,
+  `trail_parcels`, `trail_hot_k`, `trail_mean_k`, `trail_merged_kg`, `swarm_min_alt_km`, `swarm_speed_kms`.
+- **Fixed: shed vapour never finished cooling.** `VaporParcel::merged_into_air` tested whether a
+  radiatively-cooling parcel had reached ambient, which is unreachable (`p_rad ∝ T⁴ − T_amb⁴` → 0), so
+  parcels accumulated forever — measured at 3,734 stuck at 288.00 K holding 9.1 kg. A parcel is now air
+  once it has radiated all but a hundredth of the heat it was shed with. `VaporParcel` gains
+  `shed_temp_k`; new `Trail::temperature_range_k`.
+- **New `Flight::set_trail_budget` / `Trail::set_resolve_budget`** — resolve at most N parcels; beyond that
+  shed mass is booked into the air. Identical mass, coarser representation.
+- **`Flight` integrates drag in closed form** rather than sampling it, so a body decelerating at hundreds
+  of g cannot overshoot.
+
 - **Matter in flight is an engine operation, at any scale (docs/59).** New `crate::flight` —
   `Flight::introduce` (a mass, a material, a place, a velocity: the one door a scene uses),
   `introduce_swarm` (a disrupted body's fragments, from `damage::disrupt`), `step` (air, trail, gravity,

@@ -3,6 +3,61 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-24 (evening) — press the button, watch it burn
+
+**What.** The swarm is visible. Terra holds a `flight::Flight`, a `PlanetAir` environment and a
+"Meteor swarm" button; `render::MatterField` draws whatever the engine is holding. RIG-VERIFIED on the
+5060 Ti: from 700 km on the night side, one press produces a bright glowing entry streak with the leading
+fragment ahead of it.
+
+**Measured through one press:** 600 fragments of a 4,121 kg iron parent, released at 500 km — above the
+~296–354 km the engine's OWN `air_reaches` derives, so nothing of the atmosphere is skipped — descending
+508 → 0 km, braking 17.0 → 0.4 km/s, reaching 3,016 K, **396.8 kg ablated** into ~3,900 resolved vapour
+parcels, arrivals logged with real energies (8.3e9 J down to 6.5e6 J). Correctly INVISIBLE on the day
+side: a meteor is not visible at noon.
+
+**The size rule in `matter.wgsl` is a sampling statement, not a look.** A trail parcel seen from orbit is
+genuinely sub-pixel — metre-scale, 400 km away — and a raster cannot draw less than a pixel. Real meteors
+are visible from the ISS because they are BRIGHT, not because they are large. So the billboard half-size
+is `max(true projected size, one pixel)`: above a pixel it is the physics, below it the mark is a point
+sample of something really there, and the floor disappears as the camera closes in.
+
+**Two defects Robin's questions found, both real:**
+
+1. *"Does the trail dissipate as it cools?"* It cooled — hottest parcel 1300 → 288 K over ~20 s — and then
+   **3,734 parcels sat at 288.00 K forever**, holding 9.1 kg permanently aloft and costing a draw every
+   frame. `merged_into_air` asked whether a radiatively-cooling parcel had REACHED ambient, which it never
+   can: `p_rad ∝ T⁴ − T_amb⁴` vanishes as it approaches. A parcel is now air once it has radiated all but
+   a hundredth of the heat it was SHED with — relative to its own history, so it scales with any starting
+   temperature and any world's ambient. Robin's framing, recorded at the call site: *"calculus teaches us
+   that some limits may never be reached, but we can get 'close enough' as to dismiss the difference
+   without fear of fudge."* The distinction from a dial is that the tolerance is relative to the quantity
+   being resolved, so it converges with it and states its own error. **Re-measured: parcels peak at 2,659
+   and go to 0, all 396.6 kg booked into the air.**
+2. *"Be certain the particles eventually reach the ground/merge so they can safely be forgotten."*
+   `an_entry_finishes_and_nothing_is_left_aloft` runs a swarm to completion and asserts the books close and
+   then EMPTY — every fragment arrived or was consumed, every parcel became air, mass at the end equals
+   mass launched. With guards against a vacuous pass, since an empty sim also has nothing aloft. Measured:
+   40 fragments, 33 s, all 40 arrived, 4,115.3 kg landed + 5.4 kg taken by the air = 4,120.7 of 4,121.
+
+**Also:** trail resolution is bounded (`Flight::set_trail_budget`) — past the budget shed mass is booked
+rather than resolved. Same mass; the budget is the instance capacity, a real hardware bound, and the
+choice is which representation to spend it on (Law IV). And `Flight` now integrates drag in CLOSED FORM
+rather than sampling it: an entry decelerates at hundreds of g, and `v += a·dt` at that stiffness
+overshoots — the same failure the vapour parcels hit.
+
+**An honest note on the swarm's initial conditions.** They are chosen inside the regime the entry model is
+honest in, and the code says so. A first pass with a 2 m parent flew a completely correct entry in which
+NOTHING glowed and NOTHING ablated, because every fragment was metre-scale and `atmospheric_step` heats a
+body at its bulk heat capacity (docs/46 row 21 — real ablation is a surface process). Choosing a parent
+whose pieces are centimetres is staying inside the model rather than papering over it; fixing row 21 is
+what would let a metre-class body glow.
+
+**Known, not fixed:** the long dark-flight tail. After the fireball the surviving fragments fall the last
+tens of km at 80–340 m/s terminal velocity, so ~590 of 600 are still aloft a minute after the flash. That
+is real meteorite dark flight, and the native test proves it terminates — but it means the HUD's "in
+flight" count stays high long after there is anything to see.
+
 ## 2026-07-24 (later) — "we shouldn't have to wire it into Terra"
 
 **What.** Robin read the plan's last line — *"next: the Terra half, give Terra a body list and a step
