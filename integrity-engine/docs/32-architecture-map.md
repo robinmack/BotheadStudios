@@ -144,17 +144,19 @@ not exist and rebuild them; they are real, tested, and partly wired.
 
 ## 3. Terrain / voxel / atmosphere modules
 
-- **matter.rs** (2005) — CPU voxel-matter solver + the **bulk↔grain bridge**. `Particle`/`MatterSim`;
+- **matter.rs** (2592) — CPU voxel-matter solver + the **bulk↔grain bridge**. `Particle`/`MatterSim`;
   promotion `dig`/`impact`/`materialize_region`/`materialize_furrow`/`materialize_steep_terrain`/`collapse`;
   de-resolution `deposit_resting_grain` (**single source of truth**, shared by CPU step AND GPU readback,
-  `:795`); `step` (`:844`) (COM gravity + terrain snap-contact + settle — **no grain-grain contact on CPU**,
+  `:1036`); `step` (`:1104`) (COM gravity + terrain snap-contact + settle — **no grain-grain contact on CPU**,
   that's GPU-only). All representation changes conserve matter + inject no energy (grain born at rest at its
-  voxel centre). **Carries the third terrain-contact implementation** (`:872-887`, see §4.7): integer
+  voxel centre). **Carries the third terrain-contact implementation** (`:1142-1150`, see §4.7): integer
   `surface_top_voxel` column top (no bilinear surface, no gradient, no normal), a hard position snap
-  `p.pos.y = ground_y + PARTICLE_HALF`, and a scalar isotropic `p.vel *= CONTACT_DAMP` (`:33`, 0.15) with no
-  μ and no normal load — the exact velocity-multiply fudge that `lib.rs:1437-1444` records as removed from
-  the probe path. It survives here for CPU debris. Note `matter.rs:27-29` claims this class of
-  non-conservative heightfield contact was resolved; that refers to the GPU/probe path, not to this snap.
+  `p.pos.y = ground_y + PARTICLE_HALF`, and a scalar isotropic `p.vel *= CONTACT_DAMP` (`:44`, 0.15) with no
+  μ and no normal load. That is the same velocity-multiply class of contact the retired terrain `Engine`'s
+  probe path had removed (the scene was deleted per docs/50, taking that record with it); the snap survives
+  here for the CPU debris the definition-driven `Simulation` still steps (`simulation.rs:317`, under the
+  Ground scene). Note `matter.rs:37-43` records the sibling `DRAG` velocity-multiply as deleted; this snap
+  is the one of that class still standing.
 - **world.rs** (1637) — the voxel matter store (`voxels:Vec<u16>`) + layered-Earth generator + terrain
   queries. `surface_height_bilinear` (the collision surface that MIRRORS `particle_step.wgsl::terrain_h`)
   now delegates to `surface_bilinear_grad`, which returns `(h, ∂h/∂x, ∂h/∂z)` — the surface NORMAL, without
@@ -239,12 +241,14 @@ not exist and rebuild them; they are real, tested, and partly wired.
    bound. Unification is no longer "the GPU path + four missing physics" — it is **reconciling two GPU
    kernels that each hold half the law**.
 7. **Terrain contact — three implementations of one law, plus a fourth for voxels.** (a)
-   `granular::terrain_contact_resolve` (`granular.rs:310`, `TerrainContact` `:285`) is the declared physics
+   `granular::terrain_contact_resolve` (`granular.rs:414`, `TerrainContact` `:389`) is the declared physics
    of record — non-injecting constraint: normal-velocity clamp → Coulomb friction bounded by μ·jn → bounded
-   velocity-decoupled position projection. Its **only** production caller is
-   `Engine::collide_probe_with_terrain` (`lib.rs:1430`, call at `:1482`); everything else calling it is a
-   test. (b) `terrain_resolve` in `particle_step.wgsl:345` (called from `cs_integrate:457`) — the hand-kept
-   GPU mirror. (c) `MatterSim::step`'s snap+`CONTACT_DAMP` for CPU debris (`matter.rs:872-887`) — cruder,
+   velocity-decoupled position projection. Its production callers today (the probe caller went with the
+   terrain `Engine`, docs/50): the ground scene's cohesive bodies rest through it per particle
+   (`simulation.rs:403`), and the camera's matter shell sweeps through it (`granular::sweep_shell_resolve`,
+   `granular.rs:461`, called from `ground_scene.rs:1049`); everything else calling it is a
+   test. (b) `terrain_resolve` in `particle_step.wgsl:425` (called from `cs_integrate:477`) — the hand-kept
+   GPU mirror. (c) `MatterSim::step`'s snap+`CONTACT_DAMP` for CPU debris (`matter.rs:1142-1150`) — cruder,
    normal-free, still live. Plus (d) `body::Sphere::collide` (`body.rs:55`), a distinct voxel-MTV resolver.
    Unifying these onto (a) is a known open task and the count above is the honest starting point.
 8. **`AirField` is a container fork with no consumers.** `atmosphere.rs`'s SPH is a standalone struct
@@ -298,25 +302,48 @@ class as the WGSL contact mirror (§4.5), and the same class that bit gpu-verify
 
 ## 6. Scene wiring — the birth-of-the-Moon path (the canonical trace)
 
-*(Anchors re-verified 2026-07-19 — every one had shifted by ~500–800 lines as `OrbitDemo` moved.)*
+*(Anchors re-verified 2026-07-23. This section used to trace the CPU `Aggregate` debris path
+(`start_birth` → `build_impact_debris_scaled` → `moon_debris:Aggregate` → `step_block`) and then warn
+that a GPU SPH path coexisted with it, "two paths, one scene". That CPU path is RETIRED (docs/58 #7;
+docs/46 ledger rows 1 and 3, closed with the evidence and the tests). Per the header rule docs/46 wins
+on disagreement, and here it now simply agrees with the code: ONE resolved-matter path, the GPU SPH
+machine, with two entries into it. `moon_debris` and the `step_block` wiring have zero grep hits in
+`lib.rs`; `build_impact_debris_scaled` survives at `impact.rs:421`, consumed only by that module's own
+physics tests.)*
 
-`orbit.ts` `OrbitDemo.create` → `start_birth` (`lib.rs:3447`, swaps body-2→Theia, inbound geometry
-b=1.46·contact → emergent ~46° obliquity, zeroes proto-Earth spin) → per-frame `demo.advance(dtS)`
-(`:3819`, wall-clock fixed-dt substeps) → `step_substep` (`:3968`): `verlet_step` → `swept_first_contact`
-(`:3995`) → `contact_velocity` → **`build_impact_debris_scaled`** (`:4082`, Theia+Earth profiles,
-512+1024 grains, converts `spin_l`→ω) → `moon_debris:Aggregate` → **`step_block`** (`:4155`, Barnes–Hut
-self-gravity + grid contact + SPH vapor + boundary) → momentum-exact two-way coupling back to Earth,
-boundary torque → `spin_l` (day length), tidal/J2 kicks, `drain_settled` demotes rested matter → Earth →
-`push_snapshot` (`:4238`) → `render` (`:4348`, samples `RENDER_LAG_S` behind live; draws Earth as a
-512-grain oblate shell, debris provenance-tinted blue=Earth/orange=Theia) → HUD `disk_stats_json` (`:3513`).
+**The declared birth impact** (`orbit.ts` auto-starts it on the birth scene): `OrbitDemo.create`
+(`lib.rs:1027`) → `load_impact_world` (`:1976`, the docs/51 declared initial conditions) →
+`start_gpu_impact` (`:1982`), which particalizes target + impactor from their OWN declared matter via
+`gpu_sph::build_far_apart_n` (call at `:1996`; equal particle mass across bodies, one deduped material
+EOS table kept in `sph_eos`), uploads to a `gpu_sph::GpuSph`, and puts the two bodies on the inbound
+trajectory AS BODIES (no particle exists until an interaction requires one). Per frame,
+`advance(real_dt)` (`:2163`) owns the frame while `sph_active`, walking `SphPhase` (`:851`):
+`Relaxing` (`:2183`; GPU `cs_relax` chunks to 2,400 steps, each body settling under its own gravity
+far apart, then the async read-back starts) → `Approaching` (`:2215`; the bodies stay SOLID and
+integrate as N-body point masses until separation reaches `accretion::resolution_distance`, the
+distance where tidal stress makes "two point masses" a lie) → `Assembling` (`:2272`; the relaxed
+read-back is placed on the collision geometry, the target's spin vector ω = L/I from `spin_l` and the
+emergent layered inertia, shock dt + artificial viscosity restored) → `Dynamics` (`:2348`;
+`encode_kdk` batches with a frame-budget-adaptive substep count, async read-back into `sph_snapshot`,
+scheduled dt coarsening once the shock window passes).
 
-**There is now a SECOND path through this scene.** The trace above is the CPU `Aggregate` one. `OrbitDemo`
-also holds `sph_snapshot: Vec<gpu_sph::SphParticle>` (`:2846`) fed by the GPU SPH stepper, with its own HUD
-readout `gpu_disk_stats_json` (`:3777` → `gpu_sph::disk_stats_json`). So the birth scene has a CPU aggregate
-path and a GPU SPH path coexisting — docs/33 said "the deployed birth scene is still the pre-realignment
-`OrbitDemo`", which was true when written and is now only half true. **Establish which path a given run
-actually exercises before attributing a number to it**; two paths, one scene, is precisely the shape docs/46
-§1 asks you to justify or dissolve.
+**The live-drop hand-off is a second ENTRY, not a second path.** `drop_moon` (`:1576`) only zeroes the
+moon's orbital velocity; the physics does the rest. `step_substep` (`:2434`) integrates the N-body
+verlet step, then `live_resolution_crossing` (`lib.rs:299`, pure and natively tested) reports the
+first matter-carrying body inside its resolution distance; `advance` calls `start_live_drop_sph`
+(`:2062`), which particalizes EACH body from its own declared matter (docs/58) through the same
+builder, and `Assembling` reads the REAL integrated (offset, velocity) at assembly time via
+`assemble_from_relaxed_n` (call at `:2319`) instead of birth's imposed canonical approach. A striker
+with NO declared matter never enters the machine: it merges inelastically (`:2518`), momentum
+conserved, energy measured into `impact_energy_j`, never materialised into a second debris
+representation.
+
+**Measurement and aftermath are single-sourced.** The HUD's `disk_stats_json` (`:1773`) DELEGATES to
+`gpu_disk_stats_json` (`:2121` → `gpu_sph::disk_stats_json`), the ONE measurement of the live field;
+`enter_geologic_time` (`:1792`) promotes the disk's bound clumps to `tides::Moonlet`s and retires the
+particle sim. `render` (`:2620`) samples body snapshots `RENDER_LAG_S` behind the physics clock, and
+the SPH field draws straight from its GPU buffer (`sph_render.wgsl`, zero-copy), needing no snapshot
+lag: a whole KDK batch is resolved before its command buffer presents.
 
 ## 7. Render + GPU compute
 
