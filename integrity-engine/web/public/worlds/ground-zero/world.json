@@ -1,0 +1,78 @@
+{
+  "name": "Ground Zero",
+  "type": "system",
+  "bodies": [
+    {
+      "name": "Sun",
+      "role": "star",
+      "profile": "sun",
+      "pos_m": [0, 0, 0],
+      "vel_ms": [0, 0, 0]
+    },
+    {
+      "name": "Earth",
+      "role": "planet",
+      "profile": "earth",
+      "pos_m": [149600000000.0, 0, 0],
+      "vel_ms": [0, 29780, 0],
+      "spin_period_s": 86164
+    },
+    {
+      "name": "Luna",
+      "role": "moon",
+      "profile": "moon",
+      "pos_m": [149984400000.0, 0, 0],
+      "vel_ms": [0, 30802, 0]
+    }
+  ],
+  "ground": {
+    "planet": "earth",
+    "lat": 45.0,
+    "lon": 0.0,
+    "grain_size_m": 1.0,
+    "surface": {
+      "size_voxels": [96, 96, 96],
+      "base_top_m": 84.0,
+      "amplitude_m": 22.0,
+      "sea_level_m": 0.0,
+      "octaves": [
+        { "frequency": 0.021, "weight": 0.55 },
+        { "frequency": 0.058, "weight": 0.30 },
+        { "frequency": 0.140, "weight": 0.15 }
+      ]
+    },
+    "events": [],
+    "bodies": [
+      { "material": "iron", "radius_m": 2.0, "at_m": [21.3, 38.0, 50.0] }
+    ]
+  },
+  "camera": {
+    "mode": "orbit",
+    "yaw": 0.6,
+    "pitch": 0.5,
+    "zoom": 1.0,
+    "focus": "Earth"
+  },
+  "time": {
+    "scale": 118000
+  },
+  "arc": {
+    "octave_s": 1.2
+  },
+  "controls": {
+    "keys": [
+      { "code": "KeyB", "action": "brake" },
+      { "code": "KeyN", "action": "drop" },
+      { "code": "KeyR", "action": "reset" },
+      { "code": "KeyF", "action": "focus" }
+    ],
+    "buttons": [
+      { "label": "Brake ½v", "action": "brake" },
+      { "label": "Drop", "action": "drop" },
+      { "label": "Reset", "action": "reset" },
+      { "label": "Focus Earth", "action": "focus_earth" },
+      { "label": "Focus Luna", "action": "focus_moon" }
+    ]
+  },
+  "$comment": "The docs/23 demo as ONE definition. What sets this world apart from the Space scene is not the drop (Space drops a moon too); it is the ground block: ground zero declared as a lat/lon site ON the shared Earth (ground.planet names assets/bodies/earth.json, the body the orbital cast places), with the iron ball as declared cohesive matter standing at the impact site, the witness the zoom milestones descend to. The system half is what runs today: the space band loads this file and you can brake or drop Luna into the Earth. The definition-driven Simulation already builds and runs the ground half natively; nothing renders the ball at orbital scale yet. The zoom milestones (docs/59 order of work 2 to 4: descent camera, conserved hand-down, re-coherence) consume this block to materialize ground zero when the camera commits, so the drop seen from space and the ball's fate on the ground become one event read from one file. THE SITE SITS ON THE FALL'S OWN IMPACT RING, by derivation, not by taste: the whole cast starts in the orbital (x-y) plane with in-plane velocities, so a from-rest lunar fall is confined to that plane and its reachable contact points form the great circle the plane cuts through the crust; release timing can move the site around the spin axis (azimuth) but can never change the polar plane (intercept::DropWindow reports that offset rather than bending the path). A site off the ring can never be hit, whatever the timing. On the shared Earth's frame (spin axis z, geo pole y) the ring is the lon 0/180 meridian circle; lat 45 lon 0 is on it and is land per the shared landmask, so the ball stands where the physics can actually reach it."
+}

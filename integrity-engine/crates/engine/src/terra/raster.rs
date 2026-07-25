@@ -99,6 +99,16 @@ impl Raster {
         lo + v * (hi - lo)
     }
 
+    /// The ground arc (m) ONE TEXEL of this equirectangular raster spans on a body of radius
+    /// `radius_m` — the coarser of its two axes (360°/w of equator by 180°/h of meridian), because
+    /// the hand-off cares about where the data runs out, not where it is still fine. This is the
+    /// raster's own resolution as a length, the number the close-range hand-off altitude derives
+    /// from (`terra::ground_cap::handoff_alt_m`).
+    pub fn texel_arc_m(&self, radius_m: f64) -> f64 {
+        let circumference = std::f64::consts::TAU * radius_m;
+        (circumference / self.w as f64).max(0.5 * circumference / self.h as f64)
+    }
+
     /// Fraction of texels marked land — a bake sanity check (real Earth ≈ 0.29).
     pub fn land_fraction(&self) -> f64 {
         let n = self.w * self.h;
@@ -154,6 +164,22 @@ mod tests {
         assert!(r.land_at(0.0, -90.0)); // lon −90 → col 0 = land
         assert!(!r.land_at(0.0, 90.0)); // lon +90 → col 1 = ocean
         assert!((r.land_fraction() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn texel_arc_is_the_coarser_axis_of_the_raster() {
+        // The shipped Earth rasters are 2048×1024 over a 6.371e6 m sphere: one texel spans
+        // 2πR/2048 = πR/1024 ≈ 19.5 km on the ground — both axes equal for the 2:1 aspect.
+        let r = 6.371e6;
+        let sq = Raster::new(2048, 1024, 1, vec![0; 2048 * 1024]).unwrap();
+        let t = sq.texel_arc_m(r);
+        assert!((t - std::f64::consts::TAU * r / 2048.0).abs() < 1e-9, "2:1 raster: both axes agree, got {t}");
+        assert!((19_000.0..20_000.0).contains(&t), "the shipped raster's texel is ~19.5 km, got {t}");
+        // A raster with a squashed vertical axis is limited by IT: the coarser axis is the answer.
+        let squat = Raster::new(2048, 512, 1, vec![0; 2048 * 512]).unwrap();
+        assert!((squat.texel_arc_m(r) - 2.0 * t).abs() < 1e-6, "half the rows, twice the texel");
+        // Resolution is a property of the raster ON a body: twice the radius, twice the arc.
+        assert!((sq.texel_arc_m(2.0 * r) - 2.0 * t).abs() < 1e-6);
     }
 
     #[test]

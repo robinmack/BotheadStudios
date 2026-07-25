@@ -93,6 +93,12 @@ pi-scaling gate gained its end-to-end consumer (`refine::measure_crater_rim` rea
 the field at the field's own quantum, prediction frozen from the measured contact state, verdict
 or the stated sub-quantum refusal on the same line).
 
+The out-and-back arc landed the same day (`crate::arc`): one continuous camera parameterization
+from the manual rig's celestial framing down to ~1.4 km over the site, the view-resolution
+distance of the site's finest materialized quantum, the deepest framing the current rung
+honestly serves, with sim-time compression proportional to camera distance, flying the trigger
+in both directions from one control on the Ground Zero page.
+
 The site entered dynamics 2026-07-23, closing the hand-down's core. Two pieces. First, the
 release gate resolved on real relief: the stall is a true fixed point (the site's relax
 oscillates around 4.9e-2 to the 5000-iteration cap) caused by the release criterion's own two
@@ -115,8 +121,9 @@ orbital plane, so release timing fixes azimuth only, and a site off the ring's p
 never be hit - the derivation lives in the world file's comment and the solver test asserts the
 plane offset is ~0.
 
-Open within items 2 and 3, carried by docs/46 row 18: the descent camera below the orbit
-camera's floor; the N-material upload reaching the guards (the sampled state inherits the coarse field's
+Open within items 2 and 3, carried by docs/46 row 18: the camera below the arc's derived floor
+(needs the next rung down, and with it Terra's camera-relative-eye convention in the space
+band); the N-material upload reaching the guards (the sampled state inherits the coarse field's
 EOS collapse until then); site-local excavation of the floor law (the parcels carry the
 crater's truth; the declared surface stays the standing floor); and the site clock's
 real-second rate against the scaled celestial clock (a stated compute bound - verdicts are

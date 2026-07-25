@@ -3,6 +3,188 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-23: the descent corridor stops running out of pixels
+
+**What.** The space band's side of the close-range render, reused rather than re-invented.
+The one surface sampler now has a name (`terra::globe_mesh::SurfaceSampler`): the globe mesh
+builder, Terra's ground cap and the new corridor cap all read a body's surface through it, so
+no two renders of one body can disagree about its continents or elevation. On the Ground Zero
+descent, once the arc drops below the derived hand-off altitude the scene fills the same
+`terra::ground_cap` patch Terra flies over, in the crust frame around the sub-camera point,
+and draws it through the globe's own conventions (same view projection, the spin as the model
+rotation, the eye re-added as an f64-built translation), cross-faded over the coarse globe and
+replacing it outright once the cap covers the view past the horizon. The hand-off is derived
+from the raster's own resolution: `ground_cap::handoff_alt_m(texel, budget)` is
+`site::view_resolution_distance` asked about one texel, the altitude where one texel of the
+finest shipped raster subtends the same angular budget the site materialization threshold
+uses, about 19,500 km for the shipped 2048x1024 Earth rasters; `Raster::texel_arc_m` supplies
+the texel. The fade spans the first octave of deficit; Terra reads the identical derivation and
+its declared 40 km / 15 km cap constants are retired; the cap's depth lift became
+altitude-proportional (the old 20 m ceiling lost the depth fight once the fade band's top
+became thousands of kilometres instead of a declared 40 km).
+
+**Why.** A user test on Ground Zero: the globe blurs when zoomed in. The space band textured
+its Earth from planetary-scale rasters through a 192-per-face-edge mesh, so on the descent the
+data was exhausted and the renderer stretched it, and the out-and-back arc flies straight
+through that corridor. Terra already owned the cure (the cube-sphere cap and the material
+relief), and one body definition serves both scenes, so the fix is reuse behind one derived
+hand-off, not a second close-range path. Where even the finest raster is out of texels (the
+known missing finer LOD tier), those texels at their true size plus the material relief are
+the honest floor; blur is not.
+
+**Verified.** 405 native tests green (400 baseline plus 5: the hand-off derivation pinned to
+the shipped raster size and to `view_resolution_distance` itself, the finest-raster rule, the
+one-octave fade, the covers-past-the-horizon skip rule, the proportional lift against the
+depth buffer's own resolution, the raster texel arc). wasm32 check clean. Headed on the Mac
+(mac_shot pattern, port 7299, `web/rig/mac_corridor.mjs` on /groundzero.html): the arc flown
+by its own control and screenshotted at celestial, ~5,000 km, ~500 km, ~50 km and the 1.4 km
+low hold; the rig pixel-checks the mid-corridor frame and re-flies the out-and-back when the
+site arrives on the night side (the crust phase at arrival is real physics under the
+compressed approach, and a black night ground verifies nothing), first daylit arrival on
+flight two. Viewed: at 5,000 km the coastlines resolve where the old render smeared vertex
+colours; at 500 km and 50 km the biome texels hold their true size and the coast stays a
+line; at the low hold the ground is a clean lit surface under the site's fine matter. Zero
+console errors. Terra re-verified across its seven descent stations (`mac_descent.mjs`, the
+raster's texel blocks now honestly visible from orbit where the old globe smoothed them) and
+all six scenes smoke clean. Known seams, stated: the cap's outer boundary is visible mid-band
+as a fine-to-coarse data edge (and near the terminator the lift advances daybreak slightly at
+high altitude), and at the 1.4 km floor the 8 m relief tiles span ~6 px, so mip filtering
+averages the mottle nearly flat: the finer LOD tier remains the missing rung.
+
+## 2026-07-23: the drop arms for the launch window, not the instant
+
+**What.** The launch-window intercept (`crates/engine/src/intercept.rs`), pure and natively
+tested: given the current N-body state, the body to drop, the planet's declared spin (day
+length and accumulated spin angle) and the declared site (lat/lon), it computes where a
+from-rest fall released at time t hits by INTEGRATING THE SCENE'S OWN LAW (`orbit::verlet_step`
+plus the swept first-contact forecast - no analytic stand-in; the Sun's tide and the planet's
+recoil bend a multi-day "radial" fall by real degrees), then solves for the next release time
+at which the site rotates under the impact azimuth, returning the window, time-to-window, fall
+duration, the solver residual and the polar plane offset timing cannot change. Wiring: on a
+world that declares a ground site, `drop_moon` ARMS this window instead of releasing; the
+countdown runs in sim seconds inside `step_substep` and the release fires itself at the nearest
+substep boundary (a stated ±dt/2 quantization); the HUD carries "DROP ARMED · window in T-...".
+A world without a site keeps the instant drop, and Reset disarms.
+
+**Why.** Drop Moon rarely hit the declared site: the ball rides a rotating Earth and the fall
+takes days of sim time, so ground zero is a moving target - correct physics, bad demo control.
+The honest fix is the one any real mission uses: never move the ball, never bend the
+trajectory; choose the release time from data the engine already holds deterministically.
+
+**Verified.** 394 native tests green (391 baseline plus 3). The closing test replays the WIRED
+release at the Ground Zero world's own 118,000x substep (~123 s), countdown quantization
+included: the contact lands 0.086 degrees of spin-axis azimuth from the site (about 10 km of
+arc at the site ring; solver's own residual 0.0003 degrees), against a stated 1-degree
+tolerance; the 44.1-degree polar offset between the fall's equatorial impact ring and the
+declared 45N site is geometry the release time cannot move, reported by the solver rather than
+bent away. A site carried half a turn about the spin axis waits 44,538 s longer - about half a
+sidereal day - for its window, with fall durations equal to 33 s over 4.836 days and the
+inertial impact azimuth drifting only 6.1 degrees (the Moon's own orbital drift over the wait):
+a later window, never a bent trajectory. Headed on the Mac (mac_shot pattern, port 7099,
+`web/rig/groundzero_window.mjs` on /groundzero.html): Drop arms with the HUD reading "DROP
+ARMED · window in T-23h 31m sim · then a 4d 18h fall to ground zero" while Luna stays on its
+orbit; at the world's own rate the release fires itself (countdown clears with no second
+input), the fall runs to contact, and the materialized site's event window books the arrival
+(boundary: 477 guards, 0 uncovered, arrived KE +3.67e12 J / IE +7.17e14 J, peak 304 m/s) with
+the pi-gate line alongside; zero console errors; screenshots viewed.
+
+## 2026-07-23: the declared site sits on the fall's own impact ring
+
+**What.** Ground Zero declares its site at lat 45, lon 0 rather than the ground scene's 45N 100W.
+
+**Why.** The whole cast starts in the orbital plane with in-plane velocities, so a from-rest lunar
+fall is confined to that plane and its reachable contact points form the great circle the plane cuts
+through the crust. Release timing can fix the azimuth but never the polar plane, so a site 44 degrees
+off the ring could never be hit, whatever the window solved for.
+
+**Verified.** The derivation is written into the world file's comment, and the solver test asserts
+the declared site's plane offset reads ~0.
+
+## 2026-07-23: the out-and-back arc: one camera path from the ball to celestial and back
+
+**What.** The demo choreography's camera path exists: `crate::arc` (pure, natively tested) plus
+a drive in the space band and a plainly-labelled control on the Ground Zero page ("Demo arc ·
+drives camera + time only"). One press takes the camera from wherever the manual rig stands and
+glides it down to the site; the next pulls out to celestial framing; the next descends home:
+one continuous parameterization, no cuts, no scene switch, either direction, with the docs/59
+trigger materializing and folding the site along the way. The span is derived at both ends:
+floor = the site's finest materialized quantum over the docs/49 angular budget (the ball's
+one-rung child, 1.37 m, gives ~1.4 km, the deepest framing the current rung honestly serves,
+and the tested point at which absolute-f32 rendering is still sub-pixel, so Terra's
+camera-relative-eye convention is not yet needed); top = the fold threshold at the scene's own
+1.7 whole-orbit margin (now one constant, `arc::WHOLE_ORBIT_MARGIN`, where two literals lived).
+The pacing rule is declared-or-derived, never buried: sim compression proportional to camera
+distance (holding apparent angular rate constant), anchored to the world's declared
+`time.scale` at the top, flooring at real time near the ground; the world file declares the one
+new number, `arc.octave_s` (real seconds per octave of scale). Two derived rules make a
+spinning, time-compressed crust rideable: crust-anchored quantities (hover direction, look
+target, view-up) weight by the reciprocal of the compression, so nothing drifts across the view
+faster than Earth's REAL rotation; and the descent aims where the site WILL be, the remaining
+crust turn under the geometric glide is closed-form (Ω·τ·(S−1)), a constant of the motion, so
+the site rotates into place beneath the camera exactly as it arrives.
+
+**Why.** The demo decision is out-and-back: open at the ball (the scale referent), pull out
+while sim time compresses, witness the de-orbit and impact at celestial scale, descend to the
+re-cohered site. The trigger was already bidirectional; what was missing was a camera that
+spans standing-at-the-site to celestial without a representation break, and a time-compression
+law tied to altitude instead of a hand-set dial. The arc touches nothing physical, it is Law
+IV/VI kept deliberately: a camera/time driver whose every crossing goes through the site
+trigger's own laws.
+
+**Verified.** Native suite 394 passed, 0 failed, 22 ignored (388 baseline + 6 arc tests: span
+derivation pinned against `materialize_site`'s own finest particle, pacing endpoints and
+proportionality, pose continuity over a compressed spinning crust in both directions, the
+lead's conserved quantity, the pan shaping, the declared pacing in the shipped world). wasm32
+check clean; vite build clean. Watched headed on the Mac (mac_shot pattern, port 6999,
+`web/rig/mac_arc.mjs`): the arc ran station to station with ZERO console errors, celestial
+start (site materialized on load, x118,000), mid-descent (x80, aim glided onto the site),
+surface hold (camera 2 km from the site, x1 real time, ball + patch cluster centred), pull-out
+(x104 mid), celestial hold at 1.62e9 m (site FOLDED: 750 particles, 1.3134e8 kg returned, drift
++0.0e0), and the return re-materialized the same site. With IMPACT=1 the full choreography ran:
+Luna dropped from the celestial hold, the GPU impact witnessed at scale (incandescent remnant,
+Earth day 23.9 h -> 25.7 h on the HUD), and the descent through the quieted aftermath
+re-materialized the site carrying the live field's sampled state ("u sampled from the quiet
+field: 3.55e6 J/kg (peak 1012 < v_q 4358 m/s)"), the hand-down path exercised end to end from
+the camera's side. Honest remainders: the opening framing shows the ball as a small central
+cluster (going closer needs the next rung down, docs/59 item 4), and the ball's own destruction
+at the site awaits the mid-event hand-down and site dynamics (docs/59, docs/46 row 18).
+
+## 2026-07-23: the ground-zero demo is a world definition
+
+**What.** The docs/23 demo now exists as data the engine executes, not as a scene struct.
+`web/public/worlds/ground-zero/world.json` declares the full cast in one file: the Sun, the shared
+Earth and one Luna instance on her real orbit (the mean distance and its circular speed, the same
+declared state the Space world carries), plus a `ground` block placing ground zero at a lat/lon
+site on that same Earth with the iron ball declared as cohesive matter in the patch. A new page,
+`groundzero.html` (scene picker: Ground Zero), points `data-world` at the file and loads it
+through the existing space-band host; no engine or host code changed for the page, and no new
+schema was needed, because a system world can already carry the `ground` block and `GroundDef`
+already declares `planet`, `lat`, `lon` and `bodies`. What sets the page apart from Space is not
+the drop, which Space has too; it is the declared iron ball standing at the impact site, the
+witness the zoom milestones descend to, and the page says so. Two native tests make the shipped
+file executable truth: one runs BOTH halves (the system cast parses through the space band's
+schema, is star/planet/moon, and Luna's declared state is a bound orbit at the mean distance; the
+ground half builds through `Simulation::from_json`, derives its column from the shared Earth at
+the site, and builds the ball as a bonded iron lattice), the other pins the ground-zero round trip
+(lat/lon to a point on the orbital Earth's surface and back, through the one `geo` conversion,
+landing on land).
+
+**Why.** The demo must ship as a definition the space band machinery executes; adding a third
+`#[wasm_bindgen]` scene is forbidden, and worlds-as-data (docs/43, docs/51-55) is the seam that
+makes a scene a file. What runs today is what the milestones allow: the orbital system with the
+brake and drop controls, ending in the same emergent GPU impact. The ball exists in the definition
+but nothing renders it at orbital scale; the zoom milestones (docs/59 order of work 2 to 4:
+descent camera and trigger, conserved hand-down, re-coherence) are the consumers of the ground
+block, and the world file's own comment names that IOU rather than hiding it.
+
+**Verified.** Full native suite green including the two new tests; wasm32 check clean; the laws
+scans pass over the new world file (no emergent quantity declared, no defined-body override).
+Watched headed on the Mac (mac_shot pattern, port 6399): the Ground Zero page renders the space
+band with Earth crescent-lit in the Sun's light, Luna in frame, the Earth and Luna focus buttons,
+and brake/drop controls. Driving the Drop control headed: the HUD switches to "impact trajectory ·
+closest approach 1 km (inside contact at 9,551 km)", the GPU impact assembly takes over, and the
+view settles on the incandescent post-impact Earth. All of it ran from the definition.
+
 ## 2026-07-23: the site enters dynamics, and the drop breaks its ball
 
 **What.** The remaining core of the zoom hand-down (docs/59): the materialized fine site now

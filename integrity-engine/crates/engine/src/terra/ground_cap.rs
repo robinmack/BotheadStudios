@@ -10,28 +10,78 @@
 use crate::mesher::Vertex;
 use glam::{DVec3, Vec3};
 
-/// Altitude (m) at/below which the cap has fully replaced the coarse globe in the foreground. Below
-/// this the renderer SKIPS the globe draw entirely: the cap covers the view out past the horizon, and
-/// not drawing the coarse mesh is what removes the cap-vs-globe depth fight in the final metres, where
-/// the tight near plane leaves the f32 depth buffer only ~tens of metres of resolution at the horizon.
-pub const CAP_FULL_ALT_M: f64 = 15_000.0;
-/// Altitude (m) at/above which the cap is not drawn at all (fully the coarse globe).
-pub const CAP_START_ALT_M: f64 = 40_000.0;
+/// **The close-range hand-off altitude (m), DERIVED from the raster's own resolution** — never a
+/// declared constant. It is the altitude at which one texel of the surface raster subtends exactly
+/// the docs/49 angular budget: above it the planetary raster still fills the view honestly; below
+/// it the renderer would be stretching texels across more than a budget unit each, so the
+/// close-range treatment (this cap, sampling the raster at the camera's own angular density, plus
+/// the material relief) must take over. It IS `site::view_resolution_distance` asked about one
+/// texel — "at what distance does an extent this size stop filling the view" is one question with
+/// one answer, whether the asker is the site materialization threshold or the render (Law II).
+pub fn handoff_alt_m(texel_arc_m: f64, angular_resolution_rad: f64) -> f64 {
+    crate::site::view_resolution_distance(texel_arc_m, angular_resolution_rad)
+}
 
-/// The cap↔globe cross-fade: 0 at/above `CAP_START_ALT_M`, 1 at/below `CAP_FULL_ALT_M`, smoothstepped.
-/// At exactly 1 the renderer drops the globe draw (see `CAP_FULL_ALT_M`).
-pub fn cap_fade(alt_m: f64) -> f64 {
-    let t = ((alt_m - CAP_FULL_ALT_M) / (CAP_START_ALT_M - CAP_FULL_ALT_M)).clamp(0.0, 1.0);
-    1.0 - t * t * (3.0 - 2.0 * t)
+/// The finest ground arc (m) any of a body's shipped rasters resolves — the LAST data to run out
+/// on a descent, so the one the hand-off keys on (the coarser rasters are already stretched by
+/// then; showing their texels at their true size is the honest floor where no finer tier exists).
+/// `None` when no raster is loaded: nothing finer exists, so there is nothing to hand off to.
+pub fn finest_texel_arc_m(
+    rasters: &[Option<&crate::terra::raster::Raster>],
+    radius_m: f64,
+) -> Option<f64> {
+    rasters.iter().flatten().map(|r| r.texel_arc_m(radius_m)).min_by(f64::total_cmp)
+}
+
+/// The cap↔globe cross-fade: 0 at/above the derived hand-off (`start_alt_m`,
+/// [`handoff_alt_m`]), 1 at/below half of it, smoothstepped over that first OCTAVE of raster
+/// deficit (at half the hand-off a texel subtends two budget units — the stretching is
+/// unambiguously visible, so the cap must be fully in charge by then). A `start_alt_m` of 0 (no
+/// rasters) never fades the cap in.
+pub fn cap_fade(alt_m: f64, start_alt_m: f64) -> f64 {
+    if !(start_alt_m > 0.0) {
+        return 0.0;
+    }
+    let t = (start_alt_m / alt_m.max(1e-9)).log2().clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// The cap reaches this factor PAST the horizon, so its far edge sits below the horizon /
+/// occluded and no visible boundary is drawn where it ends.
+pub const CAP_MARGIN: f64 = 1.3;
+/// The clamp on the cap's angular parameter: the tangent-frame parameterization (`center +
+/// east·du + north·dv`, normalized) reaches arc `atan(du)`, so large parameters buy less and
+/// less arc; past this the patch geometry degrades faster than it covers.
+pub const CAP_MAX_ANGLE: f64 = 0.6;
+
+/// The cap's angular parameter for a camera whose horizon distance (display units) is
+/// `horizon_disp` on a sphere of radius `r_disp`. `horizon/r = tan` of the true horizon arc,
+/// which is exactly this gnomonic-style parameter's own measure, so the margin covers the
+/// horizon at any altitude the clamp allows.
+pub fn cap_angle(horizon_disp: f64, r_disp: f64) -> f64 {
+    (CAP_MARGIN * horizon_disp / r_disp).clamp(1e-4, CAP_MAX_ANGLE)
+}
+
+/// Whether the cap covers every visible point of the surface — its margin past the horizon fits
+/// inside the clamp. Only then may a renderer skip the coarse globe underneath (which is what
+/// removes the cap-vs-globe depth fight in the final metres, where the tight near plane leaves
+/// the f32 depth buffer only ~tens of metres of resolution at the horizon); skipping any higher
+/// would cut the planet's limb out of the frame.
+pub fn cap_covers_view(horizon_disp: f64, r_disp: f64) -> bool {
+    r_disp > 0.0 && CAP_MARGIN * horizon_disp / r_disp <= CAP_MAX_ANGLE
 }
 
 /// The cap's radial lift (display units) that wins the depth fight against the coarse globe while BOTH
-/// are drawn (the fade band). It is 0.2% of the altitude, capped at 20 m: by `CAP_FULL_ALT_M` (where the
-/// globe can still be co-drawn) it has reached the full 20 m, and below that it shrinks with the descent
-/// so it can NEVER reach the eye; the fixed 20 m lift used to put the cap ABOVE a camera standing 2 m
-/// up, showing its underside. `ds` is the display scale (metres → display units).
+/// are drawn (the fade band). It is 0.2% of the altitude — proportional at every scale, because the f32
+/// depth buffer's own resolution at the nadir also scales with the viewing distance (≈ z²/(near·2²⁴)
+/// with a near plane that is a few percent of the altitude, i.e. a few 1e-4 % of z), so a fixed lift
+/// that wins at one altitude loses at another. The old 20 m ceiling belonged to the declared 15–40 km
+/// fade band and lost the fight once the band's top became the DERIVED hand-off (thousands of km).
+/// Proportionality is also what keeps the lift from ever reaching the eye: 0.2% of the altitude sits
+/// far below a camera at 100% of it, down to and past standing height. `ds` is the display scale
+/// (metres → display units).
 pub fn cap_lift_disp(alt_m: f64, ds: f64) -> f64 {
-    (alt_m * 0.002).min(20.0) * ds
+    alt_m * 0.002 * ds
 }
 
 /// Fill `out` with the ground-cap vertices (cleared first). The index topology is fixed for a given `res` — get
@@ -144,27 +194,106 @@ mod tests {
     }
 
     #[test]
-    fn cap_lift_stays_below_the_eye_and_reaches_full_depth_separation_with_the_globe() {
+    fn cap_lift_scales_with_altitude_and_stays_below_the_eye() {
         let ds = 1.0 / 6_371_000.0;
-        // Wherever the coarse globe is co-drawn (fade band and above), the lift is the full 20 m the
-        // depth fight needs; wherever only the cap is drawn, it shrinks with the descent.
-        for alt in [CAP_FULL_ALT_M, 20_000.0, CAP_START_ALT_M, 100_000.0] {
-            assert!((cap_lift_disp(alt, ds) - 20.0 * ds).abs() < 1e-15, "full lift at {alt} m");
+        for alt in [0.5, 2.0, 100.0, 15_000.0, 5.0e6, 2.0e7] {
+            let lift = cap_lift_disp(alt, ds);
+            // The lift can never reach the camera: 0.2% of the altitude, so the eye (at 100%) always
+            // sits far above the lifted surface, down to and below the 2 m standing height.
+            assert!(lift < alt * ds * 0.01, "lift must stay well under the eye at {alt} m");
+            // And it always wins the depth fight: the f32 depth buffer resolves ≈ z²/(near·2²⁴) at
+            // the nadir with a near plane ≥ 3% of the altitude — a few 1e-4 % of z — so a lift
+            // proportional at 0.2% clears it by orders of magnitude at EVERY altitude (the fixed
+            // 20 m ceiling this replaces lost the fight once the fade band topped out at the
+            // derived hand-off instead of a declared 40 km).
+            let depth_ulp = alt * alt / ((0.03 * alt) * 2.0f64.powi(24)) * ds;
+            assert!(lift > 10.0 * depth_ulp, "lift must clear the depth resolution at {alt} m");
         }
-        // The lift can never reach the camera: it is 0.2% of the altitude, so the eye (at 100%) always
-        // sits far above the lifted surface; down to and below the 2 m standing height.
-        for alt in [0.5, 2.0, 10.0, 100.0, 1_000.0, CAP_FULL_ALT_M] {
-            assert!(cap_lift_disp(alt, ds) < alt * ds * 0.01, "lift must stay well under the eye at {alt} m");
-        }
-        // The fade is 1 through the whole globe-skipped regime, 0 at orbital altitude, monotonic between.
-        assert_eq!(cap_fade(2.0), 1.0);
-        assert_eq!(cap_fade(CAP_FULL_ALT_M), 1.0);
-        assert_eq!(cap_fade(CAP_START_ALT_M), 0.0);
-        let mut prev = 1.0f64;
-        for alt in [16_000.0, 20_000.0, 25_000.0, 30_000.0, 39_000.0] {
-            let f = cap_fade(alt);
-            assert!(f < prev && f > 0.0 && f < 1.0, "fade blends monotonically at {alt} m");
+        // Proportional, not tiered: one law across the whole corridor.
+        assert!((cap_lift_disp(2.0e7, ds) / cap_lift_disp(2.0, ds) - 1.0e7).abs() < 1.0);
+    }
+
+    /// **The hand-off altitude is DERIVED from the raster's own resolution, never declared.** It is
+    /// the altitude where ONE TEXEL of the finest shipped raster subtends exactly the angular
+    /// budget — the same budget the site materialization threshold uses — so it is the same
+    /// `view_resolution_distance` law asked about one texel, not a second answer (Law II).
+    #[test]
+    fn the_handoff_altitude_derives_from_the_rasters_own_resolution() {
+        let theta = crate::resolution::ResolutionController::default().angular_resolution;
+        let r_m = 6.371e6;
+        let raster = crate::terra::raster::Raster::new(2048, 1024, 1, vec![0; 2048 * 1024]).unwrap();
+        let texel = raster.texel_arc_m(r_m);
+        let start = handoff_alt_m(texel, theta);
+        // The definition: one texel per budget unit — texel / θ, ~19,500 km for the shipped Earth
+        // rasters at the 1 mrad budget. (Yes, that high: a 2048-wide equirectangular Earth is
+        // stretched well above LEO at this budget; the issue's "a few thousand km" was the eyeball
+        // estimate the derivation replaces.)
+        assert!((start - texel / theta).abs() < 1e-6, "hand-off = texel / angular budget");
+        assert!((1.9e7..2.0e7).contains(&start), "shipped-raster hand-off ~19,500 km, got {start}");
+        // It IS the materialization threshold's own law (one primitive, two askers).
+        assert_eq!(start, crate::site::view_resolution_distance(texel, theta));
+        // Finer data hands off proportionally lower: better rasters push the corridor down.
+        assert!((handoff_alt_m(texel / 4.0, theta) - start / 4.0).abs() < 1e-6);
+        // No raster → no texel → no hand-off (nothing finer exists to hand off to).
+        assert_eq!(handoff_alt_m(0.0, theta), 0.0);
+    }
+
+    /// The hand-off keys on the FINEST raster a body ships — the last data to run out on the way
+    /// down; absent rasters contribute nothing.
+    #[test]
+    fn the_handoff_keys_on_the_finest_shipped_raster() {
+        let r_m = 6.371e6;
+        let coarse = crate::terra::raster::Raster::new(512, 256, 1, vec![0; 512 * 256]).unwrap();
+        let fine = crate::terra::raster::Raster::new(2048, 1024, 1, vec![0; 2048 * 1024]).unwrap();
+        let t = finest_texel_arc_m(&[Some(&coarse), None, Some(&fine)], r_m).expect("rasters present");
+        assert_eq!(t, fine.texel_arc_m(r_m), "the finest raster is the one that matters");
+        assert_eq!(finest_texel_arc_m(&[None, None], r_m), None, "no rasters, no texel");
+    }
+
+    /// The cross-fade spans the FIRST OCTAVE of raster deficit: 0 at/above the derived hand-off,
+    /// 1 at/below half of it (a texel now subtends two budget units), smooth and monotonic
+    /// between — so the close-range treatment arrives as a glide, never a pop.
+    #[test]
+    fn the_cross_fade_spans_the_first_octave_below_the_handoff() {
+        let start = 1.95e7;
+        assert_eq!(cap_fade(start, start), 0.0, "no fade at the hand-off itself");
+        assert_eq!(cap_fade(3.0 * start, start), 0.0, "none above it");
+        assert_eq!(cap_fade(start / 2.0, start), 1.0, "fully the cap one octave down");
+        assert_eq!(cap_fade(2.0, start), 1.0, "and all the way to standing height");
+        let mut prev = 0.0f64;
+        for i in 1..20 {
+            let alt = start * 0.5f64.powf(i as f64 / 20.0);
+            let f = cap_fade(alt, start);
+            assert!(f > prev && f < 1.0, "fade blends monotonically inside the octave at {alt} m");
             prev = f;
+        }
+        // A world with no derived hand-off (no rasters) never fades the cap in.
+        assert_eq!(cap_fade(1_000.0, 0.0), 0.0);
+    }
+
+    /// The coarse globe may be skipped only when the cap genuinely covers every visible point of
+    /// the surface (its margin past the horizon fits inside the parameterization clamp). Skipping
+    /// any higher would cut the planet's limb out of the frame.
+    #[test]
+    fn the_globe_is_skipped_only_where_the_cap_covers_past_the_horizon() {
+        let r_disp = 1.0;
+        let horizon = |alt_m: f64| {
+            let h = alt_m / 6.371e6;
+            (h * (h + 2.0)).sqrt()
+        };
+        for alt in [2.0, 15_000.0, 100_000.0, 400_000.0] {
+            assert!(cap_covers_view(horizon(alt), r_disp), "covered at {alt} m");
+        }
+        for alt in [2.0e6, 5.0e6, 1.95e7] {
+            assert!(!cap_covers_view(horizon(alt), r_disp), "the limb is visible beyond the cap at {alt} m");
+        }
+        // The angle the cap is actually built with honours the same margin, clamped.
+        for alt in [2.0, 15_000.0, 400_000.0, 5.0e6] {
+            let a = cap_angle(horizon(alt), r_disp);
+            assert!(a <= CAP_MAX_ANGLE + 1e-12);
+            if cap_covers_view(horizon(alt), r_disp) {
+                assert!((a - CAP_MARGIN * horizon(alt) / r_disp).abs() < 1e-12, "unclamped where it covers");
+            }
         }
     }
 

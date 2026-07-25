@@ -257,6 +257,23 @@ impl SiteSpec {
     pub fn declared_coarse_extent_m(&self) -> f64 {
         coarse_particle_extent_m(self.coarse_mass_kg, self.coarse_density)
     }
+
+    /// The FINEST quantum the site's one materialization rung produces (m): the declared ball's
+    /// one-rung child (`m_ball / 13` at the ball material's density, the same rung-sizing law
+    /// `materialize_site` uses), or the declared grain when no ball exists (children land exactly
+    /// at the grain there). This is what the demo arc's floor derives from: the camera may
+    /// honestly descend to the view-resolution distance of THIS quantum and no further. `None`
+    /// when the ball's material is not in the catalogue (the materialization would refuse too).
+    pub fn finest_child_extent_m(&self, mats: &[Material]) -> Option<f64> {
+        match self.ball.as_ref() {
+            Some(b) => {
+                let rho = mats.iter().find(|m| m.id == b.material)?.density as f64;
+                let m_ball = rho * 4.0 / 3.0 * std::f64::consts::PI * b.radius_m.powi(3);
+                Some(coarse_particle_extent_m(m_ball / refine::LEVEL_MASS_RATIO, rho))
+            }
+            None => Some(self.grain_m),
+        }
+    }
 }
 
 /// The measured coarse quantum of a LIVE field: the largest matter share any particle carries -

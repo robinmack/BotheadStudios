@@ -128,6 +128,66 @@ mod tests {
     }
 }
 
+/// **THE surface sampler: one answer to "what is this body's surface in direction `dir`?"**
+/// (albedo, radial offset in display units, material index). The globe mesh builder, Terra's
+/// ground cap and the space band's descent-corridor cap all sample the surface through this one
+/// struct, so no two renders of one body can disagree about its continents, coastlines or
+/// elevation (Law II). The rasters and biome→material map come from the body definition.
+pub struct SurfaceSampler<'a> {
+    mats: &'a [crate::materials::Material],
+    biome_mats: &'a [usize],
+    landmask: Option<&'a crate::terra::raster::Raster>,
+    elevation: Option<&'a crate::terra::raster::Raster>,
+    landcover: Option<&'a crate::terra::raster::Raster>,
+    elev_range: [f64; 2],
+    /// metres → display units for the radial offset.
+    ds: f64,
+    /// the declared relief exaggeration.
+    exag: f64,
+    water_idx: usize,
+}
+
+impl<'a> SurfaceSampler<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        mats: &'a [crate::materials::Material],
+        biome_mats: &'a [usize],
+        landmask: Option<&'a crate::terra::raster::Raster>,
+        elevation: Option<&'a crate::terra::raster::Raster>,
+        landcover: Option<&'a crate::terra::raster::Raster>,
+        elev_range: [f64; 2],
+        ds: f64,
+        exag: f64,
+    ) -> SurfaceSampler<'a> {
+        let water_idx = crate::materials::index_of(mats, "water");
+        SurfaceSampler { mats, biome_mats, landmask, elevation, landcover, elev_range, ds, exag, water_idx }
+    }
+
+    /// The surface at a unit direction in the BODY frame (the raster's own frame): biome albedo,
+    /// radial offset above the sea-level sphere (display units), and the material the ground is
+    /// made of there (the shader picks its relief layer with it).
+    pub fn sample(&self, dir: DVec3) -> ([f32; 3], f64, u32) {
+        let (lat, lon) = crate::geo::lat_lon_from_dir(dir);
+        // Fall back to the built-in coarse landmask only when a body ships no raster — never to
+        // "re-invent" a surface a scene made up.
+        let is_land = self
+            .landmask
+            .map(|r| r.land_at(lat, lon))
+            .unwrap_or_else(|| crate::planet::earth_surface_material(dir) == "granite");
+        if is_land {
+            let biome = self.landcover.map_or(1, |r| r.biome_at(lat, lon) as usize);
+            let mi = self.biome_mats.get(biome).copied().unwrap_or(self.water_idx);
+            let e = self
+                .elevation
+                .map_or(0.0, |r| r.elevation_m_at(lat, lon, self.elev_range[0], self.elev_range[1]));
+            // Land above sea level; below-sea-level land (Dead Sea etc.) clamps to the shore.
+            (self.mats[mi].albedo, e.max(0.0) * self.ds * self.exag, mi as u32)
+        } else {
+            (self.mats[self.water_idx].albedo, 0.0, self.water_idx as u32)
+        }
+    }
+}
+
 /// **Build a body's globe from its DEFINITIVE surface.** One implementation, so every scene that shows
 /// Earth shows the same Earth: the same continents, the same coastlines, the same elevation. A scene
 /// positions a body; it never redefines one. Terra and the space/impact scenes both call this.
@@ -147,23 +207,7 @@ pub fn build_body_globe(
     landcover: Option<&crate::terra::raster::Raster>,
     elev_range: [f64; 2],
 ) -> Mesh {
-    let water_idx = crate::materials::index_of(mats, "water");
-    let water_alb = mats[water_idx].albedo;
-    build_globe(res, r_disp, |dir| {
-        let (lat, lon) = crate::geo::lat_lon_from_dir(dir);
-        // Fall back to the built-in coarse landmask only when a body ships no raster — never to
-        // "re-invent" a surface a scene made up.
-        let is_land = landmask
-            .map(|r| r.land_at(lat, lon))
-            .unwrap_or_else(|| crate::planet::earth_surface_material(dir) == "granite");
-        if is_land {
-            let biome = landcover.map_or(1, |r| r.biome_at(lat, lon) as usize);
-            let mi = biome_mats.get(biome).copied().unwrap_or(water_idx);
-            let e = elevation.map_or(0.0, |r| r.elevation_m_at(lat, lon, elev_range[0], elev_range[1]));
-            // Land above sea level; below-sea-level land (Dead Sea etc.) clamps to the shore.
-            (mats[mi].albedo, e.max(0.0) * ds * exag, mi as u32)
-        } else {
-            (water_alb, 0.0, water_idx as u32)
-        }
-    })
+    let sampler =
+        SurfaceSampler::new(mats, biome_mats, landmask, elevation, landcover, elev_range, ds, exag);
+    build_globe(res, r_disp, |dir| sampler.sample(dir))
 }

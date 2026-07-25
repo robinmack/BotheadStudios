@@ -970,6 +970,101 @@ mod tests {
         assert!(!s.strata().is_empty(), "the shipped world's column is inherited, not absent");
     }
 
+    /// **The ground-zero demo is ONE world definition** (docs/23, the demo the engine is aimed at;
+    /// docs/59). `worlds/ground-zero/world.json` declares the whole cast in one file: the Sun, the
+    /// shared Earth, one Luna instance on her real orbit, and the iron ball at a declared ground-zero
+    /// site ON that same Earth. This test proves the file EXECUTES through both paths that exist
+    /// today - the system half parses through the schema the space band loads, and the ground half
+    /// builds and runs through the definition-driven `Simulation` - so the definition cannot rot into
+    /// wishful data. The zoom milestones (docs/59 order of work 2-4) consume the ground half; until
+    /// they land, nothing renders the ball at orbital scale, and that gap is documented in the file
+    /// itself rather than papered over.
+    #[test]
+    fn the_ground_zero_world_executes_through_the_definition_paths_that_exist() {
+        let shipped = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"), "/../../web/public/worlds/ground-zero/world.json"))
+            .expect("shipped ground-zero world");
+
+        // THE SYSTEM HALF: the space band's schema. Sun + Earth + one Luna instance, every body an
+        // instance of a defined profile (declared, never re-sized in the scene - the laws scan holds
+        // that line for every shipped world).
+        let def = crate::terra::world_def::World::parse(&shipped).expect("ground-zero world parses");
+        assert_eq!(def.kind, "system", "the space band routes by type");
+        let bodies = def.bodies.as_ref().expect("a system world declares its cast");
+        let roles: Vec<&str> = bodies.iter().map(|b| b.role.as_str()).collect();
+        assert_eq!(roles, ["star", "planet", "moon"], "Sun, the shared Earth, one Luna");
+        let earth_def = &bodies[1];
+        let luna = &bodies[2];
+        assert_eq!(earth_def.profile.as_deref(), Some("earth"));
+        assert_eq!(luna.profile.as_deref(), Some("moon"), "Luna is an instance of the defined Moon");
+
+        // Luna is on her REAL orbit: the declared state vector is the mean distance, and the orbit it
+        // implies around the shared Earth is bound (specific orbital energy < 0).
+        let earth = crate::planet::earth();
+        let moon = crate::planet::moon();
+        let rel_pos = DVec3::from_array(luna.pos_m) - DVec3::from_array(earth_def.pos_m);
+        let rel_vel = DVec3::from_array(luna.vel_ms) - DVec3::from_array(earth_def.vel_ms);
+        let r = rel_pos.length();
+        assert!(
+            (r - 384_400_000.0).abs() < 1.0e6,
+            "Luna starts at the mean Earth-Moon distance; got {r:.3e} m"
+        );
+        let mu = crate::orbit::G * (earth.total_mass() + moon.total_mass());
+        let energy = 0.5 * rel_vel.length_squared() - mu / r;
+        assert!(energy < 0.0, "the declared state is a bound orbit (E = {energy:.3e} J/kg)");
+
+        // THE GROUND HALF: the SAME file builds through the definition-driven path. The patch derives
+        // from the shared Earth at the declared site and the ball exists as cohesive iron matter.
+        let sim = Simulation::from_json(&shipped, mats()).expect("the ground half builds");
+        assert_eq!(sim.cohesive_bodies().len(), 1, "the declared iron ball is built");
+        assert!(sim.cohesive_bodies()[0].agg.active_bonds() > 0, "the ball is a bonded solid");
+        assert_eq!(
+            sim.strata().first().map(|s| s.material.as_str()),
+            Some("grass"),
+            "ground zero is a land site, so the column wears the shared Earth's biosphere skin"
+        );
+        assert_eq!(sim.planet_radius_m(), earth.radius(), "the patch belongs to the one Earth");
+    }
+
+    /// **Ground zero round-trips to the shared Earth's surface.** The ground-zero world places its
+    /// ground patch by latitude and longitude; the point those degrees name on the ORBITAL Earth -
+    /// the body the system half flies - is `dir_from_lat_lon x the definition's radius`, and reading
+    /// it back returns the declared site exactly. This is the anchor the zoom's materialization
+    /// trigger descends to (docs/59): one conversion, already owned by `geo`, no second copy.
+    #[test]
+    fn the_ground_zero_site_round_trips_to_the_orbital_earths_surface() {
+        let shipped = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"), "/../../web/public/worlds/ground-zero/world.json"))
+            .expect("shipped ground-zero world");
+        let def = crate::terra::world_def::World::parse(&shipped).expect("parses");
+        let g = def.ground.as_ref().expect("the demo declares its ground-zero placement");
+
+        // The placement rides the SAME body the orbital cast places - one Earth, by id.
+        assert_eq!(g.planet, "earth", "ground zero is on the shared Earth");
+        let placed = def.bodies.as_ref().unwrap().iter().any(|b| {
+            b.role == "planet" && b.profile.as_deref() == Some(g.planet.as_str())
+        });
+        assert!(placed, "the ground's host body is the planet the system half flies");
+
+        // lat/lon -> a point on that body's surface, in the body's own frame.
+        let earth = crate::planet::earth();
+        let site = crate::geo::dir_from_lat_lon(g.lat, g.lon) * earth.radius();
+        assert!(
+            (site.length() - earth.radius()).abs() < 1.0e-6,
+            "the site sits ON the surface the definition declares"
+        );
+        // ... and back: the round trip is the identity, so ground zero is one place, whoever asks.
+        let (lat, lon) = crate::geo::lat_lon_from_dir(site);
+        assert!(
+            (lat - g.lat).abs() < 1.0e-9 && (lon - g.lon).abs() < 1.0e-9,
+            "({lat}, {lon}) must be the declared ({}, {})",
+            g.lat,
+            g.lon
+        );
+        // The site is land there, which is why the ball has ground to rest on.
+        assert!(crate::planet::is_land(g.lat, g.lon), "ground zero is a land site");
+    }
+
     /// **Ledger row 15, paid.** An impact declared in DATA must reach `MatterSim` and make real
     /// particles. Before this, `MatterSim` had zero production callers: verified physics that nothing
     /// ran. The definition is the consumer now, and it is a file rather than a scene struct.
