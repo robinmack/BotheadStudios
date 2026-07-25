@@ -8,13 +8,16 @@ a self-contained project with its own README, build, and docs.
 ### [`integrity-engine/`](integrity-engine/) — the Integrity engine
 
 An OSS **browser game engine with real Newtonian physics at its core**. Matter is simulated as
-aggregates of particles with mass and density; material behavior *emerges* from density (rock vs.
-dirt vs. grass), terrain is destructible all the way down, and the world's own aggregate mass
-produces real self-gravity (`F = ma`). Stack: Rust → WASM, a custom `wgpu` WebGPU renderer, and
-Rapier rigid bodies, with a thin TypeScript host.
+aggregates of particles with mass and density; the goal is material behavior, destruction, and
+self-gravity all emerging from that matter under one law. The discipline behind the goal: the
+engine treats fudges as bugs, every known deviation sits on a public conformance ledger with the
+test that closes it, and negative results ship in the journal. Stack: Rust → WASM, a custom
+`wgpu` WebGPU renderer, hand-written WGSL compute for the physics, and a thin TypeScript host.
 
-**Status:** pre-alpha — Phase 0 (scaffold + first pixel) complete, `v0.1.0`. See the project's
-[README](integrity-engine/README.md), [roadmap/JOURNAL](integrity-engine/JOURNAL.md), and
+**Status:** pre-1.0, under heavy development. The flagship scene is Birth of the Moon: a GPU SPH
+giant impact with a sourced Tillotson equation of state that accretes a proto-lunar disk in the
+browser, live at [integrity.bothead.net](https://integrity.bothead.net). See the project's
+[README](integrity-engine/README.md), [JOURNAL](integrity-engine/JOURNAL.md), and
 [CHANGELOG](integrity-engine/CHANGELOG.md).
 
 ## License
