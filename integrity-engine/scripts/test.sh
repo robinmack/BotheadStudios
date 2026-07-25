@@ -34,17 +34,22 @@ for a in "$@"; do
   if [[ "$a" == "--fast" ]]; then fast=1; else args+=("$a"); fi
 done
 
+# Expanding an EMPTY array with "${args[@]}" is an unbound-variable error under `set -u` on bash 3.2
+# (macOS's /bin/bash), so a bare `bash scripts/test.sh` died before running anything. The
+# ${args[@]+"${args[@]}"} form expands to nothing when the array is empty and to the quoted elements
+# otherwise, on every bash. Used at all four call sites below.
+
 if command -v cargo-nextest >/dev/null 2>&1; then
   if [[ $fast -eq 1 ]]; then
-    cargo nextest run -p engine -E "not ($SLOW_FILTER)" "${args[@]}"
+    cargo nextest run -p engine -E "not ($SLOW_FILTER)" ${args[@]+"${args[@]}"}
   else
-    cargo nextest run -p engine "${args[@]}"
+    cargo nextest run -p engine ${args[@]+"${args[@]}"}
   fi
 else
   if [[ $fast -eq 1 ]]; then
-    cargo test -p engine "${args[@]}" -- "${SLOW_SKIPS[@]}"
+    cargo test -p engine ${args[@]+"${args[@]}"} -- "${SLOW_SKIPS[@]}"
   else
-    cargo test -p engine "${args[@]}"
+    cargo test -p engine ${args[@]+"${args[@]}"}
   fi
 fi 2>&1 | tee /tmp/gf-test.log \
   | grep -E "test result:|Summary|FAIL|error\[|^error:|FAILED|panicked|warning: unused" | tail -40

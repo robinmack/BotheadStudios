@@ -3,6 +3,8 @@
 // everywhere. Pure DOM, no dependency on the WASM/GPU having loaded, so it works even if a scene
 // fails to start.
 
+import { withBase } from "./base-url";
+
 type Scene = { path: string; label: string };
 
 const SCENES: Scene[] = [
@@ -37,9 +39,10 @@ function install(): void {
   });
 
   for (const s of SCENES) {
-    const current = here === s.path;
+    const href = withBase(s.path);
+    const current = here === href;
     const a = document.createElement("a");
-    a.href = s.path;
+    a.href = href;
     a.textContent = s.label;
     a.setAttribute("aria-current", current ? "page" : "false");
     Object.assign(a.style, {

@@ -57,8 +57,33 @@ Several files carry a version; they move together on every release:
 1. Update `CHANGELOG.md`: move items out of `[Unreleased]` into a new dated `vX.Y.Z` section.
 2. Bump the version in `crates/engine/Cargo.toml` and `web/package.json`.
 3. Add a `JOURNAL.md` entry for the milestone.
-4. Commit, then tag: `git tag -a vX.Y.Z -m "vX.Y.Z — <milestone>"`.
-5. (Later, when published) publish the WASM package / release artifacts.
+4. Measure and record the release wasm size (see "Wasm size" below), next to the `wgpu`
+   version note for the release.
+5. Commit, then tag: `git tag -a vX.Y.Z -m "vX.Y.Z — <milestone>"`.
+6. (Later, when published) publish the WASM package / release artifacts.
+
+### Wasm size
+
+The engine wasm is the demo's download weight, so every release cut records it here and growth
+stays attributed to a version instead of ambient. Measure the **release** build (the one users
+pay for) plus its gzipped size (what the wire actually carries):
+
+```sh
+cd web && npm run wasm:release
+stat -f%z src/wasm/engine_bg.wasm        # raw bytes (Linux: stat -c%s)
+gzip -9 -c src/wasm/engine_bg.wasm | wc -c   # gzipped bytes
+```
+
+Baseline and per-release log (raw / gzip, bytes):
+
+| Date       | Version    | Release wasm | Gzipped |
+|------------|------------|--------------|---------|
+| 2026-07-23 | baseline   | 811,915      | 322,386 |
+
+For reference, the dev build (`npm run wasm`) measured 3,402,186 bytes on the same date; dev
+carries debug info and no `wasm-opt` pass, so only the release number is comparable across
+versions. A hard budget is deliberately not set yet; it belongs to the GPU-floor conversation.
+The CI wasm job prints both numbers on every PR so a jump is visible in the log that caused it.
 
 ## Compatibility notes we must track
 

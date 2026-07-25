@@ -104,7 +104,14 @@ const BUILD_ID =
 // the hashed assets take care of themselves.)
 const NO_STORE = { "Cache-Control": "no-store, max-age=0" };
 
+// Where the site is mounted. Local dev and deploy.sh serve from the domain root ("/"); a static host
+// that mounts the site under a subpath (e.g. GitHub Pages serves at /<repo>/) sets BASE_PATH so every
+// built asset URL, the wasm, and the public rasters resolve under that prefix. Runtime code must join
+// root-absolute paths through `withBase` (src/base-url.ts) for the same reason.
+const BASE_PATH = process.env.BASE_PATH ?? "/";
+
 export default defineConfig({
+  base: BASE_PATH,
   assetsInclude: ["**/*.wasm"],
   define: { __BUILD_ID__: JSON.stringify(BUILD_ID) },
   plugins: [logRelay(), shotSink(), ...(lan ? [basicSsl()] : [])],

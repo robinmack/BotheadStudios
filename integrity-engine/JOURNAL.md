@@ -603,6 +603,13 @@ prerequisite is an O(N log N) binding energy: `bhtree::BarnesHut` exists and is 
 `accelerations`, no POTENTIAL traversal. Adding one (same tree, same opening criterion, sum `Gm/r`), pinned
 to the exact O(N²) sum, is the next step — then the pass hooks in where `sph_snapshot` lands.
 
+## 2026-07-23: wasm size baseline recorded
+
+**What.** Recorded the release wasm baseline and made it a release-checklist step (docs/03), with a
+CI log line per PR. **Why.** The dev wasm had grown to 3.4 MB against a last-noted 1.3 MB with no
+baseline in between, so growth was unattributable. **Verified.** Measured on this date: release
+`engine_bg.wasm` 811,915 bytes raw, 322,386 bytes gzip -9 (the wire cost); dev build 3,402,186
+bytes raw for reference.
 ## 2026-07-23 — resolution-on-demand: the moon-drop caps modern Earth (deployed); Ground port foundations (docs/39)
 
 **What (shipped + deployed).** After the CPU Aggregate was retired (entry below), routing the moon-drop
