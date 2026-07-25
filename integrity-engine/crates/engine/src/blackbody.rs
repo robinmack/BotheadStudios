@@ -11,6 +11,12 @@
 //! in favour of this is a flagged follow-up — hot ejecta should glow by the same law as a star.
 
 /// Planck spectral radiance (W·m⁻³·sr⁻¹) for wavelength `lambda_m` at temperature `t_k`.
+/// **Stefan–Boltzmann constant** σ (W·m⁻²·K⁻⁴), CODATA 2018 — exact, since it is fixed by the SI
+/// definitions of k_B, h and c. THE one value: a body radiating σT⁴ is the same law whether it is a
+/// cooling moonlet, an ablating meteor or a shed vapour parcel, and this module is where radiation lives.
+/// (It was written out three times, once as a truncated `5.670e-8` — one question, two answers.)
+pub const SIGMA: f64 = 5.670_374_419e-8;
+
 pub fn planck(lambda_m: f64, t_k: f64) -> f64 {
     const H: f64 = 6.626_070_15e-34; // Planck constant, J·s (SI exact)
     const C: f64 = 2.997_924_58e8; // speed of light, m/s (SI exact)
@@ -180,7 +186,6 @@ mod tests {
 /// emits ~547× a sunlit white surface, and about 4,000× what its own sunlit rock reflects. A magma ocean
 /// outshines its own daylight, so it has no day/night terminator at all — it glows all over.
 pub fn thermal_glow_gain(t_k: f64) -> f64 {
-    const SIGMA: f64 = 5.670_374_419e-8; // Stefan–Boltzmann, W·m⁻²·K⁻⁴
     const SUNLIT_WHITE_RADIANCE: f64 = 430.0; // W·m⁻²·sr⁻¹ at 1 AU — the exposure's reference point
     if t_k <= 800.0 {
         return 0.0; // below visible incandescence

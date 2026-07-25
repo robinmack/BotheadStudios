@@ -44,6 +44,9 @@ struct RawThermal {
     decomposes_k: f32, // K — irreversible breakdown instead of melting (0 = does not / not characterized)
     #[serde(default)]
     decomposition_suppressed_pa: f32, // Pa — above this confining pressure the breakdown cannot proceed
+    /// W/(m·K) — how fast heat travels THROUGH the material. 0 = not characterized.
+    #[serde(default)]
+    thermal_conductivity: f32,
 }
 
 #[derive(Deserialize)]
@@ -111,6 +114,17 @@ pub struct Thermal {
     ///
     /// 0 ⇒ does not decompose (or not characterized).
     pub decomposes_k: f32,
+    /// **Thermal conductivity k** (W/(m·K)) — how fast heat travels through this material, and therefore
+    /// how much of a body actually participates when its surface is heated.
+    ///
+    /// This is what separates a body that heats through from one that grows a hot SKIN over a cold
+    /// interior: with `specific_heat` and `density` it gives the thermal diffusivity α = k/(ρc), whose
+    /// square root sets the depth a heat front reaches in a given time ([`Material::thermal_diffusivity`]).
+    /// `docs/04` reserved this field and it sat unused; entering the atmosphere is what needed it, because
+    /// heating a metre-wide body's whole mass at once made it impossible for one to glow (docs/46 row 21).
+    ///
+    /// 0 ⇒ not characterized ⇒ callers must not claim to know how the heat spreads (only `hh_plasma`).
+    pub thermal_conductivity: f32,
     /// Pa — the confining pressure above which decomposition CANNOT proceed, so the material melts
     /// instead.
     ///
@@ -294,6 +308,33 @@ impl Material {
         self.thermal.as_ref().map(|t| t.boil_point as f64).filter(|v| *v > 0.0)
     }
 
+    /// Latent heat of vaporization (J/kg, liquid → gas), or `None` when unsourced — the energy per unit
+    /// mass an ablating body sheds once its surface reaches the boiling point.
+    /// Thermal conductivity k (W/(m·K)), or `None` if this material's heat transport is uncharacterised.
+    pub fn thermal_conductivity(&self) -> Option<f64> {
+        let k = self.thermal.as_ref().map_or(0.0, |t| t.thermal_conductivity) as f64;
+        (k > 0.0).then_some(k)
+    }
+
+    /// **Thermal diffusivity α = k/(ρ·c)** (m²/s) — the rate a temperature front travels through this
+    /// material, and the only thing needed to answer "how deep has the heat got?": a front reaches
+    /// √(α·t) in time t.
+    ///
+    /// It is a ratio of three MEASURED quantities, so the spread between materials is real and large:
+    /// iron comes out at 1.5e-5 m²/s and basalt at 7.0e-7 — a factor of 21 — which is why an iron
+    /// meteorite conducts heat inward and warms through while a stony one grows a millimetre-thin fusion
+    /// crust over a cold core. `None` if any of the three is uncharacterised.
+    pub fn thermal_diffusivity(&self) -> Option<f64> {
+        let k = self.thermal_conductivity()?;
+        let c = self.specific_heat()?;
+        let rho = self.density as f64;
+        (c > 0.0 && rho > 0.0).then_some(k / (rho * c))
+    }
+
+    pub fn latent_vaporization(&self) -> Option<f64> {
+        self.thermal.as_ref().map(|t| t.latent_vaporization as f64).filter(|v| *v > 0.0)
+    }
+
     /// Melting point (K), or `None` when unsourced.
     pub fn melt_point(&self) -> Option<f64> {
         self.thermal.as_ref().map(|t| t.melt_point as f64).filter(|v| *v > 0.0)
@@ -359,6 +400,7 @@ pub fn load() -> Vec<Material> {
                     simon_c: t.simon_c,
                     molar_mass: t.molar_mass,
                                     decomposes_k: t.decomposes_k,
+                                    thermal_conductivity: t.thermal_conductivity,
                                     decomposition_suppressed_pa: t.decomposition_suppressed_pa,
                 }),
                 tillotson: m.tillotson,

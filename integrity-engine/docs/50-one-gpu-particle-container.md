@@ -52,6 +52,30 @@ with no error — matter vanishing, which no rendering check would catch. wgpu h
 `webgpu` backend only, so a `ParticleStore` cannot be *instantiated* natively; the arithmetic can, and
 that is the part with something to get wrong.
 
+## Partly done (2026-07-24) — the engine now says WHAT to draw, if not yet how
+
+One half of the render path turned out not to be about pipelines at all. `ground_scene` was constructing
+`GpuParticle`s **by hand, twice** — once for grains, once for bodies in flight — reading albedo out of the
+material table and calling the incandescence law itself. A third copy would have been needed for the entry
+trail (docs/59) and a fourth for a swarm, and every copy is a place a scene can quietly disagree with the
+physics about what is real, which inverts Law VI.
+
+`crate::Drawn` is now the engine's answer to *what am I holding?* — physical facts only (where, how fast,
+how big, what of, how hot; no colour, no brightness, no effect type) — and `GpuParticle::of_matter` is the
+one physics→instance mapping. `Simulation::drawn()` and `flight::Flight::drawn()` report through it, so a
+scene's render is one map over a list and a scene that can draw any of the engine's matter can draw all of
+it. That is the property that lets a capability like the meteor swarm appear in a scene that knows nothing
+about meteors.
+
+It also closed a real hole: the ground scene capped GRAINS at its instance capacity and then pushed
+meteors on top, so a full grain buffer plus a body in flight wrote past the end of the buffer. `drawn()`
+emits matter in flight first and grains last, so capping one list cannot overrun it and a budget loses the
+least informative matter.
+
+**Still two, and still the real design question:** the granular side expands each grain into 8 sub-cubes
+and SPH draws camera-facing billboards, and *Terra draws neither* — it has no instanced particle path at
+all, which is what currently stands between the engine holding a meteor swarm and anyone seeing one.
+
 ## Not done yet — the render path
 
 The mandate is "one GPU particle allocator **and render path** hosting both pipelines". This increment

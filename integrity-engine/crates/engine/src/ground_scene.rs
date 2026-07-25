@@ -650,11 +650,14 @@ impl Ground {
         let start = target + Vec3::new(-140.0, 220.0, -90.0);
         let dir = (target - start).normalize_or(Vec3::new(0.0, -1.0, 0.0));
         self.sim.throw_meteor(crate::simulation::Meteor {
-            pos: start,
-            vel: dir * speed_ms,
-            mass_kg,
+            id: 0, // stamped by the engine when it takes the body
+            pos: start.as_dvec3(),
+            vel: (dir * speed_ms).as_dvec3(),
+            mass_kg: mass_kg as f64,
             material: iron,
-            radius_m,
+            radius_m: radius_m as f64,
+            temp_k: 288.0, // stamped to ambient by throw_meteor
+            skin_m: 0.0,   // a fresh rock has no heated skin yet
         });
     }
 
@@ -746,45 +749,20 @@ impl Ground {
         write_uniform(&self.queue, &self.world_uni, view_proj, Mat4::IDENTITY, eye, light);
         write_sky(&self.queue, &self.sky_uni, view_proj, eye, light, self.atm_tau, self.atm_twilight);
 
-        // Grain instances: position + the material's own albedo + incandescence from its temperature.
+        // **The engine says what it is holding; this scene puts it on the screen.** Grains, meteors in
+        // flight and the vapour they have shed all arrive as `Drawn` — physical facts only — and one
+        // mapping turns each into an instance. This used to be two hand-written `GpuParticle` literals
+        // here (one for grains, one for meteors), which meant the scene read albedo out of the material
+        // table and called the incandescence law itself, and every new kind of matter needed another
+        // copy. A scene that can draw the engine's matter can draw ALL of it, including matter the engine
+        // starts holding later (docs/50 render path, docs/59).
         let inst: Vec<GpuParticle> = self
             .sim
-            .particles()
+            .drawn()
             .iter()
             .take(self.max_particles)
-            .map(|p| GpuParticle {
-                offset: p.pos.to_array(),
-                u: 0.0,
-                vel: p.vel.to_array(),
-                resting: 0.0,
-                // The grain is drawn in ITS OWN material's albedo, from the same cited database row the
-                // physics reads — so what you see is what is being simulated, not a decorative colour.
-                color: self.mats.get(p.material).map(|m| m.albedo).unwrap_or([0.5, 0.5, 0.5]),
-                material: p.material as f32,
-                emission: crate::emission::incandescence(p.temp_k),
-                rho: 0.0,
-                radius: 0.5 * self.sim.grain_size_m(),
-                _p0: 0.0, _p1: 0.0, _p2: 0.0,
-            })
+            .map(|d| GpuParticle::of_matter(d, &self.mats))
             .collect();
-        // Meteors in flight are matter too, drawn through the SAME instanced path as the grains —
-        // they are not a special effect layered on top.
-        let mut inst = inst;
-        for m in self.sim.meteors() {
-            inst.push(GpuParticle {
-                offset: m.pos.to_array(),
-                u: 0.0,
-                vel: m.vel.to_array(),
-                resting: 0.0,
-                color: self.mats.get(m.material).map(|mm| mm.albedo).unwrap_or([0.6, 0.5, 0.45]),
-                material: m.material as f32,
-                // Hypervelocity iron glows; the same incandescence law the ejecta uses.
-                emission: crate::emission::incandescence(1600.0),
-                rho: 0.0,
-                radius: m.radius_m,
-                _p0: 0.0, _p1: 0.0, _p2: 0.0,
-            });
-        }
         if !inst.is_empty() {
             self.queue.write_buffer(&self.particle_instances, 0, bytemuck::cast_slice(&inst));
         }

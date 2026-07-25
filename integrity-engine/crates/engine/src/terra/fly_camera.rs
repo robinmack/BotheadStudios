@@ -13,6 +13,12 @@
 
 use glam::{DMat4, DVec3, Mat4};
 
+/// **Vertical field of view (radians).** ONE definition: the projection is built from it here, and
+/// anything that needs to know how large a metre looks on screen reads it back off [`View::fov_y`]. It was
+/// briefly written out twice — here and again in a shader's billboard sizing — which is how a "one pixel"
+/// floor silently stops being one pixel.
+pub const DEFAULT_FOV_Y: f64 = 0.9;
+
 /// One frame's camera outputs (see `FlyCamera::view`).
 #[derive(Clone, Copy, Debug)]
 pub struct View {
@@ -24,6 +30,8 @@ pub struct View {
     pub east: DVec3,
     pub alt_disp: f64,
     pub horizon: f64,
+    /// The vertical field of view this frame was projected with (radians) — so no one has to guess it.
+    pub fov_y: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -106,10 +114,81 @@ impl FlyCamera {
         let globe_regime = t * t * (3.0 - 2.0 * t);
         let near_frac = 0.03 + 0.45 * globe_regime;
         let near = (alt_disp * near_frac).clamp(1e-6, 0.5).min(far * 0.5);
-        let proj = DMat4::perspective_rh(0.9, aspect.max(1e-3), near, far);
+        let proj = DMat4::perspective_rh(DEFAULT_FOV_Y, aspect.max(1e-3), near, far);
         let vp_abs = (proj * DMat4::look_at_rh(eye, eye + fwd, up_view)).as_mat4();
         let vp_rel = (proj * DMat4::look_at_rh(DVec3::ZERO, fwd, up_view)).as_mat4();
-        View { vp_abs, vp_rel, eye, up, north, east, alt_disp, horizon }
+        View { vp_abs, vp_rel, eye, up, north, east, alt_disp, horizon, fov_y: DEFAULT_FOV_Y }
+    }
+
+    // --- an externally driven camera ---
+
+    /// **A camera POSE, as something other than this camera can supply it** (Robin, 2026-07-24: *"can we
+    /// feed camera coordinates, FOV to engine? … a different thread could drive its position, framing"*).
+    ///
+    /// `FlyCamera` is ONE way to arrive at a camera: it turns lat/lon/altitude/yaw/pitch into an eye and a
+    /// direction. A renderer needs none of that — it needs an eye, a direction, an up and a field of view.
+    /// Separating the two means whatever computes the pose does not have to be this struct, does not have
+    /// to be a scene, and does not have to run on the frame that consumes it: following a meteor down,
+    /// scripting a fly-through, or watching an input device on another thread all become the same thing —
+    /// something hands the engine a pose.
+    ///
+    /// `eye`/`forward`/`up` are in DISPLAY units and the planet-centred frame (the frame `View::eye` is in,
+    /// so a caller can read one back, adjust it, and hand it in). `alt_m` is the height above the local
+    /// ground — the LOD machinery is driven by altitude, so a pose has to say where the ground is rather
+    /// than leave it to be guessed.
+    ///
+    /// `nearest_m` is the distance to the closest thing worth seeing. It exists because the fly camera
+    /// derives its near plane from ALTITUDE — reasonable when the nearest visible surface is the ground
+    /// under you, and badly wrong otherwise. MEASURED: riding 82 m behind a fragment at 218 km altitude put
+    /// the near plane 104 km away and clipped the very thing the camera was following, leaving a black
+    /// screen with a working HUD. The engine is the one that knows how close its own matter is, so it is
+    /// the one that answers this (Robin: the engine *"gets to track what is observed (and render it) based
+    /// on where it is told camera pose/fov is"*).
+    #[allow(clippy::too_many_arguments)]
+    pub fn view_from_pose(
+        eye: DVec3,
+        forward: DVec3,
+        up_hint: DVec3,
+        fov_y: f64,
+        r_disp: f64,
+        ds: f64,
+        aspect: f64,
+        alt_m: f64,
+        nearest_m: f64,
+    ) -> View {
+        let radial = eye.normalize_or(DVec3::Y);
+        let (lat, lon) = crate::geo::lat_lon_from_dir(radial);
+        let (up, north, east) = crate::geo::tangent_frame(lat, lon);
+        let fwd = forward.normalize_or(-up);
+        // Keep the up-vector honest even if the caller hands in one that is parallel to the view.
+        let up_view = {
+            let u = up_hint.normalize_or(up);
+            let ortho = u - fwd * u.dot(fwd);
+            ortho.normalize_or(if fwd.dot(up).abs() > 0.99 { north } else { up })
+        };
+        let alt_disp = (alt_m * ds).max(1e-9);
+        let h = alt_disp.max(1e-9);
+        let horizon = (h * (h + 2.0 * r_disp)).sqrt();
+        let far = horizon * 1.4;
+        // The near plane follows the CLOSEST thing rather than the altitude — but only so far. One f32
+        // depth range cannot hold an eighty-metre fragment AND a six-thousand-kilometre planet: pushing
+        // `near` down to the fragment collapsed the precision and the globe stopped drawing at all (a
+        // starfield and a working HUD, with no Earth). So the ratio is bounded: `near` never drops below a
+        // ten-thousandth of the altitude, which keeps the world renderable and means matter closer than
+        // that is clipped instead.
+        //
+        // FLAGGED, with the real fix named: this is what DEPTH PARTITIONING solves — near geometry in its
+        // own pass with its own range, which is also what `vp_rel` already exists for on the ground cap
+        // (planetary coordinates in f32). Until that lands, a viewer wanting a close chase has to stand
+        // proportionally further back as it climbs, and the engine's one-pixel sampling floor is what keeps
+        // small matter visible when it does.
+        let alt_disp = alt_disp.max(1e-9);
+        let closest = nearest_m.max(0.01).min(alt_m.max(0.01)) * ds;
+        let near = (closest * 0.2).max(alt_disp * 1.0e-4).clamp(1e-9, 0.5).min(far * 0.5);
+        let proj = DMat4::perspective_rh(fov_y.max(1e-3), aspect.max(1e-3), near, far);
+        let vp_abs = (proj * DMat4::look_at_rh(eye, eye + fwd, up_view)).as_mat4();
+        let vp_rel = (proj * DMat4::look_at_rh(DVec3::ZERO, fwd, up_view)).as_mat4();
+        View { vp_abs, vp_rel, eye, up, north, east, alt_disp, horizon, fov_y }
     }
 
     // --- input deltas ---

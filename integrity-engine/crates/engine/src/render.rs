@@ -20,6 +20,7 @@
 
 #![allow(dead_code)] // each scene uses a different subset; wasm-only consumers are invisible natively
 
+use crate::gpu_layout::GpuParticle;
 use crate::mesher::{Mesh, Vertex};
 
 pub(crate) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -318,6 +319,227 @@ impl StarField {
             cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, 1.0],
             cam_pc: [cam_pc.x, cam_pc.y, cam_pc.z, (viewport_w / viewport_h.max(1.0)).max(1e-6)],
             params: [radius, 2.2, viewport_h.max(1.0), exposure],
+        };
+        queue.write_buffer(&self.uni, 0, bytemuck::bytes_of(&u));
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind, &[]);
+        pass.set_vertex_buffer(0, self.instances.slice(..));
+        pass.draw(0..6, 0..self.count);
+    }
+}
+
+/// **One piece of matter the engine is holding, as it must be drawn** — and nothing more.
+///
+/// Every field is PHYSICAL: where it is, how fast, how big, what it is made of, how hot. There is no
+/// colour here, no brightness, no "effect type". The picture is DERIVED from these (Law VI: physics
+/// drives the render), which is why the derivation belongs to the engine and not to whoever is holding
+/// a canvas.
+///
+/// The reason this type exists: a scene was deciding what a meteor looks like. `ground_scene` built
+/// `GpuParticle`s twice — once for grains, once for meteors in flight — reading albedo out of the
+/// material table and calling the incandescence law itself, and a third copy would have been needed for
+/// the entry trail, and a fourth for a swarm. Each copy is a place a scene can quietly disagree with the
+/// physics about what is real. Now the engine answers "what am I holding?" and a scene's only job is to
+/// put it on the screen — so a scene that can draw ANY of the engine's matter can draw ALL of it, which
+/// is what makes a capability like the meteor swarm (docs/59) work in a scene that knows nothing about
+/// meteors.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Drawn {
+    /// Position, in the scene's own frame (centred world coords).
+    pub pos: glam::Vec3,
+    pub vel: glam::Vec3,
+    /// Its real radius (m) — a grain's contact radius, a body's radius, a vapour parcel's expansion into
+    /// the local air. Size is matter, not a sprite scale.
+    pub radius_m: f32,
+    /// Index into the material catalogue — what it IS. Its colour is that material's own measured albedo.
+    pub material: usize,
+    /// Temperature (K). What it glows AT; nothing glows because it was designated glowing.
+    pub temp_k: f32,
+    /// Settled matter, as opposed to matter in flight. Physical state, carried for the solver's use.
+    pub resting: bool,
+}
+
+impl GpuParticle {
+    /// The ONE physics→instance mapping. Colour is the material's own measured albedo, from the same
+    /// catalogue row the physics reads, and emission is the incandescence of its real temperature — so a
+    /// grain, a meteor, and the vapour it shed are drawn by one rule rather than three.
+    ///
+    /// (Incandescence still goes through `emission::incandescence`, the ramp the scenes already used, NOT
+    /// `blackbody::blackbody_srgb`. Collapsing those two curves is docs/46 row 13 and changes how every
+    /// hot thing looks, so it needs its own rig evidence — this is a consolidation, not a repaint.)
+    pub(crate) fn of_matter(d: &Drawn, mats: &[crate::materials::Material]) -> Self {
+        GpuParticle {
+            offset: d.pos.to_array(),
+            u: 0.0,
+            vel: d.vel.to_array(),
+            resting: if d.resting { 1.0 } else { 0.0 },
+            color: mats.get(d.material).map(|m| m.albedo).unwrap_or([0.5, 0.5, 0.5]),
+            material: d.material as f32,
+            emission: crate::emission::incandescence(d.temp_k),
+            rho: 0.0,
+            radius: d.radius_m,
+            _p0: 0.0,
+            _p1: 0.0,
+            _p2: 0.0,
+        }
+    }
+}
+
+/// Uniforms for [`MatterField`] — matches `matter.wgsl`'s `Cam`.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct MatterUniforms {
+    view_proj: [[f32; 4]; 4],
+    /// x = DISPLAY_SCALE (m → display units), y/z = projection x/y scale, w = one pixel as an NDC
+    /// half-extent (2/viewport_height).
+    params: [f32; 4],
+}
+
+/// **A scene-agnostic renderer for the engine's own matter** (docs/50 render path, docs/59).
+///
+/// The counterpart of [`StarField`], and deliberately shaped like it: a scene holds one, hands it the
+/// `Drawn` items the engine reported (already mapped to the shared [`GpuParticle`] instance layout), and
+/// draws. Nothing here knows what the matter IS — a grain, a body in flight, a parcel of shed vapour —
+/// which is precisely what lets a capability like the meteor swarm appear in a scene that was never
+/// taught about meteors.
+pub(crate) struct MatterField {
+    pipeline: wgpu::RenderPipeline,
+    /// One buffer, rewritten each frame.
+    ///
+    /// A RING of three was tried here and **measured no improvement**, so it was removed rather than kept
+    /// as plausible-looking complexity. The stall it was meant to fix (roughly one frame per second taking
+    /// 450–520 ms while the median was 1.5 ms) turned out to be an artifact of the RIG: `scripts/rig.sh`
+    /// runs with `--disable-frame-rate-limit`, so the page rendered at 170–350 fps and pushed several
+    /// times more per second through `queue.write_buffer` than any vsynced browser will. Paced at ~60 fps
+    /// the same scene never exceeds ~10 ms and never stalls at all. Recorded because the ablation ladder
+    /// that found it is reusable: upload-only stalled as badly as upload+draw, and with the upload skipped
+    /// there were no stalls — which priced the write, not the physics and not the draw.
+    instances: wgpu::Buffer,
+    capacity: u32,
+    count: u32,
+    uni: wgpu::Buffer,
+    bind: wgpu::BindGroup,
+}
+
+impl MatterField {
+    pub(crate) fn new(device: &wgpu::Device, format: wgpu::TextureFormat, capacity: u32) -> Self {
+        let instances = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("matter-instances"),
+            size: (capacity as usize * std::mem::size_of::<GpuParticle>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let uni = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("matter-uniforms"),
+            size: std::mem::size_of::<MatterUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("matter-bind-layout"),
+            entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT)],
+        });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("matter-bind"),
+            layout: &layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: uni.as_entire_binding() }],
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("matter"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/matter.wgsl").into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("matter-pipeline-layout"),
+            bind_group_layouts: &[&layout],
+            push_constant_ranges: &[],
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("matter"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                // Straight into `GpuParticle`: offset @0, color @32, emission @48, radius @64.
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<GpuParticle>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[
+                        wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
+                        wgpu::VertexAttribute { offset: 32, shader_location: 1, format: wgpu::VertexFormat::Float32x3 },
+                        wgpu::VertexAttribute { offset: 48, shader_location: 2, format: wgpu::VertexFormat::Float32x3 },
+                        wgpu::VertexAttribute { offset: 64, shader_location: 3, format: wgpu::VertexFormat::Float32 },
+                    ],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    // Additive: incandescent matter ADDS light to whatever is behind it, which is what
+                    // emission means. A trail over the night side brightens it; it does not replace it.
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent::OVER,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            // Occluded by the planet (a meteor behind Earth is behind Earth), but writes no depth: these
+            // are small emissive marks, not surfaces for anything else to sort against.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview: None,
+            cache: None,
+        });
+        Self { pipeline, instances, capacity, count: 0, uni, bind }
+    }
+
+    /// Hand it this frame's matter. Silently drawing only what fits would hide matter, so the overflow is
+    /// reported to the caller's log rather than swallowed.
+    pub(crate) fn upload(&mut self, queue: &wgpu::Queue, inst: &[GpuParticle]) {
+        let n = inst.len().min(self.capacity as usize);
+        if n > 0 {
+            queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&inst[..n]));
+        }
+        self.count = n as u32;
+    }
+
+    pub(crate) fn drawn_count(&self) -> u32 {
+        self.count
+    }
+
+    /// `proj` is the projection matrix's (x, y) scales, `viewport_h` the height in pixels — together they
+    /// are what lets the shader hold a mark at one pixel when the matter itself is smaller than that.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        queue: &wgpu::Queue,
+        view_proj: glam::Mat4,
+        display_scale: f32,
+        proj: (f32, f32),
+        viewport_h: f32,
+    ) {
+        if self.count == 0 {
+            return;
+        }
+        let u = MatterUniforms {
+            view_proj: view_proj.to_cols_array_2d(),
+            params: [display_scale, proj.0, proj.1, 2.0 / viewport_h.max(1.0)],
         };
         queue.write_buffer(&self.uni, 0, bytemuck::bytes_of(&u));
         pass.set_pipeline(&self.pipeline);

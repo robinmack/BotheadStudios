@@ -160,6 +160,67 @@ impl BarnesHut {
             .collect()
     }
 
+    /// Softened gravitational POTENTIAL at every body: `φ_i = −Σ_{j≠i} G·m_j/√(|d|²+s²)`, grouped via the
+    /// same tree and the same opening angle as [`Self::accelerations`]. This is the exact partner of that
+    /// force law — `−dφ/dr` of `−Gm/√(r²+s²)` is `Gm·r/(r²+s²)^{3/2}` — so potential and force cannot
+    /// disagree about what softening means.
+    ///
+    /// Added for de-resolution (docs/44): deciding whether a clump is self-bound needs its binding ENERGY,
+    /// and the exact all-pairs sum is O(k²) — which explodes precisely when a clump UNITES and k becomes
+    /// large, i.e. exactly the case the test exists to catch (measured: 1.9 ms at 500 members, 492 ms at
+    /// 8,000). Brute-force below [`BRUTE_BELOW`], like everything else here.
+    pub fn potentials(&self, pos: &[DVec3], mass: &[f64]) -> Vec<f64> {
+        if self.nodes.is_empty() {
+            let mut phi = vec![0.0f64; self.n];
+            for i in 0..self.n {
+                for j in 0..self.n {
+                    if i == j {
+                        continue;
+                    }
+                    let r2 = (pos[j] - pos[i]).length_squared() + self.soft2;
+                    phi[i] -= G * mass[j] / r2.sqrt();
+                }
+            }
+            return phi;
+        }
+        (0..self.n).map(|i| self.potential_on(i, 0, pos, mass)).collect()
+    }
+
+    /// The set's own gravitational binding energy, `−Σ_{i<j} G·mᵢ·mⱼ/√(rᵢⱼ²+s²)`, as `½ Σ mᵢ φᵢ` — the
+    /// factor ½ undoing the double count of each pair. Negative for any real cloud.
+    pub fn self_potential_energy(&self, pos: &[DVec3], mass: &[f64]) -> f64 {
+        let phi = self.potentials(pos, mass);
+        0.5 * (0..self.n).map(|i| mass[i] * phi[i]).sum::<f64>()
+    }
+
+    /// Potential at body `i` from the subtree rooted at `node` — mirrors [`Self::accel_on`] exactly,
+    /// including the `(2·half)/dist < θ` opening test, so the two never diverge about which nodes opened.
+    fn potential_on(&self, i: usize, node: usize, pos: &[DVec3], mass: &[f64]) -> f64 {
+        let nd = &self.nodes[node];
+        let mut phi = 0.0f64;
+        if !nd.leaf.is_empty() {
+            for &j in &nd.leaf {
+                if j != i {
+                    let r2 = (pos[j] - pos[i]).length_squared() + self.soft2;
+                    phi -= G * mass[j] / r2.sqrt();
+                }
+            }
+            return phi;
+        }
+        let d = nd.com - pos[i];
+        let r2 = d.length_squared() + self.soft2;
+        let dist = r2.sqrt();
+        if (2.0 * nd.half) / dist < self.theta {
+            return -G * nd.mass / dist;
+        }
+        for &c in &nd.children {
+            if c != EMPTY {
+                phi += self.potential_on(i, c, pos, mass);
+            }
+        }
+        phi
+    }
+
     /// Acceleration on body `i` from the subtree rooted at `node` (iterative-free recursion over the tree).
     fn accel_on(&self, i: usize, node: usize, pos: &[DVec3], mass: &[f64]) -> DVec3 {
         let nd = &self.nodes[node];
@@ -200,6 +261,64 @@ mod tests {
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+
+    // docs/44: the binding energy de-resolution needs. Same discipline as the acceleration test above —
+    // the accelerated answer is PINNED to the exact O(k^2) sum, so speed cannot change whether a clump is
+    // judged self-bound. Cloud > BRUTE_BELOW so the TREE path actually runs.
+    #[test]
+    fn barnes_hut_potential_matches_brute_force() {
+        let mut s = 0x5EED_9001u64;
+        let n = 1500;
+        let pos: Vec<DVec3> = (0..n)
+            .map(|_| DVec3::new(splitmix(&mut s), splitmix(&mut s), splitmix(&mut s)) * 1.0e6)
+            .collect();
+        let mass: Vec<f64> = (0..n).map(|_| 1.0e18 * (0.5 + splitmix(&mut s))).collect();
+        let soft = 5.0e3;
+
+        // Exact reference: -Sum_{i<j} G mi mj / sqrt(r^2 + s^2).
+        let mut brute_pe = 0.0f64;
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let r2 = (pos[j] - pos[i]).length_squared() + soft * soft;
+                brute_pe -= G * mass[i] * mass[j] / r2.sqrt();
+            }
+        }
+        let bh = BarnesHut::build(&pos, &mass, 0.5, soft);
+        let pe = bh.self_potential_energy(&pos, &mass);
+
+        assert!(brute_pe < 0.0, "a real cloud is gravitationally bound to itself");
+        let rel = ((pe - brute_pe) / brute_pe).abs();
+        assert!(rel < 0.01, "BH potential energy must match brute force to <1% (got {rel:.5}, {pe:.6e} vs {brute_pe:.6e})");
+
+        // theta -> 0 opens every node, so the tree answer must converge onto the exact sum, not merely sit
+        // near it. This is what makes the approximation a DECLARED one with a named resolved counterpart.
+        let exact = BarnesHut::build(&pos, &mass, 0.0, soft).self_potential_energy(&pos, &mass);
+        let rel_exact = ((exact - brute_pe) / brute_pe).abs();
+        assert!(rel_exact < 1.0e-9, "theta=0 must reproduce brute force exactly (got {rel_exact:.3e})");
+    }
+
+    // The brute-force path (n < BRUTE_BELOW) and the tree path must agree about the same small cloud —
+    // otherwise the dispatch itself would be a second answer.
+    #[test]
+    fn potential_brute_path_matches_the_exact_sum() {
+        let mut s = 0x1357_2468u64;
+        let n = 200; // below BRUTE_BELOW -> no tree is built
+        let pos: Vec<DVec3> = (0..n)
+            .map(|_| DVec3::new(splitmix(&mut s), splitmix(&mut s), splitmix(&mut s)) * 1.0e5)
+            .collect();
+        let mass: Vec<f64> = (0..n).map(|_| 2.0e18).collect();
+        let soft = 1.0e3;
+        let mut brute_pe = 0.0f64;
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let r2 = (pos[j] - pos[i]).length_squared() + soft * soft;
+                brute_pe -= G * mass[i] * mass[j] / r2.sqrt();
+            }
+        }
+        let pe = BarnesHut::build(&pos, &mass, 0.5, soft).self_potential_energy(&pos, &mass);
+        assert!(((pe - brute_pe) / brute_pe).abs() < 1.0e-12, "brute path must be exact: {pe:.6e} vs {brute_pe:.6e}");
     }
 
     #[test]

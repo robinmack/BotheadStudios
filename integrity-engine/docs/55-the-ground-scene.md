@@ -52,16 +52,24 @@ voxels     : 643269 -> 663614                          <- pristine was 663642
 Matter is **perfectly conserved** — and that is exactly why the crater fills in. The ejecta falls straight
 back into the hole it came from.
 
-**Root cause, and it is already recorded in docs/32 §4:** `MatterSim::step` is the CPU *settle-only*
-stepper — *"no grain-grain contact on CPU"*. Grains cannot push each other outward, so there is no ejecta
-blanket: they fall, stack, and refill the excavation exactly. The GPU granular path
-(`particle_step.wgsl` + `gpu_particles`) DOES have grain-grain contact, and it is the path that produced
-the measured local ejecta blanket (JOURNAL 2026-07-19, spread 5–7 km → 82 m).
+**Root cause — and it is TWO mechanisms, not one (corrected 2026-07-23; the original text named only the
+first):**
 
-**So the next increment is one thing, and it pays off twice:** step this scene's grains through the GPU
-granular container instead of the CPU stepper. That gives a real ejecta blanket and therefore a crater
-that persists (Robin's "dissolve when at rest becoming part of a bump map"), and it gives `gpu_particles`
-the visible consumer it has lacked since terrain was deleted.
+1. `MatterSim::step` is the CPU *settle-only* stepper — *"no grain-grain contact on CPU"*. Grains cannot
+   push each other outward, so there is no ejecta blanket: they fall and stack.
+2. Even with a blanket, `deposit_resting_grain` deposits every settled grain into its column's **air-start
+   voxel — which in an excavated column is the crater floor** (`matter.rs`, "stacks / refills the crater").
+   So any grain that comes to rest over the hole re-solidifies it from the bottom, independently of (1).
+
+Both must be addressed; fixing only the blanket leaves (2).
+
+**On the forward plan — SUPERSEDED (2026-07-23).** This doc originally proposed stepping the grains through
+the GPU *granular* container (`particle_step.wgsl` + `gpu_particles`). The engine instead took the SPH
+**cap-on-bulk** route (docs/39): a terrestrial meteor is a moon-drop scaled down, so the ground gets the
+same `promote_ground_cap` + `set_bulk_planar` + SPH machinery the space impact uses — one primitive at both
+scales (docs/46), which the separate granular path would have forked. Those two foundations
+(`promote_ground_cap`, planar bulk mode) are built and tested but NOT yet wired into this scene (it still has
+no `GpuSph`), so the crater still does not persist as of this writing — the plan changed, the gap did not.
 
 Also open: the crater reads as voxel terraces rather than a bowl (surface-nets on a 1 m lattice at a 96 m
 patch), and the meteor currently appears at the surface rather than flying in.

@@ -142,9 +142,210 @@ pub fn ground_effect(energy: f64, surface_strength: f64, binding: f64) -> Ground
     }
 }
 
+/// One piece of a body that came apart, described relative to the parent's centre of mass at the moment
+/// of disruption. Mass and radius are matter; position and velocity are where the disruption put it.
+#[derive(Clone, Copy, Debug)]
+pub struct Fragment {
+    pub mass_kg: f64,
+    /// Radius (m) at the parent's own density — `r = (3m/4πρ)^⅓`, not a size anyone assigned.
+    pub radius_m: f64,
+    /// Position relative to the parent's centre at the time asked for (m).
+    pub rel_pos: glam::DVec3,
+    /// Velocity relative to the parent's centre of mass (m/s).
+    pub rel_vel: glam::DVec3,
+}
+
+/// `n` directions spread as evenly over the sphere as `n` directions can be — the golden-angle (Fibonacci)
+/// spiral: `z` stepped uniformly through [−1, 1] and longitude advanced by the golden angle each time.
+///
+/// A disruption throws fragments every way at once, and what that needs is ISOTROPY, not randomness. A
+/// random draw of a dozen directions clumps visibly and differs run to run; this is uniform by
+/// construction, needs no seed, and is identical every run — which is what lets a scene fly back to the
+/// same crater it watched form (docs/59). The golden angle is the one that leaves no gaps: any other
+/// rotation per step eventually repeats and stripes the sphere.
+pub fn isotropic_directions(n: usize) -> Vec<glam::DVec3> {
+    if n == 0 {
+        return Vec::new();
+    }
+    if n == 1 {
+        return vec![glam::DVec3::Z];
+    }
+    // π(3 − √5): the golden angle, the irrational turn that never lines up with itself.
+    let golden = std::f64::consts::PI * (3.0 - 5.0_f64.sqrt());
+    (0..n)
+        .map(|i| {
+            // Midpoint sampling of z so the first and last points are not both stuck at the poles.
+            let z = 1.0 - 2.0 * (i as f64 + 0.5) / n as f64;
+            let r = (1.0 - z * z).max(0.0).sqrt();
+            let theta = golden * i as f64;
+            glam::DVec3::new(r * theta.cos(), r * theta.sin(), z)
+        })
+        .collect()
+}
+
+/// **A body that came apart** — the inverse of accretion, and what a meteor SWARM is (docs/59).
+///
+/// [`ground_effect`] already decides WHETHER a body is disrupted (its impact energy reaching its own
+/// gravitational binding energy). This says what disruption LEAVES, and every number in it is either the
+/// parent's own matter or a sourced measurement:
+///
+/// - **How the mass divides.** A collisional fragment population follows a power law. Dohnanyi (1969,
+///   *JGR* 74, 2531) gives the steady-state differential mass distribution `n(m) ∝ m^(−11/6)`, so the
+///   cumulative is `N(>m) ∝ m^(−5/6)` and the i-th largest fragment carries `m_i ∝ i^(−6/5)`. The
+///   exponent is that ratio, not a fitted decimal. Masses are then normalised to sum EXACTLY to the
+///   parent's — conservation is what removes the remaining freedom, so no fragment size is chosen.
+///   *Flagged:* Dohnanyi's slope describes a collisional cascade in steady state; a SINGLE disruption's
+///   slope depends on how far past the threshold it was (`Q/Q*_D`). The resolved computation this stands
+///   in for is simulating the fragmentation itself, which this engine can already do in principle — a
+///   particalized body torn apart by a real impact. Until a scene needs that, this is the declared form.
+///
+/// - **How fast they separate.** At the disruption threshold — the condition [`ground_effect`] tests,
+///   energy just reaching binding energy — the pieces are just barely unbound, so the scale of the
+///   separation is the parent's own escape speed `√(2GM/R)`. That is the SAME escape-speed criterion
+///   `accretion::Body::absorbs` uses to decide whether a straggler stays; one law, read in both
+///   directions. *Flagged:* a super-catastrophic disruption imparts more than the threshold.
+///
+/// - **Momentum.** Disruption is an INTERNAL process: it cannot move the parent's centre of mass, so
+///   `Σ m·v = 0` exactly, and the swarm as a whole still flies the trajectory the parent was on. That
+///   constraint is not decoration — isotropic directions with UNEQUAL masses do not satisfy it on their
+///   own (the heaviest fragment would drag the centre of mass off course), so the velocities are taken in
+///   the centre-of-momentum frame: `v_i = v_esc·(d̂_i − d̄)` with `d̄` the mass-weighted mean direction.
+///   The resulting spread in speed is therefore a CONSEQUENCE of conservation, not an assumed law — the
+///   heavier pieces come out slower, which is also what disruption experiments find. *Flagged:* the
+///   measured size–speed relation from laboratory catastrophic disruption is the refinement that would
+///   replace conservation-alone as the source of that spread.
+///
+/// - **How far apart they are.** `v·t` over `since_s`, the time since the body came apart. The swarm's
+///   spread is therefore a CONSEQUENCE of when it broke up, never a declared width.
+///
+/// `since_s` and the parent's matter are the initial conditions; everything else here follows from them.
+pub fn disrupt(mass_kg: f64, radius_m: f64, n: usize, since_s: f64) -> Vec<Fragment> {
+    if n == 0 || mass_kg <= 0.0 || radius_m <= 0.0 {
+        return Vec::new();
+    }
+    const G: f64 = crate::orbit::G;
+    // Dohnanyi: cumulative N(>m) ∝ m^(−5/6) ⇒ the i-th largest goes as i^(−6/5).
+    const RANK_EXPONENT: f64 = -6.0 / 5.0;
+    let weights: Vec<f64> = (1..=n).map(|i| (i as f64).powf(RANK_EXPONENT)).collect();
+    let total_w: f64 = weights.iter().sum();
+    // The parent's own density — what the pieces are made of, so their radii follow from their masses.
+    let density = mass_kg / ((4.0 / 3.0) * std::f64::consts::PI * radius_m.powi(3));
+    // Just-unbound: the escape speed of the body that came apart.
+    let v_esc = (2.0 * G * mass_kg / radius_m).sqrt();
+    let dirs = isotropic_directions(n);
+    let masses: Vec<f64> = weights.iter().map(|w| mass_kg * w / total_w).collect();
+    // The mass-weighted mean direction. Subtracting it puts the velocities in the parent's
+    // centre-of-momentum frame, so `Σ m·v = 0` exactly and the disruption moves nothing but the pieces.
+    let mean_dir: glam::DVec3 =
+        masses.iter().zip(&dirs).map(|(m, d)| *d * (*m / mass_kg)).sum();
+    masses
+        .iter()
+        .zip(&dirs)
+        .map(|(&m, &dir)| {
+            let rel_vel = (dir - mean_dir) * v_esc;
+            Fragment {
+                mass_kg: m,
+                radius_m: (3.0 * m / (4.0 * std::f64::consts::PI * density)).cbrt(),
+                // From where it sat on the parent's surface, drifting since.
+                rel_pos: dir * radius_m + rel_vel * since_s.max(0.0),
+                rel_vel,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A disrupted body is still the same body.** Whatever the power law does to the shares, the
+    /// pieces add back up to what came apart — that conservation is what leaves no room to choose a
+    /// fragment size.
+    #[test]
+    fn disruption_conserves_the_parents_mass_and_leaves_it_moving_nowhere() {
+        // A 300 m stony asteroid at basalt-ish density.
+        let (r, rho) = (300.0_f64, 2900.0_f64);
+        let m = rho * (4.0 / 3.0) * std::f64::consts::PI * r.powi(3);
+        for n in [2usize, 7, 12, 60] {
+            let frags = disrupt(m, r, n, 6.0 * 3600.0);
+            assert_eq!(frags.len(), n);
+            let sum: f64 = frags.iter().map(|f| f.mass_kg).sum();
+            assert!((sum / m - 1.0).abs() < 1e-12, "n={n}: mass conserved ({sum:.6e} vs {m:.6e})");
+
+            // Disruption is INTERNAL: it cannot move the centre of mass, so the momentum closes to zero
+            // exactly — which is why the swarm as a whole still flies the parent's declared trajectory and
+            // the approach velocity stays an honest IC. Isotropic directions alone do NOT give this when
+            // the masses differ; the centre-of-momentum construction is what does.
+            let p: glam::DVec3 = frags.iter().map(|f| f.rel_vel * f.mass_kg).sum();
+            let scale = m * frags.iter().map(|f| f.rel_vel.length()).fold(0.0, f64::max);
+            assert!(p.length() / scale < 1e-14, "n={n}: momentum closes ({:.3e} relative)", p.length() / scale);
+
+            // Every piece is real matter at the parent's density.
+            for f in &frags {
+                let implied = f.mass_kg / ((4.0 / 3.0) * std::f64::consts::PI * f.radius_m.powi(3));
+                assert!((implied / rho - 1.0).abs() < 1e-9, "fragment keeps the parent's density");
+            }
+        }
+    }
+
+    /// **The size spread is the sourced power law, and the swarm's spread is the clock.** Neither is a
+    /// width someone dialled in: one comes from Dohnanyi's exponent, the other from how long ago the body
+    /// came apart.
+    #[test]
+    fn fragments_follow_the_collisional_power_law_and_spread_with_time() {
+        let (r, rho) = (300.0_f64, 2900.0_f64);
+        let m = rho * (4.0 / 3.0) * std::f64::consts::PI * r.powi(3);
+        let frags = disrupt(m, r, 12, 0.0);
+
+        // Ranked heaviest-first, and the ratio between ranks is i^(-6/5) — checked against the law, not
+        // against a recorded number.
+        for i in 1..frags.len() {
+            assert!(frags[i].mass_kg < frags[i - 1].mass_kg, "fragment {i} is smaller than {}", i - 1);
+            let expect = ((i + 1) as f64 / i as f64).powf(-6.0 / 5.0);
+            let got = frags[i].mass_kg / frags[i - 1].mass_kg;
+            assert!((got / expect - 1.0).abs() < 1e-9, "rank {i}: {got:.6} vs {expect:.6}");
+        }
+        // One dominant remnant with a tail of smaller pieces — what the exponent implies, ~39% at n=12.
+        let biggest = frags[0].mass_kg / m;
+        assert!((0.3..0.5).contains(&biggest), "largest remnant is {:.0}% of the parent", biggest * 100.0);
+
+        // The separation SCALE is the parent's escape speed (0.38 m/s for this asteroid). Individual
+        // speeds spread around it because momentum must close, and they spread the way conservation says:
+        // the heaviest piece is the slowest.
+        let v_esc = (2.0 * crate::orbit::G * m / r).sqrt();
+        for f in &frags {
+            let ratio = f.rel_vel.length() / v_esc;
+            assert!((0.3..2.0).contains(&ratio), "speeds are of order the escape speed (got {ratio:.2})");
+        }
+        assert!(
+            frags[0].rel_vel.length() < frags[frags.len() - 1].rel_vel.length(),
+            "the heaviest fragment leaves slowest — momentum conservation, not an assumed size-speed law"
+        );
+        let extent = |t: f64| {
+            let f = disrupt(m, r, 12, t);
+            f.iter().map(|x| x.rel_pos.length()).fold(0.0, f64::max)
+        };
+        let (a_day, a_week) = (extent(86_400.0), extent(7.0 * 86_400.0));
+        assert!(a_day > 30_000.0, "a day out the swarm is tens of km across, got {a_day:.0} m");
+        assert!((a_week / a_day - 7.0).abs() < 0.1, "and it spreads linearly in time");
+    }
+
+    /// The directions really do cover the sphere: no hemisphere is empty, and no axis is preferred.
+    /// (Grid bias is a mistake this repo has made before — see `isotropy.rs`.)
+    #[test]
+    fn the_separation_directions_are_isotropic() {
+        let dirs = isotropic_directions(200);
+        for d in &dirs {
+            assert!((d.length() - 1.0).abs() < 1e-12, "unit vectors");
+        }
+        let mean: glam::DVec3 = dirs.iter().sum::<glam::DVec3>() / dirs.len() as f64;
+        assert!(mean.length() < 0.02, "no net direction ({mean:?})");
+        // Second moments: an isotropic set has ⟨x²⟩=⟨y²⟩=⟨z²⟩=⅓, so no axis is special.
+        for (axis, v) in [("x", glam::DVec3::X), ("y", glam::DVec3::Y), ("z", glam::DVec3::Z)] {
+            let m2: f64 = dirs.iter().map(|d| d.dot(v).powi(2)).sum::<f64>() / dirs.len() as f64;
+            assert!((m2 - 1.0 / 3.0).abs() < 0.02, "{axis}: ⟨{axis}²⟩ = {m2:.4}, expected ⅓");
+        }
+    }
 
     #[test]
     fn crater_scales_with_energy_and_inversely_with_strength() {
@@ -165,7 +366,7 @@ mod tests {
     #[test]
     fn moon_shatters_but_earth_only_craters() {
         // The honest regimes, with real numbers. G, masses, radii.
-        let g = 6.674e-11;
+        let g = crate::orbit::G;
         let (m_earth, r_earth) = (5.972e24, 6.371e6);
         let (m_moon, r_moon) = (7.342e22, 1.737e6);
         let bind = |m: f64, r: f64| 0.6 * g * m * m / r;

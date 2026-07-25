@@ -1,6 +1,15 @@
 # docs/58 — The generic body: no "Earth", no "Moon", just matter
 
-**Status: in progress, 2026-07-22.** Robin: *"The engine should itself have no concept of 'Earth',
+**Status: in progress — several choices now BUILT (progress note added 2026-07-23).**
+
+> Where the 8 choices stand in code, so this doc no longer reads as an untouched plan:
+> - **#1** (mass/radius/I derive from matter): BUILT — `planet::LayeredBody::moment_of_inertia`/`from_layers`, tested.
+> - **#3** (spin is a vector `ang_mom`): BUILT on the de-resolution path — `accretion::Body.ang_mom`/`Clump.ang_mom`, conserved through `absorb`.
+> - **#4** (`particalize` reads real layers + per-material EOS): BUILT — `HydroBody::particalize`/`particalize_cap`; `accretion::sample_layers` reads the layering back out.
+> - **#5** (provenance = source index; albedo render): PARTIAL — `prov` is a generic source-body index in assembly, but the disk stats and `sph_render.wgsl` still use a hardcoded two-tone (warm/cool), NOT the source material's real albedo. The albedo half is the remaining work.
+> - **#7** (retire the CPU `Aggregate`): DONE for the scene — no scene references it; `aggregate.rs` survives only for tests. **#2, #6, #8** (role-not-name, scene-as-data, `laws.rs` name-freeness capstone) remain the open frontier.
+
+**Robin (2026-07-22):** *"The engine should itself have no concept of 'Earth',
 'Moon', just the objects and assemblies passed into it… this should work for all particles, all planets,
 etc; with the engine making particalization choices based on energy, scale of view."*
 
@@ -71,6 +80,29 @@ makes this possible — every layer material now carries its own EOS), and seeds
 `earth_pct` becomes per-source-body provenance; the render's binary warm/cool tint becomes the source
 material's real **albedo** (`materials::aggregate_albedo`), which the CPU path already computes and then
 throws away.
+
+## "It's all impact" — atmosphere as a detected collision (Robin, 2026-07-24)
+
+A body's trajectory can collide with two things, and the engine should treat both as one dispatch, the way
+it already routes body↔body collisions (`interaction::detect_swept` → `route_bodies_to_sph`):
+
+- **the atmosphere** — the FLUID branch: resolve through `atmosphere::atmospheric_step` (drag + Sutton–Graves
+  aeroheating + ablation, all material-driven; the generic body⊕air operator, built 2026-07-24, docs/48).
+- **hard matter** (ground/body) — the SOLID branch: the SPH cap-on-bulk (docs/39) or granular excavation.
+
+They **compose**: a body enters the atmosphere, ablates and slows over its path, and whatever mass survives
+forks to the hard-impact routine — *"if we impact mass, fork to the hard-matter routine."* So the engine
+should detect a swept trajectory ∩ the atmosphere shell (a body with a declared `atmosphere_mass` has a
+density shell) and apply the fluid operator, exactly as it detects a surface/body collision and applies the
+solid one. A scene never re-implements entry physics; it hands the engine a moving body and the air.
+
+**Built so far:** the fluid RESOLUTION operator (`atmospheric_step`) is generic and tested; the Ground meteor
+(`Simulation::fly_meteors`) is its first caller. **Not yet built (the realignment):** the generic
+DETECTION+DISPATCH — testing every moving body's trajectory against the atmosphere shell and forking
+fluid-vs-solid — parallel to the collision-detection unification. Consumer #2 is the SPH ejecta / a body
+re-entering from orbit, which is also where entry GLOW and the ionized-gas TRAIL (the ablated vapour made
+visible; a hypervelocity phenomenon) become physical — the Ground scene's short sub-orbital drops are far
+too brief a path to heat a solid body to incandescence, so they correctly do not glow.
 
 ## Order of work
 

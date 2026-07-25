@@ -127,18 +127,17 @@ computation it defers** (Law V) — recorded in `docs/46`'s ledger, not a quiet 
    from a scene to whoever is reading the repo. `web/rig/share_button.mjs` asserts the button exists AND
    that a real PNG lands, on every scene.
 
-1. **Work directly in the main checkout on a feature branch** — `~/workspace/BotheadStudios`. Do NOT
-   create git worktrees. (This reversed on 2026-07-19: worktrees existed to isolate parallel agents, and
-   this is a single-developer project that is not doing multi-agent work. They cost a duplicated
-   `node_modules` per tree, a shared stash stack that different sessions can pop out from under each
-   other, and branches that quietly diverge in directories nobody is looking at.) Branch, commit, push,
-   PR — never commit to `main` directly.
-   **Keep the branch list at `main` alone** (Robin, 2026-07-20, stated twice). One feature branch at a
-   time; merge it, delete it (`gh pr merge N --squash --admin --delete-branch`), and `git fetch --prune`.
-   Do NOT leave branches parked: this is a single-developer repo and there is nobody else's in-flight
-   work to preserve. Work worth keeping but not merging (measurements, evidence, a salvaged tool) becomes
-   an **annotated tag** `archive/<name>` whose message records WHY — same commits, `git show
-   archive/<name>`, zero branch clutter. Five such branches were retired this way on 2026-07-20.
+1. **Branch, commit, push, PR — never commit to `main` directly.** Work in the main checkout
+   (`~/workspace/BotheadStudios`) on a feature branch; worktrees cost a duplicated `node_modules` per
+   tree and a shared stash stack, so prefer not to create them unless a harness forces isolation.
+   **★ THIS REPO IS NO LONGER SINGLE-DEVELOPER (2026-07-24): seanreid.mail@gmail.com has joined.** Two
+   rules that rested on it are now void, and both said so explicitly:
+   - *"Keep the branch list at `main` alone… there is nobody else's in-flight work to preserve"* — there
+     is now. Do not prune, rebase, force-push or retire a branch that is not yours, and do not assume a
+     branch you did not create is abandoned.
+   - *"One feature branch at a time"* — no longer yours to enforce; more than one is now normal.
+   Work worth keeping but not merging (measurements, evidence, a salvaged tool) still becomes an
+   **annotated tag** `archive/<name>` whose message records WHY — same commits, zero branch clutter.
 2. **NEVER run `cargo fmt`** — the crate isn't rustfmt-conformant; it reformats the whole tree. Edit by
    hand. (`CONTRIBUTING.md` says otherwise for outside contributors; the working rule is do-not-run.)
 3. **Test:** `bash scripts/test.sh --fast [filter]` (inner loop) · full `bash scripts/test.sh` before any
@@ -160,6 +159,15 @@ computation it defers** (Law V) — recorded in `docs/46`'s ledger, not a quiet 
    INDEPENDENT empty rAF loop reading 1.0 fps on all three scenes is what exposed it. `web/rig/_launch.mjs`
    is the one place the flags live. True rates on the 5060 Ti (2026-07-21): **terra ~354, birth ~52,
    terrain ~23 fps.**
+   **The SAME flag has an opposite trap, and it cost a session on 2026-07-24: uncapped rendering INVENTS
+   stalls.** Terra with ~1,200 instanced billboards showed roughly one frame per second taking 450–520 ms
+   inside `render()` while the median frame was 1.5 ms — a real, reproducible, and completely misleading
+   measurement. Unpaced, the page ran at 170–350 fps and pushed several times more per second through
+   `queue.write_buffer` than any vsynced browser ever will; **paced to ~60 fps in the rig, the same scene
+   never exceeded ~10 ms and never stalled at all.** So: before believing a frame-time pathology, PACE the
+   rig's render calls to ~16.7 ms and re-measure (`web/rig/terra_vsync_check.mjs` does exactly this, and
+   the ablation ladder in `terra_price_stage.mjs` — physics / upload / draw priced separately — is the way
+   to find which stage a real cost belongs to). A number from an uncapped rig is a number about the rig.
 4. **Rig-watch every visual claim** (Law: physics drives the render — verify the render). `npm run wasm`
    + serve (`npx vite` in `web/`), start the GPU-backed X server ONCE with
    `scripts/start-render-xorg.sh`, then `scripts/rigshot.sh <scene>.mjs`. That wrapper composites a real
@@ -173,8 +181,12 @@ computation it defers** (Law V) — recorded in `docs/46`'s ledger, not a quiet 
 6. **Record changes:** design → `docs/NN` · what-happened+proof → `JOURNAL.md` (newest-first, What/Why/
    **Verified**) · consumer delta → `CHANGELOG.md [Unreleased]` · standing context → memory. A substantive
    change usually touches docs+JOURNAL+CHANGELOG together.
-7. **Merging is yours to do:** `main` carries an active ruleset (1 approving code-owner review +
-   `code_quality` + 90% `code_coverage`). Robin: *"I set these rules up for outside contributors when/if
-   we have them. Since we don't yet we have impunity."* → merge with `--admin`. Do not ask each time.
+7. **★ MERGING NOW GOES THROUGH REVIEW (changed 2026-07-24).** `main` carries an active ruleset —
+   1 approving code-owner review + `code_quality` + 90% `code_coverage` — and it was previously bypassed
+   with `--admin` on Robin's explicit reasoning: *"I set these rules up for outside contributors when/if
+   we have them. Since we don't yet we have impunity."* **We do now** (seanreid.mail@gmail.com joined), so
+   the impunity is spent: open a PR, mark it ready for review, and let the ruleset do its job. Do **not**
+   merge with `--admin`, and do not self-approve. A draft PR is the right state for work in progress; the
+   right action when it is finished is `gh pr ready N`, not `gh pr merge`.
 8. **Commit** `area: imperative subject (docs/NN)` (lowercase area). **Deploy only when asked:**
    `./scripts/deploy.sh` (full suite green first) → integrity.bothead.net (PUBLIC).

@@ -163,7 +163,89 @@ async function main(): Promise<void> {
     const shareSlot = document.createElement("div");
     Object.assign(shareSlot.style, { position: "fixed", left: "16px", bottom: "16px", zIndex: "5" });
     shareSlot.appendChild(share.button);
+    // **The meteor-swarm button.** The whole of the scene's contribution to the event: it declares the
+    // initial conditions (a mass, on a trajectory) and the engine does the rest — entry, ablation, the
+    // trail, the arrival. The same button belongs on any scene that hands the engine its bodies.
+    const swarm = document.createElement("button");
+    swarm.textContent = "Meteor swarm";
+    swarm.title = "Release a disintegrated asteroid on an entry trajectory toward the point below the camera";
+    Object.assign(swarm.style, {
+      marginLeft: "8px", padding: "8px 14px", borderRadius: "999px", cursor: "pointer",
+      border: "1px solid rgba(255,255,255,0.25)", background: "rgba(20,22,30,0.72)", color: "#eee",
+      font: "600 13px system-ui, sans-serif",
+    });
+    swarm.addEventListener("click", () => {
+      terra.launch_swarm();
+      setStatus("swarm released — entering the atmosphere");
+    });
+    shareSlot.appendChild(swarm);
+
+    // **Follow a fragment down.** The engine says where its matter IS (`heaviest_fragment` / `fragment`);
+    // this decides where to put a camera because of it and hands the engine a POSE. The engine has no
+    // notion of "following" and does not need one — which is the whole point of feeding it coordinates and
+    // a field of view rather than a mode. Nothing here touches physics; the other 1,199 fragments keep
+    // falling whether or not anyone is watching this one (Law IV).
+    let followId: number | null = null;
+    const follow = document.createElement("button");
+    follow.textContent = "Follow fragment";
+    follow.title = "Ride the largest surviving fragment down — the one the air takes least of";
+    Object.assign(follow.style, {
+      marginLeft: "8px", padding: "8px 14px", borderRadius: "999px", cursor: "pointer",
+      border: "1px solid rgba(255,255,255,0.25)", background: "rgba(20,22,30,0.72)", color: "#eee",
+      font: "600 13px system-ui, sans-serif",
+    });
+    const stopFollowing = (why: string) => {
+      followId = null;
+      follow.textContent = "Follow fragment";
+      terra.clear_camera_pose();
+      setStatus(why);
+    };
+    follow.addEventListener("click", () => {
+      if (followId !== null) { stopFollowing("camera released"); return; }
+      const f = terra.heaviest_fragment();
+      if (f.length === 0) { setStatus("nothing in flight to follow", true); return; }
+      followId = f[0];
+      follow.textContent = "Release camera";
+      setStatus("following the largest fragment");
+    });
+    shareSlot.appendChild(follow);
+    (window as unknown as { followFragment?: () => void }).followFragment = () => follow.click();
+
+    // The chase pose. Offsets are multiples of the fragment's OWN radius, so the framing is the same
+    // whether it is riding a pebble or a boulder — a declared framing choice (where to stand), not a
+    // physical quantity, and scale-free so it needs no per-scene tuning.
+    //
+    // But it cannot be arbitrarily close: one f32 depth range cannot hold both a metre-wide fragment and
+    // the planet behind it, so the engine floors its near plane at a ten-thousandth of the altitude and
+    // anything nearer is clipped. So the chase also stands back a thousandth of the altitude — 219 m at
+    // 219 km, closing to a few tens of metres near the ground — and the fragment stays visible the whole
+    // way down because the engine draws matter smaller than a pixel AS a pixel. Depth partitioning is what
+    // would let the camera sit right on its shoulder at any altitude.
+    const CHASE_BACK = 40, CHASE_UP = 12, CHASE_SIDE = 16;
+    const ALT_STANDOFF = 1 / 1000;
+    const driveFollowCamera = (): boolean => {
+      if (followId === null) return false;
+      const f = terra.fragment(followId);
+      if (f.length === 0) { stopFollowing("the fragment is down — camera released"); return false; }
+      const p = [f[1], f[2], f[3]], v = [f[4], f[5], f[6]], r = Math.max(f[7], 0.05);
+      const norm = (a: number[]) => { const L = Math.hypot(...a) || 1; return a.map((x) => x / L); };
+      const cross = (a: number[], b: number[]) => [
+        a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0],
+      ];
+      const upHat = norm(p);
+      const vHat = norm(v);
+      const sideHat = norm(cross(vHat, upHat));
+      // Stand back by whichever is larger: the fragment's own size, or the altitude's depth-range floor.
+      const scale = Math.max(r, (terra.altitude_m() * ALT_STANDOFF) / CHASE_BACK);
+      const eye = [0, 1, 2].map(
+        (i) => p[i] - vHat[i] * (CHASE_BACK * scale) + upHat[i] * (CHASE_UP * scale) + sideHat[i] * (CHASE_SIDE * scale),
+      );
+      const fwd = norm([0, 1, 2].map((i) => p[i] - eye[i]));
+      terra.set_camera_pose(eye[0], eye[1], eye[2], fwd[0], fwd[1], fwd[2], upHat[0], upHat[1], upHat[2], 0.9);
+      return true;
+    };
     document.body.appendChild(shareSlot);
+    (window as unknown as { launchSwarm?: () => void }).launchSwarm = () => terra.launch_swarm();
 
     const hud = createSimHud("earth");
     const frame = () => {
@@ -172,9 +254,13 @@ async function main(): Promise<void> {
       const right = (active("right") ? 1 : 0) - (active("left") ? 1 : 0);
       const climb = (active("up") ? 1 : 0) - (active("down") ? 1 : 0);
       // Keyboard intents plus the shared pointer scheme; both feed the same mover.
+      // While following, the pose owns the camera; manual controls resume the moment it is released.
+      const following = driveFollowCamera();
       const walk = fwd + cam.forward();
-      if (walk !== 0 || right !== 0) terra.move_tangent(walk, right);
-      if (climb !== 0) terra.zoom_alt(climb * 0.35); // ~4%/frame altitude change while held
+      if (!following) {
+        if (walk !== 0 || right !== 0) terra.move_tangent(walk, right);
+        if (climb !== 0) terra.zoom_alt(climb * 0.35); // ~4%/frame altitude change while held
+      }
       try {
         terra.render();
       } catch (err) {
@@ -196,6 +282,13 @@ async function main(): Promise<void> {
             `alt <b>${fmtAlt(terra.altitude_m())}</b> · lat <b>${terra.latitude().toFixed(2)}°</b> ` +
               `lon <b>${terra.longitude().toFixed(2)}°</b>`,
             `standing on <b>${terra.ground_biome()}</b>`,
+            ...(terra.flight_count() > 0 || terra.trail_mass_kg() > 0
+              ? [
+                  `in flight <b>${terra.flight_count()}</b> · drawn <b>${terra.drawn_count()}</b> · ` +
+                    `ablated <b>${terra.trail_mass_kg().toFixed(1)} kg</b>`,
+                ]
+              : []),
+            ...(followId !== null ? [`following fragment <b>#${followId}</b>`] : []),
           ],
           timeScale: 1,
           fps: Math.round(fps),

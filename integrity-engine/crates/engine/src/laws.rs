@@ -112,6 +112,18 @@ pub(crate) const SINGLE_SOURCE: &[(&str, &str, &str)] = &[
     // The exemplar this checker was written for, and which the first version of it did not catch: the
     // display exposure lived in `atmosphere`, in `ground_scene` and again inside `globe.wgsl`.
     ("22.0", "the display exposure — atmosphere::SUN_GAIN owns it", "atmosphere"),
+    // Universal constants are the easiest of all to retype, because everyone knows them. Found
+    // 2026-07-24: G written out in FIVE modules (`gravity`, `planet`, `damage`, `accretion`, `orbit`),
+    // and Stefan–Boltzmann in three — one of those as a truncated `5.670e-8`, so a cooling moonlet and an
+    // ablating meteor were literally radiating by different constants. Nothing had drifted far enough to
+    // fail a test, which is precisely why counting is the check and reading is not.
+    // G is exempt from the count because two SHADERS legitimately need it as a compile-time `const` and
+    // WGSL cannot read a Rust constant. Those copies are PINNED instead — see
+    // `pinned_constant_tests::the_shaders_gravitational_constant_matches_the_engines`, the same treatment
+    // `EARTH_RADIUS_M` gets: a second copy is honest only if something fails when the two disagree.
+    // ("6.674e-11", "Newton's constant G — orbit::G owns it", "orbit"),
+    ("5.670_374_419e-8", "the Stefan–Boltzmann constant σ — blackbody::SIGMA owns it", "blackbody"),
+    ("5.670e-8", "σ again, truncated — ask blackbody::SIGMA, do not retype it shorter", "blackbody"),
 ];
 
 /// Shaders count too. A constant duplicated from Rust into WGSL is the same defect and harder to see,
@@ -237,6 +249,37 @@ mod pinned_constant_tests {
     /// it cannot simply ask `planet::body("earth")` at runtime. That makes it the one legitimate second
     /// copy of a number the definitions already own, and the only honest way to keep a second copy is to
     /// pin it: if `earth.json` ever changes, this fails rather than the two drifting apart in silence.
+    /// **The GPU must fall at the same rate as the CPU.** `sph_step.wgsl` and `bh_gravity.wgsl` each
+    /// carry their own `const G` because WGSL cannot read a Rust constant — a legitimate second copy, and
+    /// therefore one that has to be pinned. If someone corrects G in `orbit.rs` and not in the shaders,
+    /// the particles would gravitate by one constant while every CPU check used another, and the two
+    /// would agree on nothing except that the tests passed.
+    #[test]
+    fn the_shaders_gravitational_constant_matches_the_engines() {
+        let mut found = 0;
+        for name in ["sph_step.wgsl", "bh_gravity.wgsl"] {
+            let path = std::path::Path::new(super::SHADER_DIR).join(name);
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let line = text
+                .lines()
+                .find(|l| l.trim_start().starts_with("const G:"))
+                .unwrap_or_else(|| panic!("{name} declares no `const G` — did it move?"));
+            let value: f64 = line
+                .split('=')
+                .nth(1)
+                .and_then(|rhs| rhs.trim().trim_end_matches(';').parse().ok())
+                .unwrap_or_else(|| panic!("{name}: cannot read G from {line:?}"));
+            assert!(
+                (value - crate::orbit::G).abs() <= f64::EPSILON * crate::orbit::G,
+                "{name} gravitates by G = {value:e}, the engine by {:e}. Change `orbit::G`, then \
+                 the shaders — never one alone.",
+                crate::orbit::G
+            );
+            found += 1;
+        }
+        assert_eq!(found, 2, "both gravity shaders must be pinned");
+    }
+
     #[test]
     fn the_earth_radius_constant_matches_the_definition() {
         let declared = crate::planet::body("earth").radius();

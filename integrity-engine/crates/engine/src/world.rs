@@ -1065,7 +1065,12 @@ fn smooth(t: f32) -> f32 {
 }
 
 /// Bilinearly-interpolated value noise at lattice frequency `freq`.
-fn value_noise(x: f32, z: f32, freq: f32) -> f32 {
+///
+/// `pub(crate)` because `surface_detail` needs the SAME deterministic lattice for sub-raster relief: a
+/// second noise implementation would give a scene two different grounds at two different LODs, and the
+/// whole point of it being hash-based rather than seeded is that looking away and back finds the same
+/// hill (Law IV — the camera changes representation, never existence).
+pub(crate) fn value_noise(x: f32, z: f32, freq: f32) -> f32 {
     let fx = x * freq;
     let fz = z * freq;
     let x0 = fx.floor() as i32;

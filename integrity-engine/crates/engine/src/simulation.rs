@@ -41,22 +41,60 @@ pub struct Simulation {
     planet_mass: f64,
     planet_radius: f64,
     surface_g: f32,
+    /// Surface air pressure (Pa) — EMERGENT from the planet's declared atmosphere mass
+    /// (`LayeredBody::surface_pressure`), the same value the sky's Rayleigh optics use. Feeds the drag a
+    /// meteor feels flying through this air (docs/48). Zero for an airless world ⇒ flight in real vacuum.
+    surface_pressure: f64,
     /// Grains ever created (impact excavation + effect materialisation).
     created_total: usize,
-    /// Meteors in flight. The engine flies and lands them; the caller only throws.
-    meteors: Vec<Meteor>,
+    /// **Matter in flight, and what it has shed** — the ENGINE's `flight::Flight`, not a list this scene
+    /// keeps. Flying a body through air is not a ground-scene behaviour, so this holds the same operation
+    /// a planet holds; only the environment below differs (docs/59).
+    flight: crate::flight::Flight,
 }
 
-/// A meteor: real matter with a mass, a material, a place and a velocity.
-#[derive(Debug, Clone, Copy)]
-pub struct Meteor {
-    pub pos: Vec3,
-    pub vel: Vec3,
-    pub mass_kg: f32,
-    pub material: usize,
-    /// Rendered radius (m), from its mass and its material's density: r = (3m/4πρ)^(1/3).
-    pub radius_m: f32,
+/// **The ground patch as a world to fly through** — the whole of what is scene-specific about entry here:
+/// gravity is uniformly down, the air is the emergent exponential column the sky is drawn from, and hard
+/// matter is the voxel terrain's own surface. A planet answers the same three questions radially, and the
+/// flight physics between them is identical (`flight::FlightEnvironment`).
+struct GroundAir<'a> {
+    world: &'a crate::world::World,
+    air: Option<&'a Material>,
+    surface_pressure: f64,
+    g: f64,
 }
+
+impl crate::flight::FlightEnvironment for GroundAir<'_> {
+    fn gravity_at(&self, _pos: glam::DVec3) -> glam::DVec3 {
+        glam::DVec3::new(0.0, -self.g, 0.0)
+    }
+    fn air_at(&self, pos: glam::DVec3) -> Option<(f64, f64)> {
+        let air = self.air?;
+        // Altitude above THE shared ground height (`World::ground_height`) — the same surface the camera
+        // collides with, so the air a body flies through and the ground it lands on cannot disagree.
+        let h = (pos.y - self.world.ground_height(pos.x as f32, pos.z as f32) as f64).max(0.0);
+        Some((
+            crate::atmosphere::air_density_at(self.surface_pressure, air, AMBIENT_TEMP_K as f64, self.g, h),
+            AMBIENT_TEMP_K as f64,
+        ))
+    }
+    fn arrival(&self, _from: glam::DVec3, to: glam::DVec3) -> Option<glam::DVec3> {
+        let ground = self.world.ground_height(to.x as f32, to.z as f32) as f64;
+        (to.y <= ground).then_some(to)
+    }
+    fn air_scale_height_m(&self) -> f64 {
+        self.air.map_or(0.0, |a| crate::atmosphere::scale_height(a, AMBIENT_TEMP_K as f64, self.g))
+    }
+}
+
+/// A meteor is just matter in flight, so it is the engine's [`crate::flight::FlyingBody`] — same mass,
+/// material, place, velocity, radius and temperature. It was a separate `f32` struct living in this scene,
+/// which is two names for one concept and, worse, a concept a scene owned.
+pub type Meteor = crate::flight::FlyingBody;
+
+/// Ambient surface temperature (K) — Earth mean, the same value the air density and sky use. A meteor
+/// starts here and heats from there. Declared (a real surface temperature), flagged as a per-world datum.
+pub const AMBIENT_TEMP_K: f32 = 288.0;
 
 impl Simulation {
     /// Build from a parsed `"ground"` world. The voxel world is the procedural surface patch; the
@@ -100,8 +138,9 @@ impl Simulation {
             planet_mass,
             planet_radius,
             surface_g,
+            surface_pressure: planet.surface_pressure(),
             created_total: 0,
-            meteors: Vec::new(),
+            flight: crate::flight::Flight::default(),
         };
         sim.apply_events();
         Ok(sim)
@@ -219,45 +258,90 @@ impl Simulation {
     ///
     /// The impact energy is ½mv² at the moment of contact — a consequence of the matter and its flight,
     /// never a dial. A caller cannot ask for "a big crater"; it can only throw a bigger or faster rock.
-    pub fn throw_meteor(&mut self, m: Meteor) {
-        self.meteors.push(m);
+    pub fn throw_meteor(&mut self, mut m: Meteor) {
+        m.temp_k = AMBIENT_TEMP_K as f64; // a fresh rock is at ambient; it heats in flight, not before
+        self.flight.introduce(m);
     }
 
     /// Meteors currently in flight (for the renderer, and so a HUD can say one is incoming).
     pub fn meteors(&self) -> &[Meteor] {
-        &self.meteors
+        self.flight.bodies()
+    }
+
+    /// The entry trail — everything the meteors have ablated away, still accounted for (docs/59). Its
+    /// parcels glow at their own temperatures; a renderer asks `blackbody::blackbody_srgb` for the colour.
+    pub fn trail(&self) -> &crate::atmosphere::Trail {
+        self.flight.trail()
+    }
+
+    /// **Everything this simulation is holding that is matter.** Bodies in flight, the vapour they have
+    /// shed, and the grains on the ground — one list, in one form (`crate::Drawn`), each item carrying
+    /// only physical facts.
+    ///
+    /// A scene draws THIS. It does not ask what a meteor is, or a trail, and so it does not need to be
+    /// taught about either — matter the engine starts holding tomorrow appears without the scene
+    /// changing. That is what lets an engine capability like the meteor swarm (docs/59) work in a scene
+    /// that knows nothing about meteors: the scene declares initial conditions and presents the result,
+    /// and never decides what the result is made of.
+    ///
+    /// **Matter in flight comes first, and that ordering is load-bearing.** A caller has a finite
+    /// instance buffer and must cut the list somewhere; settled grains are both the most numerous and the
+    /// least informative, so they are what a budget should lose. This also closes a real hole: the ground
+    /// scene used to cap the GRAINS at its instance capacity and then push meteors on top, so a full
+    /// grain buffer plus a meteor in flight wrote past the end of the buffer. Capping one list cannot
+    /// overrun it. Nothing here decides EXISTENCE — every grain is simulated whether or not it is drawn
+    /// (Law IV); this is representation under a budget, and routing that choice through
+    /// `ResolutionController` (necessity and camera distance, rather than list order) is the refinement.
+    pub fn drawn(&self) -> Vec<crate::Drawn> {
+        // The engine's own flight answers for everything aloft — bodies and the vapour they shed — using
+        // this patch's air to size each parcel. The patch itself only adds its grains.
+        let env = GroundAir {
+            world: &self.world,
+            air: self.materials.iter().find(|mm| mm.id == "air"),
+            surface_pressure: self.surface_pressure,
+            g: self.surface_g as f64,
+        };
+        let mut out = self.flight.drawn(&env, |p| p.as_vec3());
+        let grain_r = 0.5 * self.grain_size_m();
+        out.extend(self.matter.particles.iter().map(|p| crate::Drawn {
+            pos: p.pos,
+            vel: p.vel,
+            radius_m: grain_r,
+            material: p.material,
+            temp_k: p.temp_k,
+            // `resting` is the SOLVER's settle bookkeeping (`matter::Particle::resting_seconds`, private)
+            // and the grain path never fed it to the renderer — it uploaded 0.0. Kept faithful rather
+            // than quietly changed: this is a consolidation, not a behaviour edit.
+            resting: false,
+        }));
+        out
     }
 
     /// Advance every meteor in flight under the planet's gravity and impact the ones that arrive.
     /// Returns grains created this step.
     fn fly_meteors(&mut self, dt: f32) -> usize {
-        let g = Vec3::new(0.0, -self.surface_g, 0.0);
-        let mut landed: Vec<Meteor> = Vec::new();
-        let mut still: Vec<Meteor> = Vec::with_capacity(self.meteors.len());
-        for mut m in self.meteors.drain(..) {
-            m.vel += g * dt;
-            m.pos += m.vel * dt;
-            // THE shared ground height (`World::ground_height`). This asked `surface_top_voxel` — an
-            // integer voxel top — while the camera's collision shell used the bilinear surface, up to a
-            // metre apart on a slope. A meteor's contact height disagreed with the surface it landed on.
-            let ground = self.world.ground_height(m.pos.x, m.pos.z);
-            if m.pos.y <= ground {
-                landed.push(m);
-            } else {
-                still.push(m);
-            }
-        }
-        self.meteors = still;
+        // **The engine flies them; this scene only says where the ground and the air are.** Everything
+        // that used to be written out here — drag, aeroheating, ablation, shedding the trail, burning up,
+        // falling, arriving — is `flight::Flight::step`, the same code a planet runs. What is left is the
+        // one thing that really is local: a flat patch's geometry.
+        let env = GroundAir {
+            world: &self.world,
+            air: self.materials.iter().find(|mm| mm.id == "air"),
+            surface_pressure: self.surface_pressure,
+            g: self.surface_g as f64,
+        };
+        let arrivals = self.flight.step(&env, &self.materials, dt as f64);
+
         let mut created = 0;
-        for m in landed {
+        for a in arrivals {
             // Energy is ½mv² of the matter that actually arrived. Not a parameter.
-            let speed = m.vel.length();
-            let energy_j = 0.5 * m.mass_kg * speed * speed;
-            let dir = m.vel.normalize_or(Vec3::new(0.0, -1.0, 0.0));
-            let n = self.matter.impact(&mut self.world, &self.materials, m.pos, dir, energy_j);
+            let dir = a.body.vel.normalize_or(glam::DVec3::new(0.0, -1.0, 0.0)).as_vec3();
+            let n = self.matter.impact(
+                &mut self.world, &self.materials, a.at.as_vec3(), dir, a.energy_j as f32,
+            );
             log::info!(
-                "impact: {:.0} kg at {:.0} m/s = {:.2e} J -> {n} grains",
-                m.mass_kg, speed, energy_j
+                "impact: {:.0} kg at {:.0} m/s, {:.0} K surface = {:.2e} J -> {n} grains",
+                a.body.mass_kg, a.body.vel.length(), a.body.temp_k, a.energy_j
             );
             created += n;
         }
@@ -411,11 +495,14 @@ mod tests {
             let c = sim.world.center();
             let ground = sim.world.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
             sim.throw_meteor(Meteor {
-                pos: Vec3::new(0.0, ground + 60.0, 0.0),
-                vel: Vec3::new(0.0, -speed, 0.0),
-                mass_kg,
+                id: 0,
+                pos: glam::DVec3::new(0.0, (ground + 60.0) as f64, 0.0),
+                vel: glam::DVec3::new(0.0, -speed as f64, 0.0),
+                mass_kg: mass_kg as f64,
                 material: iron,
                 radius_m: 0.5,
+                temp_k: 288.0, // stamped to ambient by throw_meteor
+                skin_m: 0.0, // a fresh rock has no heated skin yet
             });
             // The ENGINE flies it and lands it; the caller never computes an impact site.
             for _ in 0..600 {
@@ -435,6 +522,147 @@ mod tests {
         assert!(fast > small, "4x the SPEED must dig more (v is squared): {fast} vs {small}");
     }
 
+    /// A meteor flies through AIR, not vacuum (docs/48). Before this the flight loop was pure ballistics —
+    /// a silent Law-V gap (the atmosphere the sky is derived from did not act on anything falling through
+    /// it). Thrown HORIZONTALLY, gravity leaves the horizontal speed untouched, so any drop in it is drag
+    /// alone — which a vacuum forbids. This is `atmosphere::drag_accel` fed by the already-emergent air
+    /// density, and it is the analytic rung of the same primitive `AirField` resolves (the c_d IOU).
+    #[test]
+    fn a_meteor_feels_atmospheric_drag_as_it_flies() {
+        let world = r#"{"name":"g","type":"ground","ground":{"camera_m":[0,30,0],"view_radius_m":2000}}"#;
+        let iron = crate::materials::index_of(&mats(), "iron");
+        // Horizontal flight, high enough that it does not land during the few steps we watch.
+        let fly = |radius_m: f32| -> f32 {
+            let mut sim = Simulation::from_json(world, mats()).expect("builds");
+            let c = sim.world.center();
+            let ground = sim.world.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
+            sim.throw_meteor(Meteor {
+                id: 0,
+                pos: glam::DVec3::new(-40.0, (ground + 40.0) as f64, 0.0),
+                vel: glam::DVec3::new(900.0, 0.0, 0.0), // supersonic, purely horizontal
+                mass_kg: 1000.0,
+                material: iron,
+                radius_m: radius_m as f64,
+                temp_k: 288.0, // stamped to ambient by throw_meteor
+                skin_m: 0.0, // a fresh rock has no heated skin yet
+            });
+            let v0 = sim.meteors()[0].vel.x;
+            for _ in 0..4 {
+                sim.step(1.0 / 60.0);
+                if sim.meteors().is_empty() { break; }
+            }
+            // Horizontal speed lost over the flight — gravity cannot touch it, so this is pure drag.
+            (v0 - sim.meteors().first().map_or(v0, |m| m.vel.x)) as f32
+        };
+
+        let compact = fly(0.3); // small cross-section
+        let broad = fly(1.0); // ~11x the frontal area, same mass ⇒ much higher drag
+        assert!(compact > 0.0, "a meteor in atmosphere must lose horizontal speed to drag; lost {compact}");
+        assert!(
+            broad > compact * 3.0,
+            "drag scales with frontal area: the broad meteor ({broad} m/s) must shed far more than the \
+             compact one ({compact} m/s)"
+        );
+    }
+
+    /// A meteor HEATS as it flies (docs/48/58), so it glows by its real temperature instead of a hardcoded
+    /// 1600 K. A small fast rock heats fast (low heat capacity): its surface climbs above ambient in a few
+    /// steps. This proves the Simulation wires `temp_k` end to end — stamped to ambient, evolved by the
+    /// generic `atmosphere::atmospheric_step`, and exposed for the renderer.
+    #[test]
+    fn a_meteor_heats_by_atmospheric_entry_in_flight() {
+        let world = r#"{"name":"g","type":"ground","ground":{"camera_m":[0,30,0],"view_radius_m":2000}}"#;
+        let iron = crate::materials::index_of(&mats(), "iron");
+        let mut sim = Simulation::from_json(world, mats()).expect("builds");
+        let c = sim.world.center();
+        let ground = sim.world.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
+        // 5 kg iron (r ≈ 5 cm), thrown fast and horizontal high up so it stays aloft while it heats.
+        let r = (3.0 * 5.0 / (4.0 * std::f32::consts::PI * 7870.0)).cbrt();
+        sim.throw_meteor(Meteor {
+            id: 0,
+            pos: glam::DVec3::new(-60.0, (ground + 60.0) as f64, 0.0),
+            vel: glam::DVec3::new(5000.0, 0.0, 0.0),
+            mass_kg: 5.0,
+            material: iron,
+            radius_m: r as f64,
+            temp_k: 288.0,
+            skin_m: 0.0, // a fresh rock has no heated skin yet
+        });
+        assert_eq!(sim.meteors()[0].temp_k, AMBIENT_TEMP_K as f64, "a fresh meteor starts at ambient");
+        for _ in 0..8 {
+            sim.step(1.0 / 60.0);
+            if sim.meteors().is_empty() { break; }
+        }
+        let hot = sim.meteors().first().map_or(AMBIENT_TEMP_K as f64, |m| m.temp_k);
+        assert!(hot > AMBIENT_TEMP_K as f64 + 5.0, "the meteor's surface must heat from entry, got {hot} K");
+    }
+
+    /// **A scene never learns what a meteor is.** The engine reports everything it holds as `Drawn` —
+    /// physical facts only — so a body in flight and the vapour it sheds reach the screen through the
+    /// same one mapping the grains do. This is the property that lets an engine capability (docs/59's
+    /// meteor swarm) appear in a scene that knows nothing about meteors: the scene declares initial
+    /// conditions and presents the result, and never decides what the result looks like.
+    #[test]
+    fn the_engine_reports_every_kind_of_matter_it_holds_as_one_list() {
+        let world = r#"{"name":"g","type":"ground","ground":{"camera_m":[0,30,0],"view_radius_m":2000}}"#;
+        let iron = crate::materials::index_of(&mats(), "iron");
+        let mut sim = Simulation::from_json(world, mats()).expect("builds");
+        let c = sim.world.center();
+        let ground = sim.world.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
+
+        assert!(sim.drawn().is_empty(), "an untouched patch is holding nothing to draw");
+
+        // A grain-sized iron body at true meteor speed, high up and horizontal so it stays aloft and
+        // ablates rather than landing — the regime `atmospheric_step` is honest in (a body thinner than
+        // its own thermal skin depth).
+        let r = (3.0 * 0.03 / (4.0 * std::f32::consts::PI * 7870.0)).cbrt();
+        sim.throw_meteor(Meteor {
+            id: 0,
+            pos: glam::DVec3::new(-400.0, (ground + 400.0) as f64, 0.0),
+            vel: glam::DVec3::new(20_000.0, 0.0, 0.0),
+            mass_kg: 0.03,
+            material: iron,
+            radius_m: r as f64,
+            temp_k: 288.0,
+            skin_m: 0.0, // a fresh rock has no heated skin yet
+        });
+        // The body in flight is matter, and is reported as such the moment it exists.
+        let flying = sim.drawn();
+        assert_eq!(flying.len(), 1, "the meteor is drawn as matter, not as an effect");
+        assert_eq!(flying[0].material, iron, "drawn as what it IS — iron");
+
+        for _ in 0..40 {
+            sim.step(1.0 / 240.0);
+            if sim.trail().parcels().len() > 1 {
+                break;
+            }
+        }
+
+        let drawn = sim.drawn();
+        let parcels = sim.trail().parcels().len();
+        assert!(parcels > 0, "the meteor ablated: {parcels} parcels, {:.3e} kg", sim.trail().mass());
+        assert!(
+            drawn.len() >= parcels,
+            "every shed parcel is in the draw list ({} drawn, {parcels} parcels)", drawn.len()
+        );
+        // The trail is drawn HOT and at a real size — both derived, neither assigned.
+        let hot: Vec<&crate::Drawn> = drawn.iter().filter(|d| d.temp_k > AMBIENT_TEMP_K + 100.0).collect();
+        assert!(!hot.is_empty(), "shed vapour glows because it IS hot, not because a trail is drawn glowing");
+        for d in &hot {
+            assert!(d.radius_m > 0.0, "a parcel has a real size (its expansion into the local air)");
+            assert_eq!(d.material, iron, "iron vapour is still iron");
+        }
+        // Settled grains are the TAIL, so a caller truncating to its instance budget loses those rather
+        // than the body that is actually doing something.
+        let grains = sim.particle_count();
+        if grains > 0 {
+            assert!(
+                drawn[drawn.len() - grains..].iter().all(|d| d.radius_m == 0.5 * sim.grain_size_m()),
+                "the {grains} grains are the tail of the list"
+            );
+        }
+    }
+
     /// The engine flies the meteor. A caller that throws one and steps must see it in flight, then gone.
     #[test]
     fn the_engine_flies_the_meteor_the_caller_only_throws_it() {
@@ -443,11 +671,14 @@ mod tests {
         let c = sim.world.center();
         let ground = sim.world.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
         sim.throw_meteor(Meteor {
-            pos: Vec3::new(0.0, ground + 80.0, 0.0),
-            vel: Vec3::new(0.0, -20.0, 0.0),
+            id: 0,
+            pos: glam::DVec3::new(0.0, (ground + 80.0) as f64, 0.0),
+            vel: glam::DVec3::new(0.0, -20.0, 0.0),
             mass_kg: 800.0,
             material: crate::materials::index_of(&mats(), "iron"),
             radius_m: 0.5,
+            temp_k: 288.0, // stamped to ambient by throw_meteor
+            skin_m: 0.0, // a fresh rock has no heated skin yet
         });
         assert_eq!(sim.meteors().len(), 1, "it is in flight");
         let start_y = sim.meteors()[0].pos.y;
@@ -471,11 +702,14 @@ mod tests {
         let c = sim.world.center();
         let ground = sim.world.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
         sim.throw_meteor(Meteor {
-            pos: Vec3::new(0.0, ground + 60.0, 0.0),
-            vel: Vec3::new(0.0, -50.0, 0.0),
+            id: 0,
+            pos: glam::DVec3::new(0.0, (ground + 60.0) as f64, 0.0),
+            vel: glam::DVec3::new(0.0, -50.0, 0.0),
             mass_kg: 800.0,
             material: crate::materials::index_of(&mats(), "iron"),
             radius_m: 0.5,
+            temp_k: 288.0, // stamped to ambient by throw_meteor
+            skin_m: 0.0, // a fresh rock has no heated skin yet
         });
         // Step to the frame the impact lands on, and check the count against the grains that exist.
         let mut peak = 0usize;

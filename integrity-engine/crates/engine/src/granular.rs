@@ -482,7 +482,34 @@ pub const SLOPE_QUANTUM_M: f32 = 1.0;
 /// `mu` is the material's own DB datum (`Material::friction_coefficient`) and `r` the horizontal
 /// baseline in metres. Returns the permitted drop, in metres.
 pub fn repose_allowance(mu: f32, r: f32) -> f32 {
-    mu * r + SLOPE_QUANTUM_M
+    repose_allowance_on(mu, r, SLOPE_QUANTUM_M)
+}
+
+/// The same law on a field with a DIFFERENT quantum. [`SLOPE_QUANTUM_M`] is the voxel heightfield's own
+/// quantisation — one voxel — and it belongs to that field, not to the physics. A continuously generated
+/// surface has no quantisation and passes `0`; a raster quantised to some vertical step passes that step.
+///
+/// Split out because the alternative is a second slope law: `surface_detail` needs this same criterion at a
+/// wavelength rather than at a voxel, and computing it there instead of asking here is exactly how "ground
+/// and grain answer the slope question with ONE law" stops being true. (It did, briefly — a friction-only
+/// version was written in `surface_detail` and the material table refuted it immediately, because dry sand
+/// grips harder than granite yet only granite stands vertical. The difference is cohesion, which this
+/// module already had.)
+pub fn repose_allowance_on(mu: f32, r: f32, quantum_m: f32) -> f32 {
+    mu * r + quantum_m
+}
+
+/// **The tallest bank this material holds up by itself** (m) — the cohesion half of Mohr–Coulomb,
+/// `h_crit = c/(ρg)`.
+///
+/// Cohesionless material (gravel, dry sand: `c = 0`) gets 0 and cannot stand a vertical face at any
+/// height; basalt gets ~510 m and keeps its cliffs. Given a home here because it was computed inline at a
+/// call site while its partner term ([`repose_allowance`]) lived here, which is half a law in each place.
+pub fn critical_bank_height(cohesive_strength_pa: f32, density_kg_m3: f32, gravity_m_s2: f32) -> f32 {
+    if cohesive_strength_pa <= 0.0 {
+        return 0.0;
+    }
+    cohesive_strength_pa / (density_kg_m3.max(1.0) * gravity_m_s2.max(1e-6))
 }
 
 /// **Is this face held up?** (`docs/45` §3) — the full Mohr–Coulomb test, and the reason the two terms

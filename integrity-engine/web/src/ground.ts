@@ -90,6 +90,9 @@ async function main() {
   };
   drop?.addEventListener("click", fire);
   window.addEventListener("keydown", (e) => { if (e.key === "m") fire(); });
+  // Dev hook: the rig throws custom meteors (mass, speed) to verify entry heating — the default 1200 kg /
+  // 900 m/s rock is too massive and slow to glow, which is correct, so a small fast one exercises the glow.
+  (window as unknown as { __ground?: unknown }).__ground = g;
 
   // Share view: one shared implementation (see share-view.ts), placed in this scene's control strip.
   const share = createShareView(canvas, { onStatus: (m, bad) => setStatus(m, bad) });

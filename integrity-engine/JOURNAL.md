@@ -3,6 +3,606 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-24 (tier wired) — the mesh is the budget, not the maths
+
+**What.** `surface_detail` now has a consumer: Terra's ground cap generates sub-raster relief, bounded by
+what `granular`'s Mohr–Coulomb says the material can stand and scaled by how steep the ground already
+measures. The tier ladder is built (nested caps, each covering a quarter of the span of the one outside it,
+all from ONE builder), and the `lift` bug is fixed — it was a constant 20 m that exceeded the eye height at
+low altitude and put the ground ABOVE the camera; it now scales with altitude and is flagged as a
+depth-precision allowance rather than anything physical.
+
+**The measurement that decided the design, and it inverted my assumption.** I expected the generated octaves
+to be the cost. Priced at 2 km over the Himalaya, paced to ~60 fps (`web/rig/terra_lod_cost.mjs`):
+
+| tiers | octaves | p50 frame |
+|---|---|---|
+| 1 | 0 | **45.2 ms** ← the ladder as it shipped, before any of this |
+| 1 | 2 | 51.2 ms |
+| 1 | 6 | 50.1 ms |
+| 1 | 15 | **51.6 ms** ← fifteen octaves cost 14% over zero |
+| 2 | 4 | 126.5 ms |
+| 3 | 4 | 159.2 ms |
+| 4 | 4 | 642.5 ms |
+
+**Generated relief is nearly free; TIERS are expensive.** What costs frame time is rebuilding and
+re-uploading a 192² camera-relative mesh — which Terra was already doing once per frame for **45 ms** before
+this work, a pre-existing cost nobody had measured. So the octave budget is generous (16) and the default
+tier count is **1**, with the capacity and the knob left in place because the nesting is right and priced.
+
+**Also measured, and it reframes the whole feature: the elevation raster is 2048×1024 — 19.55 km per pixel.**
+Everest is one pixel. So below ~20 km altitude essentially ALL visible terrain relief is generated rather
+than measured, and reaching metre scale needs ~15 halvings. That is legitimate — it is bounded by the
+material's own slope law, deterministic, and flagged — but it must be said plainly rather than described as
+"micro-detail on top of real data".
+
+**Verified.** 371/371. A/B'd with the knob at fixed camera and altitude (`terra_lod_ab.mjs`): at 500 m the
+skyline is a straight line with octaves off and visibly undulating with them on. So the rule reaches the
+picture.
+
+**NOT done, and the measurement is what names it.** Standing on detailed ground still is not there: one
+tier's cells are ~540 m at 500 m altitude and ~59 m at 6 m altitude, so the relief you can see is
+hundred-metre-scale shape, not texture underfoot. **The mesh is the limit, not the maths** — and the fix is
+the one Robin gave when she set this task: *"we don't have to make things renderable at planetary scale while
+viewing subset of surface; we have the math — we can rebuild it if the camera moves again."* A tier is a
+cache of the VIEW. Anchor each tier's mesh to a fixed point and carry the eye offset in the model matrix
+(`fill_ground_cap` currently bakes `surface - eye`, so every camera motion invalidates every vertex), and a
+tier then only needs rebuilding when the camera leaves it. That is what makes tiers 2–4 affordable, and it is
+the next piece of work.
+
+## 2026-07-24 (surface detail) — Robin caught me writing a second answer to a settled question
+
+**What happened.** Starting the `surface_detail` LOD tier, I needed "how rough can this ground be?", and I
+wrote a rule for it: amplitude bounded by the material's angle of repose. Robin stopped me:
+
+> *"Wait… shouldn't this material work (sand/granite angle of repose) already be hard baked into the engine?
+> How/why were you able to change it and get it wrong with impugnity?"*
+
+It is, and I had. `granular::repose_allowance` / `face_stable` (docs/45) is Mohr–Coulomb, and its own
+documentation states the reason it exists: *"this makes ground and grain answer the slope question with ONE
+law."* I wrote a second law in a second module and every test still passed.
+
+**And it was wrong in both of the ways that module already warned about.**
+
+1. **Friction alone.** The material table refuted it immediately, which is the only reason I noticed: dry
+   sand grips HARDER than granite (μ 0.67 vs 0.60), yet only granite stands vertical. Sand's cohesion is
+   **0**; granite's is 28 MPa. A friction-only rule made sand the craggier material.
+2. **Then friction + cohesion added into one slope** — and `granular`'s doc had already written that
+   conflating the friction height with the cohesion height is *"subtly wrong in exactly the case a layered
+   world is made of"*, with the measurement to prove it (470 grains shed from a world nothing had touched).
+   They are an **OR over two different measurements**: friction acts on the SLOPE, cohesion on the BANK.
+
+**Why it was possible, which is the part worth fixing.** Nothing guarded the proven law. `laws.rs` hardens
+constants (`SINGLE_SOURCE`) and keeps scenes out of collision (`COLLISION_PRIMITIVES`), but a *derived law*
+had no such protection — so a reasonable author who did not find the primitive could contradict it silently.
+That is docs/46's stated failure mode happening to me, in the module whose own header cites it.
+
+**The fix, and the hardening** (Robin: *"We likely need to build tests to harden proven aspects of the
+engine"*):
+
+- `surface_detail::relief_amplitude_m` now holds **no slope physics at all**. It asks
+  `granular::repose_allowance_on` and `granular::critical_bank_height`, takes the OR exactly as
+  `face_stable` poses it, and only converts a permitted DROP into a sinusoid's amplitude.
+- `granular::repose_allowance_on(mu, r, quantum)` — the same law with the field's quantum as a PARAMETER.
+  `SLOPE_QUANTUM_M` is the voxel heightfield's own quantisation and belongs to that field, not to the
+  physics; a continuously generated surface passes 0. Splitting it out is what made delegation possible
+  instead of a re-derivation.
+- `granular::critical_bank_height(c, ρ, g)` — `h_crit` was computed inline in `matter.rs` while its partner
+  term lived in `granular`, i.e. half a law in each place. `matter.rs` now delegates.
+- **The guard is a CONSISTENCY test, not a grep**: `generated_relief_is_stable_by_the_engines_own_slope_law`
+  hands every octave of generated relief back to `granular::face_stable` as the face it implies, for seven
+  materials across six orders of wavelength, and requires it to be held up. A name check would not have
+  caught what I did; this does, and it fails if either side's physics moves.
+
+**Two findings the tests produced, both counter to what I assumed.**
+
+- **Below ~2 km wavelength, cohesive rock is limited by the HEIGHTFIELD, not by physics.** Granite's cohesion
+  permits a 1,057 m bank, so its ceiling across that whole range is `λ/4` — the point at which a height
+  cannot overhang. Rock is simply "as rough as a heightfield can express" there, and the honest form of an
+  overhanging crag is matter, not a height.
+- **At kilometre scales SAND stands steeper than granite**, because its friction really is higher (0.67 vs
+  0.60). Cohesion is a small-scale term; it is only cohesion that makes rock the steeper material.
+
+**Verified.** 370/370 (3 new). Nothing rig-verified here because nothing visual changed yet.
+
+**NOT done:** the tier itself. The rule and its guard exist; Terra still has one LOD tier, and wiring the
+finer one is the remaining work. Also still true: `relief_amplitude_m` is a CEILING — `slope_fraction` (the
+local measured slope as a fraction of it) is what stops a flat plain coming out as rough as a mountainside,
+and Terra will have to compute that from the elevation raster's local gradient.
+
+## 2026-07-24 (Stage B) — the observer and the universe
+
+**What.** docs/59 Stage B: ride a fragment down. Robin redirected it into something better than a follow —
+*"can we feed camera coordinates, FOV to engine? … a different thread could drive its position, framing"* —
+and then named the principle: **"This matches an observer/universe scenario. The universe handles all the
+physics, the viewer watches."**
+
+So there is no follow mode in the engine. `Terra::set_camera_pose(eye, forward, up, fov_y)` is the whole
+interface; the engine renders from exactly that and derives latitude, longitude, altitude and therefore the
+terrain LOD from it. The chase rule lives in the scene, where it is ~20 lines of vector arithmetic over two
+engine questions (`heaviest_fragment`, then `fragment(id)` each frame). Nothing in the engine learned what
+"following" means, and the same interface will take a script, a device, or code on another thread.
+
+Fragments gained stable `id`s, because an INDEX is not a handle: bodies leave the list when they arrive, so
+slot 7 is not the fragment that was at slot 7 a second ago.
+
+**Two things fell out of taking the split seriously instead of adding a mode.**
+
+1. **The FOV stopped being duplicated.** It was written in `fly_camera` and again in the matter shader's
+   billboard sizing — so the "one pixel" sampling floor silently stopped being one pixel if either moved.
+   The pose carries it, `View::fov_y` reports what the frame was built with, and the shader reads that.
+2. **The near plane became the engine's job.** The fly camera derives it from ALTITUDE — right when the
+   nearest visible thing is the ground below, badly wrong otherwise. Riding 82 m behind a fragment at 218 km
+   altitude put the near plane **104 km** away and clipped the very thing being followed: a starfield and a
+   working HUD with nothing in the middle. The engine knows how close its own matter is, so it answers that
+   now, which is precisely Robin's *"it gets to track what is observed"*.
+
+**And a hard limit, flagged rather than worked around.** One f32 depth range cannot hold an 80 m fragment
+AND a 6,371 km planet: dropping `near` to the fragment collapsed precision and the globe stopped drawing at
+all. So the ratio is bounded (`near` never below a ten-thousandth of the altitude) and the observer stands
+back proportionally as it climbs — the engine's one-pixel floor is what keeps the fragment visible when it
+does. The real fix is DEPTH PARTITIONING, named at the call site; `vp_rel` already exists for the same class
+of problem on the ground cap.
+
+**Verified** (`terra_follow.mjs`, paced to ~60 fps per CLAUDE.md rule 4b): a fragment ridden from **528.6 km
+to 0.1 km, 39 of 39 samples descending**, worst render ~3 ms, the fragment visibly incandescent at its own
+3,134 K with a cooling parcel beside it, daylit terrain filling the frame from ~30 km down, and the camera
+releasing itself the moment the fragment lands. 367/367 native.
+
+**NOT done — and it is the half the stage is named for.** The surface never gets FINER. At 70 m the ground is
+a flat green fill: right biome, no relief, no granularity. Altitude descends continuously and the globe→cap
+crossover happens, but "seeing better LOD as we descend" is unmet. docs/59 predicted this: the
+`surface_detail` LOD-tier blocker (docs/46), where Terra has no finer tier to fade into. It is also a
+prerequisite for Stage C — a crater that sharpens as you approach needs a surface that can sharpen at all.
+
+**Also fixed:** `launch_swarm` hand-rolled lat/lon→direction with the OPPOSITE sign on z from
+`crate::geo::dir_from_lat_lon`, so the swarm aimed at a mirrored longitude and landed nowhere near where the
+camera pointed. It cost me three rig runs believing the terrain was failing to render when I was simply
+looking at the night side each time. CLAUDE.md warns about exactly this: the tangent frame was once six
+hand-written copies, and the one sign they all shared was wrong.
+
+## 2026-07-24 (late) — "we lose camera controls when the engine is working"
+
+**What.** Robin reported losing camera control during an entry. Two separate things turned out to be true:
+a real defect I had introduced, and a measurement artifact I chased further than I should have.
+
+**The real defect: a feedback loop of my own making.** Terra clamped its frame `dt` to a QUARTER SECOND and
+then derived the flight's substep count FROM that `dt` — and the trail was re-aged inside every substep. So
+a slow frame produced a bigger `dt`, which asked for more substeps, each of which walked every trail parcel,
+which made the next frame slower still. That is a compounding stall, and it is exactly what "the page stops
+answering the mouse" looks like.
+
+Fixed by moving the judgement where it belongs: `FlightEnvironment` now reports its air's scale height, and
+`Flight::step` sizes its OWN substeps from the distance a body actually travels against it — never from the
+caller's frame time. The trail ages once per call, not once per substep (shed vapour is dragged to rest in
+milliseconds and needs none of the resolution a hypervelocity body does). Terra's `dt` clamp is a thirtieth
+of a second, so a stalled frame or a backgrounded tab cannot turn into a large catch-up step. Also: the
+flight step was calling `planet::body()` EVERY FRAME, which deserializes the body's JSON — rebuilding the
+planet, in full, to ask what gravity is. Resolved once now, and re-resolved only when a world loads.
+
+**The artifact, and how far it got.** With ~1,200 instanced billboards the rig showed roughly one frame per
+second taking **450–520 ms** inside `render()` while the median was **1.5 ms** — reproducible across runs
+and scaling with the swarm. I priced it properly rather than guessing, and the ablation ladder was worth
+having:
+
+| what ran | frames/8 s | p50 | max | stalls >200 ms |
+|---|---|---|---|---|
+| physics + upload + draw | 1372 | 1.5 ms | 507 ms | 8 |
+| physics + upload | 1362 | 1.5 ms | 516 ms | 9 |
+| physics only | 2839 | 1.1 ms | 53 ms | **0** |
+
+A valid ablation (the physics is identical in all three — 1,200 bodies in flight either way), and it priced
+the **upload**, not the physics and not the draw. I then tried a three-buffer ring, on the theory that the
+GPU was still reading the buffer being overwritten. **It measured no improvement, so I removed it** rather
+than keep plausible-looking complexity with a comment claiming a fix.
+
+Then the actual answer: `scripts/rig.sh` runs Chromium with `--disable-frame-rate-limit`, so the page
+rendered at **170–350 fps** and pushed several times more per second through `queue.write_buffer` than any
+vsynced browser will. **Paced to ~60 fps, the same scene never exceeded ~10 ms and never stalled at all.**
+
+| pacing | renders/10 s | p50 | p99 | max | stalls |
+|---|---|---|---|---|---|
+| uncapped (170–350 fps) | 1724 | 1.5 ms | 18.2 ms | 499 ms | 10 |
+| ~60 fps | 369 | 1.6 ms | 3.0 ms | **4 ms** | **0** |
+
+This is the same flag as the 1 Hz trap in `CLAUDE.md` rule 4b, in the opposite direction: that one HID a
+real collapse, this one INVENTS one. Both entries now sit together there, with the pacing check and the
+ablation ladder named as rigs (`terra_vsync_check.mjs`, `terra_price_stage.mjs`).
+
+**Verified.** 367/367. `terra_controls_60.mjs` drives a real right-drag and wheel zoom before, during and
+after an entry at realistic pacing: the camera moves 41–43.6° each time and the worst render during the
+entry is 3.3 ms. Worst render across a whole entry, paced: **9.8 ms**, inside a 16.7 ms budget.
+
+**What I did NOT verify, and will not claim:** the paced cost at PEAK TRAIL (~24,000 instances). Both
+attempts to catch that phase missed it — the first because my own camera drag moved the swarm's target
+before launch, the second because the entry ran slightly slower than the sampling window. The uncapped
+number at that phase (~27 ms/frame) is contaminated by the artifact above and is not usable. If a real
+browser does drop frames at peak trail, `Flight::set_trail_budget` is the lever, and it should be set from a
+measurement rather than from a guess.
+
+**Robin's suggestion, recorded not built:** *"camera placement can be controlled in the scene and handed
+over to the engine for rendering… That would allow us to place camera control monitoring in a separate
+thread."* Worth doing on its own merits — it is the same scene-declares/engine-computes split as the rest of
+this work, and moving input off the render thread makes responsiveness independent of frame cost rather
+than merely good. Not built here: the measurements above say the immediate cause was the compounding step,
+not the input path (the camera answered input even while stalling), so threading would have hidden the
+defect rather than fixed it.
+
+## 2026-07-24 (night) — row 21 closed: only the skin heats, so a metre-class body glows
+
+**What.** `atmospheric_step` raised the temperature of a body's WHOLE mass at its bulk heat capacity.
+Thermal response therefore scaled with VOLUME, and a half-metre iron body flew a perfectly correct 20 km/s
+entry and barely warmed — while real iron meteorites arrive with a molten fusion crust over a core cold
+enough to frost. Ablation is a SURFACE process.
+
+Now the heat front advances at the material's own thermal diffusivity `α = k/(ρc)` and only the mass it has
+reached takes part: `atmosphere::soak_depth` (from `δ = √(αt)`, so one step is exactly `δ' = √(δ² + α·dt)`)
+and `atmosphere::heated_mass` (the shell `ρ·(4/3)π[r³ − (r−δ)³]`). Bulk heating is not replaced — it is the
+LIMIT the model reduces to once the skin reaches the radius, which is why the existing operator tests pass
+unchanged by passing `skin = r`.
+
+**Data first (Law VII SOP).** `thermal_conductivity` is now sourced in `data/materials.json` for 28 of 29
+materials — rocks from Clauser & Huenges 1995 (AGU Reference Shelf 3), metals and gases from the CRC
+Handbook, the moisture-dependent soils carried with explicit `estimated` notes, and `hh_plasma` left
+UNKNOWN rather than guessed. `docs/04` had reserved this field and nothing had ever used it; that section
+now records the pattern, because "reserved, not used yet" hid the consequence until something needed it.
+
+**Verified.** 367/367 native (2 new), wasm builds, rig-verified on the 5060 Ti. MEASURED before → after,
+8 iron fragments at 15 km/s from 200 km:
+
+| parent radius | ablated before | ablated after | peak surface T after |
+|---|---|---|---|
+| 1 cm | 94.7% | 94.7% | 3134 K |
+| 5 cm | 27.5% | 31.1% | 3134 K |
+| 10 cm | 6.0% | 14.6% | 3134 K |
+| 30 cm | **0%** | **4.3%** | **3134 K** (was a few hundred K) |
+| 1 m | **0%** | **0.75%** | **3134 K** |
+| 3 m | **0%** | **0.03%** | **3134 K** |
+| 10 m | 0% | 0% | 2346 K |
+
+The live swarm's ablated mass went **397 kg → 15,871 kg**, and the Terra swarm's ICs no longer have to be
+shrunk to fit the model: it is a 3 m, ~890 tonne iron asteroid resolved into 1,200 fragments (11 cm to
+1.85 m), which is the disintegrated asteroid Robin actually asked for.
+
+**Three things fell out that nothing declares.**
+
+1. **The heated layer SETTLES rather than growing** — ~1.4 cm for iron, ~2.8 mm for basalt. Ablation strips
+   the skin as fast as conduction deepens it, and the balance is the classical `δ = α/2v` thermal boundary
+   layer of a receding surface. Nobody wrote that thickness; it is where two rates meet.
+2. **Basalt ablates MORE than iron at every size** (99.8% vs 94.7% for pebbles, 3.7% vs 0.75% at a metre),
+   because its diffusivity is 21× lower so the heat stays at the surface instead of being conducted away.
+   That is why stony meteorites carry thin fusion crusts and shed more of themselves than irons do.
+3. **A 10 m body still does not reach boiling, and that is Sutton–Graves being RIGHT**, not a limit left
+   over: stagnation flux goes as `√(ρ/R_n)`, so a blunter body is heated less — the reason re-entry
+   capsules are blunt.
+
+**How the test proves it rather than asserting it.** `a_metre_class_body_glows_because_only_its_skin_heats`
+flies the SAME 1 m iron body twice, differing only in `skin_m`: fresh (the real case) reaches 3134 K and
+ablates; pre-soaked to the radius (the old bulk case) stays under 1500 K and ablates exactly nothing.
+
+**Still open, and smaller** (docs/46 row 21 keeps a tail): only the skin's temperature is tracked, so the
+interior is unmodelled and heat conducting past the front is not accounted anywhere. The resolved
+computation is a real temperature PROFILE through the body; the moving-boundary treatment of a receding
+surface is its refinement.
+
+**Not measured:** peak frame rate fell from ~200 to ~37 fps at 24k drawn marks. I have not measured where
+that time goes and, per this project's own rule, will not guess — `/gpu-perf` before any claim.
+
+## 2026-07-24 (evening) — press the button, watch it burn
+
+**What.** The swarm is visible. Terra holds a `flight::Flight`, a `PlanetAir` environment and a
+"Meteor swarm" button; `render::MatterField` draws whatever the engine is holding. RIG-VERIFIED on the
+5060 Ti: from 700 km on the night side, one press produces a bright glowing entry streak with the leading
+fragment ahead of it.
+
+**Measured through one press:** 600 fragments of a 4,121 kg iron parent, released at 500 km — above the
+~296–354 km the engine's OWN `air_reaches` derives, so nothing of the atmosphere is skipped — descending
+508 → 0 km, braking 17.0 → 0.4 km/s, reaching 3,016 K, **396.8 kg ablated** into ~3,900 resolved vapour
+parcels, arrivals logged with real energies (8.3e9 J down to 6.5e6 J). Correctly INVISIBLE on the day
+side: a meteor is not visible at noon.
+
+**The size rule in `matter.wgsl` is a sampling statement, not a look.** A trail parcel seen from orbit is
+genuinely sub-pixel — metre-scale, 400 km away — and a raster cannot draw less than a pixel. Real meteors
+are visible from the ISS because they are BRIGHT, not because they are large. So the billboard half-size
+is `max(true projected size, one pixel)`: above a pixel it is the physics, below it the mark is a point
+sample of something really there, and the floor disappears as the camera closes in.
+
+**Two defects Robin's questions found, both real:**
+
+1. *"Does the trail dissipate as it cools?"* It cooled — hottest parcel 1300 → 288 K over ~20 s — and then
+   **3,734 parcels sat at 288.00 K forever**, holding 9.1 kg permanently aloft and costing a draw every
+   frame. `merged_into_air` asked whether a radiatively-cooling parcel had REACHED ambient, which it never
+   can: `p_rad ∝ T⁴ − T_amb⁴` vanishes as it approaches. A parcel is now air once it has radiated all but
+   a hundredth of the heat it was SHED with — relative to its own history, so it scales with any starting
+   temperature and any world's ambient. Robin's framing, recorded at the call site: *"calculus teaches us
+   that some limits may never be reached, but we can get 'close enough' as to dismiss the difference
+   without fear of fudge."* The distinction from a dial is that the tolerance is relative to the quantity
+   being resolved, so it converges with it and states its own error. **Re-measured: parcels peak at 2,659
+   and go to 0, all 396.6 kg booked into the air.**
+2. *"Be certain the particles eventually reach the ground/merge so they can safely be forgotten."*
+   `an_entry_finishes_and_nothing_is_left_aloft` runs a swarm to completion and asserts the books close and
+   then EMPTY — every fragment arrived or was consumed, every parcel became air, mass at the end equals
+   mass launched. With guards against a vacuous pass, since an empty sim also has nothing aloft. Measured:
+   40 fragments, 33 s, all 40 arrived, 4,115.3 kg landed + 5.4 kg taken by the air = 4,120.7 of 4,121.
+
+**Also:** trail resolution is bounded (`Flight::set_trail_budget`) — past the budget shed mass is booked
+rather than resolved. Same mass; the budget is the instance capacity, a real hardware bound, and the
+choice is which representation to spend it on (Law IV). And `Flight` now integrates drag in CLOSED FORM
+rather than sampling it: an entry decelerates at hundreds of g, and `v += a·dt` at that stiffness
+overshoots — the same failure the vapour parcels hit.
+
+**An honest note on the swarm's initial conditions.** They are chosen inside the regime the entry model is
+honest in, and the code says so. A first pass with a 2 m parent flew a completely correct entry in which
+NOTHING glowed and NOTHING ablated, because every fragment was metre-scale and `atmospheric_step` heats a
+body at its bulk heat capacity (docs/46 row 21 — real ablation is a surface process). Choosing a parent
+whose pieces are centimetres is staying inside the model rather than papering over it; fixing row 21 is
+what would let a metre-class body glow.
+
+**Known, not fixed:** the long dark-flight tail. After the fireball the surviving fragments fall the last
+tens of km at 80–340 m/s terminal velocity, so ~590 of 600 are still aloft a minute after the flash. That
+is real meteorite dark flight, and the native test proves it terminates — but it means the HUD's "in
+flight" count stays high long after there is anything to see.
+
+## 2026-07-24 (later) — "we shouldn't have to wire it into Terra"
+
+**What.** Robin read the plan's last line — *"next: the Terra half, give Terra a body list and a step
+loop"* — and rejected the shape: *"We shouldn't have to wire it into Terra. We should instead set it up as
+a natural operation of the engine receiving these materializations and rendering them naturally… (unless
+you mean wiring in the mass/trajectory introduction with button press part)."*
+
+That correction is the entry. A body list bolted onto a scene is a scene feature wearing an engine's
+clothes, and it is the exact failure docs/59 opens by naming (*if it only works in Terra, the design has
+failed*). The sanctioned scene-side part is the button that introduces a mass and a trajectory, because
+that is an INITIAL CONDITION — which is what a scene is for.
+
+- **`flight::Flight`** — matter in flight, as an engine operation. `introduce` is the one door;
+  `introduce_swarm` is `damage::disrupt` fed into it, so docs/59's swarm is a composition of two things
+  the engine already had rather than a feature. `step` runs the air, the trail, gravity, and arrival at
+  hard matter.
+- **`flight::FlightEnvironment`** — the entire seam between one flight law and every world it runs in:
+  gravity here, air here, has the path met hard matter. A ground patch answers from a heightfield, a
+  planet from its own layered mass and its `AirShell`.
+- **`Drawn`** + `GpuParticle::of_matter` + `Simulation::drawn()` — the engine says what its matter looks
+  like, once, from real albedo and real temperature.
+
+**Why it was mostly a MOVE, not an invention.** The flight operation already existed and was already
+correct — `Simulation::fly_meteors`. It was generic in everything except its ADDRESS: it lived inside a
+96 m voxel ground patch, in `f32`, so nothing at planetary scale could reach it. Nothing about drag,
+aeroheating or ablation was ever ground-specific; only *where the air is* and *where the ground is*. The
+same was true of the render: `ground_scene` built `GpuParticle`s by hand twice (grains, then bodies in
+flight), so the scene was reading albedo and calling the incandescence law itself — and a third copy would
+have been needed for the trail, a fourth for a swarm. Each copy is a place a scene can quietly disagree
+with the physics about what is real, which inverts Law VI.
+
+**The part that would have made it worse.** Extracting `Flight` while leaving `fly_meteors` in place would
+have been the Law II violation it exists to close. The ground scene now DELEGATES, and
+`simulation::Meteor` is a type alias of `flight::FlyingBody` — it was a second `f32` struct for one
+concept, owned by a scene.
+
+**Verified.** 365/365 native (4 new), wasm target builds. MEASURED — ablation is surface-to-volume, so the
+air takes a larger share of a smaller fragment. Eight iron fragments entering at 15 km/s from 200 km, as
+the parent grows:
+
+| parent radius | fragment radii | ablated |
+|---|---|---|
+| 1 cm | 3.3–7.5 mm | 94.7% |
+| 2 cm | 6.6–15 mm | 69.9% |
+| 5 cm | 1.6–3.8 cm | 27.5% |
+| 10 cm | 3.3–7.5 cm | 6.0% |
+| 30 cm – 3 m | 9.9 cm – 2.3 m | 0 |
+
+That is why shooting stars are small and iron meteorites reach the ground, and nothing in the engine says
+so — it falls out of one heating law meeting one mass distribution. The test asserts the TREND, not a
+recorded number. (The zeroes are also docs/46 row 21 biting: `atmospheric_step` heats a body's whole mass
+at bulk heat capacity, understating ablation past the thermal skin depth. Trend is physics; the exact
+cut-off is the flagged limit.)
+
+**A wrong premise of mine, caught by the measurement.** I first wrote the swarm test asserting "the small
+fragments burn up" while sizing a parent whose every fragment was metre-scale — so nothing ablated and the
+test failed. The code was right and the test's premise was wrong. Measuring the size sweep produced a
+better assertion than the one I had intended.
+
+**Also removed:** the ground scene retired a meteor below `1.0e-3` kg, a threshold tracing to nothing
+(Law V). Ablation takes `min(net/L_v·dt, mass)` per step, so a body being consumed reaches exactly zero on
+its own — and a gram of iron at 15 km/s still carries ~110 kJ. And a real buffer hole: the scene capped
+GRAINS at its instance capacity and then pushed meteors on top, writing past the end of the buffer;
+`drawn()` emits matter in flight first, so capping one list cannot overrun it.
+
+**Not done / next.** Nothing visual is claimed and no rig was run. To SEE a swarm, a scene has to present
+`Flight::drawn()` from orbit — the sanctioned scene-side part, and small — but Terra draws globes and
+meshes and has no instanced particle path at all. That is docs/50's remaining render-path increment, and
+it is now the only thing between the engine holding a meteor swarm and anyone watching one.
+
+## 2026-07-24 — the flagship's engine half: entry is a collision, a swarm is a disrupted body
+
+**What.** docs/59 Stage A, engine side. Three capabilities, each natively tested, plus a DRY pass Robin
+asked for that turned into a real (small) correctness fix.
+
+- **The atmosphere is a thing you collide with.** The engine could detect body-meets-body, and could fly a
+  body through air (`atmospheric_step`); what it could not do was NOTICE that a body was in the air — that
+  was left to whichever scene cared, which is how entry stays a scene's feature instead of the engine's
+  capability. `interaction::detect_atmospheric` is the fluid branch alongside the solid one in the same
+  module. Reported as a STATE, not an event, because an impact happens at an instant and flight through air
+  happens along a path; the two compose the way the physics does.
+- **Where an atmosphere ends, derived.** It doesn't: `ρ(h) = ρ₀·e^(−h/H)` is positive everywhere, and the
+  Kármán line is a fact about wings. `air_reaches` asks where *including* the air stops being able to change
+  the answer — `|Δv| = a_drag·dt` below `ε·|v|` is not neglecting the air, it is adding it and having no
+  effect. It is a property of the BODY, not the planet.
+- **A swarm is a disintegrated asteroid, not N placed meteors.** `damage::disrupt`: Dohnanyi (1969) mass
+  shares (`m_i ∝ i^(−6/5)`, the exponent a ratio rather than a fitted decimal) normalised to the parent's
+  mass exactly, separation at the parent's own escape speed (the just-unbound condition at the disruption
+  threshold `ground_effect` already tests), spread = v·t since breakup, and golden-angle isotropy — no seed,
+  identical every run, which is what lets a scene fly back to the same crater it watched form.
+- **The entry trail.** `VaporParcel`/`Trail`. `ablated_mass` used to be subtracted from the body and
+  dropped; now it is shed as hot vapour, which is both the conservation fix and the thing you actually see
+  behind a meteor. Parcel SIZE is emergent (vapour expands to the density of the air around it), colour is
+  `blackbody_srgb` of its real temperature. Robin's steer — *"rendering/tracking should be decided based on
+  the scale it is being viewed at"* — is in the type: `Trail` holds the same mass as resolved parcels for a
+  near camera or as a booked total for one watched from orbit, and `Trail::mass()` is the same number both
+  ways. Wired into the Ground scene's meteor, so it has a live consumer.
+
+**Why.** Robin's acceptance criterion for the flagship is *"add the meteor-swarm button to any scene that
+uses the engine properly and it just works"* — Law II stated as a test. That is only true if entry,
+disruption and the trail are engine capabilities on the generic body system, so Stage A builds them there
+first and Terra hosts them second.
+
+**Verified.** 361/361 native (10 new), wasm target builds. Measured, not assumed:
+
+- The derived air edge on Earth's own emergent air (ρ₀=1.207, H=8367 m, 20 km/s, 1 s step): **296 km** for
+  a 1 m iron sphere, **354 km** for one 1000× lighter, **291 km** at half the step. Body- and
+  step-dependent, and nowhere near any declared altitude.
+- Mass conservation flown end to end: a 1 cm iron grain entering at 20 km/s from 120 km, body + trail
+  checked against the entry mass **every step**, to 1e-12.
+- Disruption momentum closes to **1e-16** relative.
+
+**Three things the tests caught rather than confirmed** (all now docs/46 rows or flagged in place):
+
+1. **Isotropic directions with UNEQUAL masses do not conserve momentum.** The heaviest fragment would have
+   dragged the parent's centre of mass off its declared trajectory — quietly, since mass and energy still
+   balanced. Disruption is internal and cannot move the centre of mass, so velocities are taken in the
+   centre-of-momentum frame. The speed spread that falls out (heaviest piece slowest) is now a CONSEQUENCE
+   of conservation rather than an assumed size–speed law.
+2. **Explicit quadratic drag on a vapour parcel overshoots.** A parcel as thin as the air around it has an
+   enormous area per kilogram; a step long enough to stop it reverses it and then accelerates it away,
+   which read as vapour speeding up. Quadratic drag integrates in closed form, so the step is solved rather
+   than sampled and decays monotonically for any dt.
+3. **`atmospheric_step` treats an ablating body as isothermal.** A 0.5 m iron body at 20 km/s barely warms
+   through the whole descent; a 1 cm grain reaches iron's boiling point in milliseconds. The model gets the
+   observable right (small meteoroids burn up, iron meteorites land) but that is not evidence the mechanism
+   is right — it holds only while the body is thinner than its thermal skin depth (~1.5 cm for iron over
+   ten seconds). Real ablation is a surface process (docs/46 row 21).
+
+**The DRY pass (Robin: "it's getting pretty long in spots").** Measuring first said the length is not the
+interesting part — the duplication is. **G was written out in five modules and two shaders**;
+Stefan–Boltzmann in three, one as a truncated `5.670e-8`, so a cooling moonlet and an ablating meteor
+radiated by literally different constants. Nothing had drifted far enough to fail a test, which is exactly
+why counting is the check and reading is not. `orbit::G` and a new `blackbody::SIGMA` are now the only
+definitions. **The guard already existed and I nearly wrote a second one**: `laws::SINGLE_SOURCE` counts a
+constant's homes across every Rust source *and* every shader — registering σ took one line, and it
+immediately caught the two WGSL copies of G a Rust-only search had missed. Those are legitimate (WGSL
+cannot read a Rust constant) so they are PINNED, the `EARTH_RADIUS_M` treatment: a second copy is honest
+only when something fails if the two disagree.
+
+**Not done / next.** The Terra half of Stage A: Terra has no body list and no step loop today, so the
+swarm has nowhere to fly yet. No rig verification in this entry — nothing visual was claimed, and the
+physics is verified natively (docs/46 rows 20–22 record what is knowingly deferred).
+
+## 2026-07-23 (later) — de-resolution WIRED: merge, promote, crater, and the crash the rig caught
+
+**What.** The entry below landed the de-resolution *operator* and honestly called the scene wiring "not
+done." It is done now, plus the two tiers Robin steered toward and a render fix. (That earlier "NOT done /
+the collapse never ran / bhtree has no potential traversal" text is superseded by this entry — left in place
+as the record of what was true at the time.)
+
+- **De-resolution as a CONTACT LAW, not a global search** (Robin's redirect: *"if two sticky particles
+  collide and now share a common position/vector, we merge them… done in the shader, nearly free"*). Three
+  race-free kernels in `sph_step.wgsl` (`cs_merge_pick`/`apply`/`retire`, disjoint write sets, absorber by a
+  total order). TWO gates, both required: REDUNDANT (`r < h/2` ∧ `|Δv| < c_s`, the material's own numbers)
+  and NECESSARY (`n > merge_budget`, and the budget is MEASURED — the substep throttle bottomed out AND the
+  frame still over budget). Conservation exact; the destroyed relative KE becomes heat in `u`. **Materials
+  never blend** (same-`mat` only), which RETIRES the mixture-EOS IOU and preserves composition: a body
+  converges to one particle *per material*, each at its own radius (the dense one sank).
+- **Promotion to a layered body** (Robin: *"a planet is a promoted particle with more properties/analysis";
+  "as above, so below"*). `promote_settled_bodies`: a settled self-bound clump above `rounding_mass`
+  (self-gravity beats material strength — the rock/body boundary, reproduces the ~300 km potato radius)
+  leaves the particle set and becomes a layered `orbit::Body` whose matter is SAMPLED from its own particles
+  (`accretion::sample_layers` — measures the differentiation the sim made, does not declare it). **`ext_mass`
+  is now load-bearing** — the promoted body gravitates on the survivors through it (Law IV). Gated on the
+  same quiescence as the merge: promoting or merging mid-shock was MEASURED to eat the disk (birth
+  0.34/0.31/0.25 M☾ → 0.00 until the gate was fixed; docs/44 §6 said "demote on quiescence" and I'd quoted
+  it before applying it).
+- **The gate Robin caught:** the first promotion gate was `MIN_MEMBERS = 24` — unsatisfiable *because*
+  merging works (it destroys the count). Same shape as the O(k²) binding sum that exploded when clumps
+  united: a criterion written in a quantity the mechanism itself consumes. Replaced by the mass gate above.
+- **`bhtree` potential traversal** (`potentials`/`self_potential_energy`), so the binding energy is
+  O(N log N). Corrects a prior measurement that had blamed `self_pe` for cost that was actually the FoF pair
+  loop (the synthetic blob's linking length exceeded its own radius).
+- **The crater renders** (docs/46 row 18 closed). `globe.wgsl::crater_sink` sinks the surface into a
+  paraboloid; `accretion::crater_bowl` sizes depth AND radius from the measured excavated volume plus the
+  sourced simple-crater shape d≈0.4r. The old radius came from a `0.72` dial while only depth was measured —
+  a flat saucer (d/r≈0.06) that reached the shader correctly and rendered invisible. After: d/r=0.40.
+- **A crash the rig caught, no test would have:** `cs_merge_retire` set a mass to 0 but left the particle
+  LIVE, so it kept integrating, its density → 0, `p/ρ²` → NaN, and the NaN reached the disk-stat sort. Fixed
+  by making retired particles inert in every kernel AND filtering non-finite/mass-0 in `DiskView` with
+  `total_cmp`. "Harmless because massless" was true for its effect on others, false for its own evolution.
+
+**Verified.** Native 347/347. `tools/sph-verify` on the RTX 2070: force/KDK/spherical+planar bulk +
+`ext-mass` (a de-resolved body gravitates: vx 39.858 vs analytic 39.857 m/s) + `merge` (128→20, mass/mom/
+energy conserved) + `merge-materials` (128/128 survive when every pair is iron+basalt) + `merge-gate`
+(budget 0 merges nothing) + `merge-finite` (no NaN survives). Rig: promotion observed
+(`promote: 3 particles → 6.794e21 kg, 1 layer peridotite` = 0.093 M☾, matching the disk stat), scene runs
+clean, crater geometry rig-measured d/r=0.40. `a_crater_bowl_keeps_its_shape_at_every_size` independently
+re-derives ½πr²d and caught a factor-of-2 volume error the rig could not. Deployed to integrity.bothead.net.
+**Not verified:** a fully unambiguous daylit face-on crater screenshot (needs a camera-aim hook the scene
+doesn't expose); promote-then-survive in one continuous run since the crash fix.
+
+## 2026-07-23 — de-resolution: a united clump can become one gravitating body (docs/44)
+
+**What.** Robin: *"an essential efficiency/optimization component MUST be resolving debris (clumping) when
+particles that are sticky (gravity/liquid/etc) unify in trajectory... we have a large, cohesive disk of magma
+that has united; this should become a single body"*, and *"stragglers ... should be absorbed too. A meteor
+that impacts the moon becomes part of the moon unless it hits escape velocity on the rebound."*
+
+The operator already existed. `accretion::accrete` found self-bound clumps (`internal_ke + self_pe < 0` plus
+a Roche gate) and returned the promoted bodies AND the particle indices they consumed — fully tested, with
+**zero production call sites**. The four live callers of `find_clumps` only MEASURE. Nothing has ever removed
+an SPH particle at runtime. So the criterion existed and the collapse never ran (docs/48's pattern again).
+
+Four things had to be true before it could be wired, and each is now:
+
+1. **It stopped losing physics.** `Body` was `{pos, vel, mass, rho, radius}` — no angular momentum. The module
+   doc claimed the spin was *"folded into the body ... recoverable from the members"*, but there was no field
+   for it and the members are exactly what a de-resolution pass deletes. Any caller consuming
+   `Accreted::consumed` would have destroyed the spin of every clump it promoted **while mass, momentum and
+   COM still balanced exactly**. A rotating disk is where that term dominates. Added `ang_mom` and
+   `thermal_ke`/`thermal_j` — the heat deliberately NOT the whole internal KE, since a coherent rotator keeps
+   that as spin and counting it twice injects energy through a change of representation (docs/44 §7). Split
+   via `E_rot = ½ω·L`, `ω = I⁻¹L`. FLAGGED: <3 members or collinear geometry has no invertible inertia
+   tensor and over-reports heat; the spin is carried regardless.
+2. **A de-resolved body still gravitates.** `sph_step.wgsl` sums gravity over the particle set plus one
+   optional bulk, so a clump leaving that set would stop acting on the survivors — changing what is TRUE, not
+   just how it is stored (Law IV). Added `@binding(8) ext_mass` + `Params.n_ext` (which took the `_p1` padding
+   slot, so all offsets and the 80-byte size are unchanged) and `GpuSph::set_external_masses`.
+3. **Stragglers rejoin.** `Body::absorbs` gates on the body's OWN escape speed at the contact point
+   (`r <= radius`, `|v_rel| < sqrt(2GM/r)`) — no dial. `Body::absorb` conserves mass, momentum, COM and total
+   angular momentum, spins the body up on an off-centre strike, and keeps the energy budget closed.
+4. **One answer to "what is the disk?"** Four routines each carried the same preamble and had drifted; see
+   docs/46 row 17. `gpu_sph::DiskView` is now the single definition.
+
+**Also fixed, found while measuring.** `gpu_disk_stats_json()` ran EVERY FRAME with no cache and no `?nostats`
+gate, to render one HUD line — friends-of-friends plus an O(k²) binding sum. The CPU disk stats thirty lines
+above already carried a *"throttled to ~1 Hz"* comment for exactly this reason. Now throttled the same way.
+
+**Verified.** Native **341/341** (was 337). `tools/sph-verify` on the RTX 2070 — force RMS 1.85e-6, KDK
+integration, spherical + planar bulk, and a NEW positive external-mass check, since every other harness runs
+`n_ext = 0` and would pass with the channel inert or wrong-signed:
+
+```
+ext-mass: PASS -> vx=39.858 m/s vs analytic 39.857 m/s (rel 1.52e-5), a_ref=3.986 m/s^2
+```
+
+Conservation and drift tests were **mutation-checked**: zeroing `ang_mom` fails by the full spin share;
+`thermal_j = internal_ke` fails the rigid-rotator assertion; restoring the pre-fix disk filter fails with
+"the hyperbolic particle must be counted as escaped, got 0".
+
+Measured cost of the binding sum (`find_clumps_cost_against_clump_size`, `--ignored`, release):
+
+```
+  members     ms
+      500    1.9
+    1,000   11.2
+    2,000   33.0
+    4,000  121.5
+    8,000  492.1
+```
+
+**NOT done, and the blocker is honest.** The scene wiring is not in. That measurement makes a naive per-frame
+pass unusable *exactly* on the united disk it exists to catch — one call over a 20k clump extrapolates to
+seconds, i.e. the operator gets catastrophically expensive at the moment it starts succeeding. The
+prerequisite is an O(N log N) binding energy: `bhtree::BarnesHut` exists and is verified but has only
+`accelerations`, no POTENTIAL traversal. Adding one (same tree, same opening criterion, sum `Gm/r`), pinned
+to the exact O(N²) sum, is the next step — then the pass hooks in where `sph_snapshot` lands.
+
 ## 2026-07-23 — resolution-on-demand: the moon-drop caps modern Earth (deployed); Ground port foundations (docs/39)
 
 **What (shipped + deployed).** After the CPU Aggregate was retired (entry below), routing the moon-drop

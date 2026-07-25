@@ -106,7 +106,15 @@ Earth. It is the skeleton; three upgrades turn it into the real T0↔T3:
 39a–39b are the crux (a partial particalization that holds); 39d is the payoff (the converged number at
 tractable cost); 39e closes birth-of-the-Moon. Only 39a–39b need land before we know the approach is sound.
 
-### The GPU port, driven by the moon-drop (2026-07-23) — planned, not yet built
+### The GPU port, driven by the moon-drop (2026-07-23) — ★ BUILT + DEPLOYED (PR #80)
+
+> **Status update:** all 5 stages below shipped in PR #80 and are live. (1) `SphParams.bulk_cr/bulk_vm` +
+> `GpuSph::set_bulk` (spherical) / `set_bulk_planar`; (2) `HydroBody::particalize_cap`; (3) the
+> `CAP_MASS_RATIO = 0.1` gate in `route_bodies_to_sph`; (4) the two magma-glow branches gated to whole-body
+> (`sph_active && sph_cap.is_none()`); (5) rig-verified and deployed — the moon-drop now caps modern Earth
+> (blue globe + a localised bound impact) instead of melting it. The 5-stage plan is kept below as the
+> record of what was built. The remaining SURFACE/ground instance of this primitive (`promote_ground_cap`,
+> `set_bulk_planar`) exists and is tested but is NOT yet wired into the Ground scene (which has no `GpuSph`).
 
 The CPU cap-on-bulk (39a–39e above) proved the primitive but stayed in `hydrostatic.rs`'s `#[cfg(test)]`
 module and never reached the GPU `sph_step.wgsl` path (open-decision #2 deferred it). The **moon-drop now

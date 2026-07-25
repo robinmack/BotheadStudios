@@ -9,6 +9,146 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The ground generates sub-raster relief (docs/08 tiers, docs/46 `surface_detail`).** Terra's cap adds
+  detail below the elevation raster, bounded by `granular`'s Mohr-Coulomb and scaled by the locally measured
+  slope, so a plain stays flat. Nested tier capacity (`TERRA_CAP_TIERS`) plus `Terra::set_cap_ladder(tiers,
+  octaves)` for pricing it; **one tier by default**, because 2 tiers measured 126 ms/frame and 4 measured
+  642 ms while 15 octaves cost 14% over zero — the mesh is the budget, not the maths.
+- **Fixed:** the cap's `lift` was a constant 20 m, which at low altitude exceeded the eye height and put the
+  ground above the camera. It now scales with altitude.
+- **PROCESS (CLAUDE.md):** the repo is no longer single-developer — merges go through review, `--admin` is
+  retired, and branches that are not yours are not yours to prune.
+
+- **The engine renders from a camera POSE it is handed (docs/59 Stage B).** New
+  `Terra::set_camera_pose(eye, forward, up, fov_y)` / `clear_camera_pose` — the observer decides where to
+  stand and how wide to look; the universe holds the matter and renders what is observed. New
+  `FlyCamera::view_from_pose`, `fly_camera::DEFAULT_FOV_Y`, and `View::fov_y` so the field of view has ONE
+  definition (it was duplicated into the matter shader's billboard sizing). The near plane is now derived
+  from the closest matter the engine is holding rather than from altitude, bounded so one f32 depth range
+  can still hold the planet.
+- **New `Terra::heaviest_fragment()` / `Terra::fragment(id)`** and stable `FlyingBody::id`s, so something
+  outside the engine can keep hold of one particular body across time. `Flight::introduce` returns the id;
+  new `Flight::body(id)` and `Flight::heaviest()`.
+- **A "Follow fragment" button** on the Earth scene: rides the largest surviving fragment down and releases
+  the camera when it lands. The chase rule is entirely scene-side.
+- **Fixed:** `launch_swarm` computed its target direction with the opposite sign on z from
+  `geo::dir_from_lat_lon`, aiming the swarm at a mirrored longitude.
+
+- **Fixed: the engine could stall a scene's frame loop into unresponsiveness.** `Flight::step` now sizes its
+  own substeps from the air's scale height (new `FlightEnvironment::air_scale_height_m`) instead of the
+  caller doing it from frame time, which was a compounding loop — a slow frame asked for more substeps,
+  which made the next frame slower. The trail ages once per call rather than once per substep. Terra clamps
+  its frame `dt` to 1/30 s and resolves the placed body's matter and air ONCE instead of deserializing the
+  body's JSON every frame. New `Flight::drawn_into` fills a caller-owned buffer so a render loop need not
+  allocate the whole list per frame. **Breaking:** `FlightEnvironment` has a new required method.
+- **New `Terra::launch_swarm_n(count)`** — the swarm at a given fragment count (the resolution the
+  disruption is divided at), and `Terra::set_draw_matter(mode)`, a rig knob for pricing the physics, upload
+  and draw stages separately. Simulation is unaffected by the latter.
+
+- **Only a body's SKIN heats on atmospheric entry, so metre-class bodies glow (docs/46 row 21, CLOSED).**
+  New `atmosphere::soak_depth` and `atmosphere::heated_mass`; `atmospheric_step` gains a `skin_m` parameter
+  and returns the updated depth, and `flight::FlyingBody` carries it (`FlyingBody::fresh` builds an unheated
+  body). Bulk heating remains the limit the model reduces to when the skin reaches the radius, so passing
+  `skin = r` reproduces the old behaviour exactly. **Breaking:** `atmospheric_step` takes 9 arguments;
+  `FlyingBody`/`simulation::Meteor` has a new `skin_m` field.
+  Measured: a 30 cm iron parent went from 0% ablated at a few hundred K to 4.3% at its 3134 K boiling point;
+  the live swarm's ablated mass went 397 kg → 15,871 kg.
+- **`thermal_conductivity` is now sourced in `data/materials.json`** for 28 of 29 materials (rocks: Clauser
+  & Huenges 1995; metals and gases: CRC Handbook; soils flagged `estimated`; `hh_plasma` left unknown).
+  New `Material::thermal_conductivity()` and `Material::thermal_diffusivity()`. `docs/04` had reserved the
+  field since the schema was written and nothing had used it.
+- **Terra's swarm is now a 3 m, ~890 tonne iron asteroid** resolved into 1,200 fragments (11 cm–1.85 m). It
+  was a half-metre bolide only because the old bulk-heating model could not make anything larger glow.
+
+- **A meteor swarm you can watch (docs/59 Stage A).** `Terra::launch_swarm()` and a "Meteor swarm" button:
+  the scene declares initial conditions, the engine flies the entry. New `render::MatterField` — a
+  scene-agnostic renderer for whatever the engine is holding — and `shaders/matter.wgsl`, whose billboard
+  half-size is `max(true projected size, one pixel)` so a genuinely sub-pixel trail is point-sampled rather
+  than lost. New Terra readouts for HUDs and rigs: `flight_count`, `drawn_count`, `trail_mass_kg`,
+  `trail_parcels`, `trail_hot_k`, `trail_mean_k`, `trail_merged_kg`, `swarm_min_alt_km`, `swarm_speed_kms`.
+- **Fixed: shed vapour never finished cooling.** `VaporParcel::merged_into_air` tested whether a
+  radiatively-cooling parcel had reached ambient, which is unreachable (`p_rad ∝ T⁴ − T_amb⁴` → 0), so
+  parcels accumulated forever — measured at 3,734 stuck at 288.00 K holding 9.1 kg. A parcel is now air
+  once it has radiated all but a hundredth of the heat it was shed with. `VaporParcel` gains
+  `shed_temp_k`; new `Trail::temperature_range_k`.
+- **New `Flight::set_trail_budget` / `Trail::set_resolve_budget`** — resolve at most N parcels; beyond that
+  shed mass is booked into the air. Identical mass, coarser representation.
+- **`Flight` integrates drag in closed form** rather than sampling it, so a body decelerating at hundreds
+  of g cannot overshoot.
+
+- **Matter in flight is an engine operation, at any scale (docs/59).** New `crate::flight` —
+  `Flight::introduce` (a mass, a material, a place, a velocity: the one door a scene uses),
+  `introduce_swarm` (a disrupted body's fragments, from `damage::disrupt`), `step` (air, trail, gravity,
+  arrival) and `drawn`. New `flight::FlightEnvironment` — the trait a world implements to say what gravity
+  and air are here and whether a path has met hard matter; one flight law, any geometry.
+  **Breaking:** `simulation::Meteor` is now a type alias of `flight::FlyingBody` and is `f64`/`DVec3`
+  throughout (it was a separate `f32` struct owned by the ground scene). `Simulation::fly_meteors`
+  delegates to `Flight` rather than re-implementing entry.
+- **The engine says what its matter looks like (docs/50 render path).** New public `crate::Drawn` — one
+  piece of matter as it must be drawn, physical facts only — plus `Simulation::drawn()` and
+  `Flight::drawn()`. Scenes map over that list instead of building GPU instances by hand, so a scene that
+  can draw any of the engine's matter can draw all of it, including matter the engine starts holding later.
+- **Removed a threshold that traced to nothing:** the ground scene retired a meteor below `1.0e-3` kg.
+  Ablation reaches exactly zero on its own; a gram of iron at 15 km/s carries ~110 kJ.
+- **Fixed:** the ground scene capped grains at its instance capacity and then appended meteors, writing
+  past the end of the instance buffer when the grain buffer was full.
+- **Fixed:** `atmosphere::Trail::step` took one `&Material` and cooled every parcel as whatever the first
+  body in flight was made of; parcels now carry their own material (`VaporParcel::material`, and
+  `Trail::shed` takes it).
+
+- **Atmospheric entry is an engine capability, not a scene's feature (docs/59 Stage A).** New
+  `interaction::detect_atmospheric` — the FLUID branch of "two things met", alongside the existing solid
+  branch: the engine sweeps every (body-with-air, body) pair and reports who is flying through what, so any
+  scene that hands the engine its bodies gets entry physics without writing any. `interaction::BodyState`
+  gains `air: Option<AirShell>` (a breaking change to a public struct literal). New
+  `atmosphere::AirShell` — a body's air as two emergent numbers; `air_density_at` now delegates to it, so
+  the barometric profile has one implementation. New `atmosphere::air_reaches` — where an atmosphere ends,
+  derived from where including the air stops being able to change the answer rather than from a declared
+  altitude. New `orbit::swept_min_distance`, so a body cannot skim an atmosphere between two frames.
+- **The entry trail, and ablated mass stops vanishing.** New `atmosphere::VaporParcel`, `vapor_step` and
+  `Trail`. `atmospheric_step` reported `ablated_mass` and callers dropped it; shed vapour is now held at
+  whichever resolution the view needs — individual parcels near the camera, a booked total from orbit —
+  with `Trail::mass()` identical either way. Wired into `Simulation` (the ground scene's meteor), which
+  gains `Simulation::trail()`.
+- **`damage::disrupt` — what a disrupted body leaves**, i.e. a meteor swarm's initial conditions: Dohnanyi
+  mass shares normalised to the parent exactly, separation at the parent's own escape speed, spread from
+  the time since breakup, isotropic directions with no seed, and Σm·v = 0 by construction. Plus
+  `damage::isotropic_directions` and `damage::Fragment`.
+- **One G and one σ.** `blackbody::SIGMA` is new and public; `orbit::G` is now the sole definition of
+  Newton's constant. `gravity::G`, `planet`, `damage` and `accretion` delegate instead of re-declaring, and
+  `aggregate`'s truncated `5.670e-8` is corrected to the CODATA value (a 7e-5 change). `laws::SINGLE_SOURCE`
+  counts both, and the shaders' necessary copies of G are pinned to the engine's.
+
+- **De-resolution physics (docs/44) — a united clump can become one gravitating body.** `accretion::Body`
+  now carries `ang_mom` and `thermal_j`, so promoting a clump conserves angular momentum and the energy
+  budget instead of silently dropping the spin (mass/momentum/COM balanced either way, which is why it hid).
+  New `Body::absorbs`/`Body::absorb` — a straggler that cannot reach escape velocity joins the body,
+  conserving momentum and spinning it up on an off-centre strike. New `GpuSph::set_external_masses` +
+  `sph_step.wgsl` `ext_mass` channel (`@binding(8)`, `Params.n_ext` in the former `_p1` slot — layout
+  unchanged) so a de-resolved body keeps gravitating on the remaining particles. New `gpu_sph::DiskView`
+  replaces four duplicated disk-selection copies; three of them silently counted escaping matter as disk,
+  and now inherit the fix. **Behaviour change** for `moonlet_bodies`, `largest_moonlet_orbit` and
+  `disk_moonlets`.
+- **De-resolution is now WIRED and runs in the space scene (docs/44/58).** The `SphPhase::Dynamics` loop
+  coarsens and promotes matter live: (a) a shader-side pairwise **merge** (`cs_merge_pick/apply/retire` in
+  `sph_step.wgsl`, `GpuSph::set_merge_budget`/`encode_merge`) collapses redundant SAME-MATERIAL neighbour
+  pairs under measured budget pressure — different materials never merge, which RETIRES the mixture-EOS IOU;
+  and (b) a settled self-bound clump above its material's `rounding_mass` (self-gravity beats strength, the
+  rock/body boundary) **promotes** into a layered `orbit::Body` whose matter is sampled from its own
+  particles (`accretion::sample_layers`), keeping the differentiation the sim produced. `ext_mass` is now
+  load-bearing (promoted bodies act on the survivors through it). Both gate on quiescence — coarsening during
+  the shock was measured to eat the disk.
+- **A merged particle keeps its constituents' energy budget.** The relative KE an inelastic merge destroys
+  becomes heat in `u`; a retired (mass-0) particle is made INERT in every kernel — leaving it live sent its
+  density to zero, `p/ρ²` to NaN, and crashed the disk-stat sort (found and fixed via the rig, not a test).
+- **`bhtree::BarnesHut` gained a potential traversal** (`potentials`, `self_potential_energy`), so the clump
+  binding energy is O(N log N) instead of the O(N²) all-pairs sum that exploded exactly when clumps united.
+- **The crater is rendered (docs/46 row 18 closed).** `globe.wgsl` sinks the surface into a paraboloid bowl
+  whose depth AND radius come from the measured excavated volume (`accretion::crater_bowl`), not a dial —
+  fixing the long-standing "Earth never craters" report. Depth:radius holds the sourced simple-crater 0.4.
+- **The orbit HUD no longer runs an O(k²) clump search every frame.** `gpu_disk_stats_json()` is throttled
+  to ~1 Hz and honours `?nostats`, matching the CPU disk stats beside it.
+
 - **Resolution-on-demand cap impacts (docs/39) — the moon-drop caps modern Earth instead of melting it.**
   A small impactor now resolves the impactor(s) whole + a CAP of the target, keeping the target's bulk an
   abstract gravity source + boundary (`GpuSph::set_bulk`), so a Moon on Earth is a localized surface impact
