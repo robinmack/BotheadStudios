@@ -77,8 +77,19 @@ pub fn view_span_m(distance_m: f64, vertical_fov_rad: f64) -> f64 {
 /// `generated_relief_is_stable_by_the_engines_own_slope_law`, which makes not-asking fail the suite.
 ///
 /// The quantum passed to the allowance is `0`: generated relief is a continuous function, not a quantised
-/// field, so there is no quantisation to allow for. The amplitude is capped at `λ/4` — not physics but
-/// REPRESENTATION, since a heightfield cannot overhang and steeper relief folds through its own samples.
+/// field, so there is no quantisation to allow for.
+///
+/// **The `λ/4` cap is REPRESENTATION, not physics — and it only ever bites for STONE.** A heightfield cannot
+/// overhang, so relief steeper than that folds through its own samples. Robin (2026-07-24): *"arches and
+/// overhangs, while rare, do form … but in stone, not soil/regolith"* — which is exactly the cohesion
+/// distinction, and it means the cap discards real geometry in one case and nothing at all in the other:
+///
+/// - **Soil and regolith** (sand, dirt, clay, snow, gravel, grass) are cohesion-poor, so REPOSE limits them
+///   first and the cap is never reached. An overhanging dune does not exist to be discarded. Pinned by
+///   `soil_never_reaches_the_heightfield_cap_because_repose_forbids_overhangs`.
+/// - **Stone** has cohesion enough to stand vertical and to undercut, so arches and overhangs are physically
+///   real and the cap genuinely throws them away. That is a flagged limit of a HEIGHT, and its resolved form
+///   is matter — the voxel/SPH path the engine already has, where an arch is simply rock with air under it.
 pub fn relief_amplitude_m(wavelength_m: f64, mu: f64, h_crit_m: f64) -> f64 {
     if wavelength_m <= 0.0 {
         return 0.0;
@@ -212,7 +223,8 @@ mod tests {
         // But only just — and the reason is worth pinning, because it is a limit of the DRAWING and not of
         // the ground: granite's cohesion permits a 1,057 m bank, so below ~2 km wavelength its ceiling is
         // the heightfield's own `lambda/4` (a height cannot overhang) rather than anything physical. Rock is
-        // simply "as rough as a heightfield can express" across that whole range.
+        // simply "as rough as a heightfield can express" across that whole range — and what it throws away
+        // is REAL: arches and undercuts do form in stone.
         assert!(
             (rock - 0.1 * 0.25).abs() < 1e-12,
             "rock is at the representational cap, not a physical one ({rock:.5})"
@@ -243,6 +255,76 @@ mod tests {
                 "sand at lambda={lambda} is its own repose slope and nothing else ({got} vs {expect})"
             );
         }
+    }
+
+    /// **Where the heightfield cap discards real geometry, and where there is nothing to discard.**
+    ///
+    /// Robin (2026-07-24): *"arches and overhangs, while rare, do form … but in stone, not soil/regolith."*
+    /// Correct — and the criterion is already in the engine: `h_crit = c/(ρg)` is the tallest bank a material
+    /// holds by itself, so a height cannot express what that material does below a wavelength of about
+    /// `2·h_crit`, and can express everything above it. MEASURED from the catalogue:
+    ///
+    /// ```text
+    /// material     h_crit     overhangs possible below λ
+    /// sand,gravel   0 m        never, at any scale   (cohesionless)
+    /// dirt          0.36 m     0.73 m                (a stream-bank undercut)
+    /// grass         1.09 m     2.18 m
+    /// clay          1.70 m     3.40 m
+    /// snow          6.80 m    13.6 m                 (CORNICES — they really do overhang)
+    /// sandstone   222 m      443 m
+    /// limestone   378 m      755 m
+    /// granite     453 m      906 m
+    /// basalt      510 m     1019 m                   (arches, at any human scale)
+    /// ice         159 m      318 m                   (séracs, ice cliffs)
+    /// ```
+    ///
+    /// So at arch scale the split is exactly the one Robin drew — soil and regolith are repose-limited,
+    /// stone is not — with snow the honest exception, because a snow cornice overhangs by metres and that is
+    /// why it is a mountaineering hazard. Where the cap bites it is discarding REAL geometry, and its
+    /// resolved form is matter: an arch is simply rock with air under it, which the voxel/SPH path can hold
+    /// and a heightfield cannot.
+    #[test]
+    fn the_heightfield_cap_bites_only_where_overhangs_actually_form() {
+        let mats = crate::materials::load();
+        let props = |id: &str| {
+            let m = &mats[crate::materials::index_of(&mats, id)];
+            (
+                m.friction_coefficient as f64,
+                crate::granular::critical_bank_height(m.fracture_strength, m.density, 9.81) as f64,
+            )
+        };
+        let capped = |id: &str, lambda: f64| {
+            let (mu, h) = props(id);
+            (relief_amplitude_m(lambda, mu, h) - lambda * 0.25).abs() < 1e-12
+        };
+
+        // COHESIONLESS: repose binds at every scale — no overhanging dune exists to be discarded.
+        for id in ["sand", "gravel"] {
+            assert_eq!(props(id).1, 0.0, "{id} is cohesionless");
+            for lambda in [0.001_f64, 0.1, 10.0, 10_000.0] {
+                assert!(!capped(id, lambda), "{id} at lambda={lambda} is repose-limited, never capped");
+            }
+        }
+
+        // ARCH SCALE (10 m): soil and regolith are repose-limited; stone and ice are not. Robin's split.
+        for id in ["dirt", "clay", "grass"] {
+            assert!(!capped(id, 10.0), "a ten-metre {id} arch does not form, so nothing is discarded");
+        }
+        for id in ["granite", "basalt", "limestone", "sandstone", "ice"] {
+            assert!(capped(id, 10.0), "{id} can arch at ten metres and a heightfield cannot hold it");
+        }
+        // SNOW is the honest exception: cornices overhang by metres.
+        assert!(capped("snow", 10.0), "a snow cornice overhangs — that is why it is a hazard");
+        assert!(!capped("snow", 40.0), "but not at forty metres");
+
+        // The boundary is h_crit, not the material's category: even soil is capped well below its own bank
+        // height, because a centimetre undercut in damp dirt is real.
+        assert!(capped("dirt", 0.1), "a decimetre undercut in damp dirt is real");
+        let (_, dirt_h) = props("dirt");
+        assert!(
+            !capped("dirt", 4.0 * dirt_h),
+            "and well above ~2*h_crit ({dirt_h:.2} m) it is repose-limited again"
+        );
     }
 
     /// Generated relief is ROUGHNESS on measurement, deterministic, and it fades in. Determinism is Law IV,
