@@ -178,13 +178,14 @@ async function main(): Promise<void> {
     let firstFrame = true;
     let fps = 0;
     let lastT = performance.now();
+    // The one canonical HUD, created BEFORE the widgets so they mount into its layer rather than into a
+    // hand-rolled fixed div. (It used to be created 90 lines further down, after the widgets.)
+    const hud = createSimHud("earth");
     // Share view — the same module every scene uses.
     const share = createShareView(canvas, {
       onStatus: (m, bad) => setStatus(m, bad),
     });
-    const shareSlot = document.createElement("div");
-    Object.assign(shareSlot.style, { position: "fixed", left: "16px", bottom: "16px", zIndex: "5" });
-    shareSlot.appendChild(share.button);
+    hud.add("actions", share.button);
     // **The meteor-swarm button.** The whole of the scene's contribution to the event: it declares the
     // initial conditions (a mass, on a trajectory) and the engine does the rest — entry, ablation, the
     // trail, the arrival. The same button belongs on any scene that hands the engine its bodies.
@@ -200,7 +201,7 @@ async function main(): Promise<void> {
       terra.launch_swarm();
       setStatus("swarm released — entering the atmosphere");
     });
-    shareSlot.appendChild(swarm);
+    hud.add("actions", swarm);
 
     // **Follow a fragment down.** The engine says where its matter IS (`heaviest_fragment` / `fragment`);
     // this decides where to put a camera because of it and hands the engine a POSE. The engine has no
@@ -208,30 +209,50 @@ async function main(): Promise<void> {
     // a field of view rather than a mode. Nothing here touches physics; the other 1,199 fragments keep
     // falling whether or not anyone is watching this one (Law IV).
     let followId: number | null = null;
-    const follow = document.createElement("button");
-    follow.textContent = "Follow fragment";
-    follow.title = "Ride the largest surviving fragment down — the one the air takes least of";
-    Object.assign(follow.style, {
-      marginLeft: "8px", padding: "8px 14px", borderRadius: "999px", cursor: "pointer",
-      border: "1px solid rgba(255,255,255,0.25)", background: "rgba(20,22,30,0.72)", color: "#eee",
-      font: "600 13px system-ui, sans-serif",
-    });
+    // **Two camera producers, and the HUD guarantees only one drives.** "Fly" is the manual rig; "Follow
+    // fragment" hands the engine a POSE each frame. The engine has no notion of following and needs none
+    // — that is the point of feeding it coordinates and a field of view rather than a mode. Nothing here
+    // touches physics: the other fragments keep falling whether or not anyone watches this one (Law IV).
     const stopFollowing = (why: string) => {
       followId = null;
-      follow.textContent = "Follow fragment";
       terra.clear_camera_pose();
       setStatus(why);
     };
-    follow.addEventListener("click", () => {
-      if (followId !== null) { stopFollowing("camera released"); return; }
-      const f = terra.heaviest_fragment();
-      if (f.length === 0) { setStatus("nothing in flight to follow", true); return; }
-      followId = f[0];
-      follow.textContent = "Release camera";
-      setStatus("following the largest fragment");
-    });
-    shareSlot.appendChild(follow);
-    (window as unknown as { followFragment?: () => void }).followFragment = () => follow.click();
+    hud.cameras([
+      {
+        id: "fly",
+        label: "🛩 Fly",
+        title: "Drive the camera yourself — the continuous orbit⇄ground fly rig",
+        engage: () => {
+          if (followId !== null) stopFollowing("camera released");
+          else terra.clear_camera_pose();
+        },
+        release: () => {},
+      },
+      {
+        id: "follow",
+        label: "🎯 Follow fragment",
+        title: "Ride the largest surviving fragment down — the one the air takes least of",
+        engage: () => {
+          const f = terra.heaviest_fragment();
+          if (f.length === 0) {
+            // Nothing to ride. Say so and hand the wheel straight back, rather than sitting in a mode
+            // that silently does nothing.
+            setStatus("nothing in flight to follow", true);
+            hud.selectCamera("fly");
+            return;
+          }
+          followId = f[0];
+          setStatus("following the largest fragment");
+        },
+        release: () => {
+          followId = null;
+          terra.clear_camera_pose();
+        },
+      },
+    ]);
+    (window as unknown as { followFragment?: () => void }).followFragment = () =>
+      hud.selectCamera(followId === null ? "follow" : "fly");
 
     // The chase pose. Offsets are multiples of the fragment's OWN radius, so the framing is the same
     // whether it is riding a pebble or a boulder — a declared framing choice (where to stand), not a
@@ -248,7 +269,14 @@ async function main(): Promise<void> {
     const driveFollowCamera = (): boolean => {
       if (followId === null) return false;
       const f = terra.fragment(followId);
-      if (f.length === 0) { stopFollowing("the fragment is down — camera released"); return false; }
+      if (f.length === 0) {
+        // The producer ENDS ITSELF here: the fragment it was riding has landed. Route the hand-back
+        // through the HUD rather than calling stopFollowing directly, or the selector goes on showing
+        // "Follow fragment" as the active driver while the fly rig is actually in control.
+        setStatus("the fragment is down — camera released");
+        hud.selectCamera("fly");
+        return false;
+      }
       const p = [f[1], f[2], f[3]], v = [f[4], f[5], f[6]], r = Math.max(f[7], 0.05);
       const norm = (a: number[]) => { const L = Math.hypot(...a) || 1; return a.map((x) => x / L); };
       const cross = (a: number[], b: number[]) => [
@@ -266,10 +294,8 @@ async function main(): Promise<void> {
       terra.set_camera_pose(eye[0], eye[1], eye[2], fwd[0], fwd[1], fwd[2], upHat[0], upHat[1], upHat[2], 0.9);
       return true;
     };
-    document.body.appendChild(shareSlot);
     (window as unknown as { launchSwarm?: () => void }).launchSwarm = () => terra.launch_swarm();
 
-    const hud = createSimHud("earth");
     const frame = () => {
       // Held keys → move/altitude intents (the engine scales the step by altitude). Fully data-driven.
       const fwd = (active("forward") ? 1 : 0) - (active("back") ? 1 : 0);

@@ -46,6 +46,9 @@ export interface SimHud {
    *  producers, ONE sink — engaging one releases the other, so "where is the camera" always has exactly
    *  one answer. Passing fewer than two producers hides the control rather than showing a dead choice. */
   cameras(producers: CameraProducer[]): void;
+  /** Switch producers programmatically. Needed because a producer can END ITSELF — Terra's follow camera
+   *  releases when the fragment it is riding lands — and the HUD must not go on showing it as engaged. */
+  selectCamera(id: string): void;
 }
 
 /** Where a widget sits. SEMANTIC, not positional: placement is decided here once, so moving the furniture
@@ -226,12 +229,26 @@ export function createSimHud(sceneName: string): SimHud {
   regions.camera.appendChild(cameraBox);
 
   let engaged: CameraProducer | null = null;
+  let registered: CameraProducer[] = [];
+  let repaint: () => void = () => {};
+  /** The ONE switching path — release the current producer, then engage the new one. Both the buttons
+   *  and `selectCamera` go through it, so a scene-driven switch cannot skip the release the user-driven
+   *  one performs. */
+  function selectById(id: string): void {
+    const next = registered.find((p) => p.id === id);
+    if (!next || engaged?.id === id) return;
+    engaged?.release();
+    engaged = next;
+    next.engage();
+    repaint();
+  }
   function renderCameras(producers: CameraProducer[]): void {
+    registered = producers;
     cameraBox.replaceChildren();
     cameraBox.hidden = producers.length < 2;
     if (producers.length < 2) return;
     const buttons = new Map<string, HTMLButtonElement>();
-    const paint = (): void => {
+    repaint = (): void => {
       for (const [id, b] of buttons) {
         const on = engaged?.id === id;
         b.style.background = on ? "rgba(90,150,255,0.85)" : "rgba(20,24,40,0.72)";
@@ -239,18 +256,13 @@ export function createSimHud(sceneName: string): SimHud {
         b.setAttribute("aria-pressed", String(on));
       }
     };
+    const paint = repaint;
     for (const p of producers) {
       const b = hudButton(p.label, p.title);
       b.dataset.cameraProducer = p.id;
-      b.addEventListener("click", () => {
-        if (engaged?.id === p.id) return;
-        // ONE SINK: release before engaging, always, so "where is the camera" cannot have two answers
-        // even for a frame. This is the whole constraint that makes two camera systems Law-abiding.
-        engaged?.release();
-        engaged = p;
-        p.engage();
-        paint();
-      });
+      // ONE SINK: `selectById` releases before engaging, always, so "where is the camera" cannot have
+      // two answers even for a frame. That constraint is what makes two camera systems Law-abiding.
+      b.addEventListener("click", () => selectById(p.id));
       buttons.set(p.id, b);
       cameraBox.appendChild(b);
     }
@@ -266,6 +278,9 @@ export function createSimHud(sceneName: string): SimHud {
     },
     cameras(producers: CameraProducer[]): void {
       renderCameras(producers);
+    },
+    selectCamera(id: string): void {
+      selectById(id);
     },
     update(frame: SimHudFrame): void {
       if (!statsEl) return;

@@ -240,10 +240,13 @@ async function main(): Promise<void> {
     // Share view: upload exactly what's on screen (the canvas) so the agent can look at the debris swarm /
     // disk. Grabbed in the render loop right after present; POSTed to /__shot (dev server, or the deployed
     // shot receiver proxied at /__shot).
-    // Share view now comes from the shared module — this scene's inline copy was the ONLY
+    // Send Shot now comes from the shared module — this scene's inline copy was the ONLY
     // implementation, which is why the other scenes had no button at all.
     const share = createShareView(canvas, { onStatus: (m, bad) => setStatus(m, bad) });
-    mkBtn("📷 Share view", () => share.request());
+    // The shared module's OWN button, in the HUD's own layer — this scene used to build a look-alike with
+    // mkBtn and leave `share.button` unused, so the one thing rule 0 says every scene has was, here, a
+    // second implementation of it sitting in this scene's private bar.
+    hud.add("actions", share.button);
     void camEarth;
     void camMoon;
 
@@ -324,28 +327,41 @@ async function main(): Promise<void> {
         setTimeout(() => arcBtn!.classList.remove("gf-flash"), 180);
         demo.arc_press();
       });
-      const endBtn = document.createElement("button");
-      endBtn.textContent = "✕ end arc (release camera)";
-      Object.assign(endBtn.style, {
-        padding: "6px 11px", font: "600 12px/1 system-ui, sans-serif",
-        color: "#cfd9ee", background: "rgba(20,24,40,0.5)",
-        border: "1px solid rgba(255,255,255,0.18)", borderRadius: "8px", cursor: "pointer",
-        touchAction: "manipulation",
-      });
-      endBtn.addEventListener("click", () => {
-        demo.arc_stop();
-        // Resync the local camera mirror from the engine's handed-back pose, so manual
-        // control resumes from where the arc left the camera rather than a stale copy.
-        const st = demo.camera_state();
-        cam.yaw = st[0];
-        cam.pitch = st[1];
-        cam.zoom = st[2];
-        timeScale = demo.time_scale_value();
-        followMoon = false;
-        userInteracted = true;
-      });
-      slot.append(caption, arcBtn, endBtn);
-      bar.appendChild(slot);
+      // **Who drives the camera is a CHOICE; advancing the arc is an ACTION.** The old "end arc" button
+      // conflated them. Releasing the camera now happens by selecting Manual in the HUD's camera control
+      // — one place, in every scene — while `arcBtn` above keeps its real job of stepping the arc through
+      // the phases the engine names.
+      hud.cameras([
+        {
+          id: "manual",
+          label: "🖱 Manual",
+          title: "Drive the camera yourself — drag to orbit, scroll to zoom",
+          // Nothing to do on engage: the arc's release already handed the pose back and resynced.
+          engage: () => {},
+          release: () => {},
+        },
+        {
+          id: "arc",
+          label: "🎬 Demo arc",
+          title: "Sean's scripted out-and-back arc: surface ⇄ celestial, camera and clock only",
+          engage: () => demo.arc_press(),
+          release: () => {
+            demo.arc_stop();
+            // Resync the local camera mirror from the engine's handed-back pose, so manual control
+            // resumes from where the arc left the camera rather than from a stale copy. This is the
+            // detail that would have been lost by rewriting the control instead of moving it.
+            const st = demo.camera_state();
+            cam.yaw = st[0];
+            cam.pitch = st[1];
+            cam.zoom = st[2];
+            timeScale = demo.time_scale_value();
+            followMoon = false;
+            userInteracted = true;
+          },
+        },
+      ]);
+      slot.append(caption, arcBtn);
+      hud.add("actions", slot);
     }
 
     // (The GPU deformable-Earth impact is now the DEFAULT birth scene — auto-started on load — so the old

@@ -127,13 +127,17 @@ computation it defers** (Law V) — recorded in `docs/46`'s ledger, not a quiet 
 
 ## Hard rules (do not violate)
 
-0. **Every scene has a "Share view" button.** Use `web/src/share-view.ts` — do NOT write a second
-   capture path. A scene calls `createShareView(canvas, …)`, places the returned button in its control
-   strip, and calls `share.afterPresent()` **immediately after it presents** (a WebGPU canvas is only
+0. **Every scene has a "Send Shot" button, and no longer has to remember to.** Use
+   `web/src/share-view.ts` — do NOT write a second capture path. A scene calls `createShareView(canvas, …)`
+   and hands the button to the HUD (`hud.add("actions", share.button)`), then calls `share.afterPresent()`
+   **immediately after it presents** (a WebGPU canvas is only
    readable while its drawing buffer is current; capture anywhere else silently yields a blank image).
    The frame is POSTed to `/__shot` and written to `shots/shot-<ts>.png`, which is how a picture gets
    from a scene to whoever is reading the repo. `web/rig/share_button.mjs` asserts the button exists AND
-   that a real PNG lands, on every scene.
+   that a real PNG lands, on every scene; `web/rig/hud_layer.mjs` asserts it is in the HUD's own layer,
+   which is what makes "every scene" structural rather than remembered. **The space band used to build a
+   LOOK-ALIKE with its own `mkBtn` and leave `share.button` unused** — a second implementation of the one
+   thing this rule exists to make singular. That is why the rig checks the layer, not just the text.
 
 1. **The main checkout belongs to the human** (`~/workspace/BotheadStudios`). Persistent or parked
    worktrees stay banned, and the 2026-07-19 reasons were real: a duplicated `node_modules` per tree,
