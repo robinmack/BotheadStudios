@@ -166,6 +166,25 @@ confident wrong number is the same failure as a gate that passes on error.** Del
 measurement. Robin's steer on the first one is the better fix and is not built: a test rig should command
 the clock rather than wait for the sun.
 
+**★ THE EPOCH KNOB — a rig commands the clock now** (Robin: *"this being a test rig, you should be able to
+rotate earth as you see fit to run a test?"*). `Terra::set_epoch` / `clear_epoch` / `set_epoch_sun_over_lon`
+/ `sub_solar`, over one `celestial_epoch_s()` that both the terminator and the star field read — the scene
+was calling the wall clock in three independent places. The aiming lives in `orbit::epoch_for_sub_solar_lon`
+(Newton on the subsolar longitude, converging in two steps) rather than in a rig, because the rule a harness
+writes for itself — subsolar longitude ≈ 180° − 15°·UTC_hours — has no equation of time and no
+sidereal/solar day distinction and is wrong by degrees, which is exactly the error that makes someone
+mistake dusk for a bug. Deliberately NOT the simulation's clock: the flight advances on elapsed wall time
+because that is a duration, while this is an instant, and a rig that froze both could not film anything.
+
+**Verified three ways.** (1) The site that was pitch black below 4,300 km — lat 28, lon 86 — now renders at
+every rung, ink 100% all the way to 0.10 m. (2) **Reproducibility: two runs differ by mean 0.003–0.26/255,
+against the 2.5–4.8 free-running drift** that previously had to be measured with a control run before any
+screenshot comparison could be believed. (3) It exposed a confound in the detail metric nobody had named:
+aiming the sun at the site's own longitude is local NOON, the worst light for relief. The same Himalaya
+rungs read detail **0.65 at noon and 4.0–4.5 under slanting light**, so the rig now offsets the subsolar
+longitude 70° east by default. **And the freeze survives the correction** — detail is 4.04 at 30 m, 9.6 m,
+3.1 m, 0.98 m, 0.31 m and 0.10 m alike — so the flat ground is an absence of geometry, not of shadow.
+
 **NOT done.** 61–79 ms is still a visible hitch; going below it means splitting a single tier's rebuild
 across frames, not scheduling whole tiers. Also untouched: the `terra_lod_cost.mjs` table in the entry
 below is now historical — it measured the per-frame rebuild.

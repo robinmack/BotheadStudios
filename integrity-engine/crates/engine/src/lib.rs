@@ -5721,6 +5721,9 @@ mod app {
         cap_gpu: Vec<GpuMesh>,
         cap_uni: Vec<UniformSlot>,
         cap_verts: Vec<Vertex>,
+        /// The instant the SKY is drawn for, when something has pinned it — see `celestial_epoch_s`.
+        /// `None` means the wall clock, which is the shipping behaviour.
+        epoch_s: Option<f64>,
         /// **What each tier's mesh currently HOLDS** — `None` until it is built once. A tier is a cache
         /// of the view (`ground_cap::tier_is_current`): its vertices are anchored to a fixed world
         /// point, so the eye moving is carried by the model matrix and touches no vertex, and the mesh
@@ -6050,6 +6053,7 @@ mod app {
                 cap_uni,
                 cap_verts: Vec::new(),
                 cap_built: vec![None; TERRA_CAP_TIERS],
+                epoch_s: None,
                 relief_exag: TERRA_RELIEF_EXAG,
                 mats,
                 fly,
@@ -6379,6 +6383,62 @@ mod app {
             self.cap_built.iter_mut().for_each(|t| *t = None);
         }
 
+        /// **The instant this scene's SKY is drawn for** (Unix seconds) — the one answer to "where are the
+        /// Sun and the stars", used by both the terminator and the star field so they cannot disagree.
+        ///
+        /// Free-running wall clock unless [`Terra::set_epoch`] pins it.
+        ///
+        /// **Deliberately NOT the simulation's clock.** The flight advances on elapsed wall time, because
+        /// that is a DURATION ("how much time passed since the last frame") while this is an INSTANT
+        /// ("what is the sky at"). They are different questions and pinning one must not stop the other:
+        /// a rig that froze the sky and the physics together could not film anything moving. Over the
+        /// seconds a rig runs, the Sun moves ~0.02°, so nothing observable is inconsistent.
+        fn celestial_epoch_s(&self) -> f64 {
+            self.epoch_s.unwrap_or_else(crate::orbit::unix_now_seconds)
+        }
+
+        /// **Pin the sky to an instant**, so a visual test is reproducible.
+        ///
+        /// Robin, after a rig run came back black and looked like a renderer collapse when it was simply
+        /// the night side: *"this being a test rig, you should be able to rotate earth as you see fit to
+        /// run a test?"* Exactly — a rig should command the clock rather than wait for the sun.
+        ///
+        /// This is also what makes screenshot comparison honest. Two runs of IDENTICAL code differ by a
+        /// mean of 2.5–4.8/255 purely because the Sun and the star field moved between them, which is
+        /// large enough to swamp a real change: proving the anchored-tier work had not altered the picture
+        /// needed a same-code control run to measure that drift first. With the epoch pinned there is no
+        /// drift to control for.
+        pub fn set_epoch(&mut self, unix_seconds: f64) {
+            self.epoch_s = Some(unix_seconds);
+        }
+
+        /// Hand the sky back to the wall clock.
+        pub fn clear_epoch(&mut self) {
+            self.epoch_s = None;
+        }
+
+        /// **Put the daylight over this longitude**, by solving the engine's own solar law for the instant
+        /// that does it (`orbit::epoch_for_sub_solar_lon`) and pinning the sky there. Returns the epoch.
+        ///
+        /// The solver lives in `orbit` rather than here, or in a rig, because "where is the Sun" must have
+        /// one answer (Law II) — and the rule a harness would otherwise write for itself, subsolar
+        /// longitude ≈ 180° − 15°·UTC_hours, is wrong by degrees: it has no equation of time and no
+        /// sidereal/solar day distinction.
+        pub fn set_epoch_sun_over_lon(&mut self, lon_deg: f64) -> f64 {
+            let t =
+                crate::orbit::epoch_for_sub_solar_lon(lon_deg, crate::orbit::unix_now_seconds());
+            self.epoch_s = Some(t);
+            t
+        }
+
+        /// Where the Sun is standing overhead right now, `[lat, lon]` in degrees — the engine answering
+        /// from the law it draws with, so a caller never needs its own solar model.
+        pub fn sub_solar(&self) -> Vec<f64> {
+            let d = crate::orbit::solar_direction_earth_fixed(self.celestial_epoch_s());
+            let (lat, lon) = crate::geo::lat_lon_from_dir(d);
+            vec![lat, lon]
+        }
+
         /// **The altitude band the observer may occupy** (m). A world declares this in its camera block
         /// (`min_alt_m` / `max_alt_m`); Earth's says 2 m to 40,000 km, which is a statement about a person
         /// standing on a planet, not about what the engine can render.
@@ -6610,8 +6670,7 @@ mod app {
             // oriented to real time, so a decorative sun put noon in the wrong ocean and the day/night line
             // wherever it happened to land. Now the terminator is where the Sun actually puts it, and the
             // seasons come from the same declination that makes them real.
-            let sun_dir =
-                crate::orbit::solar_direction_earth_fixed(crate::orbit::unix_now_seconds());
+            let sun_dir = crate::orbit::solar_direction_earth_fixed(self.celestial_epoch_s());
             let sun_light = Vec3::new(sun_dir.x as f32, sun_dir.y as f32, sun_dir.z as f32);
 
             // docs/43 Phase 5 — build the fine ground cap under the camera and cross-fade it in as we
@@ -6853,7 +6912,7 @@ mod app {
                 // shy of a solar one, which is why they rise earlier each night. Nothing is animated —
                 // the same clock that puts the Sun in the sky puts the stars in it.
                 if let Some(stars) = self.stars.as_ref() {
-                    let gmst = crate::sky::gmst_rad(crate::orbit::unix_now_seconds());
+                    let gmst = crate::sky::gmst_rad(self.celestial_epoch_s());
                     stars.draw(
                         &self.queue,
                         &mut pass,

@@ -22,8 +22,8 @@ const PORT = process.env.PORT || '5173';
 const TOP_M = +(process.env.TOP || 7.8e10);
 const BOTTOM_M = +(process.env.BOTTOM || 0.1);
 const PER_DECADE = +(process.env.PER_DECADE || 2); // rungs per decade
-// Defaults are a DAYLIT high-relief site for the current run; a black frame and a broken renderer
-// look identical, so `terra_lit_probe.mjs` picks the lit longitude before this is worth running.
+// A high-relief site. The sun is BROUGHT to it (`set_epoch_sun_over_lon`) rather than waited for, so this
+// rig renders the same frames whatever time it is run — see the note by the epoch call below.
 const LAT = +(process.env.LAT || 39);
 const LON = +(process.env.LON || -106);
 
@@ -46,6 +46,26 @@ if (BOUNDS) {
   }, { TOP_M, BOTTOM_M });
 }
 console.log(BOUNDS ? '(observer band widened to the ladder)' : '(CONTROL: world-declared band, 2 m - 40,000 km)');
+
+// ★ PIN THE SKY. The first run of this rig came back black below 4,300 km and looked exactly like a
+// renderer collapse; it was lon 86 at 17:00 UTC, i.e. the middle of the night. A rig should command the
+// clock rather than wait for the sun (Robin), so ask the engine for the instant that puts the daylight
+// over the site. This also makes the run REPRODUCIBLE: with a free-running sky, two runs of identical
+// code differ by mean 2.5-4.8/255 from the sun and stars moving alone, which is enough to swamp a real
+// change. SUN=0 leaves the sky free-running.
+// ★ And put it LOW, not overhead. Aiming the sun at the site's own longitude is local NOON, which is the
+// worst possible light for showing relief: no shadows, so a mountain range and a billiard table look
+// alike. Measured here — the same Himalaya rungs read detail 0.65 at noon against 4.12 for a site under
+// slanting light. Offsetting the subsolar longitude east of the site gives morning light and real shading,
+// which is what "details resolving so they look reasonably accurate" actually depends on.
+const SUN_OFFSET = +(process.env.SUN_OFFSET || 70);
+if (process.env.SUN !== '0') {
+  const [t, ss] = await p.evaluate(({ LON, SUN_OFFSET }) => {
+    const t = window.__terra.set_epoch_sun_over_lon(LON + SUN_OFFSET);
+    return [t, window.__terra.sub_solar()];
+  }, { LON, SUN_OFFSET });
+  console.log(`(sky pinned to ${new Date(t * 1000).toISOString()} — subsolar ${ss[0].toFixed(1)}, ${ss[1].toFixed(1)})`);
+}
 
 await p.evaluate(() => {
   const t = window.__terra, orig = t.render.bind(t);
