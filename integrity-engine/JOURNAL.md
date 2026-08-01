@@ -85,6 +85,32 @@ against the metres a camera covers in the three frames it waits. Verified: 455/4
 differ from the pre-spread branch by mean 2.6–5.2/255, inside the 2.5–4.8 same-code drift band measured
 above — i.e. not at all.
 
+**★ And then the actual question: WHY does the ground flatten on descent** (docs/46 row 27). Two causes,
+measured, and the dominant one is not where I looked first. **It is not the amplitude law** — run the same
+generator at `slope_fraction = 1.0` and it gives RMS slope ~1.0 and 106 m of relief inside a 109 m frame,
+violently rough. The generator is fine; what multiplies it is not.
+
+1. **`slope_fraction` compares two quantities measured four orders of magnitude apart.** It is
+   `tier_slope / mu`, where `tier_slope` is the elevation gradient over a baseline of two raster texels —
+   **39 km** on the shipped Earth — and `mu` is a grain-scale friction coefficient. A 39 km baseline is a
+   regional TILT and cannot be steep. Measured over the shipped raster at 4,096 land points: median
+   **0.0020**, p90 0.0111, largest anywhere **0.0619**. **Everest itself reads 0.0080**, because averaging
+   over 39 km flattens it. In frame at 100 m altitude that is 10.3 m of relief at Earth's roughest point,
+   1.4 m at Everest, **0.36 m on median land**.
+2. **The amplitude law is scale-invariant, so approaching cannot reveal roughness even in principle.**
+   `relief_amplitude_m` is `min(drop/2, λ/4)`; for cohesive rock the cohesion term wins the OR everywhere a
+   camera cares about (granite's `h_crit` is 453 m), so the binding term is the `λ/4` no-overhang cap — a
+   HEIGHTFIELD property, not the rock's. Amplitude ∝ wavelength is Hurst exponent **H = 1**, the smoothest
+   self-affine surface and the one whose slope is identical at every scale. Real topography has H ≈ 0.5–0.7.
+
+Together they are the symptom exactly: above ~20 km the frame spans more than one texel and shows real
+measured mountains; below it the frame fits INSIDE one texel, the raster contributes only a smooth ramp,
+and every visible bump must come from a generator scaled to ~0.003 that cannot roughen as you approach.
+
+**No fix attempted, deliberately** — the fix is not a multiplier, that is a dial (Law V). It needs a
+roughness measured at a scale the shipped data does not have. Pinned by two new tests so the diagnosis
+cannot be re-derived from scratch, and both are written to FAIL if either half is ever corrected.
+
 **NOT done.** 61–79 ms is still a visible hitch; going below it means splitting a single tier's rebuild
 across frames, not scheduling whole tiers. Also untouched: the `terra_lod_cost.mjs` table in the entry
 below is now historical — it measured the per-frame rebuild.

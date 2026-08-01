@@ -164,6 +164,113 @@ pub fn micro_relief_m(
 mod tests {
     use super::*;
 
+    /// **WHY THE GROUND FLATTENS ON DESCENT, part 1 of 2: the amplitude law is scale-INVARIANT below
+    /// ~2 km, so zooming in cannot reveal more roughness** (docs/46 row 27).
+    ///
+    /// [`relief_amplitude_m`] is `min(drop/2, λ/4)`. For a cohesive rock the cohesion term wins the OR at
+    /// every wavelength a camera cares about — granite's `h_crit` is 453 m — so the binding term is the
+    /// `λ/4` NO-OVERHANG cap, which is a property of a HEIGHTFIELD, not of the rock. Amplitude ∝ wavelength
+    /// is Hurst exponent H = 1: the smoothest self-affine surface there is, and the one whose slope is
+    /// identical at every scale. Real topography has H ≈ 0.5–0.7, i.e. it gets relatively ROUGHER as you
+    /// look closer, which is exactly the thing a descent is supposed to reveal.
+    ///
+    /// This test does not assert that H = 1 is right. It pins that it is what we currently DO, so the day
+    /// someone gives the generator a real Hurst exponent, this fails and points at the reason it existed.
+    #[test]
+    fn generated_relief_has_the_same_slope_at_every_scale_below_two_km() {
+        let mats = crate::materials::load();
+        let g = &mats[crate::materials::index_of(&mats, "granite")];
+        let mu = g.friction_coefficient as f64;
+        let h_crit =
+            crate::granular::critical_bank_height(g.fracture_strength, g.density, 9.81) as f64;
+        // Below the wavelength where cohesion stops being the larger term, every octave has the SAME
+        // amplitude-to-wavelength ratio, and it is the heightfield's λ/4, not anything the material said.
+        for e in 6..20 {
+            let lam = 19_550.0 / (1u64 << e) as f64;
+            let ratio = relief_amplitude_m(lam, mu, h_crit) / lam;
+            assert!(
+                (ratio - 0.25).abs() < 1e-9,
+                "λ={lam} m: amplitude/wavelength {ratio} — expected the λ/4 heightfield cap"
+            );
+        }
+        // And it really is the cap rather than the physics: the material's own permitted drop is far
+        // larger at these wavelengths, so nothing about granite is being consulted here.
+        let lam = 100.0;
+        assert!(
+            h_crit * 0.5 > lam * 0.25,
+            "the cohesion term must be the one being discarded by the cap"
+        );
+    }
+
+    /// **WHY THE GROUND FLATTENS ON DESCENT, part 2 of 2, and the dominant term: `slope_fraction` compares
+    /// two quantities measured four orders of magnitude apart** (docs/46 row 27).
+    ///
+    /// Terra builds it as `local_raster_gradient / mu` — but the gradient is taken over a baseline of TWO
+    /// RASTER TEXELS, 39 km on the shipped Earth, while `mu` is a grain-scale material property. A 39 km
+    /// baseline cannot be steep: reaching even 0.25 would need ~10 km of relief across it. Measured on the
+    /// shipped raster, the median land value is **0.002** and the largest anywhere is **0.062** — so
+    /// `slope_fraction` is ~0.003 typically and never approaches the 1.0 that would let the material's own
+    /// limit be reached. **Everest itself measures 0.008**, because averaging over 39 km flattens it.
+    ///
+    /// The consequence is the reported symptom: below ~20 km altitude the frame fits inside ONE raster
+    /// texel, so measured elevation contributes only a smooth ramp and ALL visible roughness has to come
+    /// from the generated relief — which is being scaled by ~0.003.
+    ///
+    /// The raster figures above were measured OUTSIDE this test (the shipped 2048×1024 elevation PNG,
+    /// sampled the same way `Terra::build_cap` does — ±360/w degrees over a `2·raster_step` run — at 4,096
+    /// land points), because the engine crate has no PNG decoder and adding one to assert a constant would
+    /// be worse than citing the method. What IS asserted here is the scale mismatch that makes those
+    /// figures inevitable, and what they cost the picture.
+    #[test]
+    fn a_regional_gradient_cannot_reach_a_material_scale_slope() {
+        let mats = crate::materials::load();
+        let g = &mats[crate::materials::index_of(&mats, "granite")];
+        let mu = g.friction_coefficient as f64;
+        let h_crit =
+            crate::granular::critical_bank_height(g.fracture_strength, g.density, 9.81) as f64;
+        // The mismatch itself, which is the defect: the numerator is sampled over a baseline of two
+        // raster texels while the denominator governs slopes at the wavelengths the relief is actually
+        // generated at. Four orders of magnitude apart, so the ratio is not a fraction of anything.
+        let baseline_m = 2.0 * 19_546.0;
+        let finest_generated_wavelength_m = 19_550.0 / (1u64 << 16) as f64; // the 16-octave budget
+        assert!(
+            baseline_m / finest_generated_wavelength_m > 1.0e5,
+            "the slope is measured over a baseline {}x the features it is scaling",
+            baseline_m / finest_generated_wavelength_m
+        );
+        // What that costs the picture, at the roughest value the shipped raster actually produces
+        // (0.062 → slope_fraction 0.103) against the value the law is written in terms of (1.0).
+        let span = 109.0; // what a 100 m camera has in frame at 60° fov
+        let octaves = (19_550.0f64 / (span / 192.0)).max(1.0).log2().min(16.0);
+        let pp = |sf: f64| {
+            let h: Vec<f64> = (0..400)
+                .map(|i| {
+                    micro_relief_m(
+                        i as f64 * span / 400.0,
+                        0.0,
+                        19_550.0,
+                        octaves,
+                        mu,
+                        h_crit,
+                        sf,
+                    )
+                })
+                .collect();
+            h.iter().cloned().fold(f64::MIN, f64::max) - h.iter().cloned().fold(f64::MAX, f64::min)
+        };
+        let (roughest, median_land) = (pp(0.103), pp(0.0034));
+        assert!(
+            roughest / span < 0.11,
+            "even Earth's roughest 39 km gradient yields under an 11% grade in frame, got {}",
+            roughest / span
+        );
+        assert!(
+            median_land / span < 0.005,
+            "typical land yields a billiard table in frame, got {}",
+            median_land / span
+        );
+    }
+
     fn ctrl() -> ResolutionController {
         ResolutionController::default() // 1 mrad angular resolution, 1 mm floor
     }

@@ -225,10 +225,40 @@ tiers**, against 700–772 ms for the same rig on `main`. Four tiers now cost wh
 1-vs-4 was A/B'd at a fixed camera at the full 16-octave budget: max pixel difference **6 at 500 m, 4 at
 100 m**, ground luminance structure unchanged. The nested ladder is not what stands between the camera and
 detailed ground — so "wire the finer tier" is no longer the description of the remaining work, and
-`TERRA_DEFAULT_TIERS` stays 1 for a measured reason instead of a budgetary one. Whatever is flattening the
-surface on the way down is upstream of the tier count, and finding it is now Stage B's actual open
-question. (Candidates, none yet measured: the relief's amplitude via `slope_fraction` off a 19.55 km/pixel
-raster; the shading path, since relief below a cell cannot reach a mesh normal at all.)
+`TERRA_DEFAULT_TIERS` stays 1 for a measured reason instead of a budgetary one.
+
+#### Why the ground flattens on descent — answered, 2026-07-31 (docs/46 row 27)
+
+Two causes, measured, and the dominant one is not where I first looked. **It is not the amplitude law:** run
+the same generator at `slope_fraction = 1.0` and it produces RMS slope ~1.0 and 106 m of relief inside a
+109 m frame — violently rough. The generator is fine. What is wrong is what multiplies it.
+
+1. **`slope_fraction` compares two quantities measured four orders of magnitude apart.** Terra builds it as
+   `tier_slope / mu`, where `tier_slope` is the elevation gradient over a baseline of two raster texels —
+   **39 km** on the shipped 2048×1024 Earth — and `mu` is a grain-scale friction coefficient. A 39 km
+   baseline is a regional TILT and cannot be steep. Measured on the shipped raster at 4,096 land points:
+   median **0.0020**, p90 0.0111, largest anywhere **0.0619**. **Everest itself reads 0.0080**, because
+   averaging over 39 km flattens it. So the relief is multiplied by ~0.003 on typical land and ~0.10 at its
+   most extreme — never the 1.0 the law is written in terms of. In frame at 100 m altitude that is 10.3 m
+   of relief at the roughest place on Earth, 1.4 m at Everest, and **0.36 m on median land**.
+2. **The amplitude law is scale-invariant, so approaching cannot reveal roughness even in principle.**
+   `relief_amplitude_m` is `min(drop/2, λ/4)`, and for cohesive rock the cohesion term wins the OR
+   everywhere a camera cares about (granite's `h_crit` is 453 m), so the binding term is the `λ/4`
+   no-overhang cap — a property of a HEIGHTFIELD, not of the rock. Amplitude ∝ wavelength is Hurst exponent
+   **H = 1**: the smoothest self-affine surface there is, and the one whose slope is identical at every
+   scale. Real topography has H ≈ 0.5–0.7 and gets relatively rougher as you close in.
+
+Together they explain the symptom exactly. Above ~20 km altitude the frame spans more than one raster texel
+and you see real, measured mountains. Below it the frame fits INSIDE one texel, measured elevation
+contributes only a smooth bilinear ramp, and every visible bump must come from a generator that is both
+scaled to ~0.003 and structurally incapable of roughening as you approach.
+
+**No fix attempted, deliberately.** The fix is not a multiplier — that is a dial (Law V). It needs a
+roughness measured at a scale the shipped data does not have. The honest options are a physically-sourced
+Hurst exponent extrapolated from the finest scale the raster DOES resolve, or finer data; both are design
+decisions, not repairs. Pinned meanwhile by
+`surface_detail::generated_relief_has_the_same_slope_at_every_scale_below_two_km` and
+`surface_detail::a_regional_gradient_cannot_reach_a_material_scale_slope`.
 
 The hitch anchoring exposed is also fixed: a 4-tier rebuild was **224–310 ms**, because the staleness tests
 are relative and every rung of the ladder therefore trips at the same altitude on a descent.
