@@ -39,6 +39,8 @@ await p.waitForTimeout(3000);
 // actually at. Without this the rig measures the world file's declared 2 m / 40,000 km clamp.
 // BOUNDS=0 runs the CONTROL: the world's own declared band, to attribute any failure to the knob or to
 // the engine rather than guessing which.
+const TIERS = +(process.env.TIERS || 0); // 0 = leave the scene default
+if (TIERS) await p.evaluate((t) => window.__terra.set_cap_ladder(t, 16), TIERS);
 const BOUNDS = process.env.BOUNDS !== '0';
 if (BOUNDS) {
   await p.evaluate(({ TOP_M, BOTTOM_M }) => {
@@ -76,6 +78,7 @@ await p.evaluate(() => {
   };
 });
 
+const tilesAt = [];
 const rungs = [];
 const decades = Math.log10(TOP_M / BOTTOM_M);
 const n = Math.round(decades * PER_DECADE);
@@ -85,13 +88,26 @@ const fmt = (m) => m >= 1e9 ? `${(m / 1e9).toFixed(2)} Gm` : m >= 1e6 ? `${(m / 
   : m >= 1e3 ? `${(m / 1e3).toFixed(2)} km` : `${m.toFixed(2)} m`;
 
 console.log(`--- ${n + 1} rungs, ${decades.toFixed(1)} decades: ${fmt(TOP_M)} -> ${fmt(BOTTOM_M)} ---`);
-console.log('  altitude        p50 ms   worst ms   fps');
+console.log('  altitude        p50 ms   worst ms   fps  tiles');
 for (const [i, alt] of rungs.entries()) {
   await p.evaluate(({ alt, LAT, LON }) => {
     window.__terra.set_fly(LAT, LON, alt, 0.6, -0.45);
     window.__r.length = 0;
   }, { alt, LAT, LON });
   await p.waitForTimeout(900);
+  // Wait for the streamed elevation patch to settle before believing the frame: a screenshot taken while
+  // tiles are still in flight is a picture of the network, not of the engine. Bounded, because at high
+  // altitude or over ocean there may be nothing to fetch and that is a legitimate answer.
+  {
+    const t0 = Date.now();
+    let last = -1, stable = 0;
+    while (Date.now() - t0 < 4000) {
+      const n = await p.evaluate(() => (window.__tiles ? window.__tiles() : 0));
+      if (n === last) { if (++stable >= 3) break; } else { stable = 0; last = n; }
+      await p.waitForTimeout(120);
+    }
+    tilesAt.push(last);
+  }
   const s = await p.evaluate(() => {
     const a = window.__r; if (!a.length) return { p50: 0, max: 0, n: 0 };
     const q = a.slice().sort((x, y) => x - y);
@@ -106,7 +122,7 @@ for (const [i, alt] of rungs.entries()) {
   const alive = await p.evaluate(() => window.__terra.altitude_m());
   console.log(
     `  ${fmt(alt).padStart(10)}  ${String(s.p50).padStart(7)}  ${String(s.max).padStart(8)}  ` +
-    `${String(s.n ? Math.round(s.n / 0.9) : 0).padStart(4)}` +
+    `${String(s.n ? Math.round(s.n / 0.9) : 0).padStart(4)}  ${String(tilesAt[tilesAt.length - 1]).padStart(5)}` +
     `${(Math.abs(alive - alt) / alt > 0.01 ? `   alt clamped -> ${fmt(alive)}` : '')}`
   );
 }

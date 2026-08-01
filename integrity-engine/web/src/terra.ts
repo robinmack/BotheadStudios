@@ -96,6 +96,55 @@ async function main(): Promise<void> {
     report("info", `Terra world loaded: ${terra.world_name()}`);
     (window as unknown as { __terra?: Terra }).__terra = terra;
 
+    // **Elevation streamed by necessity** (docs/46 row 27). The engine says which tiles this view needs
+    // and never has more than a 3x3 patch outstanding; this only performs the I/O, which is the same split
+    // `load_world` already uses for the world's own rasters — the browser decodes PNGs, the engine decides
+    // what is worth decoding.
+    //
+    // Source: AWS Terrain Tiles (`terrarium`), global, unauthenticated, `Access-Control-Allow-Origin: *`.
+    // A 404 is not an error: it is the measured ladder running out of rungs, and generated relief takes
+    // over from there. Failures are remembered so a missing tile is not re-requested every frame.
+    const TILE_URL = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium";
+    const tileInFlight = new Set<string>();
+    const tileFailed = new Set<string>();
+    let tilePump = 0;
+    function pumpTiles() {
+      // Two a frame is plenty to keep a patch filled while a camera moves, and it keeps a descent from
+      // opening dozens of sockets at once.
+      if (performance.now() - tilePump < 60) return;
+      tilePump = performance.now();
+      let wanted: number[][] = [];
+      try {
+        wanted = JSON.parse(terra.tiles_wanted());
+      } catch {
+        return;
+      }
+      let started = 0;
+      for (const [z, x, y] of wanted) {
+        const key = `${z}/${x}/${y}`;
+        if (tileInFlight.has(key) || tileFailed.has(key)) continue;
+        if (started++ >= 2) break;
+        tileInFlight.add(key);
+        (async () => {
+          try {
+            const r = await fetch(`${TILE_URL}/${key}.png`);
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const bmp = await createImageBitmap(await r.blob());
+            const cv = new OffscreenCanvas(bmp.width, bmp.height);
+            const cx = cv.getContext("2d", { willReadFrequently: true }) as OffscreenCanvasRenderingContext2D;
+            cx.drawImage(bmp, 0, 0);
+            const img = cx.getImageData(0, 0, bmp.width, bmp.height);
+            terra.add_tile(z, x, y, new Uint8Array(img.data.buffer.slice(0)), bmp.width);
+          } catch {
+            tileFailed.add(key); // no data here at this zoom; the generator covers it
+          } finally {
+            tileInFlight.delete(key);
+          }
+        })();
+      }
+    }
+    (window as unknown as { __tiles?: () => number }).__tiles = () => terra.tile_count();
+
     const stats = document.getElementById("stats");
     if (stats) stats.hidden = false;
 
@@ -328,6 +377,7 @@ async function main(): Promise<void> {
         if (walk !== 0 || right !== 0) terra.move_tangent(walk, right);
         if (climb !== 0) terra.zoom_alt(climb * 0.35); // ~4%/frame altitude change while held
       }
+      pumpTiles();
       try {
         terra.render();
       } catch (err) {

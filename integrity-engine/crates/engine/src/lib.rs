@@ -5721,6 +5721,11 @@ mod app {
         cap_gpu: Vec<GpuMesh>,
         cap_uni: Vec<UniformSlot>,
         cap_verts: Vec<Vertex>,
+        /// **Measured elevation streamed by necessity** (`terra::tiles`, docs/46 row 27). The shipped
+        /// global raster is 19.5 km per texel, which is why the ground goes flat below ~20 km altitude;
+        /// this holds the metres-per-pixel tiles for the patch the camera is actually over. Empty until a
+        /// host feeds it, and the scene renders exactly as before when it is empty.
+        tiles: crate::terra::tiles::TileStore,
         /// The instant the SKY is drawn for, when something has pinned it — see `celestial_epoch_s`.
         /// `None` means the wall clock, which is the shipping behaviour.
         epoch_s: Option<f64>,
@@ -6053,6 +6058,7 @@ mod app {
                 cap_uni,
                 cap_verts: Vec::new(),
                 cap_built: vec![None; TERRA_CAP_TIERS],
+                tiles: Default::default(),
                 epoch_s: None,
                 relief_exag: TERRA_RELIEF_EXAG,
                 mats,
@@ -6439,6 +6445,62 @@ mod app {
             vec![lat, lon]
         }
 
+        /// **What measured elevation this view needs and does not have** — a JSON `[[z,x,y],…]`, nearest
+        /// first, for a host to fetch and hand back through [`Terra::add_tile`].
+        ///
+        /// The ENGINE chooses, because which data to resolve is a resolution decision and those belong to
+        /// the universe (docs/44); the host only performs the I/O, exactly as it already does for the
+        /// world's own rasters. The zoom comes from `tiles::zoom_for_ground_size` asked with the observer's
+        /// own resolvable size, so it is the same angular budget that sizes particle granularity and the
+        /// raster hand-off — not a second opinion about what is worth seeing.
+        ///
+        /// Bounded by construction: a 3×3 patch that follows the camera, so this cannot ask for the planet.
+        pub fn tiles_wanted(&self) -> String {
+            let mut out = String::from("[");
+            for (i, t) in self.tiles.missing().iter().take(16).enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&format!("[{},{},{}]", t.z, t.x, t.y));
+            }
+            out.push(']');
+            out
+        }
+
+        /// Hand back a decoded tile — `data` is interleaved RGB(A), `px` square, terrarium-encoded, which
+        /// is what the browser produces from the PNG by the same route it decodes the world's rasters.
+        /// A tile the camera has already moved past is dropped rather than stored.
+        pub fn add_tile(&mut self, z: u32, x: u32, y: u32, data: &[u8], px: u32) {
+            let chans = if px > 0 {
+                (data.len() / (px as usize * px as usize)).max(1)
+            } else {
+                return;
+            };
+            if chans < 3 || data.len() < (px * px) as usize * chans {
+                return;
+            }
+            let before = self.tiles.len();
+            self.tiles.insert(crate::terra::tiles::Tile {
+                id: crate::terra::tiles::TileId { z, x, y },
+                px,
+                chans,
+                data: data.to_vec(),
+            });
+            // New measured ground is exactly the kind of change the tier cache CANNOT see: it is keyed on
+            // where the camera is, and the camera did not move. Without this the tiles would arrive and
+            // the mesh would keep drawing the surface it was built from — the same failure `set_cap_ladder`
+            // has to guard against, and it would look like the streaming did nothing.
+            if self.tiles.len() != before {
+                self.cap_built.iter_mut().for_each(|t| *t = None);
+            }
+        }
+
+        /// How many streamed tiles are held — for a HUD, and for a rig to know the patch is complete
+        /// before it believes a screenshot.
+        pub fn tile_count(&self) -> usize {
+            self.tiles.len()
+        }
+
         /// **The altitude band the observer may occupy** (m). A world declares this in its camera block
         /// (`min_alt_m` / `max_alt_m`); Earth's says 2 m to 40,000 km, which is a statement about a person
         /// standing on a planet, not about what the engine can render.
@@ -6695,6 +6757,15 @@ mod app {
                 self.detail.angular_resolution,
             );
             let cap_fade = crate::terra::ground_cap::cap_fade(alt_m, cap_start_alt) as f32;
+            // **Ask for the measured elevation this view needs** (docs/46 row 27). The zoom is the docs/49
+            // angular budget asked of a tile pyramid — the same "how fine can this viewer resolve" that
+            // sizes everything else — and the patch is a bounded 3x3 that follows the camera, so a descent
+            // walks the ladder down instead of downloading a planet. Costs nothing until a host answers.
+            {
+                let want_m = self.detail.camera_grain_radius(alt_m.max(1e-3));
+                let z = crate::terra::tiles::zoom_for_ground_size(want_m, self.fly.lat, 256);
+                self.tiles.want_patch(self.fly.lat, self.fly.lon, z, 1);
+            }
             if cap_fade > 0.0 && self.globe_mesh.is_some() {
                 self.build_cap(&view, sun_light, cap_fade, anchor);
             }
@@ -7126,18 +7197,48 @@ mod app {
                 let cell_m = built.cell_m;
                 let octave_budget = self.cap_octave_budget;
                 // The local measured slope, sampled ONCE for the tier rather than at every vertex.
+                // **How steep is this ground, as a fraction of what the material can hold** — and the
+                // baseline it is measured over is the whole story (docs/46 row 27). Against the global
+                // raster the baseline is two texels, i.e. **39 km**, which is a REGIONAL TILT and cannot be
+                // steep: measured over the shipped data, the median land value is 0.002 and even Everest
+                // reads 0.033, so the ratio never approaches the 1.0 the law is written in terms of and the
+                // generated relief is scaled to nearly nothing.
+                //
+                // Where a streamed tile covers the camera, the baseline becomes two TILE PIXELS — tens of
+                // metres — and the quantity finally measures what its name claims, because real ground at
+                // that scale genuinely does approach the material's limit. The category error was never
+                // really about friction coefficients; it was about the resolution of the thing being
+                // differentiated.
                 let tier_slope = {
                     let (lat, lon) = (self.fly.lat, self.fly.lon);
-                    let d = 360.0 / self.elevation.as_ref().map_or(2048, |r| r.w.max(1)) as f64;
-                    let e_at = |la: f64, lo: f64| {
-                        self.elevation
-                            .as_ref()
-                            .map_or(0.0, |r| r.elevation_m_at(la, lo, elev_lo, elev_hi))
-                    };
-                    let run = (2.0 * raster_step_m).max(1.0);
-                    let dn = (e_at(lat + d, lon) - e_at(lat - d, lon)) / run;
-                    let de = (e_at(lat, lon + d) - e_at(lat, lon - d)) / run;
-                    (dn * dn + de * de).sqrt()
+                    let from_tiles = self.tiles.pixel_ground_m(lat).and_then(|px_m| {
+                        let run = (2.0 * px_m).max(1.0);
+                        let dlat = run / 2.0 / 111_320.0;
+                        let dlon = dlat / lat.to_radians().cos().abs().max(1e-6);
+                        let e =
+                            |la: f64, lo: f64| self.tiles.elevation_m_at(la, lo).map(|(e, _)| e);
+                        let (n, s_, e_, w_) = (
+                            e(lat + dlat, lon)?,
+                            e(lat - dlat, lon)?,
+                            e(lat, lon + dlon)?,
+                            e(lat, lon - dlon)?,
+                        );
+                        let dn = (n - s_) / run;
+                        let de = (e_ - w_) / run;
+                        Some((dn * dn + de * de).sqrt())
+                    });
+                    from_tiles.unwrap_or_else(|| {
+                        let d = 360.0 / self.elevation.as_ref().map_or(2048, |r| r.w.max(1)) as f64;
+                        let e_at = |la: f64, lo: f64| {
+                            self.elevation
+                                .as_ref()
+                                .map_or(0.0, |r| r.elevation_m_at(la, lo, elev_lo, elev_hi))
+                        };
+                        let run = (2.0 * raster_step_m).max(1.0);
+                        let dn = (e_at(lat + d, lon) - e_at(lat - d, lon)) / run;
+                        let de = (e_at(lat, lon + d) - e_at(lat, lon - d)) / run;
+                        (dn * dn + de * de).sqrt()
+                    })
                 };
                 if rebuild {
                     // **THE shared sampler** (`terra::globe_mesh::SurfaceSampler`, Sean's upstream-8): the
@@ -7157,12 +7258,36 @@ mod app {
                     let mats = &self.mats;
                     let detail = &self.detail;
                     let planet_radius = self.planet_radius;
+                    let tiles = &self.tiles;
+                    let elevation = self.elevation.as_ref();
                     let sample = |dir: glam::DVec3| -> ([f32; 3], f64, u32) {
-                        let (col, off, mat) = sampler.sample(dir);
+                        let (col, mut off, mat) = sampler.sample(dir);
                         let mi = mat as usize;
                         // Water is a surface, not ground: it carries no generated relief.
                         if mi == water_idx {
                             return (col, off + lift, mat);
+                        }
+                        let (lat, lon) = crate::geo::lat_lon_from_dir(dir);
+                        // **MEASURED beats generated.** Where a streamed tile covers this point, the ground
+                        // is what the tile says rather than what the raster says plus invention. The tile's
+                        // weight fades to 0 at the patch rim (`tiles::elevation_m_at`), and the blend is
+                        // written as raster + w*(tile - raster) so at the rim the surface is EXACTLY the
+                        // raster it always was — the same "detail fades in, never pops" rule as the octave
+                        // count and the cap cross-fade, not a new one.
+                        let mut base_feature_m = raster_step_m;
+                        if let Some((e_tile, w)) = tiles.elevation_m_at(lat, lon) {
+                            let e_raster = elevation
+                                .map_or(0.0, |r| r.elevation_m_at(lat, lon, elev_lo, elev_hi));
+                            let e = e_raster + w * (e_tile - e_raster);
+                            off = e.max(0.0) * ds * exag;
+                            // And the generated relief now starts BELOW THE TILE, not below the 19.5 km
+                            // raster. This is the anchor moving down, which is the whole point: geometric
+                            // in w so it arrives with the tile rather than stepping.
+                            if let Some(px_m) = tiles.pixel_ground_m(lat) {
+                                if px_m > 0.0 && raster_step_m > 0.0 {
+                                    base_feature_m = raster_step_m * (px_m / raster_step_m).powf(w);
+                                }
+                            }
                         }
                         // SUB-RASTER RELIEF (`crate::surface_detail`, docs/46 row 23) ON TOP of what the
                         // sampler measured. Below the raster there is no measurement, so the relief is
@@ -7173,7 +7298,6 @@ mod app {
                         // Sean's upstream-8 REMOVED this, correctly reasoning that one 192-cell cap has
                         // nowhere to put metre-scale relief. That holds for one tier; the ladder is what
                         // gives it somewhere to go, so the rule is kept and the sampler adopted.
-                        let (lat, lon) = crate::geo::lat_lon_from_dir(dir);
                         let m = &mats[mi];
                         let mu = m.friction_coefficient as f64;
                         let h_crit = crate::granular::critical_bank_height(
@@ -7184,8 +7308,8 @@ mod app {
                         // How many halvings below the raster THIS tier's cells can actually show:
                         // generating finer than the mesh can carry costs time and draws nothing.
                         let octaves =
-                            crate::surface_detail::detail_octaves(detail, cell_m, raster_step_m)
-                                .min((raster_step_m / cell_m).max(1.0).log2())
+                            crate::surface_detail::detail_octaves(detail, cell_m, base_feature_m)
+                                .min((base_feature_m / cell_m).max(1.0).log2())
                                 .min(octave_budget);
                         let relief = if octaves > 0.0 {
                             // How close this ground already is to what the material can hold - the measured
@@ -7202,7 +7326,7 @@ mod app {
                             crate::surface_detail::micro_relief_m(
                                 px,
                                 pz,
-                                raster_step_m,
+                                base_feature_m,
                                 octaves,
                                 mu,
                                 h_crit,

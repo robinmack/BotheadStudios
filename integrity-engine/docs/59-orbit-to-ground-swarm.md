@@ -325,6 +325,49 @@ before running it again:
   (hard rule 0), so it reported 0% for frames that plainly contained a planet. Deleted — the PNGs are the
   measurement.
 
+#### Streaming it — built 2026-08-01 (`terra::tiles`)
+
+`Terra::tiles_wanted()` → a host fetches → `Terra::add_tile()`. The **engine** chooses which tiles (a
+resolution decision, so it belongs to the universe — the zoom is `tiles::zoom_for_ground_size` asked with
+the observer's own resolvable size, the same angular budget that sizes particle granularity); the **host**
+performs the I/O, which is the split `load_world` already uses. Source is AWS Terrain Tiles (`terrarium`
+PNG, unauthenticated, `Access-Control-Allow-Origin: *`), whose RGB elevation packing is the same trick the
+shipped raster uses. Verified against ground truth before anything was built on it: Whitney 4,417 m
+(surveyed 4,421), Dead Sea −412 (−430), Everest 8,732 (8,849 — a ~30 m pixel averages the summit down).
+Against the shipped raster's **5,504 m** for Everest.
+
+Bounded by construction: a **3×3 patch** that follows the camera, so this can never ask for the planet, and
+the camera moving IS the eviction policy. The patch's weight smoothsteps to zero across its outer tile and
+a caller blends `raster + w·(tile − raster)`, so at the rim the surface is *exactly* the raster it always
+was — the same "detail fades in, never pops" rule the octave count and the cap cross-fade already use.
+Where tiles cover, the generated relief also keys off the TILE pixel instead of the 19.5 km raster, and
+`slope_fraction`'s gradient baseline becomes two tile pixels (~7 m) instead of 39 km — which is the
+category error repaired by construction, exactly as predicted.
+
+**Measured on the ladder** (Colorado Rockies, sky pinned, tiles streaming, p50 render still **0.4 ms** at
+every rung):
+
+| altitude | no tiles | tiles, 1 tier | tiles, 4 tiers |
+|---|---|---|---|
+| 2.9 km | 13.97 | 13.87 | 14.08 |
+| 920 m | 11.06 | 11.59 | 12.70 |
+| 290 m | 6.32 | 8.42 | 9.55 |
+| 94 m | 4.12 | 7.81 | **9.66** |
+| 30 m → 0.10 m | 4.12 (frozen) | ~7.9 | ~8.0 |
+
+Ground-level detail roughly **doubled**, and the 2.9 km frame now shows a ridge line and valley structure
+where it was a flat wash. **Four tiers now earn their keep** (7.81 → 9.66 at 94 m) where the same A/B
+showed nothing before — because previously there was no data for the finer tiers to express.
+
+**What still plateaus, and why it is no longer a data problem.** Below ~30 m the detail is flat at ~8. The
+cause is now representational and measurable: the cap's cell is **15 m at 0.1 m altitude and 469 m at 94 m**,
+while the tile pixel is 3.71 m and the eye resolves 0.0001–0.09 m. The mesh is coarser than the data it now
+holds, so `octaves` clamps to zero and neither measured nor generated detail can reach the frame. A
+192-cell heightfield cap spanning a horizon cannot carry sub-metre relief at any tier count — and below
+about a metre the engine's own doctrine says the ground should stop being a HEIGHT and become MATTER
+(docs/39 particalize-on-demand, docs/44). That is the next rung, and it is a different mechanism, not more
+of this one.
+
 #### Finer elevation data — the PRIMARY fix, and I first wrote the opposite
 
 - **Copernicus DEM GLO-30** — 30 m global, TanDEM-X 2011–2015, Cloud-Optimized GeoTIFF, free on AWS Open
