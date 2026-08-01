@@ -5721,6 +5721,12 @@ mod app {
         cap_gpu: Vec<GpuMesh>,
         cap_uni: Vec<UniformSlot>,
         cap_verts: Vec<Vertex>,
+        /// **What each tier's mesh currently HOLDS** — `None` until it is built once. A tier is a cache
+        /// of the view (`ground_cap::tier_is_current`): its vertices are anchored to a fixed world
+        /// point, so the eye moving is carried by the model matrix and touches no vertex, and the mesh
+        /// is only re-derived when a rebuild would change something. This is the field that turns a
+        /// 192² rebuild + upload PER TIER PER FRAME into ~18 rebuilds over a 500 km descent.
+        cap_built: Vec<Option<crate::terra::ground_cap::CapTierBuild>>,
         relief_exag: f64,
         mats: Vec<materials::Material>,
         fly: crate::terra::fly_camera::FlyCamera,
@@ -6043,6 +6049,7 @@ mod app {
                 cap_gpu,
                 cap_uni,
                 cap_verts: Vec::new(),
+                cap_built: vec![None; TERRA_CAP_TIERS],
                 relief_exag: TERRA_RELIEF_EXAG,
                 mats,
                 fly,
@@ -6171,6 +6178,10 @@ mod app {
                     })
                     .collect();
             }
+            // A new world is a different surface, so every cached ground tier is about the old one.
+            // The cache is keyed on the CAMERA (`tier_is_current`), which cannot see that the planet
+            // underneath it changed — so anything that moves the surface has to say so here.
+            self.cap_built.iter_mut().for_each(|t| *t = None);
             // docs/43 Phase 3 — build the smooth displaced globe from the loaded rasters (retires the grain
             // shell for this scene). Built once here; the fly-camera LOD refinement comes in Phase 5.
             let mesh = self.build_surface_mesh();
@@ -6362,6 +6373,10 @@ mod app {
         pub fn set_cap_ladder(&mut self, tiers: usize, octave_budget: f64) {
             self.cap_tiers = tiers.clamp(1, TERRA_CAP_TIERS);
             self.cap_octave_budget = octave_budget.max(0.0);
+            // The knob changes what a tier's vertices WOULD contain, which the camera-keyed cache
+            // cannot see. Without this an A/B of the ladder would compare a fresh build against a
+            // stale one and read as "the octaves cost nothing" — a rig measuring itself.
+            self.cap_built.iter_mut().for_each(|t| *t = None);
         }
 
         /// Diagnostic knob — see `draw_matter`. Simulation is unaffected.
@@ -6963,12 +6978,13 @@ mod app {
             // at low altitude, leaving nothing drawn at any altitude below orbital. The diagnosis stands
             // (at 2 m a horizon-sized cap is ~34 m/cell while the eye resolves ~2 mm), but the fix has to
             // add a finer LOD tier, not shrink the only one. See `surface_detail` and docs/08's tiers.
-            let cap_angle = crate::terra::ground_cap::cap_angle(view.horizon, r_disp);
-            // The radial lift that wins the depth fight against the coarse globe while both are drawn.
-            // Altitude-proportional (rule + tests in terra::ground_cap), so it clears the depth
-            // buffer's own altitude-proportional resolution at every height and still can never reach
-            // a camera standing 2 m up.
-            let lift = crate::terra::ground_cap::cap_lift_disp(self.fly.alt_m, ds);
+            // The OUTERMOST tier's angular span, from the one primitive that owns it — `CAP_MARGIN`
+            // past the horizon, clamped so a near-surface camera still gets a patch and an orbital one
+            // does not wrap the planet. This line used to be computed here AND hand-inlined a few
+            // lines below as `(1.3 * horizon / r).clamp(1e-4, 0.6)`, i.e. the same rule with the
+            // margin and the clamp copied out of it — two answers to "how big is the cap" (Law II),
+            // one of which would not have followed if the other moved.
+            let outer_angle = crate::terra::ground_cap::cap_angle(view.horizon, r_disp);
             let water_idx = materials::index_of(&self.mats, "water");
             let water_alb = self.mats[water_idx].albedo;
             // The elevation raster's own ground resolution — where MEASUREMENT runs out and anything finer
@@ -6979,9 +6995,6 @@ mod app {
             let elev_lo = self.elev_range[0];
             let elev_hi = self.elev_range[1];
 
-            // The cap's angular span: 1.3x the horizon so its edge is never visible, clamped so a
-            // near-surface camera still gets a patch and an orbital one does not wrap the planet.
-            let outer_angle = (1.3 * view.horizon / r_disp).clamp(1e-4, 0.6);
             let mut verts = std::mem::take(&mut self.cap_verts);
             for tier in 0..self.cap_tiers.clamp(1, TERRA_CAP_TIERS) {
                 // Each tier covers a quarter of the span of the one outside it, so its cells are 4x finer.
@@ -6989,8 +7002,29 @@ mod app {
                 // A tier's cell size on the ground - what its own detail budget is measured against.
                 let cell_m = (cap_angle * self.planet_radius * 2.0 / res as f64).max(1e-6);
                 // Lift each tier a little further toward the camera so the finer one wins the depth fight
-                // with the coarser one beneath it. Scaled to altitude (`cap_lift_disp`), not a constant.
-                let lift = lift * (tier as f64 + 1.0);
+                // with the coarser one beneath it. Scaled to altitude (`cap_lift_m`), not a constant.
+                let lift_m =
+                    crate::terra::ground_cap::cap_lift_m(self.fly.alt_m) * (tier as f64 + 1.0);
+                let lift = lift_m * ds;
+
+                // **The tier as a CACHE OF THE VIEW** (docs/59 Stage B). What a rebuild would produce
+                // right now — and the anchor it would hang on: the surface point under the camera, so
+                // every vertex is a small offset from it and the eye's whole contribution is the model
+                // translation below.
+                let fresh = crate::terra::ground_cap::CapTierBuild {
+                    center: view.up,
+                    anchor: view.up * r_disp,
+                    cap_angle,
+                    cell_m,
+                    lift_m,
+                };
+                // Re-derive only when re-deriving would change something. Anchored, the mesh is
+                // world-fixed, so a moving eye is not a reason (that is the model matrix's job).
+                let built = match self.cap_built[tier] {
+                    Some(b) if crate::terra::ground_cap::tier_is_current(&b, &fresh) => b,
+                    _ => fresh,
+                };
+                let rebuild = self.cap_built[tier] != Some(built);
                 let octave_budget = self.cap_octave_budget;
                 // The local measured slope, sampled ONCE for the tier rather than at every vertex.
                 let tier_slope = {
@@ -7006,7 +7040,7 @@ mod app {
                     let de = (e_at(lat, lon + d) - e_at(lat, lon - d)) / run;
                     (dn * dn + de * de).sqrt()
                 };
-                {
+                if rebuild {
                     // **THE shared sampler** (`terra::globe_mesh::SurfaceSampler`, Sean's upstream-8): the
                     // cap samples the same surface as the globe mesh BY CONSTRUCTION, so the two cannot
                     // drift into a second Earth. It answers what the surface IS - albedo, material, and the
@@ -7081,22 +7115,37 @@ mod app {
                         // The sampler's offset is already in display units; the relief is metres.
                         (col, off + relief * ds * exag + lift, mat)
                     };
+                    // ANCHORED, not eye-relative: the vertices hang off `built.anchor`, a fixed point
+                    // on the surface, so they stay valid while the camera moves.
                     crate::terra::ground_cap::fill_ground_cap(
-                        &mut verts, view.up, view.east, view.north, view.eye, r_disp, cap_angle,
-                        res, sample,
+                        &mut verts,
+                        built.center,
+                        view.east,
+                        view.north,
+                        built.anchor,
+                        r_disp,
+                        built.cap_angle,
+                        res,
+                        sample,
                     );
+                    self.queue.write_buffer(
+                        &self.cap_gpu[tier].vertex_buf,
+                        0,
+                        bytemuck::cast_slice(&verts),
+                    );
+                    self.cap_built[tier] = Some(built);
                 }
-                self.queue.write_buffer(
-                    &self.cap_gpu[tier].vertex_buf,
-                    0,
-                    bytemuck::cast_slice(&verts),
-                );
-                // Camera-relative draw: identity model, eye at the ORIGIN. tint.a = the cross-fade alpha.
+                // Camera-relative draw, as before — but the eye's part now lives in the MODEL matrix
+                // instead of in every vertex: `world = (p - anchor) + (anchor - eye) = p - eye`, so the
+                // shader (and the triplanar anchor that reads `wpos`) sees exactly what it always did.
+                // Built in f64 and cast, like `rel_model`, because it is a difference of two ~1.0
+                // display-unit positions. tint.a = the cross-fade alpha.
+                let cap_model = glam::DMat4::from_translation(built.anchor - view.eye).as_mat4();
                 write_space_uniform(
                     &self.queue,
                     &self.cap_uni[tier],
                     view.vp_rel,
-                    Mat4::IDENTITY,
+                    cap_model,
                     sun_light,
                     [1.0, 1.0, 1.0, cap_fade],
                     // emissive.xyz = the triplanar anchor (his), so the relief textures stay glued to
