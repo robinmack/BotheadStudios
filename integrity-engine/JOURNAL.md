@@ -3,6 +3,74 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-31 — the tier became a cache, the price collapsed, and the detail did not arrive
+
+**What.** A ground tier is now a CACHE OF THE VIEW. `fill_ground_cap` emits vertices relative to a fixed
+world `origin` instead of the eye, and the draw carries `anchor - eye` in the model matrix, so
+`world = (p - anchor) + (anchor - eye) = p - eye` — the shader, and the triplanar anchor that reads
+`wpos`, see exactly what they always did. `tier_is_current` then decides when a rebuild is owed. This is
+the work the 2026-07-24 entry below named as next: *"a tier is a cache of the VIEW… anchor each tier's mesh
+to a fixed point and carry the eye offset in the model matrix"*.
+
+**The rebuild question is asked the way `air_reaches` asks about the air** — *would including this change
+the answer* — never as a refresh interval, which would be a dial with no physics in it. Coverage: the
+cached disc must still contain the one a fresh build needs, and the slack it may drift into is exactly the
+`CAP_MARGIN` it was over-built by, so nothing new is declared. Resolution and lift: both must hold within
+an OCTAVE, the unit `cap_fade` already spans for "unambiguously visible".
+
+**★ An absolute angular test was tried FIRST and is wrong — the failure is the interesting part.**
+`|Δcell| / range ≤ θ`, the docs/49 budget that sizes everything else in this module, collapses at low
+altitude: a horizon-sized cap has ~52 m cells at 2 m altitude, so ANY descent changes them by more than the
+eye resolves and the answer is "rebuild" forever (**measured: ~13,000 rebuilds per halving**, worse than
+the per-frame rebuild it replaces). It is not lying — those cells really are visibly coarse. But the cure
+for a mesh too coarse to express the ground is another TIER, not another rebuild of the same one, and the
+budget cannot tell those apart. The octave measures a rebuild against what a rebuild can actually deliver.
+
+**Verified.** 452/452 native, `mod app` clean for wasm32. The anchoring is pinned vertex-for-vertex
+(`an_anchored_cap_draws_exactly_where_an_eye_relative_one_did`): anchored mesh + model translation IS the
+eye-relative mesh, not an approximation. Rig on the 5060 Ti, paced to ~60 fps
+(`web/rig/terra_anchor_drift.mjs`), the same rig run on `main` and on this branch:
+
+| | p50 render | frames per 1.2 s window |
+|---|---|---|
+| `main`, 4 tiers | **700–772 ms** | 15–17 |
+| anchored, 4 tiers | **0.4 ms** | 134–161 |
+| anchored, 1 tier | **0.4 ms** (was 45.2) | — |
+
+**★ And the picture is unchanged — proven against the confound, not asserted.** Branch-vs-`main`
+screenshots differ, but so do two runs of the SAME code, because the starfield rotates and the sun moves
+between runs. So the control was measured: branch-run-1 vs branch-run-2 (same code, ~40 min apart) differs
+by mean 2.5–4.8/255, while branch vs `main` differs by **0.43–0.64** — five to ten times LESS than the
+run-to-run drift. A raw before/after diff here would have read as a large change and been entirely time.
+
+**★ The negative result, which is the half that matters.** Tiers are now affordable, so the obvious next
+move was to raise `TERRA_DEFAULT_TIERS` off 1. **Measured first, and it does not earn its place.** A/B at a
+fixed camera over the Himalaya, 1 tier vs 4, at the full 16-octave relief budget:
+
+| altitude | max pixel Δ (1 vs 4 tiers) | ground luminance stddev, 1 → 4 |
+|---|---|---|
+| 8,000 m | 18 | 8.80 → 9.54 |
+| 2,000 m | 8 | 1.46 → 1.92 |
+| 500 m | 6 | 1.12 → 1.10 |
+| 100 m | 4 | 0.94 → 0.98 |
+
+Below ~2 km the fourth tier changes nothing a person could see, and the ground gets FLATTER on the way
+down (stddev 8.8 → 0.9), which is the opposite of the ask. The first run of this A/B used a 4-octave
+budget and I nearly reported it as-is; at 4 octaves the finest generated wavelength is 19.55 km / 2⁴ =
+1.2 km, so the test had been starved. Re-run at 16 and the conclusion is unchanged — which is the only
+reason it can be stated.
+
+So the 2026-07-24 diagnosis — *"the mesh is the limit, not the maths"* — was right about the COST and is
+not the whole story about the DETAIL. Anchoring removed the cost (642 ms → 0.4 ms) and the detail did not
+follow, so something else is between the camera and detailed ground. `TERRA_DEFAULT_TIERS` stays 1, now
+for a measured reason rather than a budgetary one.
+
+**NOT done.** A 4-tier rebuild is a **224–310 ms HITCH**. Anchoring turned a sustained per-frame cost into
+a rare one — ~1/500 of the work over a descent, which fires every 4× of altitude as the octave rule
+predicts — but a quarter-second freeze is a freeze, and all four tiers currently rebuild in the same frame.
+Spreading them (one tier per frame) is the obvious next increment and is not done. Also untouched: the
+`terra_lod_cost.mjs` table in the entry below is now historical — it measured the per-frame rebuild.
+
 ## 2026-07-25 (step 5) — the environment answers where its own surface is, and terrain stops being special
 
 **What.** Sean's `upstream-5-ground-ball` is integrated: the declared ball is cohesive matter whose fate is

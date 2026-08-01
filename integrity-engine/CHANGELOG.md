@@ -9,6 +9,20 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **A ground tier is a cache of the view, not a per-frame rebuild.** `ground_cap::fill_ground_cap`'s
+  `eye` parameter is now `origin`: the mesh is emitted relative to any fixed world point, and the caller
+  puts `anchor - eye` in the model matrix, so the draw stays camera-relative (`world = (p - anchor) +
+  (anchor - eye) = p - eye`) while the eye moving no longer touches a vertex. New:
+  `ground_cap::CapTierBuild` (what a tier was built with) and `ground_cap::tier_is_current` (whether a
+  rebuild would change anything), plus `ground_cap::cap_lift_m` — the lift law in metres, with
+  `cap_lift_disp` delegating to it. Terra rebuilds a tier only when it is owed one: **p50 render 0.4 ms
+  at four tiers, against 642.5 ms before, and 0.4 ms at one tier against 45.2 ms.**
+- **Measured, and it did not go the hoped-for way: the tier ladder buys no visible detail below ~2 km.**
+  Now that tiers are affordable they were A/B'd 1-vs-4 at a fixed camera over the Himalaya, at the full
+  16-octave relief budget: max pixel difference 6 at 500 m and 4 at 100 m, with ground-region luminance
+  structure unchanged (stddev 1.1 vs 1.1). So `TERRA_DEFAULT_TIERS` STAYS 1 — no longer because tiers cost
+  too much, but because they are measurably not the thing standing between the camera and detailed ground.
+
 - **An impact is sited where the trajectory crossed the surface, not where the step ended.**
   `FlightEnvironment::arrival` returned the post-step sample, so at entry speed (a ~283 m step at 17 km/s
   and 1/60 s) an impact coupled to matter hundreds of metres underground; `PlanetAir::arrival` had the

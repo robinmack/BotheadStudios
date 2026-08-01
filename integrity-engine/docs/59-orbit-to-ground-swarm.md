@@ -212,6 +212,28 @@ granularity. The altitude descends continuously and the globe→cap crossover ha
 because Terra has no finer LOD tier to fade into. That is the next piece of work, and it is a prerequisite
 for Stage C's JIT crater — a crater that sharpens as you approach needs a surface that can sharpen at all.
 
+#### 2026-07-31: the cost blocker is GONE and the detail blocker survived it
+
+The tier ladder was unaffordable — 45.2 ms/frame at one tier, 642.5 ms at four — because every vertex baked
+`surface - eye`, so any camera motion invalidated the whole 192² mesh, every frame, per tier. That is fixed:
+a tier is now anchored to a fixed world point with `anchor - eye` carried in the model matrix, and
+`ground_cap::tier_is_current` rebuilds it only when a rebuild would change something (coverage within the
+`CAP_MARGIN` it was over-built by; resolution and lift within an octave). **Measured: p50 0.4 ms at FOUR
+tiers**, against 700–772 ms for the same rig on `main`. Four tiers now cost what zero used to.
+
+**And the detail did not follow, which retires a hypothesis this doc was leaning on.** With tiers cheap,
+1-vs-4 was A/B'd at a fixed camera at the full 16-octave budget: max pixel difference **6 at 500 m, 4 at
+100 m**, ground luminance structure unchanged. The nested ladder is not what stands between the camera and
+detailed ground — so "wire the finer tier" is no longer the description of the remaining work, and
+`TERRA_DEFAULT_TIERS` stays 1 for a measured reason instead of a budgetary one. Whatever is flattening the
+surface on the way down is upstream of the tier count, and finding it is now Stage B's actual open
+question. (Candidates, none yet measured: the relief's amplitude via `slope_fraction` off a 19.55 km/pixel
+raster; the shading path, since relief below a cell cannot reach a mesh normal at all.)
+
+Open cost, newly exposed rather than introduced: a 4-tier rebuild is a **224–310 ms hitch**, because all
+tiers rebuild in the same frame. It fires every 4× of altitude on a descent. Spreading rebuilds one tier
+per frame is the obvious increment.
+
 Also found and fixed on the way: `launch_swarm` hand-rolled its own lat/lon→direction with the OPPOSITE
 sign on z from `crate::geo::dir_from_lat_lon`, so the swarm aimed at a mirrored longitude and arrived
 nowhere near where the camera pointed. CLAUDE.md warns about this exact thing — the tangent frame was once
