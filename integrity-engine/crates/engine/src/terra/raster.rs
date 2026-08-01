@@ -121,9 +121,168 @@ impl Raster {
     }
 }
 
+/// **The rasters the engine actually SHIPS, decoded natively** (test-only).
+///
+/// A test that wants to know what the surface does has two choices: invent a raster, or read the one the
+/// scene draws. Inventing one answers a question about the test. This module exists so the harder and more
+/// useful question — *what does the real Earth do* — can be asked in-suite, and so a measurement of it is
+/// re-run on every commit instead of living in a note that says it was true once.
+///
+/// **The engine has no PNG decoder at runtime and does not need one.** In the browser, `web/src/terra.ts`
+/// decodes each raster (ImageBitmap → OffscreenCanvas → `getImageData`) and hands `load_world` raw **RGBA**
+/// bytes, which it wraps with `Raster::new(w, h, 4, …)`. So `png` is a DEV-dependency and this module is
+/// `#[cfg(test)]`: nothing here is compiled into `--lib`, which is what the wasm gate and `wasm-pack` build.
+///
+/// Everything is widened to RGBA for the same reason — the bytes a test sees must be the bytes the engine
+/// sees at runtime, or the measurement is of a different raster than the one that ships.
+#[cfg(test)]
+pub(crate) mod shipped {
+    use super::Raster;
+    use std::path::PathBuf;
+
+    /// `web/public` + a body definition's asset URL. The URLs in `assets/bodies/*.json` are absolute web
+    /// paths (`/bodies/earth/elevation.png`) because they are fetched by the browser; on disk they are
+    /// served from `web/public`, so that is the one mapping this module needs to know.
+    fn web_public(url: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../web/public")
+            .join(url.trim_start_matches('/'))
+    }
+
+    /// A PNG on disk → a [`Raster`] holding RGBA, exactly as the browser would deliver it.
+    ///
+    /// `EXPAND` normalises the awkward encodings up front (palette → RGB, sub-byte grey → 8-bit, `tRNS` →
+    /// alpha), which is what `getImageData` also gives you, so an indexed land-cover PNG and a truecolour
+    /// elevation PNG arrive in the same shape.
+    pub fn decode_png(path: &std::path::Path) -> Result<Raster, String> {
+        let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
+        decoder.set_transformations(png::Transformations::EXPAND);
+        let mut reader = decoder
+            .read_info()
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let info = reader
+            .next_frame(&mut buf)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        // 16-bit samples would arrive big-endian and two bytes wide, which is a different raster from the
+        // one the engine reads. Refuse rather than silently reinterpret (the shipped set is all 8-bit;
+        // elevation packs 16 bits as R<<8|G, which is 8-bit channels carrying a 16-bit number).
+        if info.bit_depth != png::BitDepth::Eight {
+            return Err(format!(
+                "{}: expected 8-bit, got {:?}",
+                path.display(),
+                info.bit_depth
+            ));
+        }
+        let src_chans = match info.color_type {
+            png::ColorType::Grayscale => 1,
+            png::ColorType::GrayscaleAlpha => 2,
+            png::ColorType::Rgb => 3,
+            png::ColorType::Rgba => 4,
+            other => {
+                return Err(format!(
+                    "{}: unexpected colour type {other:?}",
+                    path.display()
+                ))
+            }
+        };
+        let (w, h) = (info.width as usize, info.height as usize);
+        // Widen to RGBA — the browser's own delivery shape.
+        let mut rgba = vec![255u8; w * h * 4];
+        for i in 0..w * h {
+            let s = &buf[i * src_chans..i * src_chans + src_chans];
+            let px = &mut rgba[i * 4..i * 4 + 4];
+            match src_chans {
+                1 => px[..3].copy_from_slice(&[s[0], s[0], s[0]]),
+                2 => {
+                    px[..3].copy_from_slice(&[s[0], s[0], s[0]]);
+                    px[3] = s[1];
+                }
+                3 => px[..3].copy_from_slice(s),
+                _ => px.copy_from_slice(s),
+            }
+        }
+        Raster::new(w, h, 4, rgba)
+    }
+
+    /// The shipped elevation raster **and the range it decodes to**, both read from
+    /// `assets/bodies/earth.json` through the engine's own `world_def::Surface` — so a test cannot drift
+    /// from the definition the scene loads, and cannot quietly hardcode a range that changes.
+    pub fn earth_elevation() -> (Raster, [f64; 2]) {
+        let def = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/bodies/earth.json");
+        let json =
+            std::fs::read_to_string(&def).unwrap_or_else(|e| panic!("{}: {e}", def.display()));
+        let body: crate::terra::world_def::World = serde_json::from_str(&json)
+            .expect("assets/bodies/earth.json parses as a body definition");
+        let surface = body
+            .surface
+            .expect("Earth's definition carries a surface block");
+        let url = surface
+            .elevation_url
+            .expect("Earth's surface names an elevation raster");
+        let range = surface
+            .elevation_range_m
+            .expect("Earth's surface declares the range its elevation raster decodes to");
+        (
+            decode_png(&web_public(&url)).expect("the shipped elevation raster decodes"),
+            range,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The native decoder must hand back what the BROWSER hands the engine, or every measurement taken
+    /// through it is about a different raster than the one that ships: RGBA, the declared dimensions, and
+    /// an elevation range that brackets real Earth rather than whatever a default would have supplied.
+    #[test]
+    fn the_shipped_earth_raster_decodes_the_way_the_browser_delivers_it() {
+        let (elev, range) = super::shipped::earth_elevation();
+        assert_eq!(elev.chans, 4, "the browser delivers RGBA; so must we");
+        assert_eq!(
+            (elev.w, elev.h),
+            (2048, 1024),
+            "the shipped equirectangular raster"
+        );
+        assert_eq!(elev.data.len(), elev.w * elev.h * 4);
+        assert_eq!(
+            range,
+            [-11_000.0, 9_000.0],
+            "read from the body definition, not assumed"
+        );
+        // It decodes to a real Earth. These are the DATA's own values, not the world's — a 19.5 km texel
+        // averages Everest's 8,848 m down to ~5,500 — so they check that the decode is right way up and
+        // correctly packed, never that the raster is accurate.
+        //
+        // ★ This raster is elevation AND BATHYMETRY: the sea floor, not the sea surface. Open ocean is
+        // therefore several km NEGATIVE, which is the thing to know before asserting anything about it.
+        let at = |lat, lon| elev.elevation_m_at(lat, lon, range[0], range[1]);
+        assert!(
+            at(27.99, 86.93) > 4_000.0,
+            "Everest region is high: {}",
+            at(27.99, 86.93)
+        );
+        assert!(
+            at(11.35, 142.2) < -8_000.0,
+            "the Mariana Trench is deep: {}",
+            at(11.35, 142.2)
+        );
+        assert!(
+            (-6_000.0..-3_000.0).contains(&at(0.0, -140.0)),
+            "the open Pacific is abyssal plain: {}",
+            at(0.0, -140.0)
+        );
+        assert!(
+            (0.0..1_000.0).contains(&at(0.0, -60.0)),
+            "the Amazon basin is low land"
+        );
+        // Right way up: the raster's row 0 is +90°N. If it were flipped, Antarctica's ice sheet (high)
+        // and the Arctic ocean (below sea level) would swap.
+        assert!(at(-85.0, 0.0) > 1_000.0, "Antarctica is a high ice sheet");
+        assert!(at(85.0, 0.0) < 0.0, "the Arctic is ocean");
+    }
 
     /// A 4×2 single-channel raster; corners let us pin the (lat,lon)→texel mapping.
     fn grid4x2() -> Raster {

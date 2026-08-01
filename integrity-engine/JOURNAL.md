@@ -94,9 +94,9 @@ violently rough. The generator is fine; what multiplies it is not.
    `tier_slope / mu`, where `tier_slope` is the elevation gradient over a baseline of two raster texels —
    **39 km** on the shipped Earth — and `mu` is a grain-scale friction coefficient. A 39 km baseline is a
    regional TILT and cannot be steep. Measured over the shipped raster at 4,096 land points: median
-   **0.0020**, p90 0.0111, largest anywhere **0.0619**. **Everest itself reads 0.0080**, because averaging
-   over 39 km flattens it. In frame at 100 m altitude that is 10.3 m of relief at Earth's roughest point,
-   1.4 m at Everest, **0.36 m on median land**.
+   **0.00202**, p90 0.01149, largest anywhere **0.0667**. **Everest itself reads 0.0328**, because
+   averaging over 39 km flattens it. In frame at 100 m altitude that is 11.8 m of relief at Earth's
+   roughest point and **0.36 m on median land**.
 2. **The amplitude law is scale-invariant, so approaching cannot reveal roughness even in principle.**
    `relief_amplitude_m` is `min(drop/2, λ/4)`; for cohesive rock the cohesion term wins the OR everywhere a
    camera cares about (granite's `h_crit` is 453 m), so the binding term is the `λ/4` no-overhang cap — a

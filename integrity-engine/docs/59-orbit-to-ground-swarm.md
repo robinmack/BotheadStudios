@@ -237,10 +237,14 @@ the same generator at `slope_fraction = 1.0` and it produces RMS slope ~1.0 and 
    `tier_slope / mu`, where `tier_slope` is the elevation gradient over a baseline of two raster texels —
    **39 km** on the shipped 2048×1024 Earth — and `mu` is a grain-scale friction coefficient. A 39 km
    baseline is a regional TILT and cannot be steep. Measured on the shipped raster at 4,096 land points:
-   median **0.0020**, p90 0.0111, largest anywhere **0.0619**. **Everest itself reads 0.0080**, because
-   averaging over 39 km flattens it. So the relief is multiplied by ~0.003 on typical land and ~0.10 at its
-   most extreme — never the 1.0 the law is written in terms of. In frame at 100 m altitude that is 10.3 m
-   of relief at the roughest place on Earth, 1.4 m at Everest, and **0.36 m on median land**.
+   median **0.00202**, p90 0.01149, largest anywhere **0.0667**. **Everest itself reads 0.0328**, because
+   averaging over 39 km flattens it. So the relief is multiplied by ~0.003 on typical land and ~0.11 at its
+   most extreme — never the 1.0 the law is written in terms of. In frame at 100 m altitude that is 11.8 m
+   of relief at the roughest place on Earth and **0.36 m on median land**. Those figures are now measured
+   IN-SUITE through the engine's own sampler
+   (`surface_detail::a_regional_gradient_cannot_reach_a_material_scale_slope`), which corrected them: the
+   first pass used a separate script that reimplemented `Raster::coords` with a half-texel offset the
+   engine does not have, and it reported Everest as 0.008.
 2. **The amplitude law is scale-invariant, so approaching cannot reveal roughness even in principle.**
    `relief_amplitude_m` is `min(drop/2, λ/4)`, and for cohesive rock the cohesion term wins the OR
    everywhere a camera cares about (granite's `h_crit` is 453 m), so the binding term is the `λ/4`

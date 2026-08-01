@@ -23,6 +23,14 @@ serde_json = "1"
 fast-surface-nets = "0.2"
 ndshape = "0.3"
 
+# **Test-only, and deliberately not a real dependency.** At runtime the engine never decodes a PNG: the
+# browser does it (`web/src/terra.ts` — ImageBitmap → OffscreenCanvas → getImageData) and hands the engine
+# raw RGBA bytes. So this buys native tests the ability to measure the SHIPPED rasters — the actual Earth
+# the scene draws, not a stand-in — at zero cost to the browser build. A dev-dependency is not compiled
+# into `--lib`, which is exactly what the wasm gate builds, so nothing here can reach the wasm bundle.
+[dev-dependencies]
+png = "0.17"
+
 [dependencies.web-sys]
 version = "0.3"
 features = ["HtmlCanvasElement", "Window", "Document"]

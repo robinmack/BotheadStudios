@@ -207,20 +207,14 @@ mod tests {
     ///
     /// Terra builds it as `local_raster_gradient / mu` — but the gradient is taken over a baseline of TWO
     /// RASTER TEXELS, 39 km on the shipped Earth, while `mu` is a grain-scale material property. A 39 km
-    /// baseline cannot be steep: reaching even 0.25 would need ~10 km of relief across it. Measured on the
-    /// shipped raster, the median land value is **0.002** and the largest anywhere is **0.062** — so
-    /// `slope_fraction` is ~0.003 typically and never approaches the 1.0 that would let the material's own
-    /// limit be reached. **Everest itself measures 0.008**, because averaging over 39 km flattens it.
+    /// baseline cannot be steep, and this test **measures the shipped raster to say so** rather than
+    /// citing a number: it reproduces `Terra::build_cap`'s own sampling (±360/w degrees over a
+    /// `2·raster_step` run) across the real elevation PNG and reports the distribution. Everest itself
+    /// comes out at ~0.008, because averaging over 39 km flattens it.
     ///
     /// The consequence is the reported symptom: below ~20 km altitude the frame fits inside ONE raster
     /// texel, so measured elevation contributes only a smooth ramp and ALL visible roughness has to come
-    /// from the generated relief — which is being scaled by ~0.003.
-    ///
-    /// The raster figures above were measured OUTSIDE this test (the shipped 2048×1024 elevation PNG,
-    /// sampled the same way `Terra::build_cap` does — ±360/w degrees over a `2·raster_step` run — at 4,096
-    /// land points), because the engine crate has no PNG decoder and adding one to assert a constant would
-    /// be worse than citing the method. What IS asserted here is the scale mismatch that makes those
-    /// figures inevitable, and what they cost the picture.
+    /// from the generated relief — which is being scaled by that number.
     #[test]
     fn a_regional_gradient_cannot_reach_a_material_scale_slope() {
         let mats = crate::materials::load();
@@ -238,8 +232,73 @@ mod tests {
             "the slope is measured over a baseline {}x the features it is scaling",
             baseline_m / finest_generated_wavelength_m
         );
-        // What that costs the picture, at the roughest value the shipped raster actually produces
-        // (0.062 → slope_fraction 0.103) against the value the law is written in terms of (1.0).
+
+        // **MEASURED on the raster the scene actually draws**, sampled exactly as `Terra::build_cap`
+        // samples it. This is the whole claim, and it is now re-run on every commit.
+        //
+        // The bounds below are loose brackets around what the shipped data measures (printed on every
+        // run), not targets: they exist to catch the raster being replaced or the sampler moving, and
+        // they are deliberately far from the measured values so ordinary noise cannot trip them.
+        // ★ Doing this in-suite CORRECTED the first version of this measurement. It was originally taken
+        // by a separate script that reimplemented `Raster::coords` with a half-texel offset the engine
+        // does not have. Over 16k points that is invisible — the median and p90 agreed to three digits —
+        // but at a single named point in the steepest terrain on Earth it lands in a different texel, and
+        // it reported Everest as 0.008 when the engine reads 0.033. A reimplementation of the thing under
+        // test is a second answer to the same question (Law II), and this is what it cost.
+        let (elev, range) = crate::terra::raster::shipped::earth_elevation();
+        let r_m = 6.371e6;
+        let raster_step_m = elev.texel_arc_m(r_m);
+        let d = 360.0 / elev.w as f64;
+        let tier_slope = |lat: f64, lon: f64| {
+            let e = |la: f64, lo: f64| elev.elevation_m_at(la, lo, range[0], range[1]);
+            let run = (2.0 * raster_step_m).max(1.0);
+            let dn = (e(lat + d, lon) - e(lat - d, lon)) / run;
+            let de = (e(lat, lon + d) - e(lat, lon - d)) / run;
+            (dn * dn + de * de).sqrt()
+        };
+        // Everest: the steepest place there is, and the raster reads it as almost flat.
+        let everest = tier_slope(27.99, 86.93);
+        assert!(
+            everest < 0.05,
+            "even Everest reads as a gentle regional tilt, got {everest}"
+        );
+        // The distribution over land. `elevation > 1 m` stands in for land here (the raster carries
+        // bathymetry, so ocean is strongly negative).
+        let mut land: Vec<f64> = Vec::new();
+        for i in 0..128 {
+            for j in 0..128 {
+                let lat = -60.0 + 120.0 * i as f64 / 127.0;
+                let lon = -180.0 + 360.0 * j as f64 / 127.0;
+                if elev.elevation_m_at(lat, lon, range[0], range[1]) > 1.0 {
+                    land.push(tier_slope(lat, lon));
+                }
+            }
+        }
+        assert!(
+            land.len() > 2_000,
+            "enough land samples to be a distribution"
+        );
+        land.sort_by(f64::total_cmp);
+        let pct = |p: f64| land[((land.len() - 1) as f64 * p) as usize];
+        let (median, p90, worst) = (pct(0.5), pct(0.9), land[land.len() - 1]);
+        assert!(
+            median / mu < 0.01,
+            "typical land is scaled to nearly nothing: median slope {median} → fraction {}",
+            median / mu
+        );
+        assert!(
+            worst / mu < 0.20,
+            "nowhere on Earth does a 39 km baseline approach the material limit: worst {worst} → fraction {}",
+            worst / mu
+        );
+        println!(
+            "tier_slope over land: median {median:.5} (fraction {:.5}), p90 {p90:.5}, worst {worst:.5} (fraction {:.5}); Everest {everest:.5}",
+            median / mu,
+            worst / mu
+        );
+
+        // What that costs the picture, at the roughest value the shipped raster actually produces,
+        // against the value the law is written in terms of (1.0).
         let span = 109.0; // what a 100 m camera has in frame at 60° fov
         let octaves = (19_550.0f64 / (span / 192.0)).max(1.0).log2().min(16.0);
         let pp = |sf: f64| {
@@ -258,10 +317,15 @@ mod tests {
                 .collect();
             h.iter().cloned().fold(f64::MIN, f64::max) - h.iter().cloned().fold(f64::MAX, f64::min)
         };
-        let (roughest, median_land) = (pp(0.103), pp(0.0034));
+        // Fed from the MEASUREMENT above, not from constants — so if the shipped raster is ever replaced
+        // with finer data, this test reports the new consequence instead of the old one.
+        let (roughest, median_land) = (pp(worst / mu), pp(median / mu));
+        println!(
+            "relief in a {span:.0} m frame at 100 m altitude: {roughest:.2} m at Earth's roughest, {median_land:.2} m on median land"
+        );
         assert!(
-            roughest / span < 0.11,
-            "even Earth's roughest 39 km gradient yields under an 11% grade in frame, got {}",
+            roughest / span < 0.15,
+            "even Earth's roughest 39 km gradient yields a gentle grade in frame, got {}",
             roughest / span
         );
         assert!(
