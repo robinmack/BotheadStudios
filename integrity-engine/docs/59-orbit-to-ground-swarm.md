@@ -325,7 +325,7 @@ before running it again:
   (hard rule 0), so it reported 0% for frames that plainly contained a planet. Deleted — the PNGs are the
   measurement.
 
-#### Finer elevation data — it exists, it is free, and it is not an alternative
+#### Finer elevation data — the PRIMARY fix, and I first wrote the opposite
 
 - **Copernicus DEM GLO-30** — 30 m global, TanDEM-X 2011–2015, Cloud-Optimized GeoTIFF, free on AWS Open
   Data / OpenTopography.
@@ -335,11 +335,35 @@ before running it again:
   3 mm precision. Notable because that is the encoding this engine's raster already uses, and because tiles
   are how a body streams detail rather than shipping it.
 
-The arithmetic that decides the architecture: 30 m global is ~1.4×10¹² samples. It cannot be shipped whole,
-so finer data is necessarily a **tiled, fetched-by-necessity** source — which is docs/44's ladder applied to
-data rather than to matter. And even at 30 m the generator still covers 30 m down to centimetres. So finer
-data and a measured exponent are complementary: the data moves the anchor down, the exponent governs
-everything below it.
+**★ This section first said finer data was "not an alternative" to the exponent. That was wrong, and Robin
+caught it.** The generator has to cover from the data's resolution down to 0.1 m, and that span is what
+decides how much the exponent matters:
+
+| source | m/texel | samples | raw | generator span | H=1 error at 0.1 m |
+|---|---|---|---|---|---|
+| shipped raster | 19,568 | 2.1×10⁶ | 4 MB | **5.29 decades** | **544×** |
+| ETOPO 2022 | 464 | 3.7×10⁹ | 7.5 GB | 3.67 decades | 79× |
+| Copernicus GLO-30 | 30 | 8.9×10¹¹ | 1.8 TB | 2.48 decades | 19× |
+| AWS tiles z=15 | 4.8 | 3.5×10¹³ | 70 TB | **1.68 decades** | **7.4×** |
+
+Finer data attacks this at both ends at once, and the second way is the one I missed:
+
+1. It shortens what the generator must invent — 5.29 decades today, 1.68 with streamed tiles.
+2. **It repairs the `slope_fraction` category error BY CONSTRUCTION.** That bug is not really about
+   friction coefficients; it is that the gradient is sampled over two texels, and two texels is 39 km. At
+   30 m texels the baseline is 60 m, where real ground genuinely approaches what the material can hold — so
+   the ratio finally measures what its name claims. The category error is a symptom of the resolution.
+
+So finer data is the primary fix, and it is largely an alternative for the symptom that prompted all this:
+with 30 m data there is real measured relief in frame at 94 m altitude, and the flat green fill is gone. The
+exponent governs only the residual, and it matters *more* the less data you have.
+
+What data still cannot do: **reach 10 cm.** GLO-30 leaves 2.5 decades below it and z=15 tiles leave 1.7, so
+a generator is needed either way — just a far less load-bearing one. And **none of these ship as a file**:
+even ETOPO 2022 is 7.5 GB raw. A single-file upgrade within a web budget buys ~5–10 km per texel
+(4096×2048 ≈ 13 MB), which is three decades short of the problem. Metres require **tiled, fetched-by-
+necessity** data — docs/44's ladder applied to data rather than to matter, and AWS's terrarium tiles are
+already the encoding this engine reads.
 
 The hitch anchoring exposed is also fixed: a 4-tier rebuild was **224–310 ms**, because the staleness tests
 are relative and every rung of the ladder therefore trips at the same altitude on a descent.

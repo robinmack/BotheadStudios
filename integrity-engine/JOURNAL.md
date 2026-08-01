@@ -124,14 +124,22 @@ a real roughness rather than a regional tilt. Caveat stated rather than buried: 
 ~0.77 at the shortest pair to ~0.41 at the longest, so one H over that range is a fit, not a constant, and
 extrapolating it four more decades to metre scale is a declared model whose resolved counterpart is data.
 
-**Finer elevation data exists, is free, and is not an alternative to the exponent.** Copernicus GLO-30
+**Finer elevation data exists and is free — and it is the PRIMARY fix, not a companion to the exponent.
+★ I first wrote the opposite and Robin caught it.** Copernicus GLO-30
 (30 m, TanDEM-X, COG on AWS Open Data); ETOPO 2022 (15 arc-sec ~450 m topo+bathy, NOAA public domain — the
 drop-in upgrade, being the same *kind* of seamless land+sea product); AWS Terrain Tiles (global z/x/y
-**terrarium PNG**, no auth, RGB-packed metres — the same encoding this engine already reads). But 30 m
-global is ~1.4×10¹² samples: unshippable whole, so finer data is necessarily TILED and fetched by
-necessity, which is docs/44's ladder applied to data instead of matter. And even at 30 m the generator
-still covers 30 m down to centimetres. The data moves the anchor down; the exponent governs everything
-below it.
+**terrarium PNG**, no auth, RGB-packed metres — the same encoding this engine already reads). The generator must cover from the data's resolution down to 0.1 m, and that
+span is what decides how much the exponent matters: **5.29 decades today (H=1 wrong by 544× at 0.1 m),
+2.48 with GLO-30 (19×), 1.68 with z=15 tiles (7.4×)**. And the part I missed: finer data **repairs the
+`slope_fraction` category error BY CONSTRUCTION**, because that bug is really that two texels is 39 km —
+at 30 m texels the baseline is 60 m, where real ground does approach what the material can hold, so the
+ratio finally measures what its name claims. With 30 m data there is real relief in frame at 94 m altitude
+and the flat green fill is simply gone.
+
+What data still cannot do: reach 10 cm (2.5 decades short at GLO-30), or ship as a file — even ETOPO 2022
+is 7.5 GB raw, and a single file within a web budget buys ~5–10 km per texel, three decades short. So the
+route is **tiled, fetched-by-necessity data** (docs/44's ladder applied to data instead of matter; AWS's
+terrarium tiles are already the encoding this engine reads), with the exponent covering the residual.
 
 **★ THE NORTH-STAR LADDER, WALKED.** Robin: *"from mars-earth distance to 10 cm above the surface …
 so we can prove our frame of reference/increased detail system works … without noticeable frame-rate
