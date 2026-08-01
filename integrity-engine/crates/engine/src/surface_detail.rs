@@ -335,6 +335,129 @@ mod tests {
         );
     }
 
+    /// **What Earth's own roughness actually does with scale — the exponent the generator should have had**
+    /// (docs/46 row 27).
+    ///
+    /// The generator's amplitude ∝ wavelength is Hurst exponent **H = 1**, which is an assumption nobody
+    /// made deliberately — it falls out of the `λ/4` heightfield cap binding at every wavelength. This
+    /// measures the real thing from the raster the scene draws, so the assumption can be replaced by a
+    /// number instead of by another assumption.
+    ///
+    /// **Method: the structure function** (the variogram). For a self-affine surface the RMS height
+    /// difference between two points a distance `r` apart grows as `r^H`, so a log-log fit of RMS Δz
+    /// against `r` has slope `H` directly. Pairs are taken along great circles from golden-angle sample
+    /// points — deterministic, no seed, uniform over the sphere — and **both ends must be land**: the sea
+    /// floor is a different surface with different statistics, and the coastline between them is a
+    /// kilometres-tall step that would dominate anything measured across it.
+    ///
+    /// **What this can and cannot say.** The raster resolves 19.5 km, so the honest fitting range is
+    /// ~39 km (two texels, clear of the bilinear smoothing at one) to a few hundred km — under two
+    /// decades. Extrapolating an exponent measured there down to metre wavelengths is FOUR MORE DECADES,
+    /// and that extrapolation is a declared model, not a measurement (Law V). What it does establish is
+    /// the thing the current law gets wrong: real topography is not H = 1, so a generator built on `λ/4`
+    /// is not merely uncalibrated, it has the wrong SHAPE, and no multiplier fixes a wrong exponent.
+    #[test]
+    fn earths_topography_is_self_affine_and_its_exponent_is_not_one() {
+        let (elev, range) = crate::terra::raster::shipped::earth_elevation();
+        let mask = crate::terra::raster::shipped::earth_landmask();
+        let r_m = 6.371e6;
+        let texel = elev.texel_arc_m(r_m);
+
+        // A great-circle step of `dist_m` on bearing `az` from (lat, lon), in degrees.
+        let offset = |lat: f64, lon: f64, az: f64, dist_m: f64| -> (f64, f64) {
+            let d = dist_m / r_m;
+            let (la, lo) = (lat.to_radians(), lon.to_radians());
+            let lat2 = (la.sin() * d.cos() + la.cos() * d.sin() * az.cos()).asin();
+            let lon2 = lo + (az.sin() * d.sin() * la.cos()).atan2(d.cos() - la.sin() * lat2.sin());
+            (lat2.to_degrees(), lon2.to_degrees())
+        };
+
+        // Golden-angle points: uniform over the sphere, deterministic, identical every run.
+        const N: usize = 20_000;
+        let golden = std::f64::consts::PI * (3.0 - 5f64.sqrt());
+        let lags: Vec<f64> = (0..6).map(|k| texel * (1u32 << k) as f64).collect();
+        let mut sum = vec![0.0f64; lags.len()];
+        let mut cnt = vec![0usize; lags.len()];
+        let mut land_points = 0usize;
+        for i in 0..N {
+            let z = 1.0 - 2.0 * (i as f64 + 0.5) / N as f64;
+            let lat = z.asin().to_degrees();
+            let lon = ((i as f64 * golden) % std::f64::consts::TAU).to_degrees() - 180.0;
+            if !mask.land_at(lat, lon) {
+                continue;
+            }
+            land_points += 1;
+            let e0 = elev.elevation_m_at(lat, lon, range[0], range[1]);
+            for (li, &lag) in lags.iter().enumerate() {
+                for a in 0..8 {
+                    let az = a as f64 * std::f64::consts::TAU / 8.0;
+                    let (lat2, lon2) = offset(lat, lon, az, lag);
+                    if !mask.land_at(lat2, lon2) {
+                        continue;
+                    }
+                    let d = elev.elevation_m_at(lat2, lon2, range[0], range[1]) - e0;
+                    sum[li] += d * d;
+                    cnt[li] += 1;
+                }
+            }
+        }
+        assert!(land_points > 3_000, "enough land to be a measurement");
+
+        let rms: Vec<f64> = (0..lags.len())
+            .map(|i| (sum[i] / cnt[i].max(1) as f64).sqrt())
+            .collect();
+        for i in 0..lags.len() {
+            println!(
+                "  lag {:8.1} km   RMS dz {:8.1} m   ({} pairs)",
+                lags[i] / 1000.0,
+                rms[i],
+                cnt[i]
+            );
+        }
+        // Least-squares slope of log(RMS) against log(lag), skipping the shortest lag: at one texel the
+        // bilinear interpolation is smoothing the very quantity being measured.
+        let fit = |from: usize| {
+            let xs: Vec<f64> = lags[from..].iter().map(|l| l.ln()).collect();
+            let ys: Vec<f64> = rms[from..].iter().map(|v| v.ln()).collect();
+            let n = xs.len() as f64;
+            let (mx, my) = (xs.iter().sum::<f64>() / n, ys.iter().sum::<f64>() / n);
+            let num: f64 = xs.iter().zip(&ys).map(|(x, y)| (x - mx) * (y - my)).sum();
+            let den: f64 = xs.iter().map(|x| (x - mx) * (x - mx)).sum();
+            num / den
+        };
+        let h = fit(1);
+        println!(
+            "  Hurst exponent H = {h:.3} over {:.0}-{:.0} km ({} land points)",
+            lags[1] / 1000.0,
+            lags[lags.len() - 1] / 1000.0,
+            land_points
+        );
+        println!(
+            "  anchor: RMS dz at one raster texel ({:.1} km) = {:.1} m",
+            texel / 1000.0,
+            rms[0]
+        );
+        // The finding: Earth's land is self-affine with an exponent well under 1. The generator's implied
+        // H = 1 is not a calibration error, it is the wrong shape — at 10 m wavelength, `λ^1` is smaller
+        // than `λ^H` by (19_550/10)^(1-H), which is a factor of tens.
+        assert!(
+            (0.2..0.95).contains(&h),
+            "H should land in the self-affine range reported for topography, got {h}"
+        );
+        assert!(
+            h < 0.9,
+            "the measurement must actually refute the generator's implied H = 1, got {h}"
+        );
+        let understatement = (19_550.0f64 / 10.0).powf(1.0 - h);
+        println!(
+            "  at 10 m wavelength, H=1 understates the measured exponent by {understatement:.0}x"
+        );
+        assert!(
+            understatement > 5.0,
+            "and the gap must matter at metre scale"
+        );
+    }
+
     fn ctrl() -> ResolutionController {
         ResolutionController::default() // 1 mrad angular resolution, 1 mm floor
     }

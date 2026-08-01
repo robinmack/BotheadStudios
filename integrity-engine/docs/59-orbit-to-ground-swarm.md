@@ -257,12 +257,46 @@ and you see real, measured mountains. Below it the frame fits INSIDE one texel, 
 contributes only a smooth bilinear ramp, and every visible bump must come from a generator that is both
 scaled to ~0.003 and structurally incapable of roughening as you approach.
 
-**No fix attempted, deliberately.** The fix is not a multiplier — that is a dial (Law V). It needs a
-roughness measured at a scale the shipped data does not have. The honest options are a physically-sourced
-Hurst exponent extrapolated from the finest scale the raster DOES resolve, or finer data; both are design
-decisions, not repairs. Pinned meanwhile by
+**No fix attempted, deliberately.** The fix is not a multiplier — that is a dial (Law V), and a wrong
+exponent cannot be corrected by a coefficient anyway. Pinned meanwhile by
 `surface_detail::generated_relief_has_the_same_slope_at_every_scale_below_two_km` and
 `surface_detail::a_regional_gradient_cannot_reach_a_material_scale_slope`.
+
+#### The exponent, measured (2026-08-01)
+
+`earths_topography_is_self_affine_and_its_exponent_is_not_one` measures the structure function of the
+shipped raster over land — golden-angle sample points, great-circle pairs, **both ends land** (the sea floor
+is a different surface and the coastline between them is a kilometres-tall step):
+
+| lag | 19.5 km | 39.1 km | 78.2 km | 156 km | 313 km | 625 km |
+|---|---|---|---|---|---|---|
+| RMS Δz | 137.9 m | 235.2 m | 355.4 m | 509.1 m | 682.4 m | 905.2 m |
+
+Log-log slope over 39–625 km: **H = 0.483** (5,846 land points, ~40k pairs per lag). That is the accepted
+value — Turcotte's spherical-harmonic spectrum gives S(k) ∝ k⁻² below 10,000 km with β = 2H+1, so β ≈ 2
+implies H ≈ 0.5, and a recent Earth/Venus roughness study reports H ≈ 0.55 at β = −2.1. So the generator's
+implied **H = 1 is 50× too smooth at 10 m wavelength**, and the measurement also supplies the ANCHOR a fix
+needs: RMS Δz at one texel = 137.9 m, a real roughness rather than a regional tilt.
+
+**Honest caveat.** The local slope drifts from ~0.77 at the shortest pair to ~0.41 at the longest, so a
+single H over 39–625 km is a fit, not a constant — and extrapolating it four more decades to metre scale is
+a DECLARED model (Law V) whose named resolved counterpart is finer data.
+
+#### Finer elevation data — it exists, it is free, and it is not an alternative
+
+- **Copernicus DEM GLO-30** — 30 m global, TanDEM-X 2011–2015, Cloud-Optimized GeoTIFF, free on AWS Open
+  Data / OpenTopography.
+- **ETOPO 2022** — 15 arc-second (~450 m) global **topo+bathy**, NOAA, public domain. The natural drop-in
+  upgrade for this raster, because it is the same *kind* of product: one seamless land+sea surface.
+- **AWS Terrain Tiles** — global `z/x/y` **terrarium PNG** tiles, no authentication, elevation RGB-packed to
+  3 mm precision. Notable because that is the encoding this engine's raster already uses, and because tiles
+  are how a body streams detail rather than shipping it.
+
+The arithmetic that decides the architecture: 30 m global is ~1.4×10¹² samples. It cannot be shipped whole,
+so finer data is necessarily a **tiled, fetched-by-necessity** source — which is docs/44's ladder applied to
+data rather than to matter. And even at 30 m the generator still covers 30 m down to centimetres. So finer
+data and a measured exponent are complementary: the data moves the anchor down, the exponent governs
+everything below it.
 
 The hitch anchoring exposed is also fixed: a 4-tier rebuild was **224–310 ms**, because the staleness tests
 are relative and every rung of the ladder therefore trips at the same altitude on a descent.

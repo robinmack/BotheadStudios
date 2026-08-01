@@ -229,6 +229,22 @@ pub(crate) mod shipped {
             range,
         )
     }
+
+    /// The shipped land mask. Needed alongside the elevation whenever a measurement must not mix land
+    /// with sea floor: they are different surfaces with different statistics, and the coastline between
+    /// them is a kilometres-tall step that would dominate any roughness measured across it.
+    pub fn earth_landmask() -> Raster {
+        let def = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/bodies/earth.json");
+        let json =
+            std::fs::read_to_string(&def).unwrap_or_else(|e| panic!("{}: {e}", def.display()));
+        let body: crate::terra::world_def::World = serde_json::from_str(&json)
+            .expect("assets/bodies/earth.json parses as a body definition");
+        let url = body
+            .surface
+            .and_then(|s| s.landmask_url)
+            .expect("Earth's surface names a land mask");
+        decode_png(&web_public(&url)).expect("the shipped land mask decodes")
+    }
 }
 
 #[cfg(test)]

@@ -107,9 +107,31 @@ Together they are the symptom exactly: above ~20 km the frame spans more than on
 measured mountains; below it the frame fits INSIDE one texel, the raster contributes only a smooth ramp,
 and every visible bump must come from a generator scaled to ~0.003 that cannot roughen as you approach.
 
-**No fix attempted, deliberately** — the fix is not a multiplier, that is a dial (Law V). It needs a
-roughness measured at a scale the shipped data does not have. Pinned by two new tests so the diagnosis
-cannot be re-derived from scratch, and both are written to FAIL if either half is ever corrected.
+**No fix attempted, deliberately** — the fix is not a multiplier, that is a dial (Law V), and a wrong
+exponent cannot be corrected by a coefficient anyway. Pinned by two new tests so the diagnosis cannot be
+re-derived from scratch, and both are written to FAIL if either half is ever corrected.
+
+**★ Then the exponent was MEASURED, and it is the accepted one.**
+`earths_topography_is_self_affine_and_its_exponent_is_not_one` takes the structure function of the shipped
+raster over land — golden-angle points, great-circle pairs, both ends land, because the sea floor is a
+different surface and the coastline between them is a kilometres-tall step. RMS Δz runs 137.9 m at 19.5 km
+to 905.2 m at 625 km; the log-log slope over 39–625 km is **H = 0.483** (5,846 land points, ~40k pairs per
+lag). Turcotte's spherical-harmonic spectrum gives S(k) ∝ k⁻² below 10,000 km with β = 2H+1, so β ≈ 2 means
+H ≈ 0.5, and a recent Earth/Venus roughness study reports H ≈ 0.55 at β = −2.1 — the measurement landed on
+the literature without being aimed at it. **The generator's implied H = 1 is 50× too smooth at 10 m
+wavelength**, and the same measurement supplies the anchor a fix would need: RMS Δz at one texel = 137.9 m,
+a real roughness rather than a regional tilt. Caveat stated rather than buried: the local slope drifts from
+~0.77 at the shortest pair to ~0.41 at the longest, so one H over that range is a fit, not a constant, and
+extrapolating it four more decades to metre scale is a declared model whose resolved counterpart is data.
+
+**Finer elevation data exists, is free, and is not an alternative to the exponent.** Copernicus GLO-30
+(30 m, TanDEM-X, COG on AWS Open Data); ETOPO 2022 (15 arc-sec ~450 m topo+bathy, NOAA public domain — the
+drop-in upgrade, being the same *kind* of seamless land+sea product); AWS Terrain Tiles (global z/x/y
+**terrarium PNG**, no auth, RGB-packed metres — the same encoding this engine already reads). But 30 m
+global is ~1.4×10¹² samples: unshippable whole, so finer data is necessarily TILED and fetched by
+necessity, which is docs/44's ladder applied to data instead of matter. And even at 30 m the generator
+still covers 30 m down to centimetres. The data moves the anchor down; the exponent governs everything
+below it.
 
 **NOT done.** 61–79 ms is still a visible hitch; going below it means splitting a single tier's rebuild
 across frames, not scheduling whole tiers. Also untouched: the `terra_lod_cost.mjs` table in the entry
