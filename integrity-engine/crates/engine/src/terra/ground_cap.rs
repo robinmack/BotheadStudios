@@ -156,6 +156,37 @@ pub fn tier_is_current(built: &CapTierBuild, fresh: &CapTierBuild) -> bool {
     covers && resolves && lifted
 }
 
+/// **Which ONE tier may be rebuilt this frame** — the ladder's whole rebuild budget, spent outermost
+/// first. `None` when every tier is current and the frame owes nothing.
+///
+/// One per frame, because the tiers go stale TOGETHER. [`tier_is_current`]'s resolution and lift tests
+/// are both relative (an octave of a quantity that scales with altitude), so on a descent every rung
+/// trips at the same altitude — and four 192² meshes re-derived and re-uploaded in one frame measured as
+/// a **224-310 ms freeze**. Spreading them costs each tier a few frames of staleness and there is real
+/// slack for it: a deferred tier keeps drawing its cached mesh, and the amount it is allowed to be wrong
+/// by is the `CAP_MARGIN` it was over-built by — tens of kilometres of ground at low altitude against
+/// the metres a camera covers in the three frames it waits.
+///
+/// **Outermost first for two reasons, not one.** It is the tier whose staleness shows worst (a coverage
+/// gap at tier 0 is a hole at the horizon with only the coarse globe behind it, while a gap in an inner
+/// tier just reveals the coarser tier drawn underneath it). And it keeps the built set a PREFIX: a tier
+/// that has never been built is stale, so it is picked before any tier outside it can be, which is what
+/// lets [`tiers_ready`] be a count instead of a mask.
+pub fn tier_owed_a_rebuild(
+    built: &[Option<CapTierBuild>],
+    fresh: &[CapTierBuild],
+) -> Option<usize> {
+    (0..built.len().min(fresh.len()))
+        .find(|&i| !built[i].is_some_and(|b| tier_is_current(&b, &fresh[i])))
+}
+
+/// How many tiers, counting from the outermost, have a mesh worth drawing. A tier that has never been
+/// built holds an empty vertex buffer, so it must not be drawn — and while the ladder fills in one tier
+/// per frame, that is a real state the renderer passes through rather than a theoretical one.
+pub fn tiers_ready(built: &[Option<CapTierBuild>]) -> usize {
+    built.iter().take_while(|t| t.is_some()).count()
+}
+
 /// Fill `out` with the ground-cap vertices (cleared first). The index topology is fixed for a given `res` — get
 /// it once from [`cap_indices`] — so this is called every frame to rewrite only the vertex buffer.
 /// - `center`,`east`,`north`: the unit surface direction under the camera and its tangent frame.
@@ -627,6 +658,98 @@ mod tests {
             }
             assert!(alt < built_alt, "the cache must go stale on the way down");
         }
+    }
+
+    /// A ladder of `n` tiers at `alt`, each covering a quarter of the span of the one outside it —
+    /// Terra's `TERRA_TIER_RATIO`, reproduced here so the policy is tested against the real shape.
+    fn ladder(alt: f64, n: usize) -> Vec<CapTierBuild> {
+        let r_m: f64 = 6.371e6;
+        let h = ((alt / r_m) * (alt / r_m + 2.0)).sqrt();
+        (0..n)
+            .map(|t| {
+                let ang = CAP_MARGIN * h / 4f64.powi(t as i32);
+                CapTierBuild {
+                    center: DVec3::X,
+                    anchor: DVec3::X,
+                    cap_angle: ang,
+                    cell_m: ang * r_m * 2.0 / 192.0,
+                    lift_m: cap_lift_m(alt) * (t as f64 + 1.0),
+                }
+            })
+            .collect()
+    }
+
+    /// **The hitch fix, stated as the invariant it has to hold: never more than one rebuild per frame.**
+    /// Fly a descent one frame at a time and count. The tiers go stale together — that is exactly why
+    /// four of them rebuilding in one frame was a 224-310 ms freeze — so the count, not the total, is
+    /// the thing to pin.
+    #[test]
+    fn a_descent_never_owes_more_than_one_rebuild_in_a_frame() {
+        let n = 4;
+        let mut built: Vec<Option<CapTierBuild>> = vec![None; n];
+        let mut alt = 500_000.0f64;
+        let mut rebuilds = 0;
+        let mut frames = 0;
+        // ~60 fps down through the whole corridor at a brisk 200 m/frame-ish descent rate.
+        while alt > 2.0 {
+            let fresh = ladder(alt, n);
+            // AT MOST ONE. The policy has no way to express two, and that is the point.
+            if let Some(t) = tier_owed_a_rebuild(&built, &fresh) {
+                built[t] = Some(fresh[t]);
+                rebuilds += 1;
+            }
+            // The built set stays a PREFIX, which is what makes `tiers_ready` a count.
+            let ready = tiers_ready(&built);
+            assert!(
+                built[..ready].iter().all(|t| t.is_some())
+                    && built[ready..].iter().all(|t| t.is_none()),
+                "the built set must stay a prefix"
+            );
+            alt *= 0.995;
+            frames += 1;
+        }
+        // Four tiers over a 500 km descent: a bounded number of rebuilds, each one frame's worth.
+        assert!(
+            (10..400).contains(&rebuilds),
+            "expected tens of rebuilds over the descent, got {rebuilds} in {frames} frames"
+        );
+        assert_eq!(tiers_ready(&built), n, "the ladder ends up fully built");
+    }
+
+    /// The ladder fills in outermost-first, one per frame, from cold — so nothing is ever drawn from a
+    /// vertex buffer that was never filled.
+    #[test]
+    fn a_cold_ladder_fills_in_outermost_first_one_tier_at_a_time() {
+        let n = 4;
+        let fresh = ladder(5_000.0, n);
+        let mut built: Vec<Option<CapTierBuild>> = vec![None; n];
+        for expect in 0..n {
+            assert_eq!(tiers_ready(&built), expect);
+            let t = tier_owed_a_rebuild(&built, &fresh).expect("a cold tier is owed a rebuild");
+            assert_eq!(t, expect, "tiers are served outermost first");
+            built[t] = Some(fresh[t]);
+        }
+        assert_eq!(tiers_ready(&built), n);
+        assert_eq!(
+            tier_owed_a_rebuild(&built, &fresh),
+            None,
+            "a fully current ladder owes nothing"
+        );
+    }
+
+    /// A stale INNER tier is served even while the outer ones are current — outermost-first is a
+    /// priority, not a requirement that the outer tier be stale too.
+    #[test]
+    fn a_stale_inner_tier_is_still_reached() {
+        let n = 4;
+        let fresh = ladder(5_000.0, n);
+        let mut built: Vec<Option<CapTierBuild>> = fresh.iter().map(|f| Some(*f)).collect();
+        assert_eq!(tier_owed_a_rebuild(&built, &fresh), None);
+        // Drift tier 2's centre well outside its own (much smaller) margin.
+        let mut b2 = fresh[2];
+        b2.center = (DVec3::X + DVec3::Y * (fresh[2].cap_angle * 2.0)).normalize();
+        built[2] = Some(b2);
+        assert_eq!(tier_owed_a_rebuild(&built, &fresh), Some(2));
     }
 
     #[test]

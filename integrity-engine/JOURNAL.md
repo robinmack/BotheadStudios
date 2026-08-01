@@ -65,11 +65,29 @@ not the whole story about the DETAIL. Anchoring removed the cost (642 ms → 0.4
 follow, so something else is between the camera and detailed ground. `TERRA_DEFAULT_TIERS` stays 1, now
 for a measured reason rather than a budgetary one.
 
-**NOT done.** A 4-tier rebuild is a **224–310 ms HITCH**. Anchoring turned a sustained per-frame cost into
-a rare one — ~1/500 of the work over a descent, which fires every 4× of altitude as the octave rule
-predicts — but a quarter-second freeze is a freeze, and all four tiers currently rebuild in the same frame.
-Spreading them (one tier per frame) is the obvious next increment and is not done. Also untouched: the
-`terra_lod_cost.mjs` table in the entry below is now historical — it measured the per-frame rebuild.
+**The hitch, and the fix (same day).** Anchoring turned a sustained per-frame cost into a rare one, but a
+4-tier rebuild was still a **224–310 ms freeze**. The cause is worth stating because it is not obvious: the
+staleness tests are RELATIVE (an octave of a quantity that scales with altitude), so on a descent every rung
+of the ladder trips at the *same altitude* and all four re-derive in one frame. `tier_owed_a_rebuild` now
+spends the frame's whole rebuild budget on the outermost tier that needs one. **Worst frame 224–310 ms →
+61–79 ms** — one tier's rebuild, which is the floor for this approach — with p50 still 0.4 ms.
+
+Outermost-first for two reasons rather than one: it is the tier whose staleness shows worst (a coverage gap
+at tier 0 is a hole at the horizon with only the coarse globe behind it, while a gap in an inner tier just
+reveals the coarser tier drawn underneath), and it keeps the built set a PREFIX, which is what lets
+`tiers_ready` be a count rather than a mask. That count is load-bearing: a tier that has never been built
+holds an empty vertex buffer, so the draw is capped at it, and the globe is no longer skipped while the
+outermost tier is still missing — otherwise the frames right after a world load would draw nothing at all.
+
+Deferring is affordable because a deferred tier keeps drawing its cached mesh and the amount it is allowed
+to be wrong by is the `CAP_MARGIN` it was over-built by — tens of kilometres of ground at low altitude
+against the metres a camera covers in the three frames it waits. Verified: 455/455, and the rendered frames
+differ from the pre-spread branch by mean 2.6–5.2/255, inside the 2.5–4.8 same-code drift band measured
+above — i.e. not at all.
+
+**NOT done.** 61–79 ms is still a visible hitch; going below it means splitting a single tier's rebuild
+across frames, not scheduling whole tiers. Also untouched: the `terra_lod_cost.mjs` table in the entry
+below is now historical — it measured the per-frame rebuild.
 
 ## 2026-07-25 (step 5) — the environment answers where its own surface is, and terrain stops being special
 

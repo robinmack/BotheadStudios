@@ -6617,11 +6617,21 @@ mod app {
                 self.detail.angular_resolution,
             );
             let cap_fade = crate::terra::ground_cap::cap_fade(alt_m, cap_start_alt) as f32;
-            let draw_globe = !(cap_fade >= 1.0
-                && crate::terra::ground_cap::cap_covers_view(view.horizon, r_disp));
             if cap_fade > 0.0 && self.globe_mesh.is_some() {
                 self.build_cap(&view, sun_light, cap_fade, anchor);
             }
+            // How much of the ladder has a mesh worth drawing. Read AFTER `build_cap`, because the
+            // ladder fills in one tier per frame and this is what keeps a never-filled vertex buffer
+            // out of the pass.
+            let cap_ready = crate::terra::ground_cap::tiers_ready(
+                &self.cap_built[..self.cap_tiers.clamp(1, TERRA_CAP_TIERS)],
+            );
+            // The globe may only be skipped once the cap genuinely covers the view — which now includes
+            // "the outermost tier actually exists". Skipping it while the ladder is still filling in
+            // would leave the frames after a world load with nothing drawn at all.
+            let draw_globe = cap_ready == 0
+                || !(cap_fade >= 1.0
+                    && crate::terra::ground_cap::cap_covers_view(view.horizon, r_disp));
 
             // **The engine advances its own matter.** Terra's part is a wall-clock dt and the environment
             // this world presents; the flight law itself is `flight::Flight::step` — the same code the
@@ -6860,11 +6870,8 @@ mod app {
                         pass.set_pipeline(&self.cap_pipeline);
                         // OUTERMOST first: each finer tier is drawn over the coarser one it sits inside,
                         // lifted a hair further toward the camera so it wins the depth fight.
-                        for (uni, gpu) in self
-                            .cap_uni
-                            .iter()
-                            .zip(self.cap_gpu.iter())
-                            .take(self.cap_tiers)
+                        for (uni, gpu) in
+                            self.cap_uni.iter().zip(self.cap_gpu.iter()).take(cap_ready)
                         {
                             draw(&mut pass, uni, gpu);
                         }
@@ -6995,36 +7002,50 @@ mod app {
             let elev_lo = self.elev_range[0];
             let elev_hi = self.elev_range[1];
 
-            let mut verts = std::mem::take(&mut self.cap_verts);
-            for tier in 0..self.cap_tiers.clamp(1, TERRA_CAP_TIERS) {
-                // Each tier covers a quarter of the span of the one outside it, so its cells are 4x finer.
-                let cap_angle = outer_angle / TERRA_TIER_RATIO.powi(tier as i32);
-                // A tier's cell size on the ground - what its own detail budget is measured against.
-                let cell_m = (cap_angle * self.planet_radius * 2.0 / res as f64).max(1e-6);
-                // Lift each tier a little further toward the camera so the finer one wins the depth fight
-                // with the coarser one beneath it. Scaled to altitude (`cap_lift_m`), not a constant.
-                let lift_m =
-                    crate::terra::ground_cap::cap_lift_m(self.fly.alt_m) * (tier as f64 + 1.0);
-                let lift = lift_m * ds;
+            let n_tiers = self.cap_tiers.clamp(1, TERRA_CAP_TIERS);
+            // **The tier as a CACHE OF THE VIEW** (docs/59 Stage B). What a rebuild would produce right
+            // now, for every tier — and the anchor it would hang on: the surface point under the camera,
+            // so every vertex is a small offset from it and the eye's whole contribution is the model
+            // translation below. Pure arithmetic, so pricing the whole ladder costs nothing.
+            let fresh: Vec<crate::terra::ground_cap::CapTierBuild> = (0..n_tiers)
+                .map(|tier| {
+                    // Each tier covers a quarter of the span of the one outside it, so its cells are 4x finer.
+                    let cap_angle = outer_angle / TERRA_TIER_RATIO.powi(tier as i32);
+                    crate::terra::ground_cap::CapTierBuild {
+                        center: view.up,
+                        anchor: view.up * r_disp,
+                        cap_angle,
+                        // A tier's cell size on the ground - what its own detail budget is measured against.
+                        cell_m: (cap_angle * self.planet_radius * 2.0 / res as f64).max(1e-6),
+                        // Lift each tier a little further toward the camera so the finer one wins the depth
+                        // fight with the coarser one beneath it. Altitude-scaled, never a constant.
+                        lift_m: crate::terra::ground_cap::cap_lift_m(self.fly.alt_m)
+                            * (tier as f64 + 1.0),
+                    }
+                })
+                .collect();
+            // **AT MOST ONE REBUILD PER FRAME.** The staleness tests are relative, so on a descent every
+            // rung trips at the same altitude and all four used to be re-derived in one frame — a
+            // measured 224-310 ms freeze. `tier_owed_a_rebuild` spends the frame's whole rebuild budget
+            // on the outermost tier that needs it; the rest keep drawing their cached mesh, which they
+            // have the `CAP_MARGIN` slack to do for the few frames they wait.
+            let owed =
+                crate::terra::ground_cap::tier_owed_a_rebuild(&self.cap_built[..n_tiers], &fresh);
 
-                // **The tier as a CACHE OF THE VIEW** (docs/59 Stage B). What a rebuild would produce
-                // right now — and the anchor it would hang on: the surface point under the camera, so
-                // every vertex is a small offset from it and the eye's whole contribution is the model
-                // translation below.
-                let fresh = crate::terra::ground_cap::CapTierBuild {
-                    center: view.up,
-                    anchor: view.up * r_disp,
-                    cap_angle,
-                    cell_m,
-                    lift_m,
-                };
-                // Re-derive only when re-deriving would change something. Anchored, the mesh is
-                // world-fixed, so a moving eye is not a reason (that is the model matrix's job).
+            let mut verts = std::mem::take(&mut self.cap_verts);
+            for tier in 0..n_tiers {
+                // Deferred or current, a tier draws the mesh it HAS — so the anchor and the lift below
+                // must come from the cached build, not from what a fresh one would have used.
                 let built = match self.cap_built[tier] {
-                    Some(b) if crate::terra::ground_cap::tier_is_current(&b, &fresh) => b,
-                    _ => fresh,
+                    Some(b) if owed != Some(tier) => b,
+                    _ => fresh[tier],
                 };
-                let rebuild = self.cap_built[tier] != Some(built);
+                let rebuild = owed == Some(tier);
+                if !rebuild && self.cap_built[tier].is_none() {
+                    continue; // never built and not this frame's turn — nothing to draw yet
+                }
+                let lift = built.lift_m * ds;
+                let cell_m = built.cell_m;
                 let octave_budget = self.cap_octave_budget;
                 // The local measured slope, sampled ONCE for the tier rather than at every vertex.
                 let tier_slope = {

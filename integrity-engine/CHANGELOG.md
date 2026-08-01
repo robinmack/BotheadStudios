@@ -17,6 +17,12 @@ because **we are our own first customers** and pin exact engine versions in our 
   rebuild would change anything), plus `ground_cap::cap_lift_m` — the lift law in metres, with
   `cap_lift_disp` delegating to it. Terra rebuilds a tier only when it is owed one: **p50 render 0.4 ms
   at four tiers, against 642.5 ms before, and 0.4 ms at one tier against 45.2 ms.**
+- **At most one ground tier is rebuilt per frame.** The staleness tests are relative, so on a descent every
+  rung of the ladder trips at the same altitude and all four used to be re-derived in one frame — a measured
+  224–310 ms freeze. `ground_cap::tier_owed_a_rebuild` spends the frame's whole rebuild budget on the
+  outermost tier that needs it, and `ground_cap::tiers_ready` keeps a never-filled vertex buffer out of the
+  pass while the ladder fills in. **Worst frame 224–310 ms → 61–79 ms**, one tier's rebuild, p50 unchanged
+  at 0.4 ms.
 - **Measured, and it did not go the hoped-for way: the tier ladder buys no visible detail below ~2 km.**
   Now that tiers are affordable they were A/B'd 1-vs-4 at a fixed camera over the Himalaya, at the full
   16-octave relief budget: max pixel difference 6 at 500 m and 4 at 100 m, with ground-region luminance

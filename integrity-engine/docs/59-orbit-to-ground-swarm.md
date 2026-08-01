@@ -230,9 +230,11 @@ surface on the way down is upstream of the tier count, and finding it is now Sta
 question. (Candidates, none yet measured: the relief's amplitude via `slope_fraction` off a 19.55 km/pixel
 raster; the shading path, since relief below a cell cannot reach a mesh normal at all.)
 
-Open cost, newly exposed rather than introduced: a 4-tier rebuild is a **224–310 ms hitch**, because all
-tiers rebuild in the same frame. It fires every 4× of altitude on a descent. Spreading rebuilds one tier
-per frame is the obvious increment.
+The hitch anchoring exposed is also fixed: a 4-tier rebuild was **224–310 ms**, because the staleness tests
+are relative and every rung of the ladder therefore trips at the same altitude on a descent.
+`ground_cap::tier_owed_a_rebuild` now serves at most one tier per frame, outermost first — **61–79 ms worst
+frame**, one tier's rebuild, p50 still 0.4 ms. Going below that means splitting a single tier's rebuild
+across frames rather than scheduling whole tiers, and is not done.
 
 Also found and fixed on the way: `launch_swarm` hand-rolled its own lat/lon→direction with the OPPOSITE
 sign on z from `crate::geo::dir_from_lat_lon`, so the swarm aimed at a mirrored longitude and arrived
