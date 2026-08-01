@@ -6379,6 +6379,25 @@ mod app {
             self.cap_built.iter_mut().for_each(|t| *t = None);
         }
 
+        /// **The altitude band the observer may occupy** (m). A world declares this in its camera block
+        /// (`min_alt_m` / `max_alt_m`); Earth's says 2 m to 40,000 km, which is a statement about a person
+        /// standing on a planet, not about what the engine can render.
+        ///
+        /// It is exposed because the scale-ladder rig has to ask a question the declared band cannot
+        /// express: *does one continuous representation carry the view from interplanetary distance down to
+        /// standing height* (docs/13, docs/23). `set_camera_pose` places the eye anywhere, but it CLAMPS the
+        /// altitude the LOD machinery reads to this band, so outside it the cap, the blend and the near
+        /// plane are all being told a different altitude from the one the eye is at — and a scale ladder
+        /// that walked past the clamp would be measuring the clamp.
+        ///
+        /// Not a physics knob: nothing here changes what exists or how it moves, only how far the observer
+        /// may stand. `FlyCamera::new`'s own floor of 0.1 m still applies and is not raised.
+        pub fn set_alt_bounds(&mut self, min_alt_m: f64, max_alt_m: f64) {
+            self.fly.min_alt = min_alt_m.max(0.1);
+            self.fly.max_alt = max_alt_m.max(self.fly.min_alt);
+            self.fly.alt_m = self.fly.alt_m.clamp(self.fly.min_alt, self.fly.max_alt);
+        }
+
         /// Diagnostic knob — see `draw_matter`. Simulation is unaffected.
         pub fn set_draw_matter(&mut self, mode: u32) {
             self.draw_matter = mode;

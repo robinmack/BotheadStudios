@@ -282,6 +282,49 @@ needs: RMS Δz at one texel = 137.9 m, a real roughness rather than a regional t
 single H over 39–625 km is a fit, not a constant — and extrapolating it four more decades to metre scale is
 a DECLARED model (Law V) whose named resolved counterpart is finer data.
 
+#### The north-star ladder, walked (2026-08-01)
+
+Robin: *"from mars-earth distance to 10 cm above the surface … so we can prove our frame of
+reference/increased detail system works, with visual details resolving automatically so they look
+reasonably accurate all along the path without noticeable frame-rate impact."*
+
+`web/rig/terra_scale_ladder.mjs` walks it — 25 rungs, **11.9 decades**, 78 Gm (Mars at opposition) down to
+0.10 m, paced to ~60 fps, a screenshot and a frame time at every rung. It asserts nothing; it reports.
+
+**Frame rate: it holds.** p50 render is **0.4 ms at every single rung**, top to bottom. There is no cliff
+anywhere in twelve decades. The only blemish is the known 38–70 ms ground-tier rebuild hitch.
+
+**The picture: continuous for nine decades, then frozen for three.**
+
+| rungs | altitude | what the frame does |
+|---|---|---|
+| 0–4 | 78 Gm → 810 Mm | ink 0.7%, detail 4.6, unchanging — the STARFIELD. Earth subtends 1.6×10⁻⁴ rad, ~0.1 px. Correct: Earth from Mars is a point of light. |
+| 5–8 | 260 Mm → 8.5 Mm | ink 1.0 → 3.3 → 20.9 → **74.7%**, detail 10 → 27 → 68 → 76. The planet grows in smoothly and monotonically. |
+| 9–14 | 2.7 Mm → 9 km | ink 100%, detail 14–28 as terrain crosses the frame. |
+| 15–18 | 2.9 km → 94 m | detail decays 13.97 → 11.06 → 6.32 → **4.12**. |
+| 19–24 | 30 m → **0.10 m** | detail **4.12, 4.12, 4.13, 4.13, 4.13, 4.13** — frozen to two decimals across three decades. |
+
+At 8,474 km the frame is a recognisable Earth: continents, biome colours, atmospheric limb, stars. At 94 m
+it is a **flat green fill** — the HUD says *standing on grass* — and it does not change again all the way to
+10 cm. **The last three decades of the zoom deliver no information at all.**
+
+That is row 27 rendered rather than argued: the generated relief is anchored to a regional tilt (~0.003)
+and extrapolated with the wrong exponent (H = 1 against a measured 0.483), so below ~100 m there is nothing
+left to resolve. The scale machinery — frame of reference, LOD, cost — is sound across the whole ladder;
+what runs out is the SURFACE DATA MODEL, and the ladder now measures exactly where.
+
+Two traps the ladder walked into first, both already written down in this repo and both worth re-reading
+before running it again:
+
+- **The night side.** The first run was black below 4,300 km and looked like a renderer collapse. It was
+  lon 86 at 17:00 UTC — the dead of night (measured: 0.3% lit at lon 90, 78% at lon −90, and the sub-solar
+  longitude at that moment is −75°). `web/rig/terra_lit_probe.mjs` now sweeps longitude and reports the lit
+  fraction, so the question is answered before it is confused for a bug.
+- **In-page pixel readback of a WebGPU canvas is blank.** The rig's first version measured `ink` by
+  `drawImage`-ing the canvas on a later tick; a WebGPU drawing buffer is only readable while current
+  (hard rule 0), so it reported 0% for frames that plainly contained a planet. Deleted — the PNGs are the
+  measurement.
+
 #### Finer elevation data — it exists, it is free, and it is not an alternative
 
 - **Copernicus DEM GLO-30** — 30 m global, TanDEM-X 2011–2015, Cloud-Optimized GeoTIFF, free on AWS Open

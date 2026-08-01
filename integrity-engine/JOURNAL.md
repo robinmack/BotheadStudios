@@ -133,6 +133,31 @@ necessity, which is docs/44's ladder applied to data instead of matter. And even
 still covers 30 m down to centimetres. The data moves the anchor down; the exponent governs everything
 below it.
 
+**★ THE NORTH-STAR LADDER, WALKED.** Robin: *"from mars-earth distance to 10 cm above the surface …
+so we can prove our frame of reference/increased detail system works … without noticeable frame-rate
+impact."* `web/rig/terra_scale_ladder.mjs` walks 25 rungs over **11.9 decades**, 78 Gm (Mars at opposition)
+to 0.10 m, paced to ~60 fps.
+
+**Frame rate holds: p50 render 0.4 ms at EVERY rung, top to bottom.** No cliff in twelve decades; the only
+blemish is the known 38–70 ms tier-rebuild hitch. **The picture is continuous for nine decades and frozen
+for three.** Ink rises 0.7% → 74.7% as the planet grows in (rungs 5–8, smooth and monotonic), fills the
+frame by 2.7 Mm, and then detail decays 13.97 → 4.12 between 2.9 km and 94 m and **freezes at 4.12–4.13 for
+the last six rungs — 94 m, 30 m, 9.6 m, 3.1 m, 0.98 m, 0.31 m, 0.10 m**. At 8,474 km the frame is a
+recognisable Earth with continents, biomes, limb and stars; at 94 m it is a flat green fill, and it does not
+change again. **The last three decades of the zoom deliver no information.** That is docs/46 row 27
+rendered rather than argued — the scale machinery is sound across the whole ladder, and what runs out is
+the surface DATA MODEL.
+
+**★★ Two traps, both already written down here, both walked into anyway.** (1) The first run was black
+below 4,300 km and looked like a renderer collapse — it was lon 86 at 17:00 UTC, the dead of night.
+Measured: 0.3% lit at lon 90, 78% at lon −90, sub-solar longitude −75°. `terra_lit_probe.mjs` now answers
+that question before it can be mistaken for a bug. (2) The rig measured its own frames by `drawImage`-ing
+the WebGPU canvas on a later tick and got BLANK — rule 0 says a WebGPU drawing buffer is readable only while
+current — so it reported 0% ink for frames that plainly contained a planet. **A rig that reports a
+confident wrong number is the same failure as a gate that passes on error.** Deleted; the PNGs are the
+measurement. Robin's steer on the first one is the better fix and is not built: a test rig should command
+the clock rather than wait for the sun.
+
 **NOT done.** 61–79 ms is still a visible hitch; going below it means splitting a single tier's rebuild
 across frames, not scheduling whole tiers. Also untouched: the `terra_lod_cost.mjs` table in the entry
 below is now historical — it measured the per-frame rebuild.
