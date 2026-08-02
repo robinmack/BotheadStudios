@@ -13,6 +13,30 @@ And, on what that implies for the scenes that exist:
 > harness, just move it around to different biomes on Earth? … All scenes should derive from the same
 > universe the same way and render the same way with physics being identical, just at different scales."*
 
+> *"BECAUSE it should ALL BE THE SAME. The Earth should be the Earth, the Moon the Moon, no matter how
+> close or how far the camera pans."*
+
+**That sentence is the whole doc, and it is a law, not a preference.** Today the camera does not choose how
+finely Earth is drawn — it chooses WHICH EARTH YOU GET:
+
+| | Terra | Ground |
+|---|---|---|
+| surface | cube-sphere globe + 192² tangent cap | voxel `World` + mesher |
+| frame | planetary, f64 → display units | local Cartesian f32, y = up |
+| shader | `globe.wgsl` | `world.wgsl` |
+| altitude | continuous, interplanetary → 0.1 m | **none — `set_orbit(yaw, pitch, _zoom)` ignores zoom** |
+
+Two surfaces, two frames, two shaders, and one of them cannot leave the ground. That is Law IV inverted:
+the camera is deciding identity rather than representation. An explanation that ends "Ground looks good
+close up, Terra looks good far away" is not a defence of the design, it is the statement of the bug.
+
+**The mechanical form of "the same" is not one mesh — it is one SURFACE, resolved by necessity.** Far away
+Earth is cheap math over its own raster; near the eye the same ground is resolved into real matter; the
+transition is resolution, not identity, and nothing about which is in play may depend on which scene struct
+you happened to open. The engine already has the primitive that does exactly this and it has **zero
+consumers**: `gpu_sph::promote_ground_cap` turns a patch of surface into matter, built and tested and wired
+to nothing (docs/48's pattern again — physics built, then wired into one place or none).
+
 ## What this actually says
 
 It is not a feature request. It is a definition of what a scene IS, and it retires the one the engine still
