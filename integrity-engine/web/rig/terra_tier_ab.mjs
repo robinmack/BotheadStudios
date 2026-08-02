@@ -25,7 +25,7 @@ await p.evaluate(() => {
 for (const [alt, pitch] of [[8000, -0.55], [2000, -0.60], [500, -0.65], [100, -0.70]]) {
   for (const tiers of [1, 4]) {
     await p.evaluate(({ tiers, alt, pitch, OCT }) => {
-      window.__terra.set_cap_ladder(tiers, OCT);
+      window.__terra.set_octave_budget(OCT);
       window.__terra.set_fly(28, 86, alt, 0.6, pitch);
       window.__r.length = 0;
     }, { tiers, alt, pitch, OCT });

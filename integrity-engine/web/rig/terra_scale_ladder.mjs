@@ -39,8 +39,6 @@ await p.waitForTimeout(3000);
 // actually at. Without this the rig measures the world file's declared 2 m / 40,000 km clamp.
 // BOUNDS=0 runs the CONTROL: the world's own declared band, to attribute any failure to the knob or to
 // the engine rather than guessing which.
-const TIERS = +(process.env.TIERS || 0); // 0 = leave the scene default
-if (TIERS) await p.evaluate((t) => window.__terra.set_cap_ladder(t, 16), TIERS);
 const BOUNDS = process.env.BOUNDS !== '0';
 if (BOUNDS) {
   await p.evaluate(({ TOP_M, BOTTOM_M }) => {

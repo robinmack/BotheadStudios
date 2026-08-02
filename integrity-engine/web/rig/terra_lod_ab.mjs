@@ -11,7 +11,7 @@ await p.waitForTimeout(3000);
 for (const alt of [8000, 500]) {
   for (const oct of [0, 16]) {
     await p.evaluate(({ oct, alt }) => {
-      window.__terra.set_cap_ladder(1, oct);
+      window.__terra.set_octave_budget(oct);
       window.__terra.set_fly(28, 86, alt, 0.6, -0.30);
     }, { oct, alt });
     await p.waitForTimeout(2200);

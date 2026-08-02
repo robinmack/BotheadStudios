@@ -42,7 +42,7 @@ const stats = async () => p.evaluate(() => {
 // start (set_cap_ladder clears it), then held while the sub-point drifts into the margin CAP_MARGIN buys.
 // 0.02° of latitude is ~2.2 km on the ground, well inside the ~24 km of slack at 500 m.
 console.log(`--- lateral walk, ${TIERS} tier(s), 500 m ---`);
-await p.evaluate((t) => { window.__terra.set_cap_ladder(t, 4); }, TIERS);
+await p.evaluate((t) => { window.__terra.set_octave_budget(4); }, TIERS);
 for (const [i, dlat] of [0, 0.004, 0.008, 0.012, 0.02].entries()) {
   await p.evaluate(({ dlat }) => window.__terra.set_fly(28 + dlat, 86, 500, 0.6, -0.20), { dlat });
   await p.waitForTimeout(1200);

@@ -1,0 +1,17 @@
+import { launch } from './_launch.mjs';
+const PORT = process.env.PORT || '5173';
+const b = await launch();
+const p = await b.newPage({ viewport: { width: 800, height: 600 } });
+p.on('pageerror', e => console.log('PAGEERR:', e.message));
+p.on('console', m => console.log('CONSOLE[' + m.type() + ']:', m.text().slice(0, 400)));
+await p.goto(`http://127.0.0.1:${PORT}/terra.html`, { waitUntil: 'load' });
+await p.waitForFunction(() => !!window.__terra, null, { timeout: 60000 });
+await p.waitForTimeout(3000);
+await p.evaluate(() => window.__terra.set_surface_mode(1));
+await p.evaluate(() => window.__terra.set_fly(39, -106, 4.0e5, 0.6, -0.45));
+await p.waitForTimeout(4000);
+console.log('survived 400 km');
+await p.evaluate(() => window.__terra.set_fly(39, -106, 8.0e3, 0.6, -0.45));
+await p.waitForTimeout(4000);
+console.log('survived 8 km');
+await b.close();

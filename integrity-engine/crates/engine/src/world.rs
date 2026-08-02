@@ -1098,6 +1098,15 @@ fn smooth(t: f32) -> f32 {
 pub(crate) fn value_noise(x: f32, z: f32, freq: f32) -> f32 {
     let fx = x * freq;
     let fz = z * freq;
+    // The lattice is indexed by i32, so a coordinate beyond ~2.1e9 has no cell to belong to. That is a
+    // real limit of this representation and it is stated here rather than left as a landmine: a caller
+    // asking for a wavelength so fine that position/wavelength leaves the lattice gets the SAME answer
+    // everywhere (a flat field) instead of a debug panic and a silent release-mode wrap. It fires only
+    // for a caller whose octave count has run away, which is a bug in the caller.
+    const LATTICE_MAX: f32 = 2.0e9;
+    if !fx.is_finite() || !fz.is_finite() || fx.abs() > LATTICE_MAX || fz.abs() > LATTICE_MAX {
+        return 0.5;
+    }
     let x0 = fx.floor() as i32;
     let z0 = fz.floor() as i32;
     let tx = smooth(fx - x0 as f32);
