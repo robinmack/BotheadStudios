@@ -7,7 +7,7 @@
 //! core — as a declared vertical LOD (real materials/order, compressed depths; docs/25/28).
 
 use crate::materials::{index_of, Material};
-use glam::{IVec3, Vec3};
+use glam::{DVec3, IVec3, Vec3};
 use std::collections::VecDeque;
 
 /// Width (X), height (Y, up), depth (Z) of the world in voxels. 1 voxel = 1 metre.
@@ -877,9 +877,22 @@ pub fn terrain_height_with(
 /// column all come from the definition; the LAWS (how strata stack, how water fills, how the
 /// heightfield is sampled) stay in the engine. `generate` is this on the declared defaults, which
 /// reproduce the constants this used to hardcode.
-pub fn generate_from(
+/// **A voxel patch of ground, given a HEIGHT SOURCE.** Everything a column is made of — the skin, the
+/// strata bands measured down from the lowest possible surface, the ocean pass, the tops index — is here
+/// and is the same whatever decides where the top of each column is.
+///
+/// That separation is the point (docs/63). A patch of ground built from DECLARED fbm dials and a patch
+/// built from the REAL measured elevation of a real place must differ in exactly one thing — where the
+/// surface is — and in nothing else. When they differed in the whole builder, one of them was not Earth.
+///
+/// **This is for MATTER, not for appearance.** How the ground LOOKS at a given distance is the appearance
+/// integral over a pixel footprint (docs/63), not a choice of representation; materializing voxels because
+/// a camera came close would be the representation swap that doc exists to refuse. Matter is materialized
+/// when something needs to interact with it, in the amount needed.
+fn fill_columns(
     def: &crate::terra::world_def::GroundSurface,
     materials: &[Material],
+    height_at: impl Fn(usize, usize) -> f32,
 ) -> World {
     let (w, h, d) = (def.size_voxels[0], def.size_voxels[1], def.size_voxels[2]);
     // Resolve the declared column to material indices, top-down. The LAST entry fills everything below.
@@ -917,8 +930,7 @@ pub fn generate_from(
     let mut max_top = 0usize;
     for z in 0..d {
         for x in 0..w {
-            let top = (terrain_height_with(def, x as f32, z as f32).round() as i32)
-                .clamp(skin + 1, h as i32 - 1);
+            let top = (height_at(x, z).round() as i32).clamp(skin + 1, h as i32 - 1);
             let skin_start = top - skin;
             for yy in 0..top {
                 let v = if yy >= skin_start {
@@ -966,6 +978,74 @@ pub fn generate_from(
     };
     world.rebuild_tops();
     world
+}
+
+/// A patch whose relief is DECLARED — the scene's own fbm dials. Honest for a body-less sandbox, and a
+/// fiction for anywhere that names a real place: see [`from_measured_surface`].
+pub fn generate_from(
+    def: &crate::terra::world_def::GroundSurface,
+    materials: &[Material],
+) -> World {
+    fill_columns(def, materials, |x, z| {
+        terrain_height_with(def, x as f32, z as f32)
+    })
+}
+
+/// **A patch of the REAL surface of a real body** — the same voxel ground, with the one thing that was
+/// invented replaced by measurement (docs/63).
+///
+/// `elevation_m_at(lat, lon)` is the body's own surface, whatever resolution it is currently known at:
+/// the shipped raster, or a streamed tile (`terra::tiles`) where one covers. It is a closure for the same
+/// reason `fill_ground_cap` takes a sampler — this function has no business knowing where measurements
+/// come from, only that it must not invent them.
+///
+/// The patch is `w × d` metres centred on `(lat, lon)`, and voxel offsets become geography through the
+/// SHARED tangent frame (`geo::tangent_frame`). That is not fussiness: this repo has already shipped six
+/// hand-written copies of that frame, all sharing one wrong sign, which aimed a meteor swarm at a mirrored
+/// longitude and cost three rig runs to find.
+///
+/// **The datum is derived, not declared.** `base_top_m` and `amplitude_m` are dials that only mean
+/// something for invented relief; here the patch sits on its own measured minimum, so the voxel grid
+/// covers the ground that is actually there and the relief is whatever the body has. Returns the world
+/// and the elevation (m) its `y = 0` plane corresponds to, since a caller siting anything in it needs to
+/// know what the floor means.
+pub fn from_measured_surface(
+    def: &crate::terra::world_def::GroundSurface,
+    materials: &[Material],
+    lat_deg: f64,
+    lon_deg: f64,
+    radius_m: f64,
+    elevation_m_at: impl Fn(f64, f64) -> f64,
+) -> (World, f64) {
+    let (w, _h, d) = (def.size_voxels[0], def.size_voxels[1], def.size_voxels[2]);
+    let (_up, north, east) = crate::geo::tangent_frame(lat_deg, lon_deg);
+    let centre = crate::geo::dir_from_lat_lon(lat_deg, lon_deg);
+    // Voxel (x,z) -> the direction on the body it stands under. 1 voxel = 1 metre, so an offset in
+    // metres is an offset in radians of `metres / radius` along the tangent frame.
+    let dir_of = |x: usize, z: usize| -> DVec3 {
+        let e = (x as f64 - w as f64 * 0.5) / radius_m;
+        // z grows SOUTH, matching the raster convention (row 0 is +90°N).
+        let n = (d as f64 * 0.5 - z as f64) / radius_m;
+        (centre + east * e + north * n).normalize()
+    };
+    let sample = |x: usize, z: usize| -> f64 {
+        let (la, lo) = crate::geo::lat_lon_from_dir(dir_of(x, z));
+        elevation_m_at(la, lo)
+    };
+    // The measured floor of this patch, so the grid holds the ground that is there rather than the
+    // ground a dial guessed at. One voxel of headroom below keeps the lowest column from being empty.
+    let mut lowest = f64::INFINITY;
+    for z in 0..d {
+        for x in 0..w {
+            lowest = lowest.min(sample(x, z));
+        }
+    }
+    if !lowest.is_finite() {
+        lowest = 0.0;
+    }
+    let datum = lowest - 1.0;
+    let world = fill_columns(def, materials, |x, z| (sample(x, z) - datum) as f32);
+    (world, datum)
 }
 
 pub fn generate(materials: &[Material]) -> World {

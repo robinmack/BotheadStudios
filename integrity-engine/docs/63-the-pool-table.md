@@ -89,14 +89,113 @@ hands.** Where it changes hands is where the engine is still lying about being o
 5. **Epochs.** Scenes differ in TIME as well as scale — proto-Earth, modern Earth. Time is now commandable
    (`Terra::set_epoch`), but which Earth a scene means is still implicit in which body file it names.
 
+## The mechanism (Robin, 2026-08-01) — and it is NOT a bridge between representations
+
+An earlier version of this section proposed rebasing Ground's voxel patch on real elevation and calling
+that the fix. **That was a category error and Robin caught it**: it solves an APPEARANCE problem with a
+representation swap, which is the very thing that made two Earths, and swapping representations by zoom
+level is the technique we are trying to beat rather than reproduce.
+
+> *"If we know the textures we will use at ground level, and we efficiently scale them properly (accounting
+> for geography/biome/etc), and we know the scale, don't we get everything for free if we apply the textures
+> at different scales to the same geometries? … We're building something new here."*
+>
+> *"That way we just map a texture onto a segment of a sphere, whether it's a small chord or a full globe."*
+>
+> *"Mathematically it is matter, but we only materialize that matter **visually** when we need to, and only
+> the amount we need to."*
+
+That last sentence is the governing one, and it is Law IV said exactly: **the ground is matter at every
+point, always.** Nothing about a camera makes matter exist or stop existing. What a camera decides is how
+much of that matter we MATERIALIZE — and materialization has two different customers, the pixel and the
+interaction, which are the same law (docs/44) asked by different necessities.
+
+So the texture is not a stand-in FOR matter. It is a **statistical description of the matter that is
+there**, integrated over a footprint. That is what makes it honest rather than a fudge, and it is the same
+argument `surface_normal.wgsl` already makes for material grain — *"evaluating light's response to a known
+sub-resolution surface statistic is what a microfacet model is"* — generalised from one scale to all of
+them.
+
+### One geometry
+
+**A segment of a sphere**, its extent and tessellation set by the camera; the full globe is the limiting
+case where the angular radius reaches π. `fill_ground_cap` already builds exactly this, so the work is
+letting one primitive's angular radius go all the way up and deleting the globe mesh — along with every
+piece of machinery that exists ONLY to mediate between two meshes: `cap_fade`, `cap_lift_disp`,
+`cap_covers_view`, the `draw_globe` decision, and the whole class of bug where the two disagree about where
+the ground is. None of that is physics; it is bookkeeping between two answers to one question.
+
+**Where the mesh stops and the texture starts is derived, not chosen.** The first cut of this rule said the
+mesh must carry whatever SILHOUETTES, since a normal map can shade a ridge but cannot put an edge against
+the sky. Robin's amendment relaxes it, and in the direction of MORE physics rather than less:
+
+> *"Closer to the horizon the vertical matters more (we need silhouette), but that can be an effect of
+> lighting if we know the height map. Modern cards can at least do primitive ray tracing from a point
+> source like the sun."*
+
+If the height is known as a function — and it is, measured to the tile and generated below it — then
+marching it answers both halves directly:
+
+- **Toward the sun: whether light reaches this point.** Today the shader computes `ndl = max(dot(n, l), 0)`
+  with NO occlusion whatsoever, so terrain never shadows itself and a mountain's west face is lit at dawn.
+  A march is not a shadow effect bolted on; it is evaluating the thing the Lambert term currently assumes
+  away, and it is strictly more honest than what is there.
+- **Along the view ray: whether nearer ground hides farther ground.** This is what makes a coarse mesh read
+  as real terrain at grazing angles, and it is most effective exactly where it is most needed — a
+  near-tangent ray near the horizon traverses many samples.
+
+So the mesh only has to carry the LARGE-SCALE PROFILE, not everything that silhouettes; fine relief
+occluding fine relief comes from the march. Tessellation gets cheaper, not more expensive. What remains
+irreducibly geometric is the outermost edge against the sky at the segment's own scale — the planet's limb
+and the km-scale skyline — which the displaced segment already carries.
+
+### One appearance function
+
+The material response integrated over the pixel's footprint, and it needs TWO moments, not one:
+
+- **Mean albedo** — below the material tile this is the texture's own mip chain (already there); above it,
+  it is the MIXTURE of materials over the footprint, which does not exist today.
+- **Variance of the normal** — sub-pixel geometry does not vanish when it stops being resolved, it becomes
+  ROUGHNESS. Averaging normals alone loses it and the surface goes glassy, which is part of why our ground
+  reads as painted plastic from altitude.
+
+Today, above the 8 m material tile there is NO variation source at all except a flat per-vertex biome colour
+sampled from a 19.5 km raster. That is precisely why 94 m altitude renders as a wash: nothing integrates,
+so there is nothing between "grain too small to see" and "one colour".
+
+### The invariant that keeps it honest
+
+**Resolve a patch to matter, integrate its appearance over the footprint that was being drawn, and the
+result must equal the texture that was already being drawn there.** If they differ, one of them is lying.
+That is what makes the unresolved form a declared model with a named resolved counterpart (Law V) rather
+than a picture that merely looks plausible — and it is checkable, in the same shape as
+`generated_relief_is_stable_by_the_engines_own_slope_law`, which catches generated relief disagreeing with
+the slope law it claims to obey.
+
 ## The order that follows from it
 
-1. **Rebase Ground on the real surface at its declared lat/lon** (streamed elevation + the shared strata),
-   and give it the ability to move. Harvest what Ground already does well first — it owns the voxel/granular
-   matter path, `deposit_event`, cohesive bodies and the SPH cap — none of which Terra has.
-2. **Sub-metre ground as matter**, which both the pool table and the JIT crater (docs/59 Stage C) need.
-3. **One render path**, so "looks good" is one answer.
+1. **Collapse globe and cap into ONE sphere segment** whose extent follows the camera, and delete the
+   machinery that mediated between them. This is what makes "the Earth is the Earth" true in the code.
+   ★ The blocker is the parameterization, not the idea: `fill_ground_cap` is gnomonic
+   (`center + east·du + north·dv`, normalized), which reaches 90° only as `du → ∞` — hence today's
+   `CAP_MAX_ANGLE = 0.6`. Covering a hemisphere needs a parameterization that degrades gracefully to π.
+1b. **The height march** — toward the sun for self-shadowing, along the view ray for occlusion — which is
+   what lets the segment stay coarsely tessellated.
+2. **The appearance integral** — material mixture over the footprint, and normal variance carried as
+   roughness — with the convergence invariant as its test.
+3. **Matter on demand**, for the pixel or the interaction, never triggered by camera altitude. Ground
+   already owns this machinery (voxel/granular matter, `deposit_event`, cohesive bodies, the SPH cap) and
+   it should be attached to the real surface rather than to an invented patch.
 4. **Scenes as data** (docs/46 row 14), at which point a pool table is a definition and not a code change.
+
+### What this retires
+
+The tier ladder. Measured 2026-08-01, one tier against four differed by **max 4 pixel values at 100 m
+altitude**, and this section is the explanation that measurement lacked: **geometry was never the right
+carrier for sub-cell detail.** Adding vertices to express what belongs in a texture's second moment cannot
+work, so the ladder is not under-tuned, it is the wrong mechanism. (The anchoring work that made tiers cost
+0.4 ms instead of 642 ms was a real fix to a real per-frame cost, attached to a feature that should not need
+to exist.)
 
 **Related:** docs/13 (scale-relative) · docs/23 (north star) · docs/39 (JIT particalization) · docs/44
 (resolution by necessity) · docs/46 (one-physics charter, rows 14 and 27) · docs/51 (scenes as data) ·
