@@ -87,7 +87,18 @@ fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     let ndl = max(dot(n, l), 0.0);
     // Reflected sunlight (albedo × illumination), same SUN_GAIN + Reinhard as the space band; black night side.
     let SUN_GAIN = u.atm.w; // atmosphere::SUN_GAIN — one exposure for every view of this world
-    let albedo = i.col * u.tint.rgb;
+    // **The material's OWN texture, not a flat biome colour.** `i.col` is the vertex's material albedo —
+    // one number for all of granite, all of sand — and it is what this surface wore until now, which is
+    // why the ground read as a uniform wash from standing height however much relief was under it. The
+    // texture array was bound here the whole time and never sampled.
+    //
+    // The texture already IS this material's albedo (generated from the cited optical properties), so it
+    // REPLACES `i.col` rather than tinting it — multiplying would square the albedo and darken every
+    // surface. `i.col` remains the fallback where a material has no layer, and the two agree by
+    // construction at distance: the mip chain averages the texture back to the flat albedo, so orbit looks
+    // exactly as it did and grain only appears once the camera is close enough to resolve it.
+    let grain = surface_albedo_triplanar(i.wpos + u.emissive.xyz, n, i.mat, GLOBE_TEX_SCALE);
+    let albedo = grain * u.tint.rgb;
     var radiance = albedo * (ndl * SUN_GAIN);
     // **The body's own heat.** A surface hot enough to glow emits regardless of where the Sun is, so this
     // is added on BOTH sides of the terminator — which is the physics: proto-Earth's 1,900 K magma ocean
@@ -105,7 +116,15 @@ fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     // and gets exactly nothing — the airless case needs no branch.
     // Positions are camera-relative (eye at the origin), so the direction back to the eye is -wpos.
     let view = normalize(-i.wpos);
-    radiance += rayleigh_veil(dot(n, view), dot(n, l), dot(view, l), u.atm.xyz, u.atm.w, u.light_dir.w);
+    // **Only the air that is actually between the eye and this point** (`emissive.w`). `rayleigh_veil`
+    // computes the FULL vertical column's in-scatter, which is right from orbit and wrong on the ground:
+    // unscaled it puts a whole sky of haze between a camera standing on grass and the grass in front of
+    // it, and measured by ablation that is what turned real green ground (rgb 84,195,65, material grain
+    // visible) into a pale cyan wash. The fraction of the column lying below the eye is 1 - e^(-h/H) on
+    // the engine's own barometric profile — 3.5e-5 at 0.3 m altitude, 0.63 at one scale height, 1 from
+    // orbit, so the planet from space is untouched and the ground gets its own colour back.
+    radiance += u.emissive.w
+        * rayleigh_veil(dot(n, view), dot(n, l), dot(view, l), u.atm.xyz, u.atm.w, u.light_dir.w);
     let mapped = tonemap(radiance); // the shared display law — compresses brightness, keeps hue
     // Alpha = tint.a: 1.0 for the opaque globe, the cross-fade factor for the ground cap.
     return vec4<f32>(mapped, u.tint.a);

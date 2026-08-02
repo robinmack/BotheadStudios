@@ -6389,6 +6389,42 @@ mod app {
             self.cap_built.iter_mut().for_each(|t| *t = None);
         }
 
+        /// **How much of the air column actually lies between the eye and the ground** — the factor the
+        /// surface's in-scattered veil must be scaled by.
+        ///
+        /// `rayleigh_veil` computes the in-scatter for the FULL vertical column, which is right when the
+        /// observer is above the atmosphere and wrong everywhere else: applied unscaled it puts a whole
+        /// sky's worth of haze between a camera standing on the grass and the grass 1 m in front of it.
+        /// Measured by ablation — with the veil disabled the same ground goes from a pale cyan wash
+        /// (rgb ~150,230,190) to real grass (84,195,65) with its material grain visible. It was not the
+        /// texture that was missing; it was drowned.
+        ///
+        /// The column above altitude `h` is `ρ₀·H·e^(−h/H)`, so the fraction lying BELOW the eye — the part
+        /// its downward view actually looks through — is `1 − e^(−h/H)`, using the same barometric scale
+        /// height `atmosphere::AirShell` derives from the air's own molar mass and temperature. Nothing is
+        /// declared here: at 0.3 m altitude it is 3.5e-5 and the ground is its own colour, at one scale
+        /// height 0.63, and from orbit it is 1 and the planet looks exactly as it did.
+        ///
+        /// **FLAGGED IOU (Law V).** This is the VERTICAL column difference, so it omits the horizontal path
+        /// term: from ground level, distant terrain will now be too crisp, because the air along a long
+        /// near-horizontal path is real and this does not count it. The computation it stands in for is the
+        /// segment integral ∫ρ dl from eye to surface point, which for an exponential atmosphere over a
+        /// linearly-varying altitude is `ρ₀·L·(e^(−h₁/H) − e^(−h₂/H))·H/(h₂−h₁)` — cheap, but it needs the
+        /// eye's world position in the shader, which this uniform layout does not carry yet.
+        fn veil_column_fraction(&self) -> f32 {
+            let h = self.fly.alt_m.max(0.0);
+            // The SAME scale height the flight integrates through — asked of the environment that owns
+            // this world's air, not re-derived here (Law II).
+            let scale_h = {
+                use crate::flight::FlightEnvironment;
+                self.flight_env.air_scale_height_m()
+            };
+            if !(scale_h > 0.0) {
+                return 1.0; // an airless world has no veil to scale, and none is added
+            }
+            (1.0 - (-h / scale_h).exp()) as f32
+        }
+
         /// **The instant this scene's SKY is drawn for** (Unix seconds) — the one answer to "where are the
         /// Sun and the stars", used by both the terminator and the star field so they cannot disagree.
         ///
@@ -6863,7 +6899,7 @@ mod app {
                     rel_model,
                     sun_light,
                     [1.0, 1.0, 1.0, 1.0],
-                    [anchor.x, anchor.y, anchor.z, 1.0],
+                    [anchor.x, anchor.y, anchor.z, self.veil_column_fraction()],
                     air,
                     // Terra draws whichever body the world names, so the glow is that body's.
                     glow_of(&crate::planet::body(&self.body_id)),
@@ -7373,7 +7409,7 @@ mod app {
                     [1.0, 1.0, 1.0, cap_fade],
                     // emissive.xyz = the triplanar anchor (his), so the relief textures stay glued to
                     // the surface under the camera-relative draw instead of swimming with the eye.
-                    [anchor.x, anchor.y, anchor.z, 1.0],
+                    [anchor.x, anchor.y, anchor.z, self.veil_column_fraction()],
                     self.air(),
                     NO_GLOW,
                 );
