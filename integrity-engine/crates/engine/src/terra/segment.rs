@@ -60,6 +60,25 @@ pub fn ring_angle(t: f64, cap_angle: f64) -> f64 {
     (t * t) * cap_angle
 }
 
+/// **How much of the sphere is visible from `alt_m`** — the angular radius, from the centre directly
+/// under the eye, of the surface that is not over the horizon.
+///
+/// `cos α = R / (R + h)`: the tangent point. It is worth stating what this bounds, because it collapses
+/// the problem. From any FINITE altitude you can see strictly less than a hemisphere, so a segment never
+/// needs to exceed π/2 — and π/2 is precisely where the gnomonic cap this replaces had its asymptote. The
+/// old parameterization could not reach the one extent that is actually required.
+///
+/// 1.77e-4 rad at 0.1 m, 0.37 rad at 400 km, → π/2 as the eye recedes. `margin` reaches past the horizon
+/// so the rim is never a visible edge — the same job [`super::ground_cap::CAP_MARGIN`] did, and the same
+/// reason.
+pub fn visible_angle(alt_m: f64, radius_m: f64, margin: f64) -> f64 {
+    if !(radius_m > 0.0) || !(alt_m > 0.0) {
+        return 0.0;
+    }
+    let a = (radius_m / (radius_m + alt_m)).clamp(-1.0, 1.0).acos();
+    (a * margin).min(std::f64::consts::FRAC_PI_2)
+}
+
 /// Fill `out` with a sphere segment's vertices (cleared first), centred on `center`, reaching `cap_angle`
 /// radians — up to π, which is the whole sphere.
 ///
@@ -284,6 +303,38 @@ mod tests {
             "centre height {}",
             c.length()
         );
+    }
+
+    /// **The visible surface is at most a hemisphere, and that is the whole point.** The extent the
+    /// segment needs is bounded by π/2 — which is exactly where the gnomonic cap it replaces asymptotes,
+    /// so the old parameterization could not reach the one extent that is actually required.
+    #[test]
+    fn the_visible_surface_never_exceeds_a_hemisphere() {
+        let r = 6.371e6;
+        let mut prev = 0.0;
+        for alt in [0.1, 2.0, 100.0, 8_000.0, 400_000.0, 7.8e10] {
+            let a = visible_angle(alt, r, 1.0);
+            assert!(a > prev, "more is visible from higher up: {alt} m");
+            assert!(
+                a < std::f64::consts::FRAC_PI_2 + 1e-12,
+                "never more than a hemisphere"
+            );
+            prev = a;
+        }
+        // Computed, not typed. ★ The first version of this test asserted 0.367 rad at 400 km, a number I
+        // wrote from memory; `acos(6371/6771)` is 0.3454. The code was right and the fixture was wrong,
+        // for the second time this session — a fixture is a measurement too.
+        assert!((visible_angle(0.1, r, 1.0) - 0.000177).abs() < 1e-6);
+        assert!((visible_angle(2.0, r, 1.0) - 0.000792).abs() < 1e-6);
+        assert!((visible_angle(400_000.0, r, 1.0) - 0.345446).abs() < 1e-5);
+        // Interplanetary distance is a hemisphere to within a rounding error, not more.
+        assert!(visible_angle(7.8e10, r, 1.0) > std::f64::consts::FRAC_PI_2 - 1e-4);
+        // No altitude, no surface visible; a nonsense radius does not panic.
+        assert_eq!(visible_angle(0.0, r, 1.0), 0.0);
+        assert_eq!(visible_angle(100.0, 0.0, 1.0), 0.0);
+        // The margin reaches past the horizon but is still clamped at the hemisphere.
+        assert!(visible_angle(400_000.0, r, 1.3) > visible_angle(400_000.0, r, 1.0));
+        assert!(visible_angle(7.8e10, r, 1.3) <= std::f64::consts::FRAC_PI_2);
     }
 
     /// Rings concentrate toward the centre — resolution spent where the eye is looking — and the mapping

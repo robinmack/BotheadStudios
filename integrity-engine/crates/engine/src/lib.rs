@@ -5634,6 +5634,14 @@ mod app {
     const SPACE_FOV_Y: f32 = 0.9;
 
     const TERRA_CAP_RES: usize = 192;
+    /// The one segment's resolution (docs/63). Rings out from under the eye, spokes around it — the same
+    /// vertex budget the 192² cap spent, arranged so the samples concentrate where the camera looks
+    /// instead of being spread evenly over a square that was mostly horizon.
+    const TERRA_SEG_RINGS: usize = 96;
+    const TERRA_SEG_SPOKES: usize = 192;
+    /// How far past the horizon the segment reaches, so its rim is never a visible edge. Same job, and
+    /// same value, as the cap's own margin — the geometry changed, the reason did not.
+    const TERRA_SEG_MARGIN: f64 = 1.3;
     /// **How many nested ground tiers** (docs/08's ladder; docs/46 row on `surface_detail`). ONE tier could
     /// never work: a 192² grid over a horizon-sized cap is ~34 m per cell at 2 m altitude while the eye
     /// resolves ~2 mm, and the documented attempt to fix that by SHRINKING the single cap left nothing drawn
@@ -5721,6 +5729,21 @@ mod app {
         cap_gpu: Vec<GpuMesh>,
         cap_uni: Vec<UniformSlot>,
         cap_verts: Vec<Vertex>,
+        /// **THE one surface geometry** (docs/63, `terra::segment`): a sphere segment whose angular radius
+        /// follows the camera — a chord underfoot, a hemisphere from orbit. `None` until built. While
+        /// `surface_mode` is 0 this is unused and the scene draws globe + cap exactly as before, so the two
+        /// can be compared on the same frame before either is deleted.
+        segment_gpu: Option<GpuMesh>,
+        segment_uni: Option<UniformSlot>,
+        segment_verts: Vec<Vertex>,
+        /// What the segment's mesh currently HOLDS — the same cache-of-the-view rule the ground tiers use
+        /// (`ground_cap::tier_is_current`), on the one mesh instead of a ladder of them. The LIFT term is
+        /// 0 here and always will be: a depth-fight allowance exists only to separate two meshes drawn
+        /// over each other, and there is one.
+        segment_built: Option<crate::terra::ground_cap::CapTierBuild>,
+        /// 0 = the legacy globe + cap pair, 1 = the single segment. A knob only while the collapse is
+        /// being proven; the point of the exercise is that it stops having two settings.
+        surface_mode: u32,
         /// **Measured elevation streamed by necessity** (`terra::tiles`, docs/46 row 27). The shipped
         /// global raster is 19.5 km per texel, which is why the ground goes flat below ~20 km altitude;
         /// this holds the metres-per-pixel tiles for the patch the camera is actually over. Empty until a
@@ -6001,6 +6024,22 @@ mod app {
                     make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler)
                 })
                 .collect();
+            // THE one surface (docs/63). Built here rather than lazily because this is where the bind
+            // layout and the material texture views are in scope, which is the same reason the cap's are.
+            let seg_res = crate::terra::segment::SegmentRes::new(TERRA_SEG_RINGS, TERRA_SEG_SPOKES);
+            let segment_gpu = Some(make_dynamic_mesh(
+                &device,
+                "terra-segment",
+                seg_res.vertex_count(),
+                &crate::terra::segment::segment_indices(seg_res),
+            ));
+            let segment_uni = Some(make_space_uniform(
+                &device,
+                &bind_layout,
+                &tex_view,
+                &normal_view,
+                &sampler,
+            ));
             let shell_count = 4096; // ~2.8° grain spacing — resolves continents/biomes (Phase 2, grain shell)
             let shell_unis: Vec<UniformSlot> = (0..shell_count)
                 .map(|_| {
@@ -6058,6 +6097,11 @@ mod app {
                 cap_uni,
                 cap_verts: Vec::new(),
                 cap_built: vec![None; TERRA_CAP_TIERS],
+                segment_gpu,
+                segment_uni,
+                segment_built: None,
+                segment_verts: Vec::new(),
+                surface_mode: 0,
                 tiles: Default::default(),
                 epoch_s: None,
                 relief_exag: TERRA_RELIEF_EXAG,
@@ -6528,6 +6572,7 @@ mod app {
             // has to guard against, and it would look like the streaming did nothing.
             if self.tiles.len() != before {
                 self.cap_built.iter_mut().for_each(|t| *t = None);
+                self.segment_built = None;
             }
         }
 
@@ -6535,6 +6580,14 @@ mod app {
         /// before it believes a screenshot.
         pub fn tile_count(&self) -> usize {
             self.tiles.len()
+        }
+
+        /// Draw the surface as ONE sphere segment (1) instead of the globe + cap pair (0). A knob only
+        /// while the collapse is being proven — see `surface_mode`.
+        pub fn set_surface_mode(&mut self, mode: u32) {
+            self.surface_mode = mode.min(1);
+            self.cap_built.iter_mut().for_each(|t| *t = None);
+            self.segment_built = None;
         }
 
         /// **The altitude band the observer may occupy** (m). A world declares this in its camera block
@@ -6805,6 +6858,10 @@ mod app {
             if cap_fade > 0.0 && self.globe_mesh.is_some() {
                 self.build_cap(&view, sun_light, cap_fade, anchor);
             }
+            // **THE one surface** (docs/63): a segment whose extent is simply what is visible from here.
+            if self.surface_mode == 1 && self.globe_mesh.is_some() {
+                self.build_segment(&view, sun_light, anchor);
+            }
             // How much of the ladder has a mesh worth drawing. Read AFTER `build_cap`, because the
             // ladder fills in one tier per frame and this is what keeps a never-filled vertex buffer
             // out of the pass.
@@ -7045,13 +7102,23 @@ mod app {
                     // Once the cap is fully faded in AND covers the view out past the horizon, the
                     // globe is SKIPPED: near the ground the depth buffer cannot separate two copies
                     // of the same surface (see ground_cap::cap_covers_view).
-                    if draw_globe {
+                    // **ONE surface** (docs/63) when the collapse is on: no cross-fade, no lift, no
+                    // "does the cap cover enough to skip the globe" — those exist only to mediate
+                    // between two meshes, and there is one.
+                    if self.surface_mode == 1 {
+                        if let (Some(gpu), Some(uni)) =
+                            (self.segment_gpu.as_ref(), self.segment_uni.as_ref())
+                        {
+                            pass.set_pipeline(&self.globe_pipeline);
+                            draw(&mut pass, uni, gpu);
+                        }
+                    } else if draw_globe {
                         pass.set_pipeline(&self.globe_pipeline);
                         draw(&mut pass, &self.globe_uni, globe);
                     }
                     // docs/43 Phase 5: the fine ground cap (alpha-blended cross-fade). Drawn only when it
                     // was built this frame (cap_fade > 0); it covers the foreground out past the horizon.
-                    if cap_fade > 0.0 {
+                    if cap_fade > 0.0 && self.surface_mode == 0 {
                         pass.set_pipeline(&self.cap_pipeline);
                         // OUTERMOST first: each finer tier is drawn over the coarser one it sits inside,
                         // lifted a hair further toward the camera so it wins the depth fight.
@@ -7146,6 +7213,107 @@ mod app {
                 self.landcover.as_ref(),
                 self.elev_range,
             )
+        }
+
+        /// **Build the ONE surface segment** (docs/63) — the collapse of globe + cap into a single mesh.
+        ///
+        /// Its angular radius is `segment::visible_angle`: literally the surface that is not over the
+        /// horizon, times the same margin the cap used so the rim is never an edge. That is the whole
+        /// extent rule. There is no cross-fade, no depth-fight lift and no "is the cap covering enough to
+        /// skip the globe" decision, because those existed only to mediate between two meshes.
+        fn build_segment(
+            &mut self,
+            view: &crate::terra::fly_camera::View,
+            sun_light: Vec3,
+            anchor: Vec3,
+        ) {
+            let res = crate::terra::segment::SegmentRes::new(TERRA_SEG_RINGS, TERRA_SEG_SPOKES);
+            let r_disp = self.planet_radius * display_scale();
+            let ds = display_scale();
+            let exag = self.relief_exag;
+            let angle = crate::terra::segment::visible_angle(
+                self.fly.alt_m,
+                self.planet_radius,
+                TERRA_SEG_MARGIN,
+            );
+            let water_idx = materials::index_of(&self.mats, "water");
+            let elev_lo = self.elev_range[0];
+            let elev_hi = self.elev_range[1];
+            let tiles = &self.tiles;
+            let elevation = self.elevation.as_ref();
+            let sampler = crate::terra::globe_mesh::SurfaceSampler::new(
+                &self.mats,
+                &self.biome_mats,
+                self.landmask.as_ref(),
+                self.elevation.as_ref(),
+                self.landcover.as_ref(),
+                self.elev_range,
+                ds,
+                exag,
+            );
+            // A cache of the view, the same rule the tiers use: re-derive only when re-deriving would
+            // change something. Anchored to the surface point under the camera, so the eye moving is
+            // carried by the model matrix and touches no vertex.
+            let fresh = crate::terra::ground_cap::CapTierBuild {
+                center: view.up,
+                anchor: view.up * r_disp,
+                cap_angle: angle,
+                cell_m: (angle * self.planet_radius / res.rings as f64).max(1e-6),
+                lift_m: 0.0,
+            };
+            let built = match self.segment_built {
+                Some(b) if crate::terra::ground_cap::tier_is_current(&b, &fresh) => b,
+                _ => fresh,
+            };
+            let rebuild = self.segment_built != Some(built);
+            let mut verts = std::mem::take(&mut self.segment_verts);
+            if rebuild {
+                let sample = |dir: glam::DVec3| -> ([f32; 3], f64, u32) {
+                    let (col, mut off, mat) = sampler.sample(dir);
+                    if mat as usize == water_idx {
+                        return (col, off, mat);
+                    }
+                    // Measured beats generated, exactly as the cap does it — one surface, one rule.
+                    let (lat, lon) = crate::geo::lat_lon_from_dir(dir);
+                    if let Some((e_tile, w)) = tiles.elevation_m_at(lat, lon) {
+                        let e_raster =
+                            elevation.map_or(0.0, |r| r.elevation_m_at(lat, lon, elev_lo, elev_hi));
+                        off = (e_raster + w * (e_tile - e_raster)).max(0.0) * ds * exag;
+                    }
+                    (col, off, mat)
+                };
+                crate::terra::segment::fill_segment(
+                    &mut verts,
+                    built.center,
+                    view.east,
+                    view.north,
+                    built.anchor,
+                    r_disp,
+                    built.cap_angle,
+                    res,
+                    sample,
+                );
+                if let Some(gpu) = self.segment_gpu.as_ref() {
+                    self.queue
+                        .write_buffer(&gpu.vertex_buf, 0, bytemuck::cast_slice(&verts));
+                }
+                self.segment_built = Some(built);
+            }
+            if let Some(uni) = self.segment_uni.as_ref() {
+                let model = glam::DMat4::from_translation(built.anchor - view.eye).as_mat4();
+                write_space_uniform(
+                    &self.queue,
+                    uni,
+                    view.vp_rel,
+                    model,
+                    sun_light,
+                    [1.0, 1.0, 1.0, 1.0],
+                    [anchor.x, anchor.y, anchor.z, self.veil_column_fraction()],
+                    self.air(),
+                    glow_of(&crate::planet::body(&self.body_id)),
+                );
+            }
+            self.segment_verts = verts;
         }
 
         /// docs/43 Phase 5 — rebuild the camera-relative ground cap under the camera and upload it (vertices only;
