@@ -7,7 +7,7 @@
 use serde::Deserialize;
 
 /// The material database, embedded at compile time so the WASM is self-contained.
-const MATERIALS_JSON: &str = include_str!("../../../data/materials.json");
+pub(crate) const MATERIALS_JSON: &str = include_str!("../../../data/materials.json");
 
 #[derive(Deserialize)]
 struct RawFile {

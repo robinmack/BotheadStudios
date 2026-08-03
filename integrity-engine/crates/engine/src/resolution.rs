@@ -316,9 +316,185 @@ impl ResolutionField {
     }
 }
 
+/// **How much work this machine can afford — MEASURED, never declared** (Robin, 2026-08-02:
+/// *"budget for textels/etc in engine should scale based on compute/GPU capability … naturally
+/// degrading on slower systems, built-in future-proofing for future platforms"*).
+///
+/// This is the compute-side companion to [`ResolutionController::angular_resolution`]. That one asks
+/// *how fine can this VIEWER resolve*; this one asks *how much can this MACHINE do about it*. Both are
+/// legitimate cost tolerances rather than physical quantities (Law V) — neither makes anything "look
+/// right", and both converge: raise them and the answer improves toward the same limit.
+///
+/// **Why it is measured rather than read off the hardware.** A table of device names is a guess that
+/// ages badly and is wrong the first time it meets a machine nobody tested — which is precisely the
+/// future-proofing that was asked for. A closed loop on the time the work ACTUALLY took needs no table:
+/// a slower machine settles lower, a faster one settles higher, and a machine that does not exist yet
+/// settles wherever it belongs without anyone editing a constant.
+///
+/// ★ **The ceiling is the DATA, not the hardware, and that is what makes this converge rather than
+/// run away.** Once the sample grid is as fine as the measurement underneath it, the integral is
+/// COMPLETE — more samples re-read the same numbers and buy exactly nothing. So growth stops on its
+/// own: [`observe`](Self::observe) is told the side actually used, and when the data bound it rather
+/// than the budget, the budget does not grow. Law VIII's convergence clause, enforced by construction.
+#[derive(Clone, Debug)]
+pub struct WorkBudget {
+    /// Held as a FLOAT, and that is not fussiness. With an integer side, damping rounds a small
+    /// correction straight back to where it started — a budget of 4 measuring 175 ms against a 110 ms
+    /// target implies 3.17, damps to 3.58, rounds to 4, and never moves again however long it runs.
+    /// Measured: it sat at 4 for every rebuild of a six-rung ladder.
+    side: f64,
+    target_ms: f64,
+    /// How far toward the newly implied side one observation may move it. Full correction on every
+    /// sample makes the budget ring between two values as ordinary frame-to-frame noise pushes the
+    /// measurement either side of the target; a fractional step averages that noise out.
+    damping: f64,
+}
+
+impl WorkBudget {
+    /// A budget that starts at `side` and aims to keep one unit of work under `target_ms`.
+    pub fn new(side: usize, target_ms: f64) -> WorkBudget {
+        WorkBudget {
+            side: side.max(1) as f64,
+            target_ms: target_ms.max(1e-3),
+            damping: 0.5,
+        }
+    }
+
+    /// The grid side the next integral may use, per axis.
+    pub fn side(&self) -> usize {
+        (self.side.round() as i64).max(1) as usize
+    }
+
+    /// **Fold in what one unit of work actually cost.**
+    ///
+    /// `used_side` is the side the work really ran at — which may be smaller than [`side`](Self::side)
+    /// because the data ran out first. In that case the budget was not the binding constraint and must
+    /// NOT grow on the strength of a cheap measurement; growing would chase a limit that does not
+    /// exist and then overshoot the moment the camera moved somewhere with finer data.
+    ///
+    /// Cost goes as the AREA of the grid, so the side implied by a time ratio is its square root.
+    pub fn observe(&mut self, used_side: usize, elapsed_ms: f64) {
+        if !(elapsed_ms > 0.0) || !elapsed_ms.is_finite() {
+            return;
+        }
+        let over = elapsed_ms > self.target_ms;
+        // Compare against what was actually OFFERED (the rounded side), not the internal float.
+        // Against the float, a caller that used exactly what it was given still looks data-bound
+        // whenever the float sits above its own rounding — which silently froze every undershoot.
+        if used_side < self.side() && !over {
+            return; // the data bound this one, not the budget — no information about our limit
+        }
+        let implied = self.side * (self.target_ms / elapsed_ms).sqrt();
+        self.side = (self.side + self.damping * (implied - self.side)).max(1.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A budget must respond to a MODEST overshoot, not just a dramatic one.** ★ Found by rig, not by
+    /// test: holding `side` as an integer made a 4 measuring 175 ms against a 110 ms target imply 3.17,
+    /// damp to 3.58, round back to 4, and sit there for every rebuild of a six-rung ladder — a budget
+    /// that silently did nothing. The three tests above all used ratios extreme enough to clear the
+    /// rounding in one step, so none of them saw it.
+    #[test]
+    fn a_small_overshoot_still_moves_the_budget() {
+        let mut b = WorkBudget::new(4, 110.0);
+        let start = b.side();
+        b.observe(4, 175.0);
+        b.observe(4, 175.0);
+        assert!(
+            b.side() < start,
+            "a persistent 1.6x overshoot must reduce the budget, stayed at {}",
+            b.side()
+        );
+        // And a modest UNDERSHOOT must let it climb again, or a budget could only ever ratchet down.
+        let mut c = WorkBudget::new(4, 110.0);
+        c.observe(4, 80.0);
+        c.observe(4, 80.0);
+        assert!(
+            c.side() > 4,
+            "a persistent undershoot must raise the budget, stayed at {}",
+            c.side()
+        );
+    }
+
+    /// **The budget must DEGRADE on a slow machine and GROW on a fast one, with no table of device
+    /// names anywhere** — Robin's requirement, stated as a test. A device nobody has tested (or that
+    /// does not exist yet) settles wherever its own measurements put it.
+    #[test]
+    fn the_budget_finds_the_machine_it_is_running_on() {
+        // A machine where each sample-row costs 4 ms: the honest side for a 25 ms target is ~2.5.
+        let slow_cost = |side: usize| side as f64 * side as f64 * 4.0;
+        let mut b = WorkBudget::new(16, 25.0);
+        for _ in 0..40 {
+            let s = b.side();
+            b.observe(s, slow_cost(s));
+        }
+        assert!(
+            b.side() >= 2 && b.side() <= 3,
+            "a slow machine should settle near 2-3, got {}",
+            b.side()
+        );
+        // The same code on a machine 400x faster settles far higher — nothing was edited.
+        let fast_cost = |side: usize| side as f64 * side as f64 * 0.01;
+        let mut f = WorkBudget::new(16, 25.0);
+        for _ in 0..40 {
+            let s = f.side();
+            f.observe(s, fast_cost(s));
+        }
+        assert!(
+            f.side() > 40,
+            "a fast machine should settle much higher, got {}",
+            f.side()
+        );
+        assert!(
+            f.side() > b.side() * 10,
+            "fast {} must far exceed slow {}",
+            f.side(),
+            b.side()
+        );
+    }
+
+    /// **The ceiling is the DATA, not the hardware — so a budget cannot run away.** When the integral
+    /// is already as fine as the measurement under it, every extra sample re-reads the same numbers, so
+    /// the work stays cheap forever. A budget that grew on that evidence would chase a limit that does
+    /// not exist, then overshoot the instant the camera reached ground with finer data.
+    #[test]
+    fn a_budget_does_not_grow_on_work_the_data_already_bounded() {
+        let mut b = WorkBudget::new(8, 25.0);
+        let start = b.side();
+        for _ in 0..50 {
+            // The data supported only a 3x3 grid, so the work was trivial however much we allowed.
+            b.observe(3, 0.05);
+        }
+        assert_eq!(
+            b.side(),
+            start,
+            "the data bound this work, so it says nothing about our compute limit"
+        );
+        // But a genuinely over-budget run still shrinks it, even when the data bound the side —
+        // otherwise a machine too slow for even the data's resolution could never back off.
+        b.observe(3, 500.0);
+        assert!(b.side() < start, "an over-budget run must still reduce it");
+    }
+
+    /// It must never propose zero work, and nonsense timings must not move it. A budget of zero draws
+    /// nothing at all, which is worse than a coarse answer.
+    #[test]
+    fn the_budget_stays_sane() {
+        let mut b = WorkBudget::new(1, 25.0);
+        for _ in 0..20 {
+            b.observe(b.side(), 10_000.0); // hopelessly slow
+        }
+        assert_eq!(b.side(), 1, "never below one sample");
+        let mut c = WorkBudget::new(8, 25.0);
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            c.observe(8, bad);
+        }
+        assert_eq!(c.side(), 8, "a nonsense measurement moves nothing");
+    }
 
     /// docs/44 §4b's worked table, which is the specification. A ~1500 kg car, one wheel: P = 3679 N over
     /// A = 0.02 m². The three surfaces must land where the doc says — and basalt must be EXACTLY zero, not

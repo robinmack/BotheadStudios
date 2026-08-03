@@ -27,6 +27,7 @@
 //! where the eye is.
 
 use crate::mesher::Vertex;
+use crate::terra::globe_mesh::SurfaceSample;
 use glam::{DVec3, Vec3};
 
 /// A segment's own resolution: `rings` steps outward from the centre, `spokes` around it.
@@ -119,7 +120,12 @@ pub fn look_centre(eye: DVec3, forward: DVec3, r_surface: f64) -> DVec3 {
 ///
 /// `origin` is the world point the vertices are emitted relative to (see the anchoring note on
 /// `ground_cap::fill_ground_cap`; the same rule applies, and for the same reason). `sample` answers what
-/// the surface IS in a direction: albedo, radial offset in display units, material.
+/// the surface IS in a direction: albedo, radial offset in display units, material, and the roughness
+/// this mesh is too coarse to show (docs/63 — see [`crate::terra::appearance`]).
+///
+/// `sample` is `FnMut` because answering it can require WORK, and work wants scratch space: the
+/// appearance integral reuses one accumulator across all 18,433 vertices rather than allocating per
+/// vertex. Nothing here calls it re-entrantly, so the looser bound costs the caller nothing.
 ///
 /// The index topology is fixed for a given [`SegmentRes`] — get it once from [`segment_indices`].
 pub fn fill_segment(
@@ -131,7 +137,7 @@ pub fn fill_segment(
     r_disp: f64,
     cap_angle: f64,
     res: SegmentRes,
-    sample: impl Fn(DVec3) -> ([f32; 3], f64, u32),
+    mut sample: impl FnMut(DVec3) -> SurfaceSample,
 ) {
     out.clear();
     out.reserve(res.vertex_count());
@@ -142,23 +148,33 @@ pub fn fill_segment(
     let mut pos = Vec::with_capacity(res.vertex_count());
     let mut cols = Vec::with_capacity(res.vertex_count());
     let mut mats = Vec::with_capacity(res.vertex_count());
+    let mut roughs = Vec::with_capacity(res.vertex_count());
     let mut dirs = Vec::with_capacity(res.vertex_count());
 
     let mut push = |dir: DVec3,
                     pos: &mut Vec<Vec3>,
                     cols: &mut Vec<[f32; 3]>,
                     mats: &mut Vec<u32>,
+                    roughs: &mut Vec<f32>,
                     dirs: &mut Vec<DVec3>| {
-        let (col, off, mat) = sample(dir);
-        let p = dir * (r_disp + off);
+        let s = sample(dir);
+        let p = dir * (r_disp + s.offset);
         let r = p - origin;
         pos.push(Vec3::new(r.x as f32, r.y as f32, r.z as f32));
-        cols.push(col);
-        mats.push(mat);
+        cols.push(s.albedo);
+        mats.push(s.material);
+        roughs.push(s.rough);
         dirs.push(dir);
     };
 
-    push(center, &mut pos, &mut cols, &mut mats, &mut dirs);
+    push(
+        center,
+        &mut pos,
+        &mut cols,
+        &mut mats,
+        &mut roughs,
+        &mut dirs,
+    );
     for ring in 1..=res.rings {
         let a = ring_angle(ring as f64 / res.rings as f64, cap);
         let (sa, ca) = a.sin_cos();
@@ -168,7 +184,7 @@ pub fn fill_segment(
             // Rodrigues about the centre: rotate `center` by `a` toward the azimuth `phi` in the tangent
             // frame. Exact at every angle, including past a hemisphere, where a projected plane is not.
             let dir = (center * ca + (east * cp + north * sp) * sa).normalize();
-            push(dir, &mut pos, &mut cols, &mut mats, &mut dirs);
+            push(dir, &mut pos, &mut cols, &mut mats, &mut roughs, &mut dirs);
         }
     }
 
@@ -209,6 +225,7 @@ pub fn fill_segment(
             nrm: nrm.to_array(),
             col: cols[i],
             mat: mats[i],
+            rough: roughs[i],
         });
     }
 }
@@ -236,8 +253,8 @@ pub fn segment_indices(res: SegmentRes) -> Vec<u32> {
 mod tests {
     use super::*;
 
-    fn flat(_d: DVec3) -> ([f32; 3], f64, u32) {
-        ([0.3, 0.4, 0.2], 0.0, 1)
+    fn flat(_d: DVec3) -> SurfaceSample {
+        SurfaceSample::flat([0.3, 0.4, 0.2], 0.0, 1)
     }
 
     fn frame(center: DVec3) -> (DVec3, DVec3) {
@@ -472,7 +489,7 @@ mod tests {
             1.0,
             0.2,
             res,
-            |d| ([0.3, 0.3, 0.3], 0.01 * (d.dot(north) * 40.0).sin(), 0),
+            |d| SurfaceSample::flat([0.3, 0.3, 0.3], 0.01 * (d.dot(north) * 40.0).sin(), 0),
         );
         let tilted = v
             .iter()

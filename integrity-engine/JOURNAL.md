@@ -3,6 +3,79 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-02 — the appearance integral, and the negative result that re-orders the plan
+
+**What.** `terra::appearance` integrates the surface over the patch a vertex stands for and reports two
+moments: the area-weighted material MIXTURE, and the variance of the slope ABOUT the mesh's own normal.
+`rough_diffuse` in the shared shader chunk spends the second, because Lambert is roughness-blind and a
+variance with nowhere to go is a variance discarded. `resolution::WorkBudget` sizes the work from
+measured time rather than a declared constant. `Vertex` gained `rough`; the `([f32;3], f64, u32)` tuple
+every surface builder passed around became `SurfaceSample`.
+
+**Why.** docs/63: what the mesh cannot carry as SHAPE it must carry as STATISTICS. At 94 m altitude
+Terra's mesh cell is ~469 m while a streamed elevation tile pixel is ~3.71 m, so some sixteen thousand
+measured samples sit inside one cell, and `octaves <= log2(base_feature/cell)` evaluates to **0** — the
+generated relief switches off exactly where a descent should start revealing ground. Adding vertices was
+already measured and retired: one tier against four differed by at most four pixel values at 100 m.
+
+**★ The rule that keeps it from double-counting.** The mesh already carries the MEAN slope, as its
+normal; the appearance carries only the variance ABOUT that mean. Integrate the total and every hill is
+counted twice — once as the shape being displayed, again as roughness smeared over it.
+
+**★ The convergence invariant, as docs/63 asked for it.** Combining sub-footprints is the law of total
+variance, `Var(total) = E[Var(within)] + Var(E[within])`. Drop the second term and a coarse footprint
+reports less roughness than the sum of its parts, so the answer CHANGES on refinement — precisely "one
+of them is lying".
+
+**★★★ THE RESULT THAT MATTERS, AND IT IS NEGATIVE: the integral is correct and has nothing to
+integrate.** At 100 m over the Colorado Rockies it changes the picture by almost nothing — not because
+the model is wrong, but because the data cannot answer it. Measured through the engine at the scale
+ladder's own site (39N, 106W, 469 m cell): the land-cover raster is **19.5 km per texel**, so the cell
+sits inside ONE texel and the mixture has exactly **one** constituent; the elevation raster at that
+resolution is a bilinear ramp across a cell — a PLANE — so sigma comes back **< 1e-3 rad**. The mean
+slope is real, and the mesh already carries it.
+And the surface's own description is **invented**: `web/public/bodies/earth/SOURCES.txt` says the land
+cover is a *"DERIVED climate approximation from lat+elevation+coast, NOT a measured land-cover
+dataset"* — six latitude bands. **The biome map also commits a category error: forest maps to material
+`pine`, which is pine TIMBER (albedo [0.68, 0.48, 0.21], a brown), so the Amazon and the Congo are
+drawn the colour of cut lumber.** Robin found both from the picture — *"the Sahara is green"*, *"the
+Amazon Rainforest in Brazil/etc looks pretty sparse"* — before any of this was measured.
+**So docs/63's step 3 is no longer "later", it is PREREQUISITE**, and the doc is amended to say so.
+
+**★ The cost is a real regression and is NOT fixed.** Same ladder rig, same machine (5060 Ti), main vs
+branch: worst frame **44-53 ms -> 158-186 ms**, a 3x rebuild hitch; steady-state render is untouched at
+p50 0.4 ms either way. The first hypothesis — a `dir -> lat/lon -> dir -> lat/lon` round trip in the
+inner loop — was wrong: removing it moved 177-192 ms to only 158-186 ms. The structural fix is not a
+smaller sampling budget but a different shape: a **mip pyramid of moments** over the elevation, built
+once per tile, making the per-vertex integral an O(1) lookup and EXACT rather than sub-sampled
+(docs/46 row 29).
+
+**★ The budget is measured, not declared** (Robin: *"budget for textels/etc in engine should scale
+based on compute/GPU capability ... naturally degrading on slower systems, built-in future-proofing for
+future platforms"*). `WorkBudget` is a closed loop on the time work actually took, so it needs no table
+of device names, and its ceiling is the DATA rather than the hardware: once the grid is as fine as the
+measurement underneath it, more samples re-read the same numbers and growth stops by construction.
+
+**★★ Two mistakes, both found by instruments rather than by reading — and one of them was my own test.**
+- **The convergence test was toothless and a mutation check caught it.** The first fixture was
+  symmetric in `u`, so all four quadrant means were equal, `Var(E[within])` was ~0, and the test PASSED
+  with `combine`'s between-parts term deliberately deleted. It now asserts its own precondition — that
+  the fixture exercises the term it protects — so it cannot go quiet again. *Verify a new gate by
+  making it fail* applies to tests you just wrote, not only to gates you inherited.
+- **`WorkBudget` held its side as an integer and therefore did nothing.** A budget of 4 measuring 175 ms
+  against a 110 ms target implies 3.17, damps to 3.58, rounds back to 4, and never moves; it sat at 4
+  for every rebuild of a six-rung ladder. All three of its original tests used ratios extreme enough to
+  clear the rounding in one step, so none of them saw it.
+
+**Verified.** 475/475 native, `mod app` clean for wasm32, `cargo fmt` clean. Rig-measured on the
+5060 Ti across a 100 km -> 1 m ladder, with `main` run through the identical rig as the control rather
+than compared against a remembered number.
+
+**NOT done, deliberately and flagged in place:** the space band's segment does not run the integral, so
+it still shades as plain Lambert. Two scenes drawing one Earth differently is what docs/63 exists to
+end — but the corridor's descent is not frame-reproducible, so the change cannot be A/B'd until the
+fixed-pose rig (docs/63 item 1c) exists. Flagged rather than shipped unverified.
+
 ## 2026-08-02 — one surface: the globe and the cap collapse into a segment of a sphere
 
 **What.** Terra and the space band both draw a planet's surface as ONE thing now — `terra::segment`, a

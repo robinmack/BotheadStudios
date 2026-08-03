@@ -708,3 +708,207 @@ mod numbering_tests {
         );
     }
 }
+
+/// **Physical quantities the material catalogue CARRIES that no code reads yet**, each with what it is
+/// for. Every entry is a declared IOU (Law V): the data is sourced and real, the physics that would
+/// consume it is not built, and saying so out loud is what keeps the gap from being invisible.
+///
+/// ★ **This list exists because a catalogued-but-unread property is the quietest failure in the
+/// project.** `data/materials.json` gives `oak` and `pine` full orthotropic strength — tensile
+/// **90 MPa along the grain against 5.5 MPa across it**, under an explicit `assumed_condition` of
+/// *"strongly anisotropic"* — and **that 16x ratio is the whole reason wood splinters rather than
+/// cratering.** Nothing read any of it, so oak failed like a weak stone, and the only way anyone found
+/// out was by tracing a cannonball through a hull by hand (docs/46 row 30).
+///
+/// Read the other way, this is an inventory of physics the engine has DATA for and does not yet do —
+/// a roadmap derived from measurement rather than opinion. Nearly half the catalogue is on it.
+pub(crate) const UNWIRED_MATERIAL_PROPERTIES: &[(&str, &str)] = &[
+    // Anisotropic failure — docs/46 row 30. The set that makes wood splinter along its grain, and
+    // rolled steel and composite layup tear along theirs.
+    (
+        "youngs_modulus_perp",
+        "anisotropic stiffness across the grain (docs/46 row 30)",
+    ),
+    (
+        "tensile_strength_perp",
+        "anisotropic tension — 16x weaker across oak's grain than along it",
+    ),
+    (
+        "compressive_strength_perp",
+        "anisotropic compression across the grain",
+    ),
+    ("modulus_of_rupture", "bending failure of a beam or plank"),
+    (
+        "shear_strength",
+        "shear failure, the mode a rivet and a bolted joint fail in",
+    ),
+    (
+        "tensile_strength_blade",
+        "a turbine blade's own direction-dependent limit",
+    ),
+    // Bulk elasticity and strength the contact law does not yet ask for.
+    (
+        "compressive_strength",
+        "crushing failure, distinct from the tensile fracture already used",
+    ),
+    (
+        "bulk_modulus",
+        "volumetric stiffness; the EOS covers this where a Tillotson block exists",
+    ),
+    (
+        "poisson_ratio",
+        "transverse strain under load — needed by any real stress solver",
+    ),
+    (
+        "ductility",
+        "how far matter yields before it breaks, i.e. dents rather than shatters",
+    ),
+    // Granular and fluid behaviour.
+    (
+        "friction_angle",
+        "the repose angle as a MEASURED property, beside the derived mu",
+    ),
+    (
+        "dynamic_viscosity",
+        "real fluid flow; SPH currently carries its own viscosity",
+    ),
+    (
+        "surface_tension",
+        "droplets, menisci, and why a raindrop is a sphere",
+    ),
+    // Hardness — scratch, indent and impact resistance, none of it consulted.
+    ("hardness_mohs", "scratch hardness"),
+    ("hardness_janka_n", "indentation hardness of wood"),
+    ("hardness_shore_a", "indentation hardness of elastomers"),
+    // Optics.
+    (
+        "translucency",
+        "light carried THROUGH matter — every material declares it, nothing reads it",
+    ),
+];
+
+#[cfg(test)]
+mod material_property_tests {
+    /// **Every NUMBER in the material catalogue is either read by the engine or declared unwired.**
+    ///
+    /// Prose is not a gate (AGENTS.md §2), and neither is a memory note. The failure this catches is
+    /// specific and has already happened: someone sources a real property, puts it in the catalogue,
+    /// and nothing consumes it — so the engine keeps answering with the isotropic approximation while
+    /// the honest number sits in the file. It looks like progress and changes nothing.
+    ///
+    /// The check runs BOTH ways, which is what keeps the list from rotting:
+    ///   * a numeric property nothing reads and nobody declared -> FAIL (data added with no consumer)
+    ///   * a declared property that IS now read -> FAIL (wire it, then delete the entry)
+    ///
+    /// Only NUMBERS are enforced. `grain`, `notes`, `source` and `conductivity_note` are prose — they
+    /// document the data rather than being physical quantities, so nothing is expected to consume them.
+    /// The `tillotson` block is excluded too: it is read wholesale as a struct and its fields are named
+    /// `A`, `B`, `a`, `b`, `alpha`, so scanning source for them would match everything and prove nothing.
+    #[test]
+    fn every_catalogued_material_number_is_read_or_declared_unwired() {
+        let json: serde_json::Value = serde_json::from_str(crate::materials::MATERIALS_JSON)
+            .expect("data/materials.json parses");
+        let mut props: std::collections::BTreeMap<String, usize> = Default::default();
+        for m in json["materials"].as_array().expect("a materials array") {
+            for block in ["mechanical", "optical", "thermal"] {
+                let Some(map) = m.get(block).and_then(|b| b.as_object()) else {
+                    continue;
+                };
+                for (k, v) in map {
+                    let numeric = v.is_number()
+                        || v.as_array()
+                            .is_some_and(|a| a.first().is_some_and(|x| x.is_number()));
+                    if numeric {
+                        *props.entry(k.clone()).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            props.len() > 20,
+            "expected a rich catalogue; found only {} numeric properties",
+            props.len()
+        );
+
+        // Every line of engine source, as one blob to scan.
+        let mut blob = String::new();
+        collect_rs(
+            &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut blob,
+        );
+        assert!(blob.len() > 100_000, "the source scan found almost nothing");
+
+        let declared: std::collections::BTreeMap<&str, &str> =
+            super::UNWIRED_MATERIAL_PROPERTIES.iter().copied().collect();
+        let mut undeclared = Vec::new();
+        let mut now_wired = Vec::new();
+        for (prop, on) in &props {
+            let read = reads_identifier(&blob, prop);
+            match (read, declared.contains_key(prop.as_str())) {
+                (false, false) => undeclared.push(format!("  {prop} (on {on} materials)")),
+                (true, true) => now_wired.push(format!("  {prop}")),
+                _ => {}
+            }
+        }
+        assert!(
+            undeclared.is_empty(),
+            "these catalogued NUMBERS are read by nothing and are not declared unwired.\n\
+             A sourced property with no consumer is an invisible gap — the engine keeps using its\n\
+             approximation while the honest number sits in the file. Either wire it, or add it to\n\
+             `laws::UNWIRED_MATERIAL_PROPERTIES` with what it is for:\n{}",
+            undeclared.join("\n")
+        );
+        assert!(
+            now_wired.is_empty(),
+            "these are declared UNWIRED but the engine now reads them — delete the entries, the debt\n\
+             is paid:\n{}",
+            now_wired.join("\n")
+        );
+    }
+
+    /// Word-boundary search, so `cohesion` does not match `cohesion_ceiling` and `a` does not match
+    /// every word in the tree. Comments count as readers deliberately: a property named only in a
+    /// comment is at least VISIBLE to the next person, which is the thing being enforced.
+    fn reads_identifier(blob: &str, ident: &str) -> bool {
+        let bytes = blob.as_bytes();
+        let mut from = 0;
+        while let Some(i) = blob[from..].find(ident) {
+            let s = from + i;
+            let e = s + ident.len();
+            let before_ok = s == 0 || !is_word(bytes[s - 1]);
+            let after_ok = e >= bytes.len() || !is_word(bytes[e]);
+            if before_ok && after_ok {
+                return true;
+            }
+            from = s + 1;
+        }
+        false
+    }
+
+    fn is_word(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'_'
+    }
+
+    fn collect_rs(dir: &std::path::Path, out: &mut String) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                collect_rs(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                // ★ Skip THIS file. The declaration list below names every unwired property, so
+                // including it makes each declaration its own reader and the check reports that all
+                // the debt is paid. A registry is not a consumer.
+                if p.file_name().is_some_and(|n| n == "laws.rs") {
+                    continue;
+                }
+                if let Ok(t) = std::fs::read_to_string(&p) {
+                    out.push_str(&t);
+                    out.push('\n');
+                }
+            }
+        }
+    }
+}

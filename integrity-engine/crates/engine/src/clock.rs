@@ -54,8 +54,16 @@ impl StepClock {
     }
 }
 
-/// Wall-clock seconds, on either target.
-fn now_seconds() -> f64 {
+/// **Wall-clock seconds, on either target — the engine's one answer to "what time is it now".**
+///
+/// Public because measuring how long work took is a second, legitimate caller (see
+/// `resolution::WorkBudget`), and a module that needed a clock and could not reach this one would
+/// write its own — which is how two clocks that disagree get into a codebase (Law II).
+///
+/// Resolution is a millisecond on wasm (`Date::now`). That is ample for differences of tens of
+/// milliseconds; anything needing finer would want `performance.now` and should say so here rather
+/// than quietly adding a second time source.
+pub fn now_seconds() -> f64 {
     #[cfg(target_arch = "wasm32")]
     {
         // `Date::now` rather than `performance.now`: the engine already depends on js-sys for the clock

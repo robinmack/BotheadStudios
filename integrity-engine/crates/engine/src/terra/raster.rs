@@ -245,11 +245,38 @@ pub(crate) mod shipped {
             .expect("Earth's surface names a land mask");
         decode_png(&web_public(&url)).expect("the shipped land mask decodes")
     }
+
+    /// The shipped land-cover raster **and the biome-index → material-id map that decodes it**, both
+    /// from the body definition — so a test reads the classes the scene reads, and cannot invent a
+    /// vocabulary of its own.
+    ///
+    /// ★ Read `web/public/bodies/earth/SOURCES.txt` before drawing a conclusion from this raster. It is
+    /// **DERIVED, not measured**: latitude bands plus elevation plus a coast test
+    /// (`tools/bake-earth/bake.py::bake_landcover`), with real MODIS MCD12Q1 recorded as the follow-up.
+    /// The elevation and land mask beside it ARE measured, so it is easy to assume this one is too.
+    pub fn earth_landcover() -> (Raster, std::collections::BTreeMap<String, String>) {
+        let def = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/bodies/earth.json");
+        let json =
+            std::fs::read_to_string(&def).unwrap_or_else(|e| panic!("{}: {e}", def.display()));
+        let body: crate::terra::world_def::World = serde_json::from_str(&json)
+            .expect("assets/bodies/earth.json parses as a body definition");
+        let surface = body
+            .surface
+            .expect("Earth's definition carries a surface block");
+        let url = surface
+            .landcover_url
+            .expect("Earth's surface names a land-cover raster");
+        (
+            decode_png(&web_public(&url)).expect("the shipped land-cover raster decodes"),
+            surface.biomes.into_iter().collect(),
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     /// The native decoder must hand back what the BROWSER hands the engine, or every measurement taken
     /// through it is about a different raster than the one that ships: RGBA, the declared dimensions, and
     /// an elevation range that brackets real Earth rather than whatever a default would have supplied.

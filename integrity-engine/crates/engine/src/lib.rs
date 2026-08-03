@@ -4640,13 +4640,20 @@ mod app {
                         // The spin's oblate figure as a radial factor — first-order identical to
                         // the globe draw's affine scale about the spin axis (the mesh's y), so the
                         // cap sits on the same flattened surface the globe draws.
+                        // NOTE (docs/63, and it is a real gap): this segment does NOT yet run the
+                        // appearance integral Terra's does, so it carries `rough = 0` and shades as
+                        // plain Lambert. Two scenes drawing one Earth differently is the very thing
+                        // docs/63 exists to end — but the corridor's descent is not frame-reproducible,
+                        // so a change here cannot be A/B'd until the fixed-pose rig (docs/63 item 1c)
+                        // exists. Flagged in docs/46 rather than shipped unverified.
                         let sample = |dir: glam::DVec3| {
-                            let (col, off, mat) = sampler.sample(dir);
-                            (
-                                col,
-                                off + lift + r_draw * flat * (1.0 / 3.0 - dir.y * dir.y),
-                                mat,
-                            )
+                            let p = sampler.sample(dir);
+                            crate::terra::globe_mesh::SurfaceSample {
+                                offset: p.offset
+                                    + lift
+                                    + r_draw * flat * (1.0 / 3.0 - dir.y * dir.y),
+                                ..p
+                            }
                         };
                         crate::terra::segment::fill_segment(
                             &mut verts,
@@ -5423,8 +5430,8 @@ mod app {
             push_constant_ranges: &[],
         });
         // Same vertex layout as the world mesh; the space shader only reads position + normal.
-        const ATTRS: [wgpu::VertexAttribute; 4] =
-            wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Uint32];
+        const ATTRS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+            0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Uint32, 4 => Float32];
         let vertex_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
@@ -5501,8 +5508,8 @@ mod app {
             bind_group_layouts: &[bind_layout],
             push_constant_ranges: &[],
         });
-        const ATTRS: [wgpu::VertexAttribute; 4] =
-            wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Uint32];
+        const ATTRS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+            0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Uint32, 4 => Float32];
         let vertex_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
@@ -5782,6 +5789,16 @@ mod app {
         /// generated relief each vertex may sum. Both cost frame time and both buy detail, and the only way
         /// to know the exchange rate is to move one at a time (gpu-perf §5).
         cap_octave_budget: f64,
+        /// **How many sub-samples the appearance integral may take per mesh cell, on THIS machine**
+        /// (docs/63, `resolution::WorkBudget`). Robin's rule: *"budget for textels/etc in engine should
+        /// scale based on compute/GPU capability … naturally degrading on slower systems, built-in
+        /// future-proofing for future platforms."* So it is measured from the time a rebuild actually
+        /// took rather than read off a table of device names, and it stops growing on its own once the
+        /// grid is as fine as the elevation data underneath it — at which point the integral is complete
+        /// and more samples re-read the same numbers.
+        appearance_budget: crate::resolution::WorkBudget,
+        /// Rig override for the above: non-zero pins the grid side so the stage can be priced.
+        appearance_probes_pinned: usize,
         /// Diagnostic: skip UPLOADING and DRAWING the engine's matter while still simulating it. The
         /// physics and the render path both scale with the same number, so measuring either one alone is
         /// impossible without a knob that moves one and not the other (the gpu-perf rule: price a stage,
@@ -6043,6 +6060,20 @@ mod app {
                 matter,
                 flight_env,
                 cap_octave_budget: TERRA_OCTAVE_BUDGET,
+                // Start where a mid-range machine plausibly lands and let the FIRST rebuild correct
+                // it — the starting value is a seed for the loop, not a claim about the hardware. One
+                // rebuild may cost ~1.5 vsync frames: rebuilds are rare (nine in a 500 km descent) and
+                // already the largest single cost in the frame they land on.
+                // ★ The target is what a MESH REBUILD may cost, because that is what is measured —
+                // the integral is not separable from the build it runs inside without timing half a
+                // million probes individually. So the baseline mesh cost is the floor: on a machine
+                // where building the mesh ALONE exceeds this, the integral correctly collapses to its
+                // minimum, which is the graceful degradation that was asked for. Measured on a
+                // 5060 Ti: baseline rebuild 61-79 ms, so ~110 ms leaves real headroom to spend and
+                // still bounds the hitch. Lowering the BASELINE is separate open work (JOURNAL
+                // 2026-07-31: "one tier's rebuild, the floor for scheduling WHOLE tiers").
+                appearance_budget: crate::resolution::WorkBudget::new(4, 110.0),
+                appearance_probes_pinned: 0,
                 cam_pose: None,
                 draw_matter: 2,
                 drawn_buf: Vec::new(),
@@ -6390,6 +6421,20 @@ mod app {
         /// count went with the tier ladder, docs/63.)
         pub fn set_octave_budget(&mut self, octave_budget: f64) {
             self.cap_octave_budget = octave_budget.max(0.0);
+            self.segment_built = None;
+        }
+
+        /// **Pin the appearance integral's sample grid, for PRICING it** (docs/63, docs/46 row 29).
+        ///
+        /// Normally `resolution::WorkBudget` sets this from measured time. A rig needs it PINNED
+        /// instead, because the way to find out what a stage costs is to move one thing and re-time —
+        /// not to delete the stage and re-time the whole build, which prices the deletion rather than
+        /// the stage (the gpu-perf rule). `0` hands control back to the budget.
+        ///
+        /// Cost should go as the grid AREA. If it does not, the cost is not in the probes and the
+        /// optimisation aimed at the probes would be aimed at the wrong thing.
+        pub fn set_appearance_probes(&mut self, side: u32) {
+            self.appearance_probes_pinned = side as usize;
             self.segment_built = None;
         }
 
@@ -7193,24 +7238,50 @@ mod app {
             let mut verts = std::mem::take(&mut self.segment_verts);
             if rebuild {
                 let rings_f = res.rings as f64;
-                let sample = |dir: glam::DVec3| -> ([f32; 3], f64, u32) {
-                    let (col, mut off, mat) = sampler.sample(dir);
-                    let mi = mat as usize;
-                    if mi == water_idx {
-                        return (col, off, mat);
+                // **ONE answer to "how high is the ground here, and how fine is the data that says
+                // so"** — used by the vertex's own displacement AND by the appearance integral's
+                // probe below. Two copies would be two answers to one question (Law II), and the
+                // probe's copy is exactly where the tile's measured relief would silently go missing:
+                // a probe that read only the raster would report a smooth bilinear ramp and the
+                // integral would conclude, wrongly, that the ground is flat.
+                let ground_m = |lat: f64, lon: f64| -> (f64, f64) {
+                    let e_raster =
+                        elevation.map_or(0.0, |r| r.elevation_m_at(lat, lon, elev_lo, elev_hi));
+                    match tiles.elevation_m_at(lat, lon) {
+                        Some((e_tile, w)) => {
+                            let base = match tiles.pixel_ground_m(lat) {
+                                Some(px_m) if px_m > 0.0 && raster_step_m > 0.0 => {
+                                    raster_step_m * (px_m / raster_step_m).powf(w)
+                                }
+                                _ => raster_step_m,
+                            };
+                            ((e_raster + w * (e_tile - e_raster)).max(0.0), base)
+                        }
+                        None => (e_raster.max(0.0), raster_step_m),
                     }
+                };
+                let mut scratch = crate::terra::appearance::Moments::new();
+                // What this machine can afford this rebuild — measured, not declared. See
+                // `resolution::WorkBudget`: it settles lower on a slow device and higher on a fast
+                // one, and stops growing once the grid reaches the data's own resolution.
+                let probe_side = if self.appearance_probes_pinned > 0 {
+                    self.appearance_probes_pinned
+                } else {
+                    self.appearance_budget.side()
+                };
+                // The finest grid the DATA under this segment could support, over the whole rebuild —
+                // the budget's convergence ceiling (see `WorkBudget::observe`).
+                let max_want = std::cell::Cell::new(1usize);
+                let t_appearance = crate::clock::now_seconds();
+                let sample = |dir: glam::DVec3| -> crate::terra::globe_mesh::SurfaceSample {
+                    let point = sampler.sample(dir);
+                    let mut off = point.offset;
+                    let mi = point.material as usize;
                     // Measured beats generated, exactly as the cap does it — one surface, one rule.
                     let (lat, lon) = crate::geo::lat_lon_from_dir(dir);
-                    let mut base_feature_m = raster_step_m;
-                    if let Some((e_tile, w)) = tiles.elevation_m_at(lat, lon) {
-                        let e_raster =
-                            elevation.map_or(0.0, |r| r.elevation_m_at(lat, lon, elev_lo, elev_hi));
-                        off = (e_raster + w * (e_tile - e_raster)).max(0.0) * ds * exag;
-                        if let Some(px_m) = tiles.pixel_ground_m(lat) {
-                            if px_m > 0.0 && raster_step_m > 0.0 {
-                                base_feature_m = raster_step_m * (px_m / raster_step_m).powf(w);
-                            }
-                        }
+                    let (elev_m, base_feature_m) = ground_m(lat, lon);
+                    if mi != water_idx {
+                        off = elev_m * ds * exag;
                     }
                     // **The mesh's own cell here** — and on a polar segment that VARIES, finer toward the
                     // centre where the rings bunch. Differentiating the squared ring spacing gives
@@ -7228,35 +7299,78 @@ mod app {
                     let cell_m = (2.0 * (a_ang * built.cap_angle).sqrt() / rings_f * planet_radius)
                         .max(inner_m)
                         .max(1e-3);
-                    let m = &mats[mi];
-                    let mu = m.friction_coefficient as f64;
-                    let h_crit =
-                        crate::granular::critical_bank_height(m.fracture_strength, m.density, 9.81)
-                            as f64;
-                    let octaves =
-                        crate::surface_detail::detail_octaves(detail, cell_m, base_feature_m)
-                            .min((base_feature_m / cell_m).max(1.0).log2())
-                            .min(octave_budget);
-                    if octaves > 0.0 {
-                        let frac = if mu > 0.0 {
-                            (tier_slope / mu).clamp(0.0, 1.0)
-                        } else {
-                            0.0
-                        };
-                        let px = lon.to_radians() * planet_radius * lat.to_radians().cos();
-                        let pz = lat.to_radians() * planet_radius;
-                        let relief = crate::surface_detail::micro_relief_m(
-                            px,
-                            pz,
-                            base_feature_m,
-                            octaves,
-                            mu,
-                            h_crit,
-                            frac,
-                        );
-                        off += relief * ds * exag;
+                    // Ocean keeps its own displacement rule (sea level, flat); land gets the generated
+                    // sub-raster relief. Both then have their APPEARANCE integrated, because a coastal
+                    // cell really is part land and part sea, and point-sampling it as one or the other
+                    // is the jagged-coastline bug the integral exists to end.
+                    if mi != water_idx {
+                        let m = &mats[mi];
+                        let mu = m.friction_coefficient as f64;
+                        let h_crit = crate::granular::critical_bank_height(
+                            m.fracture_strength,
+                            m.density,
+                            9.81,
+                        ) as f64;
+                        let octaves =
+                            crate::surface_detail::detail_octaves(detail, cell_m, base_feature_m)
+                                .min((base_feature_m / cell_m).max(1.0).log2())
+                                .min(octave_budget);
+                        if octaves > 0.0 {
+                            let frac = if mu > 0.0 {
+                                (tier_slope / mu).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
+                            let px = lon.to_radians() * planet_radius * lat.to_radians().cos();
+                            let pz = lat.to_radians() * planet_radius;
+                            let relief = crate::surface_detail::micro_relief_m(
+                                px,
+                                pz,
+                                base_feature_m,
+                                octaves,
+                                mu,
+                                h_crit,
+                                frac,
+                            );
+                            off += relief * ds * exag;
+                        }
                     }
-                    (col, off, mat)
+                    // **THE APPEARANCE INTEGRAL** (docs/63). The mesh carries this cell's mean shape;
+                    // everything finer than the cell — the material MIXTURE and the slope SPREAD — is
+                    // integrated here and carried as colour and roughness. Without it those sixteen
+                    // thousand measured tile pixels per cell reach nothing.
+                    max_want.set(
+                        max_want
+                            .get()
+                            .max((cell_m / base_feature_m.max(1e-9)).floor().max(1.0) as usize),
+                    );
+                    let a = crate::terra::appearance::integrate_on_sphere(
+                        &mut scratch,
+                        dir,
+                        planet_radius,
+                        cell_m,
+                        base_feature_m,
+                        probe_side,
+                        mats,
+                        |la, lo| (ground_m(la, lo).0, sampler.material_at(la, lo) as usize),
+                    );
+                    // An empty mixture means the footprint was finer than the data under it, so there
+                    // was nothing to integrate and the point sample IS the answer — with `rough = 0`,
+                    // which shades as exactly the Lambert it always did. Not a fallback for failure:
+                    // it is the correct result, arrived at without doing the work.
+                    if a.mix.is_empty() {
+                        crate::terra::globe_mesh::SurfaceSample {
+                            offset: off,
+                            ..point
+                        }
+                    } else {
+                        crate::terra::globe_mesh::SurfaceSample {
+                            albedo: a.albedo,
+                            offset: off,
+                            material: a.material as u32,
+                            rough: a.sigma_rad() as f32,
+                        }
+                    }
                 };
                 crate::terra::segment::fill_segment(
                     &mut verts,
@@ -7269,6 +7383,15 @@ mod app {
                     res,
                     sample,
                 );
+                // One rebuild is one unit of work: fold its real cost back into the budget. The side
+                // REALLY used is the smaller of what we allowed and what the data supports — passing
+                // the allowance alone would let a cheap, data-bound rebuild argue for a bigger budget.
+                if self.appearance_probes_pinned == 0 {
+                    self.appearance_budget.observe(
+                        probe_side.min(max_want.get()),
+                        (crate::clock::now_seconds() - t_appearance) * 1000.0,
+                    );
+                }
                 if let Some(gpu) = self.segment_gpu.as_ref() {
                     self.queue
                         .write_buffer(&gpu.vertex_buf, 0, bytemuck::cast_slice(&verts));

@@ -39,6 +39,10 @@ struct VOut {
     @location(1) wpos       : vec3<f32>,
     @location(2) col        : vec3<f32>,
     @location(3) @interpolate(flat) mat : u32,
+    // The RMS slope angle (rad) of the ground this vertex stands for that the MESH IS NOT SHOWING
+    // (docs/63). Interpolated, not flat: roughness varies continuously across the ground, and a flat
+    // value would draw the mesh's own cell boundaries as shading facets.
+    @location(4) rough      : f32,
 };
 
 // The bowl. A simple crater's profile is a PARABOLOID, so the vertex sinks by depth·(1−(θ/θr)²) inside the
@@ -58,7 +62,7 @@ fn crater_sink(dir : vec3<f32>) -> f32 {
 
 @vertex
 fn vs_main(@location(0) pos : vec3<f32>, @location(1) nrm : vec3<f32>, @location(2) col : vec3<f32>,
-           @location(3) mat : u32) -> VOut {
+           @location(3) mat : u32, @location(4) rough : f32) -> VOut {
     var o : VOut;
     // Sink the surface into the bowl. `pos` is a unit-sphere position (the model matrix carries the real
     // radius and the oblateness), so a fractional depth scales the vertex straight along its own radius.
@@ -69,6 +73,7 @@ fn vs_main(@location(0) pos : vec3<f32>, @location(1) nrm : vec3<f32>, @location
     o.normal = (u.model * vec4<f32>(nrm, 0.0)).xyz;
     o.col = col;
     o.mat = mat;
+    o.rough = rough;
     return o;
 }
 
@@ -84,7 +89,12 @@ fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     // cross-fade); the anchor restores surface-fixed texture coordinates modulo the tile period.
     let n = surface_normal_triplanar(i.wpos + u.emissive.xyz, normalize(i.normal), i.mat, GLOBE_TEX_SCALE);
     let l = normalize(u.light_dir.xyz);
-    let ndl = max(dot(n, l), 0.0);
+    // Positions are camera-relative (eye at the origin), so the direction back to the eye is -wpos.
+    let view = normalize(-i.wpos);
+    // **The appearance integral's second moment reaching the light** (docs/63). `i.rough` is the slope
+    // spread the mesh could not carry as geometry; at zero this is bit-identical to the `max(dot(n,l),0)`
+    // that stood here, so ground the mesh fully resolves looks exactly as it did.
+    let ndl = rough_diffuse(n, l, view, i.rough);
     // Reflected sunlight (albedo × illumination), same SUN_GAIN + Reinhard as the space band; black night side.
     let SUN_GAIN = u.atm.w; // atmosphere::SUN_GAIN — one exposure for every view of this world
     // **The material's OWN texture, not a flat biome colour.** `i.col` is the vertex's material albedo —
@@ -114,8 +124,6 @@ fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     // There is no "atmosphere strength" dial any more: the brightness is whatever the declared air's
     // optical depth scatters at the shared exposure. A body with no declared atmosphere carries tau = 0
     // and gets exactly nothing — the airless case needs no branch.
-    // Positions are camera-relative (eye at the origin), so the direction back to the eye is -wpos.
-    let view = normalize(-i.wpos);
     // **Only the air that is actually between the eye and this point** (`emissive.w`). `rayleigh_veil`
     // computes the FULL vertical column's in-scatter, which is right from orbit and wrong on the ground:
     // unscaled it puts a whole sky of haze between a camera standing on grass and the grass in front of
