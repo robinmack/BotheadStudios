@@ -17,7 +17,7 @@ await p.evaluate(() => {
 });
 const price = async (tiers, oct) => {
   await p.evaluate(({ tiers, oct }) => {
-    window.__terra.set_cap_ladder(tiers, oct);
+    window.__terra.set_octave_budget(oct);
     window.__terra.set_fly(28, 86, 2000, 0.6, -0.35);
     window.__r.length = 0;
   }, { tiers, oct });

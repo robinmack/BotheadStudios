@@ -44,21 +44,13 @@ fn vs_main(
 
 const TEX_SCALE : f32 = 1.0 / 8.0; // one texture tile per 8 metres
 
-fn triplanar(local : vec3<f32>, n : vec3<f32>, layer : u32) -> vec3<f32> {
-    var w = abs(n);
-    w = w / (w.x + w.y + w.z);
-    let cx = textureSample(tex, samp, local.yz * TEX_SCALE, layer).rgb;
-    let cy = textureSample(tex, samp, local.xz * TEX_SCALE, layer).rgb;
-    let cz = textureSample(tex, samp, local.xy * TEX_SCALE, layer).rgb;
-    return cx * w.x + cy * w.y + cz * w.z;
-}
-
 @fragment
 fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     let n = surface_normal_triplanar(i.local, normalize(i.normal), i.mat, TEX_SCALE);
     let l = normalize(u.light_dir.xyz);
 
-    let albedo = triplanar(i.local, n, i.mat);
+    // The shared chunk's blend, not a private copy — see `surface_albedo_triplanar`.
+    let albedo = surface_albedo_triplanar(i.local, n, i.mat, TEX_SCALE);
 
     let params = matparams[i.mat];
     let view = normalize(u.camera_pos.xyz - i.world_pos);

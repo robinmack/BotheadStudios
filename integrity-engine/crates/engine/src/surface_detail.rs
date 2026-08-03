@@ -164,6 +164,300 @@ pub fn micro_relief_m(
 mod tests {
     use super::*;
 
+    /// **WHY THE GROUND FLATTENS ON DESCENT, part 1 of 2: the amplitude law is scale-INVARIANT below
+    /// ~2 km, so zooming in cannot reveal more roughness** (docs/46 row 27).
+    ///
+    /// [`relief_amplitude_m`] is `min(drop/2, λ/4)`. For a cohesive rock the cohesion term wins the OR at
+    /// every wavelength a camera cares about — granite's `h_crit` is 453 m — so the binding term is the
+    /// `λ/4` NO-OVERHANG cap, which is a property of a HEIGHTFIELD, not of the rock. Amplitude ∝ wavelength
+    /// is Hurst exponent H = 1: the smoothest self-affine surface there is, and the one whose slope is
+    /// identical at every scale. Real topography has H ≈ 0.5–0.7, i.e. it gets relatively ROUGHER as you
+    /// look closer, which is exactly the thing a descent is supposed to reveal.
+    ///
+    /// This test does not assert that H = 1 is right. It pins that it is what we currently DO, so the day
+    /// someone gives the generator a real Hurst exponent, this fails and points at the reason it existed.
+    #[test]
+    fn generated_relief_has_the_same_slope_at_every_scale_below_two_km() {
+        let mats = crate::materials::load();
+        let g = &mats[crate::materials::index_of(&mats, "granite")];
+        let mu = g.friction_coefficient as f64;
+        let h_crit =
+            crate::granular::critical_bank_height(g.fracture_strength, g.density, 9.81) as f64;
+        // Below the wavelength where cohesion stops being the larger term, every octave has the SAME
+        // amplitude-to-wavelength ratio, and it is the heightfield's λ/4, not anything the material said.
+        for e in 6..20 {
+            let lam = 19_550.0 / (1u64 << e) as f64;
+            let ratio = relief_amplitude_m(lam, mu, h_crit) / lam;
+            assert!(
+                (ratio - 0.25).abs() < 1e-9,
+                "λ={lam} m: amplitude/wavelength {ratio} — expected the λ/4 heightfield cap"
+            );
+        }
+        // And it really is the cap rather than the physics: the material's own permitted drop is far
+        // larger at these wavelengths, so nothing about granite is being consulted here.
+        let lam = 100.0;
+        assert!(
+            h_crit * 0.5 > lam * 0.25,
+            "the cohesion term must be the one being discarded by the cap"
+        );
+    }
+
+    /// **WHY THE GROUND FLATTENS ON DESCENT, part 2 of 2, and the dominant term: `slope_fraction` compares
+    /// two quantities measured four orders of magnitude apart** (docs/46 row 27).
+    ///
+    /// Terra builds it as `local_raster_gradient / mu` — but the gradient is taken over a baseline of TWO
+    /// RASTER TEXELS, 39 km on the shipped Earth, while `mu` is a grain-scale material property. A 39 km
+    /// baseline cannot be steep, and this test **measures the shipped raster to say so** rather than
+    /// citing a number: it reproduces `Terra::build_cap`'s own sampling (±360/w degrees over a
+    /// `2·raster_step` run) across the real elevation PNG and reports the distribution. Everest itself
+    /// comes out at ~0.008, because averaging over 39 km flattens it.
+    ///
+    /// The consequence is the reported symptom: below ~20 km altitude the frame fits inside ONE raster
+    /// texel, so measured elevation contributes only a smooth ramp and ALL visible roughness has to come
+    /// from the generated relief — which is being scaled by that number.
+    #[test]
+    fn a_regional_gradient_cannot_reach_a_material_scale_slope() {
+        let mats = crate::materials::load();
+        let g = &mats[crate::materials::index_of(&mats, "granite")];
+        let mu = g.friction_coefficient as f64;
+        let h_crit =
+            crate::granular::critical_bank_height(g.fracture_strength, g.density, 9.81) as f64;
+        // The mismatch itself, which is the defect: the numerator is sampled over a baseline of two
+        // raster texels while the denominator governs slopes at the wavelengths the relief is actually
+        // generated at. Four orders of magnitude apart, so the ratio is not a fraction of anything.
+        let baseline_m = 2.0 * 19_546.0;
+        let finest_generated_wavelength_m = 19_550.0 / (1u64 << 16) as f64; // the 16-octave budget
+        assert!(
+            baseline_m / finest_generated_wavelength_m > 1.0e5,
+            "the slope is measured over a baseline {}x the features it is scaling",
+            baseline_m / finest_generated_wavelength_m
+        );
+
+        // **MEASURED on the raster the scene actually draws**, sampled exactly as `Terra::build_cap`
+        // samples it. This is the whole claim, and it is now re-run on every commit.
+        //
+        // The bounds below are loose brackets around what the shipped data measures (printed on every
+        // run), not targets: they exist to catch the raster being replaced or the sampler moving, and
+        // they are deliberately far from the measured values so ordinary noise cannot trip them.
+        // ★ Doing this in-suite CORRECTED the first version of this measurement. It was originally taken
+        // by a separate script that reimplemented `Raster::coords` with a half-texel offset the engine
+        // does not have. Over 16k points that is invisible — the median and p90 agreed to three digits —
+        // but at a single named point in the steepest terrain on Earth it lands in a different texel, and
+        // it reported Everest as 0.008 when the engine reads 0.033. A reimplementation of the thing under
+        // test is a second answer to the same question (Law II), and this is what it cost.
+        let (elev, range) = crate::terra::raster::shipped::earth_elevation();
+        let r_m = 6.371e6;
+        let raster_step_m = elev.texel_arc_m(r_m);
+        let d = 360.0 / elev.w as f64;
+        let tier_slope = |lat: f64, lon: f64| {
+            let e = |la: f64, lo: f64| elev.elevation_m_at(la, lo, range[0], range[1]);
+            let run = (2.0 * raster_step_m).max(1.0);
+            let dn = (e(lat + d, lon) - e(lat - d, lon)) / run;
+            let de = (e(lat, lon + d) - e(lat, lon - d)) / run;
+            (dn * dn + de * de).sqrt()
+        };
+        // Everest: the steepest place there is, and the raster reads it as almost flat.
+        let everest = tier_slope(27.99, 86.93);
+        assert!(
+            everest < 0.05,
+            "even Everest reads as a gentle regional tilt, got {everest}"
+        );
+        // The distribution over land. `elevation > 1 m` stands in for land here (the raster carries
+        // bathymetry, so ocean is strongly negative).
+        let mut land: Vec<f64> = Vec::new();
+        for i in 0..128 {
+            for j in 0..128 {
+                let lat = -60.0 + 120.0 * i as f64 / 127.0;
+                let lon = -180.0 + 360.0 * j as f64 / 127.0;
+                if elev.elevation_m_at(lat, lon, range[0], range[1]) > 1.0 {
+                    land.push(tier_slope(lat, lon));
+                }
+            }
+        }
+        assert!(
+            land.len() > 2_000,
+            "enough land samples to be a distribution"
+        );
+        land.sort_by(f64::total_cmp);
+        let pct = |p: f64| land[((land.len() - 1) as f64 * p) as usize];
+        let (median, p90, worst) = (pct(0.5), pct(0.9), land[land.len() - 1]);
+        assert!(
+            median / mu < 0.01,
+            "typical land is scaled to nearly nothing: median slope {median} → fraction {}",
+            median / mu
+        );
+        assert!(
+            worst / mu < 0.20,
+            "nowhere on Earth does a 39 km baseline approach the material limit: worst {worst} → fraction {}",
+            worst / mu
+        );
+        println!(
+            "tier_slope over land: median {median:.5} (fraction {:.5}), p90 {p90:.5}, worst {worst:.5} (fraction {:.5}); Everest {everest:.5}",
+            median / mu,
+            worst / mu
+        );
+
+        // What that costs the picture, at the roughest value the shipped raster actually produces,
+        // against the value the law is written in terms of (1.0).
+        let span = 109.0; // what a 100 m camera has in frame at 60° fov
+        let octaves = (19_550.0f64 / (span / 192.0)).max(1.0).log2().min(16.0);
+        let pp = |sf: f64| {
+            let h: Vec<f64> = (0..400)
+                .map(|i| {
+                    micro_relief_m(
+                        i as f64 * span / 400.0,
+                        0.0,
+                        19_550.0,
+                        octaves,
+                        mu,
+                        h_crit,
+                        sf,
+                    )
+                })
+                .collect();
+            h.iter().cloned().fold(f64::MIN, f64::max) - h.iter().cloned().fold(f64::MAX, f64::min)
+        };
+        // Fed from the MEASUREMENT above, not from constants — so if the shipped raster is ever replaced
+        // with finer data, this test reports the new consequence instead of the old one.
+        let (roughest, median_land) = (pp(worst / mu), pp(median / mu));
+        println!(
+            "relief in a {span:.0} m frame at 100 m altitude: {roughest:.2} m at Earth's roughest, {median_land:.2} m on median land"
+        );
+        assert!(
+            roughest / span < 0.15,
+            "even Earth's roughest 39 km gradient yields a gentle grade in frame, got {}",
+            roughest / span
+        );
+        assert!(
+            median_land / span < 0.005,
+            "typical land yields a billiard table in frame, got {}",
+            median_land / span
+        );
+    }
+
+    /// **What Earth's own roughness actually does with scale — the exponent the generator should have had**
+    /// (docs/46 row 27).
+    ///
+    /// The generator's amplitude ∝ wavelength is Hurst exponent **H = 1**, which is an assumption nobody
+    /// made deliberately — it falls out of the `λ/4` heightfield cap binding at every wavelength. This
+    /// measures the real thing from the raster the scene draws, so the assumption can be replaced by a
+    /// number instead of by another assumption.
+    ///
+    /// **Method: the structure function** (the variogram). For a self-affine surface the RMS height
+    /// difference between two points a distance `r` apart grows as `r^H`, so a log-log fit of RMS Δz
+    /// against `r` has slope `H` directly. Pairs are taken along great circles from golden-angle sample
+    /// points — deterministic, no seed, uniform over the sphere — and **both ends must be land**: the sea
+    /// floor is a different surface with different statistics, and the coastline between them is a
+    /// kilometres-tall step that would dominate anything measured across it.
+    ///
+    /// **What this can and cannot say.** The raster resolves 19.5 km, so the honest fitting range is
+    /// ~39 km (two texels, clear of the bilinear smoothing at one) to a few hundred km — under two
+    /// decades. Extrapolating an exponent measured there down to metre wavelengths is FOUR MORE DECADES,
+    /// and that extrapolation is a declared model, not a measurement (Law V). What it does establish is
+    /// the thing the current law gets wrong: real topography is not H = 1, so a generator built on `λ/4`
+    /// is not merely uncalibrated, it has the wrong SHAPE, and no multiplier fixes a wrong exponent.
+    #[test]
+    fn earths_topography_is_self_affine_and_its_exponent_is_not_one() {
+        let (elev, range) = crate::terra::raster::shipped::earth_elevation();
+        let mask = crate::terra::raster::shipped::earth_landmask();
+        let r_m = 6.371e6;
+        let texel = elev.texel_arc_m(r_m);
+
+        // A great-circle step of `dist_m` on bearing `az` from (lat, lon), in degrees.
+        let offset = |lat: f64, lon: f64, az: f64, dist_m: f64| -> (f64, f64) {
+            let d = dist_m / r_m;
+            let (la, lo) = (lat.to_radians(), lon.to_radians());
+            let lat2 = (la.sin() * d.cos() + la.cos() * d.sin() * az.cos()).asin();
+            let lon2 = lo + (az.sin() * d.sin() * la.cos()).atan2(d.cos() - la.sin() * lat2.sin());
+            (lat2.to_degrees(), lon2.to_degrees())
+        };
+
+        // Golden-angle points: uniform over the sphere, deterministic, identical every run.
+        const N: usize = 20_000;
+        let golden = std::f64::consts::PI * (3.0 - 5f64.sqrt());
+        let lags: Vec<f64> = (0..6).map(|k| texel * (1u32 << k) as f64).collect();
+        let mut sum = vec![0.0f64; lags.len()];
+        let mut cnt = vec![0usize; lags.len()];
+        let mut land_points = 0usize;
+        for i in 0..N {
+            let z = 1.0 - 2.0 * (i as f64 + 0.5) / N as f64;
+            let lat = z.asin().to_degrees();
+            let lon = ((i as f64 * golden) % std::f64::consts::TAU).to_degrees() - 180.0;
+            if !mask.land_at(lat, lon) {
+                continue;
+            }
+            land_points += 1;
+            let e0 = elev.elevation_m_at(lat, lon, range[0], range[1]);
+            for (li, &lag) in lags.iter().enumerate() {
+                for a in 0..8 {
+                    let az = a as f64 * std::f64::consts::TAU / 8.0;
+                    let (lat2, lon2) = offset(lat, lon, az, lag);
+                    if !mask.land_at(lat2, lon2) {
+                        continue;
+                    }
+                    let d = elev.elevation_m_at(lat2, lon2, range[0], range[1]) - e0;
+                    sum[li] += d * d;
+                    cnt[li] += 1;
+                }
+            }
+        }
+        assert!(land_points > 3_000, "enough land to be a measurement");
+
+        let rms: Vec<f64> = (0..lags.len())
+            .map(|i| (sum[i] / cnt[i].max(1) as f64).sqrt())
+            .collect();
+        for i in 0..lags.len() {
+            println!(
+                "  lag {:8.1} km   RMS dz {:8.1} m   ({} pairs)",
+                lags[i] / 1000.0,
+                rms[i],
+                cnt[i]
+            );
+        }
+        // Least-squares slope of log(RMS) against log(lag), skipping the shortest lag: at one texel the
+        // bilinear interpolation is smoothing the very quantity being measured.
+        let fit = |from: usize| {
+            let xs: Vec<f64> = lags[from..].iter().map(|l| l.ln()).collect();
+            let ys: Vec<f64> = rms[from..].iter().map(|v| v.ln()).collect();
+            let n = xs.len() as f64;
+            let (mx, my) = (xs.iter().sum::<f64>() / n, ys.iter().sum::<f64>() / n);
+            let num: f64 = xs.iter().zip(&ys).map(|(x, y)| (x - mx) * (y - my)).sum();
+            let den: f64 = xs.iter().map(|x| (x - mx) * (x - mx)).sum();
+            num / den
+        };
+        let h = fit(1);
+        println!(
+            "  Hurst exponent H = {h:.3} over {:.0}-{:.0} km ({} land points)",
+            lags[1] / 1000.0,
+            lags[lags.len() - 1] / 1000.0,
+            land_points
+        );
+        println!(
+            "  anchor: RMS dz at one raster texel ({:.1} km) = {:.1} m",
+            texel / 1000.0,
+            rms[0]
+        );
+        // The finding: Earth's land is self-affine with an exponent well under 1. The generator's implied
+        // H = 1 is not a calibration error, it is the wrong shape — at 10 m wavelength, `λ^1` is smaller
+        // than `λ^H` by (19_550/10)^(1-H), which is a factor of tens.
+        assert!(
+            (0.2..0.95).contains(&h),
+            "H should land in the self-affine range reported for topography, got {h}"
+        );
+        assert!(
+            h < 0.9,
+            "the measurement must actually refute the generator's implied H = 1, got {h}"
+        );
+        let understatement = (19_550.0f64 / 10.0).powf(1.0 - h);
+        println!(
+            "  at 10 m wavelength, H=1 understates the measured exponent by {understatement:.0}x"
+        );
+        assert!(
+            understatement > 5.0,
+            "and the gap must matter at metre scale"
+        );
+    }
+
     fn ctrl() -> ResolutionController {
         ResolutionController::default() // 1 mrad angular resolution, 1 mm floor
     }

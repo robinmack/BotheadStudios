@@ -88,6 +88,18 @@ is being refactored toward is [`docs/33-architecture-realignment.md`](docs/33-ar
   engine itself"*. Both remaining scenes are `#[wasm_bindgen]` structs INSIDE the engine crate with their
   own pipelines and render loops, so adding or removing one means editing the engine — deleting terrain
   cost 1,516 lines of `lib.rs` plus a public-API change. Do not add a third scene this way.
+- ★ **ONE SURFACE GEOMETRY (docs/63, 2026-08-02).** Both scenes draw a planet's surface as
+  `terra::segment` — a disc on the sphere whose angular radius is simply what is visible from the eye,
+  centred on what the camera LOOKS at. It replaced the cube-sphere globe AND the tangent ground cap in
+  Terra and in the space band, and deleted everything that mediated between those two meshes: the
+  cross-fade, the depth-fight lift, the "may I skip the globe" test, and the tier ladder. Robin's rule is
+  the reason: *"The Earth should be the Earth, the Moon the Moon, no matter how close or how far the
+  camera pans"* — a camera that picks WHICH Earth you get is Law IV inverted. **Do not add a second
+  surface mesh for a range of distances; change the segment's extent.**
+- ★ **Measured elevation STREAMS (`terra::tiles`).** The shipped raster is 19.5 km/texel, so below ~20 km
+  altitude the frame sits inside one texel. The engine names the tiles it needs and the host fetches them
+  (AWS terrarium PNG, CORS-open); a bounded 3×3 patch follows the camera. Where tiles cover, generated
+  relief keys off the TILE pixel, not the raster.
 - **The key fact:** the physics *laws* are already unified and scale-invariant (`granular::Contact`,
   the SPH kernel, `Furrow` excavation, `plough_loft`, `Body`, `LayeredBody`); the *solvers and containers*
   are FORKED (CPU `Aggregate` f64 vs voxel-`World`/GPU f32; four integrators; Earth-as-rigid-boundary vs

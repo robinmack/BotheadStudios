@@ -778,6 +778,31 @@ pub fn solar_direction_earth_fixed(unix_seconds: f64) -> glam::DVec3 {
     crate::geo::dir_from_lat_lon(declination.to_degrees(), subsolar_longitude.to_degrees())
 }
 
+/// **When is the Sun over this longitude?** — the instant nearest `near_unix_s` at which the subsolar
+/// point sits at `target_lon_deg`.
+///
+/// It exists so that "put the daylight here" is answered by the SAME solar law that draws the terminator
+/// (Law II). The alternative is what a test harness reaches for on its own — subsolar longitude ≈ 180° −
+/// 15°·UTC_hours — which ignores the equation of time and Earth's elliptical orbit and is wrong by up to
+/// ~4° of longitude, i.e. a quarter of an hour of daylight, in exactly the situation where someone is
+/// trying to decide whether a dark frame is night or a bug.
+///
+/// Newton on the subsolar longitude, whose derivative is Earth's own rotation to a part in 400 (the Sun's
+/// own motion along the ecliptic is ~1°/day against 360°/day of spin), so it converges in two steps.
+pub fn epoch_for_sub_solar_lon(target_lon_deg: f64, near_unix_s: f64) -> f64 {
+    let lon_at = |t: f64| crate::geo::lat_lon_from_dir(solar_direction_earth_fixed(t)).1;
+    let mut t = near_unix_s;
+    for _ in 0..4 {
+        // Shortest way round: the subsolar point marches WEST, so a positive error means waiting.
+        let err = (target_lon_deg - lon_at(t) + 180.0).rem_euclid(360.0) - 180.0;
+        if err.abs() < 1e-9 {
+            break;
+        }
+        t -= err / 360.0 * 86_164.09; // one sidereal day per revolution, not one solar day
+    }
+    t
+}
+
 /// Wall-clock seconds since the Unix epoch, on either target.
 pub fn unix_now_seconds() -> f64 {
     #[cfg(target_arch = "wasm32")]
@@ -840,6 +865,35 @@ mod solar_position_tests {
             (moved - 90.0).abs() < 2.0,
             "6 h ⇒ ~90° west, got {moved:.2}°"
         );
+    }
+
+    /// **Aiming the daylight must use the same law that draws it.** A rig that wants a lit site solves
+    /// for the epoch rather than waiting for the sun, and this is the solver: ask for a subsolar
+    /// longitude, get an instant that really has the Sun there, checked by asking the forward law back.
+    #[test]
+    fn the_epoch_solver_puts_the_sun_where_it_was_asked_to() {
+        use super::epoch_for_sub_solar_lon;
+        let near = 1_754_067_600.0; // 2025-08-01 17:00 UTC
+        let lon_at = |t: f64| crate::geo::lat_lon_from_dir(solar_direction_earth_fixed(t)).1;
+        for want in [-180.0, -106.0, -75.0, 0.0, 45.0, 86.0, 179.0] {
+            let t = epoch_for_sub_solar_lon(want, near);
+            let got = lon_at(t);
+            let err = (want - got + 180.0).rem_euclid(360.0) - 180.0;
+            assert!(err.abs() < 1e-6, "asked for {want}°, sun is at {got}°");
+            // And it lands NEAR the reference instant — within half a day, not some arbitrary rotation.
+            assert!(
+                (t - near).abs() <= 0.5 * 86_400.0 + 1.0,
+                "solved epoch is {:.0} s from the reference",
+                t - near
+            );
+        }
+        // ★ The naive form a harness would otherwise write — 180° − 15°·UTC_hours — is NOT good enough,
+        // and this is by how much. It ignores the equation of time and the difference between a solar and
+        // a sidereal day, which is exactly the error that makes someone mistake dusk for a render bug.
+        let naive_lon = 180.0 - 15.0 * ((near / 3600.0) % 24.0);
+        let real_lon = lon_at(near);
+        let gap = ((naive_lon - real_lon + 180.0).rem_euclid(360.0) - 180.0).abs();
+        assert!(gap > 0.5, "the naive rule really does differ, by {gap:.2}°");
     }
 }
 

@@ -212,6 +212,217 @@ granularity. The altitude descends continuously and the globe→cap crossover ha
 because Terra has no finer LOD tier to fade into. That is the next piece of work, and it is a prerequisite
 for Stage C's JIT crater — a crater that sharpens as you approach needs a surface that can sharpen at all.
 
+#### 2026-07-31: the cost blocker is GONE and the detail blocker survived it
+
+The tier ladder was unaffordable — 45.2 ms/frame at one tier, 642.5 ms at four — because every vertex baked
+`surface - eye`, so any camera motion invalidated the whole 192² mesh, every frame, per tier. That is fixed:
+a tier is now anchored to a fixed world point with `anchor - eye` carried in the model matrix, and
+`ground_cap::tier_is_current` rebuilds it only when a rebuild would change something (coverage within the
+`CAP_MARGIN` it was over-built by; resolution and lift within an octave). **Measured: p50 0.4 ms at FOUR
+tiers**, against 700–772 ms for the same rig on `main`. Four tiers now cost what zero used to.
+
+**And the detail did not follow, which retires a hypothesis this doc was leaning on.** With tiers cheap,
+1-vs-4 was A/B'd at a fixed camera at the full 16-octave budget: max pixel difference **6 at 500 m, 4 at
+100 m**, ground luminance structure unchanged. The nested ladder is not what stands between the camera and
+detailed ground — so "wire the finer tier" is no longer the description of the remaining work, and
+`TERRA_DEFAULT_TIERS` stays 1 for a measured reason instead of a budgetary one.
+
+#### Why the ground flattens on descent — answered, 2026-07-31 (docs/46 row 27)
+
+Two causes, measured, and the dominant one is not where I first looked. **It is not the amplitude law:** run
+the same generator at `slope_fraction = 1.0` and it produces RMS slope ~1.0 and 106 m of relief inside a
+109 m frame — violently rough. The generator is fine. What is wrong is what multiplies it.
+
+1. **`slope_fraction` compares two quantities measured four orders of magnitude apart.** Terra builds it as
+   `tier_slope / mu`, where `tier_slope` is the elevation gradient over a baseline of two raster texels —
+   **39 km** on the shipped 2048×1024 Earth — and `mu` is a grain-scale friction coefficient. A 39 km
+   baseline is a regional TILT and cannot be steep. Measured on the shipped raster at 4,096 land points:
+   median **0.00202**, p90 0.01149, largest anywhere **0.0667**. **Everest itself reads 0.0328**, because
+   averaging over 39 km flattens it. So the relief is multiplied by ~0.003 on typical land and ~0.11 at its
+   most extreme — never the 1.0 the law is written in terms of. In frame at 100 m altitude that is 11.8 m
+   of relief at the roughest place on Earth and **0.36 m on median land**. Those figures are now measured
+   IN-SUITE through the engine's own sampler
+   (`surface_detail::a_regional_gradient_cannot_reach_a_material_scale_slope`), which corrected them: the
+   first pass used a separate script that reimplemented `Raster::coords` with a half-texel offset the
+   engine does not have, and it reported Everest as 0.008.
+2. **The amplitude law is scale-invariant, so approaching cannot reveal roughness even in principle.**
+   `relief_amplitude_m` is `min(drop/2, λ/4)`, and for cohesive rock the cohesion term wins the OR
+   everywhere a camera cares about (granite's `h_crit` is 453 m), so the binding term is the `λ/4`
+   no-overhang cap — a property of a HEIGHTFIELD, not of the rock. Amplitude ∝ wavelength is Hurst exponent
+   **H = 1**: the smoothest self-affine surface there is, and the one whose slope is identical at every
+   scale. Real topography has H ≈ 0.5–0.7 and gets relatively rougher as you close in.
+
+Together they explain the symptom exactly. Above ~20 km altitude the frame spans more than one raster texel
+and you see real, measured mountains. Below it the frame fits INSIDE one texel, measured elevation
+contributes only a smooth bilinear ramp, and every visible bump must come from a generator that is both
+scaled to ~0.003 and structurally incapable of roughening as you approach.
+
+**No fix attempted, deliberately.** The fix is not a multiplier — that is a dial (Law V), and a wrong
+exponent cannot be corrected by a coefficient anyway. Pinned meanwhile by
+`surface_detail::generated_relief_has_the_same_slope_at_every_scale_below_two_km` and
+`surface_detail::a_regional_gradient_cannot_reach_a_material_scale_slope`.
+
+#### The exponent, measured (2026-08-01)
+
+`earths_topography_is_self_affine_and_its_exponent_is_not_one` measures the structure function of the
+shipped raster over land — golden-angle sample points, great-circle pairs, **both ends land** (the sea floor
+is a different surface and the coastline between them is a kilometres-tall step):
+
+| lag | 19.5 km | 39.1 km | 78.2 km | 156 km | 313 km | 625 km |
+|---|---|---|---|---|---|---|
+| RMS Δz | 137.9 m | 235.2 m | 355.4 m | 509.1 m | 682.4 m | 905.2 m |
+
+Log-log slope over 39–625 km: **H = 0.483** (5,846 land points, ~40k pairs per lag). That is the accepted
+value — Turcotte's spherical-harmonic spectrum gives S(k) ∝ k⁻² below 10,000 km with β = 2H+1, so β ≈ 2
+implies H ≈ 0.5, and a recent Earth/Venus roughness study reports H ≈ 0.55 at β = −2.1. So the generator's
+implied **H = 1 is 50× too smooth at 10 m wavelength**, and the measurement also supplies the ANCHOR a fix
+needs: RMS Δz at one texel = 137.9 m, a real roughness rather than a regional tilt.
+
+**Honest caveat.** The local slope drifts from ~0.77 at the shortest pair to ~0.41 at the longest, so a
+single H over 39–625 km is a fit, not a constant — and extrapolating it four more decades to metre scale is
+a DECLARED model (Law V) whose named resolved counterpart is finer data.
+
+#### The north-star ladder, walked (2026-08-01)
+
+Robin: *"from mars-earth distance to 10 cm above the surface … so we can prove our frame of
+reference/increased detail system works, with visual details resolving automatically so they look
+reasonably accurate all along the path without noticeable frame-rate impact."*
+
+`web/rig/terra_scale_ladder.mjs` walks it — 25 rungs, **11.9 decades**, 78 Gm (Mars at opposition) down to
+0.10 m, paced to ~60 fps, a screenshot and a frame time at every rung. It asserts nothing; it reports.
+
+**Frame rate: it holds.** p50 render is **0.4 ms at every single rung**, top to bottom. There is no cliff
+anywhere in twelve decades. The only blemish is the known 38–70 ms ground-tier rebuild hitch.
+
+**The picture: continuous for nine decades, then frozen for three.**
+
+| rungs | altitude | what the frame does |
+|---|---|---|
+| 0–4 | 78 Gm → 810 Mm | ink 0.7%, detail 4.6, unchanging — the STARFIELD. Earth subtends 1.6×10⁻⁴ rad, ~0.1 px. Correct: Earth from Mars is a point of light. |
+| 5–8 | 260 Mm → 8.5 Mm | ink 1.0 → 3.3 → 20.9 → **74.7%**, detail 10 → 27 → 68 → 76. The planet grows in smoothly and monotonically. |
+| 9–14 | 2.7 Mm → 9 km | ink 100%, detail 14–28 as terrain crosses the frame. |
+| 15–18 | 2.9 km → 94 m | detail decays 13.97 → 11.06 → 6.32 → **4.12**. |
+| 19–24 | 30 m → **0.10 m** | detail **4.12, 4.12, 4.13, 4.13, 4.13, 4.13** — frozen to two decimals across three decades. |
+
+At 8,474 km the frame is a recognisable Earth: continents, biome colours, atmospheric limb, stars. At 94 m
+it is a **flat green fill** — the HUD says *standing on grass* — and it does not change again all the way to
+10 cm. **The last three decades of the zoom deliver no information at all.**
+
+That is row 27 rendered rather than argued: the generated relief is anchored to a regional tilt (~0.003)
+and extrapolated with the wrong exponent (H = 1 against a measured 0.483), so below ~100 m there is nothing
+left to resolve. The scale machinery — frame of reference, LOD, cost — is sound across the whole ladder;
+what runs out is the SURFACE DATA MODEL, and the ladder now measures exactly where.
+
+Two traps the ladder walked into first, both already written down in this repo and both worth re-reading
+before running it again:
+
+- **The night side.** The first run was black below 4,300 km and looked like a renderer collapse. It was
+  lon 86 at 17:00 UTC — the dead of night (measured: 0.3% lit at lon 90, 78% at lon −90, and the sub-solar
+  longitude at that moment is −75°). `web/rig/terra_lit_probe.mjs` now sweeps longitude and reports the lit
+  fraction, so the question is answered before it is confused for a bug.
+- **In-page pixel readback of a WebGPU canvas is blank.** The rig's first version measured `ink` by
+  `drawImage`-ing the canvas on a later tick; a WebGPU drawing buffer is only readable while current
+  (hard rule 0), so it reported 0% for frames that plainly contained a planet. Deleted — the PNGs are the
+  measurement.
+
+#### 2026-08-02: the tier ladder is gone, and so is the second mesh
+
+Everything in the two sections above that reasons about a CAP, a tier ladder or a globe to fade against is
+now historical. `terra::segment` draws one surface at whatever extent is visible (docs/63), so `build_cap`,
+`cap_fade`, the depth-fight lift, `cap_covers_view` and the ladder itself were deleted in both scenes. The
+measurements stand — they are why the ladder was retired — but the mechanism they measured no longer
+exists. `slope_fraction` and the generated relief moved to `build_segment` unchanged, so row 27's diagnosis
+is unaffected.
+
+#### Streaming it — built 2026-08-01 (`terra::tiles`)
+
+`Terra::tiles_wanted()` → a host fetches → `Terra::add_tile()`. The **engine** chooses which tiles (a
+resolution decision, so it belongs to the universe — the zoom is `tiles::zoom_for_ground_size` asked with
+the observer's own resolvable size, the same angular budget that sizes particle granularity); the **host**
+performs the I/O, which is the split `load_world` already uses. Source is AWS Terrain Tiles (`terrarium`
+PNG, unauthenticated, `Access-Control-Allow-Origin: *`), whose RGB elevation packing is the same trick the
+shipped raster uses. Verified against ground truth before anything was built on it: Whitney 4,417 m
+(surveyed 4,421), Dead Sea −412 (−430), Everest 8,732 (8,849 — a ~30 m pixel averages the summit down).
+Against the shipped raster's **5,504 m** for Everest.
+
+Bounded by construction: a **3×3 patch** that follows the camera, so this can never ask for the planet, and
+the camera moving IS the eviction policy. The patch's weight smoothsteps to zero across its outer tile and
+a caller blends `raster + w·(tile − raster)`, so at the rim the surface is *exactly* the raster it always
+was — the same "detail fades in, never pops" rule the octave count and the cap cross-fade already use.
+Where tiles cover, the generated relief also keys off the TILE pixel instead of the 19.5 km raster, and
+`slope_fraction`'s gradient baseline becomes two tile pixels (~7 m) instead of 39 km — which is the
+category error repaired by construction, exactly as predicted.
+
+**Measured on the ladder** (Colorado Rockies, sky pinned, tiles streaming, p50 render still **0.4 ms** at
+every rung):
+
+| altitude | no tiles | tiles, 1 tier | tiles, 4 tiers |
+|---|---|---|---|
+| 2.9 km | 13.97 | 13.87 | 14.08 |
+| 920 m | 11.06 | 11.59 | 12.70 |
+| 290 m | 6.32 | 8.42 | 9.55 |
+| 94 m | 4.12 | 7.81 | **9.66** |
+| 30 m → 0.10 m | 4.12 (frozen) | ~7.9 | ~8.0 |
+
+Ground-level detail roughly **doubled**, and the 2.9 km frame now shows a ridge line and valley structure
+where it was a flat wash. **Four tiers now earn their keep** (7.81 → 9.66 at 94 m) where the same A/B
+showed nothing before — because previously there was no data for the finer tiers to express.
+
+**What still plateaus, and why it is no longer a data problem.** Below ~30 m the detail is flat at ~8. The
+cause is now representational and measurable: the cap's cell is **15 m at 0.1 m altitude and 469 m at 94 m**,
+while the tile pixel is 3.71 m and the eye resolves 0.0001–0.09 m. The mesh is coarser than the data it now
+holds, so `octaves` clamps to zero and neither measured nor generated detail can reach the frame. A
+192-cell heightfield cap spanning a horizon cannot carry sub-metre relief at any tier count — and below
+about a metre the engine's own doctrine says the ground should stop being a HEIGHT and become MATTER
+(docs/39 particalize-on-demand, docs/44). That is the next rung, and it is a different mechanism, not more
+of this one.
+
+#### Finer elevation data — the PRIMARY fix, and I first wrote the opposite
+
+- **Copernicus DEM GLO-30** — 30 m global, TanDEM-X 2011–2015, Cloud-Optimized GeoTIFF, free on AWS Open
+  Data / OpenTopography.
+- **ETOPO 2022** — 15 arc-second (~450 m) global **topo+bathy**, NOAA, public domain. The natural drop-in
+  upgrade for this raster, because it is the same *kind* of product: one seamless land+sea surface.
+- **AWS Terrain Tiles** — global `z/x/y` **terrarium PNG** tiles, no authentication, elevation RGB-packed to
+  3 mm precision. Notable because that is the encoding this engine's raster already uses, and because tiles
+  are how a body streams detail rather than shipping it.
+
+**★ This section first said finer data was "not an alternative" to the exponent. That was wrong, and Robin
+caught it.** The generator has to cover from the data's resolution down to 0.1 m, and that span is what
+decides how much the exponent matters:
+
+| source | m/texel | samples | raw | generator span | H=1 error at 0.1 m |
+|---|---|---|---|---|---|
+| shipped raster | 19,568 | 2.1×10⁶ | 4 MB | **5.29 decades** | **544×** |
+| ETOPO 2022 | 464 | 3.7×10⁹ | 7.5 GB | 3.67 decades | 79× |
+| Copernicus GLO-30 | 30 | 8.9×10¹¹ | 1.8 TB | 2.48 decades | 19× |
+| AWS tiles z=15 | 4.8 | 3.5×10¹³ | 70 TB | **1.68 decades** | **7.4×** |
+
+Finer data attacks this at both ends at once, and the second way is the one I missed:
+
+1. It shortens what the generator must invent — 5.29 decades today, 1.68 with streamed tiles.
+2. **It repairs the `slope_fraction` category error BY CONSTRUCTION.** That bug is not really about
+   friction coefficients; it is that the gradient is sampled over two texels, and two texels is 39 km. At
+   30 m texels the baseline is 60 m, where real ground genuinely approaches what the material can hold — so
+   the ratio finally measures what its name claims. The category error is a symptom of the resolution.
+
+So finer data is the primary fix, and it is largely an alternative for the symptom that prompted all this:
+with 30 m data there is real measured relief in frame at 94 m altitude, and the flat green fill is gone. The
+exponent governs only the residual, and it matters *more* the less data you have.
+
+What data still cannot do: **reach 10 cm.** GLO-30 leaves 2.5 decades below it and z=15 tiles leave 1.7, so
+a generator is needed either way — just a far less load-bearing one. And **none of these ship as a file**:
+even ETOPO 2022 is 7.5 GB raw. A single-file upgrade within a web budget buys ~5–10 km per texel
+(4096×2048 ≈ 13 MB), which is three decades short of the problem. Metres require **tiled, fetched-by-
+necessity** data — docs/44's ladder applied to data rather than to matter, and AWS's terrarium tiles are
+already the encoding this engine reads.
+
+The hitch anchoring exposed is also fixed: a 4-tier rebuild was **224–310 ms**, because the staleness tests
+are relative and every rung of the ladder therefore trips at the same altitude on a descent.
+`ground_cap::tier_owed_a_rebuild` now serves at most one tier per frame, outermost first — **61–79 ms worst
+frame**, one tier's rebuild, p50 still 0.4 ms. Going below that means splitting a single tier's rebuild
+across frames rather than scheduling whole tiers, and is not done.
+
 Also found and fixed on the way: `launch_swarm` hand-rolled its own lat/lon→direction with the OPPOSITE
 sign on z from `crate::geo::dir_from_lat_lon`, so the swarm aimed at a mirrored longitude and arrived
 nowhere near where the camera pointed. CLAUDE.md warns about this exact thing — the tangent frame was once

@@ -1412,8 +1412,10 @@ mod app {
             let cap_gpu = make_dynamic_mesh(
                 &device,
                 "corridor-cap",
-                CAP_RES * CAP_RES,
-                &crate::terra::ground_cap::cap_indices(CAP_RES),
+                crate::terra::segment::SegmentRes::new(SEG_RINGS, SEG_SPOKES).vertex_count(),
+                &crate::terra::segment::segment_indices(crate::terra::segment::SegmentRes::new(
+                    SEG_RINGS, SEG_SPOKES,
+                )),
             );
             let cap_uni =
                 make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
@@ -4576,7 +4578,7 @@ mod app {
             // the particle field is the matter, so no cap.
             let mut corridor_cap = false;
             let mut corridor_skip_globe = false;
-            if let (Some((eye_w, _, _, d_m)), Some(surf), false) =
+            if let (Some((eye_w, aim_w, _, d_m)), Some(surf), false) =
                 (arc_pose, self.earth_surface.as_ref(), self.sph_active)
             {
                 let theta = crate::resolution::ResolutionController::default().angular_resolution;
@@ -4592,22 +4594,37 @@ mod app {
                     .unwrap_or(0.0),
                     theta,
                 );
-                let fade = crate::terra::ground_cap::cap_fade(d_m, cap_start_alt);
-                if fade > 0.0 && self.globe_mesh.is_some() {
+                // Below the derived hand-off, the corridor's own surface takes over. This was
+                // `cap_fade(d_m, ..) > 0.0`, which meant exactly this and then spent the fade blending
+                // two meshes; with one mesh there is nothing to blend, only a threshold to cross.
+                if d_m < cap_start_alt && self.globe_mesh.is_some() {
                     let centre = target.map_or(earth_center, |(c, _, _)| c);
                     let ds = pretty_scale;
                     let r_draw = pretty_r_surf * ds;
                     let q_inv = spin_rot.conjugate();
                     let eye_body = (q_inv * (eye_w - centre)) * ds; // body frame, display units
-                    let dir_body = eye_body.normalize_or(glam::DVec3::Y);
+                                                                    // Centred on what the camera LOOKS at (`segment::look_centre`), not its own nadir:
+                                                                    // the descent looks AHEAD along its path, so centring under the eye would spend the
+                                                                    // fine rings on ground behind it. Measured as jagged biome edges at the corridor's
+                                                                    // mid-stations before this.
+                    let fwd_body = (q_inv * ((aim_w - eye_w) * ds))
+                        .normalize_or(-eye_body.normalize_or(glam::DVec3::Y));
+                    let dir_body = crate::terra::segment::look_centre(eye_body, fwd_body, r_draw);
                     let (lat, lon) = crate::geo::lat_lon_from_dir(dir_body);
                     let (up_b, north_b, east_b) = crate::geo::tangent_frame(lat, lon);
                     let h = (eye_body.length() - r_draw).max(1.0e-9);
                     let horizon = (h * (h + 2.0 * r_draw)).sqrt();
-                    let angle = crate::terra::ground_cap::cap_angle(horizon, r_draw);
-                    corridor_skip_globe =
-                        fade >= 1.0 && crate::terra::ground_cap::cap_covers_view(horizon, r_draw);
-                    let lift = crate::terra::ground_cap::cap_lift_disp(d_m, ds);
+                    // **ONE surface** (docs/63): the extent is what is VISIBLE from here, and the globe
+                    // is always skipped because there is no second mesh to blend with. No fade, and no
+                    // depth-fight lift — both existed only to hold two copies of one surface apart.
+                    let _ = horizon;
+                    let angle = crate::terra::segment::visible_angle(
+                        h / ds,
+                        r_draw / ds,
+                        crate::terra::ground_cap::CAP_MARGIN,
+                    );
+                    corridor_skip_globe = true;
+                    let lift = 0.0;
                     let mut verts = std::mem::take(&mut self.cap_verts);
                     {
                         let sampler = crate::terra::globe_mesh::SurfaceSampler::new(
@@ -4631,8 +4648,15 @@ mod app {
                                 mat,
                             )
                         };
-                        crate::terra::ground_cap::fill_ground_cap(
-                            &mut verts, up_b, east_b, north_b, eye_body, r_draw, angle, CAP_RES,
+                        crate::terra::segment::fill_segment(
+                            &mut verts,
+                            up_b,
+                            east_b,
+                            north_b,
+                            eye_body,
+                            r_draw,
+                            angle,
+                            crate::terra::segment::SegmentRes::new(SEG_RINGS, SEG_SPOKES),
                             sample,
                         );
                     }
@@ -4663,7 +4687,10 @@ mod app {
                         view_proj,
                         Mat4::from_translation(eye_spos) * spin_m,
                         earth_light,
-                        [1.0, 1.0, 1.0, fade as f32 * pretty_fade],
+                        // Opaque: the cross-fade alpha went with the mesh it was fading against.
+                        // `pretty_fade` stays — that is the docs/42 pretty-render blend, a different
+                        // thing entirely from the globe/cap hand-off.
+                        [1.0, 1.0, 1.0, pretty_fade],
                         [eye_disp.x as f32, eye_disp.y as f32, eye_disp.z as f32, 0.0],
                         self.air(),
                         glow_of(&crate::planet::body("earth")),
@@ -5633,21 +5660,13 @@ mod app {
     /// see `merge-reports/2026-07-25-sean-reid.md`.)
     const SPACE_FOV_Y: f32 = 0.9;
 
-    const TERRA_CAP_RES: usize = 192;
-    /// **How many nested ground tiers** (docs/08's ladder; docs/46 row on `surface_detail`). ONE tier could
-    /// never work: a 192² grid over a horizon-sized cap is ~34 m per cell at 2 m altitude while the eye
-    /// resolves ~2 mm, and the documented attempt to fix that by SHRINKING the single cap left nothing drawn
-    /// below orbital altitude. So tiers are nested instead — each covers a quarter of the angular span of
-    /// the one outside it, so its cells are 4× finer, and the innermost is what you are standing on.
-    ///
-    /// Robin's rule is what makes this affordable: *"we don't have to make things renderable at planetary
-    /// scale while viewing subset of surface; we have the math — we can rebuild it if the camera moves
-    /// again."* Every tier is camera-relative and rebuilt each frame, so none of them is a cache of the
-    /// planet — they are a cache of the VIEW, and the generator is the source of truth.
-    const TERRA_CAP_TIERS: usize = 4;
-    /// Angular shrink per tier. 4 gives 4× finer cells per step, so four tiers span 64× — enough to take
-    /// 34 m cells down to ~0.5 m at standing height.
-    const TERRA_TIER_RATIO: f64 = 4.0;
+    /// Terra's segment resolution is the SHARED one (`SEG_RINGS`/`SEG_SPOKES`) — two scenes drawing the
+    /// same planet at two densities would be two Earths again, in the one place that is easiest to miss.
+    const TERRA_SEG_RINGS: usize = SEG_RINGS;
+    const TERRA_SEG_SPOKES: usize = SEG_SPOKES;
+    /// How far past the horizon the segment reaches, so its rim is never a visible edge. Same job, and
+    /// same value, as the cap's own margin — the geometry changed, the reason did not.
+    const TERRA_SEG_MARGIN: f64 = 1.3;
     /// **How many octaves of generated relief a vertex may sum.** Set generously, because MEASUREMENT says
     /// it is nearly free — the octaves were not the cost, and assuming they were is the mistake this number
     /// records. Priced at 2 km over the Himalaya, paced to ~60 fps (`web/rig/terra_lod_cost.mjs`):
@@ -5668,18 +5687,11 @@ mod app {
     /// **45 ms** before this work — a pre-existing cost nobody had measured. The mesh, not the maths, is the
     /// budget.
     const TERRA_OCTAVE_BUDGET: f64 = 16.0;
-    /// **Tiers built by default: ONE**, until the ladder is amortised.
-    ///
-    /// The capacity above exists and the knob (`set_cap_ladder`) drives it, because the nesting is right and
-    /// measured — but at 126 ms for two tiers and 642 ms for four, more than one is not affordable while
-    /// every tier is rebuilt every frame. Robin named the fix: a tier is a cache of the VIEW, not of the
-    /// planet, so *"we can rebuild it if the camera moves again"* — anchor each tier's mesh to a fixed point
-    /// and carry the eye offset in the model matrix, and a tier then only needs rebuilding when the camera
-    /// leaves it. That is what unlocks the rest of the ladder, and it is the next piece of work.
-    const TERRA_DEFAULT_TIERS: usize = 1;
-    /// (fixed topology) is built once. One resolution for every scene's cap — Terra's descent and the
-    /// space band's corridor build the same patch.
-    const CAP_RES: usize = 192;
+    /// (fixed topology) is built once. **One resolution for every scene's SEGMENT** — Terra's descent and
+    /// the space band's corridor build the same surface, by the same builder, at the same density
+    /// (docs/63). Rings out from under the eye, spokes around it.
+    const SEG_RINGS: usize = 96;
+    const SEG_SPOKES: usize = 192;
     /// The finest REAL feature the elevation raster carries (m). Detail below this is not in the data,
     /// so it must come from the material — see the micro-relief in the cap sample.
     const RASTER_FEATURE_M: f64 = 20_000.0;
@@ -5703,7 +5715,6 @@ mod app {
         // smooth mesh (land lifted by real elevation + biome-coloured, ocean cells at sea level with the water
         // material) replaces the grain shell for the scene. `None` until then (falls back to the grain shell).
         globe_pipeline: wgpu::RenderPipeline,
-        globe_mesh: Option<GpuMesh>,
         /// WHICH defined body this scene placed. A scene positions a body and never defines one, but it
         /// does have to remember which one it put there — the render asks the definition for the body's
         /// own heat, and a magma-ocean world must not borrow modern Earth's daylit look.
@@ -5711,16 +5722,35 @@ mod app {
         /// The real sky. Terra's world frame is Earth-FIXED, so the catalogue is rotated by Greenwich
         /// sidereal time each frame — which is what makes the stars wheel overhead, once per sidereal day.
         stars: Option<StarField>,
-        globe_uni: UniformSlot,
         // docs/43 Phase 5 — the fine, camera-relative ground cap (rebuilt each frame under the camera) + its
         // alpha-blend pipeline, and a reused CPU vertex scratch buffer. Cross-faded with the globe by altitude.
-        cap_pipeline: wgpu::RenderPipeline,
         /// The ground tiers, OUTERMOST first — one mesh and one uniform slot each, all built by the same
         /// `build_cap` from the same `sample`, because a second cap builder would be a second answer to
         /// "what does the ground look like here".
-        cap_gpu: Vec<GpuMesh>,
-        cap_uni: Vec<UniformSlot>,
-        cap_verts: Vec<Vertex>,
+        /// **THE one surface geometry** (docs/63, `terra::segment`): a sphere segment whose angular radius
+        /// follows the camera — a chord underfoot, a hemisphere from orbit. `None` until built. While
+        /// `surface_mode` is 0 this is unused and the scene draws globe + cap exactly as before, so the two
+        /// can be compared on the same frame before either is deleted.
+        segment_gpu: Option<GpuMesh>,
+        segment_uni: Option<UniformSlot>,
+        segment_verts: Vec<Vertex>,
+        /// What the segment's mesh currently HOLDS — the same cache-of-the-view rule the ground tiers use
+        /// (`ground_cap::tier_is_current`), on the one mesh instead of a ladder of them. The LIFT term is
+        /// 0 here and always will be: a depth-fight allowance exists only to separate two meshes drawn
+        /// over each other, and there is one.
+        segment_built: Option<crate::terra::ground_cap::CapTierBuild>,
+        /// Whether a world with real surface rasters has loaded — the signal that used to be carried by
+        /// `globe_mesh.is_some()`, back when a globe mesh existed to ask about. Below it, the Phase-2
+        /// grain shell stands in for a body with no surface data.
+        surface_loaded: bool,
+        /// **Measured elevation streamed by necessity** (`terra::tiles`, docs/46 row 27). The shipped
+        /// global raster is 19.5 km per texel, which is why the ground goes flat below ~20 km altitude;
+        /// this holds the metres-per-pixel tiles for the patch the camera is actually over. Empty until a
+        /// host feeds it, and the scene renders exactly as before when it is empty.
+        tiles: crate::terra::tiles::TileStore,
+        /// The instant the SKY is drawn for, when something has pinned it — see `celestial_epoch_s`.
+        /// `None` means the wall clock, which is the shipping behaviour.
+        epoch_s: Option<f64>,
         relief_exag: f64,
         mats: Vec<materials::Material>,
         fly: crate::terra::fly_camera::FlyCamera,
@@ -5751,7 +5781,6 @@ mod app {
         /// Rig knobs for PRICING the ground ladder: how many tiers to build, and how many octaves of
         /// generated relief each vertex may sum. Both cost frame time and both buy detail, and the only way
         /// to know the exchange rate is to move one at a time (gpu-perf §5).
-        cap_tiers: usize,
         cap_octave_budget: f64,
         /// Diagnostic: skip UPLOADING and DRAWING the engine's matter while still simulating it. The
         /// physics and the render path both scale with the same number, so measuring either one alone is
@@ -5965,28 +5994,22 @@ mod app {
             // Same shader as the globe, alpha-blended for the cross-fade. (The merge had this calling
             // build_globe_pipeline with make_dynamic_mesh's arguments — the pipeline takes a bind layout
             // and a blend state; the label/count/indices belong to the mesh built just below.)
-            let cap_pipeline = build_globe_pipeline(
+            // THE one surface (docs/63). Built here rather than lazily because this is where the bind
+            // layout and the material texture views are in scope, which is the same reason the cap's are.
+            let seg_res = crate::terra::segment::SegmentRes::new(TERRA_SEG_RINGS, TERRA_SEG_SPOKES);
+            let segment_gpu = Some(make_dynamic_mesh(
+                &device,
+                "terra-segment",
+                seg_res.vertex_count(),
+                &crate::terra::segment::segment_indices(seg_res),
+            ));
+            let segment_uni = Some(make_space_uniform(
                 &device,
                 &bind_layout,
-                config.format,
-                wgpu::BlendState::ALPHA_BLENDING,
-            );
-            let cap_indices = crate::terra::ground_cap::cap_indices(TERRA_CAP_RES);
-            let cap_gpu: Vec<GpuMesh> = (0..TERRA_CAP_TIERS)
-                .map(|_| {
-                    make_dynamic_mesh(
-                        &device,
-                        "terra-cap",
-                        TERRA_CAP_RES * TERRA_CAP_RES,
-                        &cap_indices,
-                    )
-                })
-                .collect();
-            let cap_uni: Vec<UniformSlot> = (0..TERRA_CAP_TIERS)
-                .map(|_| {
-                    make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler)
-                })
-                .collect();
+                &tex_view,
+                &normal_view,
+                &sampler,
+            ));
             let shell_count = 4096; // ~2.8° grain spacing — resolves continents/biomes (Phase 2, grain shell)
             let shell_unis: Vec<UniformSlot> = (0..shell_count)
                 .map(|_| {
@@ -6019,7 +6042,6 @@ mod app {
                 last_frame_s: 0.0,
                 matter,
                 flight_env,
-                cap_tiers: TERRA_DEFAULT_TIERS,
                 cap_octave_budget: TERRA_OCTAVE_BUDGET,
                 cam_pose: None,
                 draw_matter: 2,
@@ -6035,14 +6057,15 @@ mod app {
                 shell_unis,
                 shell_count,
                 globe_pipeline,
-                globe_mesh: None,
                 body_id: "earth".into(),
                 stars: None,
-                globe_uni,
-                cap_pipeline,
-                cap_gpu,
-                cap_uni,
-                cap_verts: Vec::new(),
+                segment_gpu,
+                segment_uni,
+                segment_built: None,
+                surface_loaded: false,
+                segment_verts: Vec::new(),
+                tiles: Default::default(),
+                epoch_s: None,
                 relief_exag: TERRA_RELIEF_EXAG,
                 mats,
                 fly,
@@ -6171,14 +6194,19 @@ mod app {
                     })
                     .collect();
             }
+            // A new world is a different surface, so the cached segment is about the old one. The cache
+            // is keyed on the CAMERA (`tier_is_current`), which cannot see that the planet underneath it
+            // changed — so anything that moves the surface has to say so here.
+            self.segment_built = None;
             // docs/43 Phase 3 — build the smooth displaced globe from the loaded rasters (retires the grain
             // shell for this scene). Built once here; the fly-camera LOD refinement comes in Phase 5.
-            let mesh = self.build_surface_mesh();
-            let tri = mesh.indices.len() / 3;
-            self.globe_mesh = Some(upload_mesh(&self.device, "terra-globe", &mesh));
+            // docs/63: no globe mesh is built. The segment IS the surface, at whatever extent the camera
+            // asks for, so a second planetary mesh has nothing left to do.
+            self.surface_loaded = true;
+            self.segment_built = None;
 
             let land_frac = self.landmask.as_ref().map(|r| r.land_fraction());
-            log::info!("Terra: globe mesh built — {} triangles", tri);
+            log::info!("Terra: surface loaded — drawn as ONE sphere segment (docs/63)");
             log::info!(
                 "Terra: loaded '{}' — radius {:.0} km, rasters land={} elev={} cover={}, land fraction {:?}",
                 w.name,
@@ -6357,11 +6385,179 @@ mod app {
             }
         }
 
-        /// Rig knobs — see `cap_tiers` / `cap_octave_budget`. Physics is unaffected; only how finely the
-        /// ground is drawn.
-        pub fn set_cap_ladder(&mut self, tiers: usize, octave_budget: f64) {
-            self.cap_tiers = tiers.clamp(1, TERRA_CAP_TIERS);
+        /// **How many octaves of generated relief a surface sample may sum.** A rig knob for pricing
+        /// detail against cost; physics is unaffected. (Was `set_cap_ladder(tiers, octaves)` — the tier
+        /// count went with the tier ladder, docs/63.)
+        pub fn set_octave_budget(&mut self, octave_budget: f64) {
             self.cap_octave_budget = octave_budget.max(0.0);
+            self.segment_built = None;
+        }
+
+        /// **How much of the air column actually lies between the eye and the ground** — the factor the
+        /// surface's in-scattered veil must be scaled by.
+        ///
+        /// `rayleigh_veil` computes the in-scatter for the FULL vertical column, which is right when the
+        /// observer is above the atmosphere and wrong everywhere else: applied unscaled it puts a whole
+        /// sky's worth of haze between a camera standing on the grass and the grass 1 m in front of it.
+        /// Measured by ablation — with the veil disabled the same ground goes from a pale cyan wash
+        /// (rgb ~150,230,190) to real grass (84,195,65) with its material grain visible. It was not the
+        /// texture that was missing; it was drowned.
+        ///
+        /// The column above altitude `h` is `ρ₀·H·e^(−h/H)`, so the fraction lying BELOW the eye — the part
+        /// its downward view actually looks through — is `1 − e^(−h/H)`, using the same barometric scale
+        /// height `atmosphere::AirShell` derives from the air's own molar mass and temperature. Nothing is
+        /// declared here: at 0.3 m altitude it is 3.5e-5 and the ground is its own colour, at one scale
+        /// height 0.63, and from orbit it is 1 and the planet looks exactly as it did.
+        ///
+        /// **FLAGGED IOU (Law V).** This is the VERTICAL column difference, so it omits the horizontal path
+        /// term: from ground level, distant terrain will now be too crisp, because the air along a long
+        /// near-horizontal path is real and this does not count it. The computation it stands in for is the
+        /// segment integral ∫ρ dl from eye to surface point, which for an exponential atmosphere over a
+        /// linearly-varying altitude is `ρ₀·L·(e^(−h₁/H) − e^(−h₂/H))·H/(h₂−h₁)` — cheap, but it needs the
+        /// eye's world position in the shader, which this uniform layout does not carry yet.
+        fn veil_column_fraction(&self) -> f32 {
+            let h = self.fly.alt_m.max(0.0);
+            // The SAME scale height the flight integrates through — asked of the environment that owns
+            // this world's air, not re-derived here (Law II).
+            let scale_h = {
+                use crate::flight::FlightEnvironment;
+                self.flight_env.air_scale_height_m()
+            };
+            if !(scale_h > 0.0) {
+                return 1.0; // an airless world has no veil to scale, and none is added
+            }
+            (1.0 - (-h / scale_h).exp()) as f32
+        }
+
+        /// **The instant this scene's SKY is drawn for** (Unix seconds) — the one answer to "where are the
+        /// Sun and the stars", used by both the terminator and the star field so they cannot disagree.
+        ///
+        /// Free-running wall clock unless [`Terra::set_epoch`] pins it.
+        ///
+        /// **Deliberately NOT the simulation's clock.** The flight advances on elapsed wall time, because
+        /// that is a DURATION ("how much time passed since the last frame") while this is an INSTANT
+        /// ("what is the sky at"). They are different questions and pinning one must not stop the other:
+        /// a rig that froze the sky and the physics together could not film anything moving. Over the
+        /// seconds a rig runs, the Sun moves ~0.02°, so nothing observable is inconsistent.
+        fn celestial_epoch_s(&self) -> f64 {
+            self.epoch_s.unwrap_or_else(crate::orbit::unix_now_seconds)
+        }
+
+        /// **Pin the sky to an instant**, so a visual test is reproducible.
+        ///
+        /// Robin, after a rig run came back black and looked like a renderer collapse when it was simply
+        /// the night side: *"this being a test rig, you should be able to rotate earth as you see fit to
+        /// run a test?"* Exactly — a rig should command the clock rather than wait for the sun.
+        ///
+        /// This is also what makes screenshot comparison honest. Two runs of IDENTICAL code differ by a
+        /// mean of 2.5–4.8/255 purely because the Sun and the star field moved between them, which is
+        /// large enough to swamp a real change: proving the anchored-tier work had not altered the picture
+        /// needed a same-code control run to measure that drift first. With the epoch pinned there is no
+        /// drift to control for.
+        pub fn set_epoch(&mut self, unix_seconds: f64) {
+            self.epoch_s = Some(unix_seconds);
+        }
+
+        /// Hand the sky back to the wall clock.
+        pub fn clear_epoch(&mut self) {
+            self.epoch_s = None;
+        }
+
+        /// **Put the daylight over this longitude**, by solving the engine's own solar law for the instant
+        /// that does it (`orbit::epoch_for_sub_solar_lon`) and pinning the sky there. Returns the epoch.
+        ///
+        /// The solver lives in `orbit` rather than here, or in a rig, because "where is the Sun" must have
+        /// one answer (Law II) — and the rule a harness would otherwise write for itself, subsolar
+        /// longitude ≈ 180° − 15°·UTC_hours, is wrong by degrees: it has no equation of time and no
+        /// sidereal/solar day distinction.
+        pub fn set_epoch_sun_over_lon(&mut self, lon_deg: f64) -> f64 {
+            let t =
+                crate::orbit::epoch_for_sub_solar_lon(lon_deg, crate::orbit::unix_now_seconds());
+            self.epoch_s = Some(t);
+            t
+        }
+
+        /// Where the Sun is standing overhead right now, `[lat, lon]` in degrees — the engine answering
+        /// from the law it draws with, so a caller never needs its own solar model.
+        pub fn sub_solar(&self) -> Vec<f64> {
+            let d = crate::orbit::solar_direction_earth_fixed(self.celestial_epoch_s());
+            let (lat, lon) = crate::geo::lat_lon_from_dir(d);
+            vec![lat, lon]
+        }
+
+        /// **What measured elevation this view needs and does not have** — a JSON `[[z,x,y],…]`, nearest
+        /// first, for a host to fetch and hand back through [`Terra::add_tile`].
+        ///
+        /// The ENGINE chooses, because which data to resolve is a resolution decision and those belong to
+        /// the universe (docs/44); the host only performs the I/O, exactly as it already does for the
+        /// world's own rasters. The zoom comes from `tiles::zoom_for_ground_size` asked with the observer's
+        /// own resolvable size, so it is the same angular budget that sizes particle granularity and the
+        /// raster hand-off — not a second opinion about what is worth seeing.
+        ///
+        /// Bounded by construction: a 3×3 patch that follows the camera, so this cannot ask for the planet.
+        pub fn tiles_wanted(&self) -> String {
+            let mut out = String::from("[");
+            for (i, t) in self.tiles.missing().iter().take(16).enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&format!("[{},{},{}]", t.z, t.x, t.y));
+            }
+            out.push(']');
+            out
+        }
+
+        /// Hand back a decoded tile — `data` is interleaved RGB(A), `px` square, terrarium-encoded, which
+        /// is what the browser produces from the PNG by the same route it decodes the world's rasters.
+        /// A tile the camera has already moved past is dropped rather than stored.
+        pub fn add_tile(&mut self, z: u32, x: u32, y: u32, data: &[u8], px: u32) {
+            let chans = if px > 0 {
+                (data.len() / (px as usize * px as usize)).max(1)
+            } else {
+                return;
+            };
+            if chans < 3 || data.len() < (px * px) as usize * chans {
+                return;
+            }
+            let before = self.tiles.len();
+            self.tiles.insert(crate::terra::tiles::Tile {
+                id: crate::terra::tiles::TileId { z, x, y },
+                px,
+                chans,
+                data: data.to_vec(),
+            });
+            // New measured ground is exactly the kind of change the tier cache CANNOT see: it is keyed on
+            // where the camera is, and the camera did not move. Without this the tiles would arrive and
+            // the mesh would keep drawing the surface it was built from — the same failure `set_cap_ladder`
+            // has to guard against, and it would look like the streaming did nothing.
+            if self.tiles.len() != before {
+                self.segment_built = None;
+            }
+        }
+
+        /// How many streamed tiles are held — for a HUD, and for a rig to know the patch is complete
+        /// before it believes a screenshot.
+        pub fn tile_count(&self) -> usize {
+            self.tiles.len()
+        }
+
+        /// **The altitude band the observer may occupy** (m). A world declares this in its camera block
+        /// (`min_alt_m` / `max_alt_m`); Earth's says 2 m to 40,000 km, which is a statement about a person
+        /// standing on a planet, not about what the engine can render.
+        ///
+        /// It is exposed because the scale-ladder rig has to ask a question the declared band cannot
+        /// express: *does one continuous representation carry the view from interplanetary distance down to
+        /// standing height* (docs/13, docs/23). `set_camera_pose` places the eye anywhere, but it CLAMPS the
+        /// altitude the LOD machinery reads to this band, so outside it the cap, the blend and the near
+        /// plane are all being told a different altitude from the one the eye is at — and a scale ladder
+        /// that walked past the clamp would be measuring the clamp.
+        ///
+        /// Not a physics knob: nothing here changes what exists or how it moves, only how far the observer
+        /// may stand. `FlyCamera::new`'s own floor of 0.1 m still applies and is not raised.
+        pub fn set_alt_bounds(&mut self, min_alt_m: f64, max_alt_m: f64) {
+            self.fly.min_alt = min_alt_m.max(0.1);
+            self.fly.max_alt = max_alt_m.max(self.fly.min_alt);
+            self.fly.alt_m = self.fly.alt_m.clamp(self.fly.min_alt, self.fly.max_alt);
         }
 
         /// Diagnostic knob — see `draw_matter`. Simulation is unaffected.
@@ -6576,8 +6772,7 @@ mod app {
             // oriented to real time, so a decorative sun put noon in the wrong ocean and the day/night line
             // wherever it happened to land. Now the terminator is where the Sun actually puts it, and the
             // seasons come from the same declination that makes them real.
-            let sun_dir =
-                crate::orbit::solar_direction_earth_fixed(crate::orbit::unix_now_seconds());
+            let sun_dir = crate::orbit::solar_direction_earth_fixed(self.celestial_epoch_s());
             let sun_light = Vec3::new(sun_dir.x as f32, sun_dir.y as f32, sun_dir.z as f32);
 
             // docs/43 Phase 5 — build the fine ground cap under the camera and cross-fade it in as we
@@ -6601,11 +6796,20 @@ mod app {
                 .unwrap_or(0.0),
                 self.detail.angular_resolution,
             );
-            let cap_fade = crate::terra::ground_cap::cap_fade(alt_m, cap_start_alt) as f32;
-            let draw_globe = !(cap_fade >= 1.0
-                && crate::terra::ground_cap::cap_covers_view(view.horizon, r_disp));
-            if cap_fade > 0.0 && self.globe_mesh.is_some() {
-                self.build_cap(&view, sun_light, cap_fade, anchor);
+            let _ = cap_start_alt;
+            // **Ask for the measured elevation this view needs** (docs/46 row 27). The zoom is the docs/49
+            // angular budget asked of a tile pyramid — the same "how fine can this viewer resolve" that
+            // sizes everything else — and the patch is a bounded 3x3 that follows the camera, so a descent
+            // walks the ladder down instead of downloading a planet. Costs nothing until a host answers.
+            {
+                let want_m = self.detail.camera_grain_radius(alt_m.max(1e-3));
+                let z = crate::terra::tiles::zoom_for_ground_size(want_m, self.fly.lat, 256);
+                self.tiles.want_patch(self.fly.lat, self.fly.lon, z, 1);
+            }
+
+            // **THE one surface** (docs/63): a segment whose extent is simply what is visible from here.
+            if self.surface_loaded {
+                self.build_segment(&view, sun_light, anchor);
             }
 
             // **The engine advances its own matter.** Terra's part is a wall-clock dt and the environment
@@ -6677,24 +6881,7 @@ mod app {
             }
 
             let air = self.air();
-            if self.globe_mesh.is_some() {
-                // docs/43 Phase 3: the displaced globe: one draw. Camera-relative model (the mesh is in
-                // display units, Earth-centred; `rel_model` moves the eye to the origin); white tint (the
-                // mesh carries the per-vertex biome colour); emissive.xyz = the triplanar texture anchor
-                // (the eye folded modulo the tile; see above), .w unused.
-                write_space_uniform(
-                    &self.queue,
-                    &self.globe_uni,
-                    view_proj,
-                    rel_model,
-                    sun_light,
-                    [1.0, 1.0, 1.0, 1.0],
-                    [anchor.x, anchor.y, anchor.z, 1.0],
-                    air,
-                    // Terra draws whichever body the world names, so the glow is that body's.
-                    glow_of(&crate::planet::body(&self.body_id)),
-                );
-            } else {
+            if !self.surface_loaded {
                 // Fallback: the Phase-2 grain shell (used until a world's surface rasters build the globe mesh).
                 let shell_spacing = self.planet_radius
                     * (4.0 * std::f64::consts::PI / self.shell_count as f64).sqrt();
@@ -6809,7 +6996,7 @@ mod app {
                 // shy of a solar one, which is why they rise earlier each night. Nothing is animated —
                 // the same clock that puts the Sun in the sky puts the stars in it.
                 if let Some(stars) = self.stars.as_ref() {
-                    let gmst = crate::sky::gmst_rad(crate::orbit::unix_now_seconds());
+                    let gmst = crate::sky::gmst_rad(self.celestial_epoch_s());
                     stars.draw(
                         &self.queue,
                         &mut pass,
@@ -6831,28 +7018,16 @@ mod app {
                         80.0,
                     );
                 }
-                if let Some(globe) = &self.globe_mesh {
-                    // Once the cap is fully faded in AND covers the view out past the horizon, the
-                    // globe is SKIPPED: near the ground the depth buffer cannot separate two copies
-                    // of the same surface (see ground_cap::cap_covers_view).
-                    if draw_globe {
+                if self.surface_loaded {
+                    // **ONE surface** (docs/63): the segment, whose extent is simply what is visible from
+                    // here. There is no cross-fade, no depth-fight lift and no "does the cap cover enough
+                    // to skip the globe" decision, because all of that existed to mediate between two
+                    // meshes drawing the same planet, and there is one.
+                    if let (Some(gpu), Some(uni)) =
+                        (self.segment_gpu.as_ref(), self.segment_uni.as_ref())
+                    {
                         pass.set_pipeline(&self.globe_pipeline);
-                        draw(&mut pass, &self.globe_uni, globe);
-                    }
-                    // docs/43 Phase 5: the fine ground cap (alpha-blended cross-fade). Drawn only when it
-                    // was built this frame (cap_fade > 0); it covers the foreground out past the horizon.
-                    if cap_fade > 0.0 {
-                        pass.set_pipeline(&self.cap_pipeline);
-                        // OUTERMOST first: each finer tier is drawn over the coarser one it sits inside,
-                        // lifted a hair further toward the camera so it wins the depth fight.
-                        for (uni, gpu) in self
-                            .cap_uni
-                            .iter()
-                            .zip(self.cap_gpu.iter())
-                            .take(self.cap_tiers)
-                        {
-                            draw(&mut pass, uni, gpu);
-                        }
+                        draw(&mut pass, uni, gpu);
                     }
                 } else {
                     pass.set_pipeline(&self.pipeline);
@@ -6924,77 +7099,58 @@ mod app {
             peak * display_scale() * self.relief_exag
         }
 
-        /// Terra's globe — built by the ONE shared body-globe builder, so Terra and the space scenes
-        /// cannot drift into showing two different Earths.
-        fn build_surface_mesh(&self) -> Mesh {
-            crate::terra::globe_mesh::build_body_globe(
-                256,
-                self.planet_radius * display_scale(),
-                display_scale(),
-                self.relief_exag,
-                &self.mats,
-                &self.biome_mats,
-                self.landmask.as_ref(),
-                self.elevation.as_ref(),
-                self.landcover.as_ref(),
-                self.elev_range,
-            )
-        }
-
-        /// docs/43 Phase 5 — rebuild the camera-relative ground cap under the camera and upload it (vertices only;
-        /// the index topology is fixed). It samples the SAME surface as the globe (real elevation × the world's
-        /// declared exaggeration, biome albedo) at high resolution, curving to a true horizon, emitted relative to
-        /// the eye for ground-scale precision. `cap_fade` is the cross-fade alpha, carried in tint.a.
-        fn build_cap(
+        /// **Build the ONE surface segment** (docs/63) — the collapse of globe + cap into a single mesh.
+        ///
+        /// Its angular radius is `segment::visible_angle`: literally the surface that is not over the
+        /// horizon, times the same margin the cap used so the rim is never an edge. That is the whole
+        /// extent rule. There is no cross-fade, no depth-fight lift and no "is the cap covering enough to
+        /// skip the globe" decision, because those existed only to mediate between two meshes.
+        fn build_segment(
             &mut self,
             view: &crate::terra::fly_camera::View,
             sun_light: Vec3,
-            cap_fade: f32,
             anchor: Vec3,
         ) {
+            let res = crate::terra::segment::SegmentRes::new(TERRA_SEG_RINGS, TERRA_SEG_SPOKES);
             let r_disp = self.planet_radius * display_scale();
-            let exag = self.relief_exag;
             let ds = display_scale();
-            let res = CAP_RES;
-            // Cover past the visible horizon so the far edge sits below it / occluded — no visible cap
-            // boundary (the margin + clamp live in `ground_cap::cap_angle`, shared with the space band).
-            // NOTE (2026-07-21): sizing this to the camera-resolvable texel instead of the horizon was
-            // tried and REVERTED — it shrank the fine cap ~46x while the coarse globe is cross-faded out
-            // at low altitude, leaving nothing drawn at any altitude below orbital. The diagnosis stands
-            // (at 2 m a horizon-sized cap is ~34 m/cell while the eye resolves ~2 mm), but the fix has to
-            // add a finer LOD tier, not shrink the only one. See `surface_detail` and docs/08's tiers.
-            let cap_angle = crate::terra::ground_cap::cap_angle(view.horizon, r_disp);
-            // The radial lift that wins the depth fight against the coarse globe while both are drawn.
-            // Altitude-proportional (rule + tests in terra::ground_cap), so it clears the depth
-            // buffer's own altitude-proportional resolution at every height and still can never reach
-            // a camera standing 2 m up.
-            let lift = crate::terra::ground_cap::cap_lift_disp(self.fly.alt_m, ds);
+            let exag = self.relief_exag;
+            let angle = crate::terra::segment::visible_angle(
+                self.fly.alt_m,
+                self.planet_radius,
+                TERRA_SEG_MARGIN,
+            );
             let water_idx = materials::index_of(&self.mats, "water");
-            let water_alb = self.mats[water_idx].albedo;
-            // The elevation raster's own ground resolution — where MEASUREMENT runs out and anything finer
-            // has to be generated. Derived from the raster's width, not assumed.
+            let elev_lo = self.elev_range[0];
+            let elev_hi = self.elev_range[1];
+            let tiles = &self.tiles;
+            let elevation = self.elevation.as_ref();
+            let mats = &self.mats;
+            let detail = &self.detail;
+            let planet_radius = self.planet_radius;
+            let octave_budget = self.cap_octave_budget;
             let raster_step_m = self.elevation.as_ref().map_or(90.0, |r| {
                 2.0 * std::f64::consts::PI * self.planet_radius / r.w.max(1) as f64
             });
-            let elev_lo = self.elev_range[0];
-            let elev_hi = self.elev_range[1];
-
-            // The cap's angular span: 1.3x the horizon so its edge is never visible, clamped so a
-            // near-surface camera still gets a patch and an orbital one does not wrap the planet.
-            let outer_angle = (1.3 * view.horizon / r_disp).clamp(1e-4, 0.6);
-            let mut verts = std::mem::take(&mut self.cap_verts);
-            for tier in 0..self.cap_tiers.clamp(1, TERRA_CAP_TIERS) {
-                // Each tier covers a quarter of the span of the one outside it, so its cells are 4x finer.
-                let cap_angle = outer_angle / TERRA_TIER_RATIO.powi(tier as i32);
-                // A tier's cell size on the ground - what its own detail budget is measured against.
-                let cell_m = (cap_angle * self.planet_radius * 2.0 / res as f64).max(1e-6);
-                // Lift each tier a little further toward the camera so the finer one wins the depth fight
-                // with the coarser one beneath it. Scaled to altitude (`cap_lift_disp`), not a constant.
-                let lift = lift * (tier as f64 + 1.0);
-                let octave_budget = self.cap_octave_budget;
-                // The local measured slope, sampled ONCE for the tier rather than at every vertex.
-                let tier_slope = {
-                    let (lat, lon) = (self.fly.lat, self.fly.lon);
+            // How steep this ground measures, as a fraction of what the material can hold — from the
+            // TILES where they cover (a metres-long baseline, so the ratio means what its name says) and
+            // from the raster otherwise. Same rule as the cap's, sampled once for the segment.
+            let tier_slope = {
+                let (lat, lon) = (self.fly.lat, self.fly.lon);
+                let from_tiles = self.tiles.pixel_ground_m(lat).and_then(|px_m| {
+                    let run = (2.0 * px_m).max(1.0);
+                    let dlat = run / 2.0 / 111_320.0;
+                    let dlon = dlat / lat.to_radians().cos().abs().max(1e-6);
+                    let e = |la: f64, lo: f64| self.tiles.elevation_m_at(la, lo).map(|(e, _)| e);
+                    let (n, s_, e_, w_) = (
+                        e(lat + dlat, lon)?,
+                        e(lat - dlat, lon)?,
+                        e(lat, lon + dlon)?,
+                        e(lat, lon - dlon)?,
+                    );
+                    Some((((n - s_) / run).powi(2) + (((e_ - w_) / run).powi(2))).sqrt())
+                });
+                from_tiles.unwrap_or_else(|| {
                     let d = 360.0 / self.elevation.as_ref().map_or(2048, |r| r.w.max(1)) as f64;
                     let e_at = |la: f64, lo: f64| {
                         self.elevation
@@ -7005,108 +7161,135 @@ mod app {
                     let dn = (e_at(lat + d, lon) - e_at(lat - d, lon)) / run;
                     let de = (e_at(lat, lon + d) - e_at(lat, lon - d)) / run;
                     (dn * dn + de * de).sqrt()
-                };
-                {
-                    // **THE shared sampler** (`terra::globe_mesh::SurfaceSampler`, Sean's upstream-8): the
-                    // cap samples the same surface as the globe mesh BY CONSTRUCTION, so the two cannot
-                    // drift into a second Earth. It answers what the surface IS - albedo, material, and the
-                    // measured elevation offset.
-                    let sampler = crate::terra::globe_mesh::SurfaceSampler::new(
-                        &self.mats,
-                        &self.biome_mats,
-                        self.landmask.as_ref(),
-                        self.elevation.as_ref(),
-                        self.landcover.as_ref(),
-                        self.elev_range,
-                        ds,
-                        exag,
-                    );
-                    let mats = &self.mats;
-                    let detail = &self.detail;
-                    let planet_radius = self.planet_radius;
-                    let sample = |dir: glam::DVec3| -> ([f32; 3], f64, u32) {
-                        let (col, off, mat) = sampler.sample(dir);
-                        let mi = mat as usize;
-                        // Water is a surface, not ground: it carries no generated relief.
-                        if mi == water_idx {
-                            return (col, off + lift, mat);
+                })
+            };
+            let sampler = crate::terra::globe_mesh::SurfaceSampler::new(
+                &self.mats,
+                &self.biome_mats,
+                self.landmask.as_ref(),
+                self.elevation.as_ref(),
+                self.landcover.as_ref(),
+                self.elev_range,
+                ds,
+                exag,
+            );
+            // A cache of the view, the same rule the tiers use: re-derive only when re-deriving would
+            // change something. Anchored to the surface point under the camera, so the eye moving is
+            // carried by the model matrix and touches no vertex.
+            // Centred on what the camera LOOKS at, not on its own nadir: the rings concentrate at the
+            // centre, so an oblique view would otherwise spend its fine samples on ground behind the eye.
+            let look = crate::terra::segment::look_centre(view.eye, view.forward, r_disp);
+            let fresh = crate::terra::ground_cap::CapTierBuild {
+                center: look,
+                anchor: look * r_disp,
+                cap_angle: angle,
+                cell_m: (angle * self.planet_radius / res.rings as f64).max(1e-6),
+            };
+            let built = match self.segment_built {
+                Some(b) if crate::terra::ground_cap::tier_is_current(&b, &fresh) => b,
+                _ => fresh,
+            };
+            let rebuild = self.segment_built != Some(built);
+            let mut verts = std::mem::take(&mut self.segment_verts);
+            if rebuild {
+                let rings_f = res.rings as f64;
+                let sample = |dir: glam::DVec3| -> ([f32; 3], f64, u32) {
+                    let (col, mut off, mat) = sampler.sample(dir);
+                    let mi = mat as usize;
+                    if mi == water_idx {
+                        return (col, off, mat);
+                    }
+                    // Measured beats generated, exactly as the cap does it — one surface, one rule.
+                    let (lat, lon) = crate::geo::lat_lon_from_dir(dir);
+                    let mut base_feature_m = raster_step_m;
+                    if let Some((e_tile, w)) = tiles.elevation_m_at(lat, lon) {
+                        let e_raster =
+                            elevation.map_or(0.0, |r| r.elevation_m_at(lat, lon, elev_lo, elev_hi));
+                        off = (e_raster + w * (e_tile - e_raster)).max(0.0) * ds * exag;
+                        if let Some(px_m) = tiles.pixel_ground_m(lat) {
+                            if px_m > 0.0 && raster_step_m > 0.0 {
+                                base_feature_m = raster_step_m * (px_m / raster_step_m).powf(w);
+                            }
                         }
-                        // SUB-RASTER RELIEF (`crate::surface_detail`, docs/46 row 23) ON TOP of what the
-                        // sampler measured. Below the raster there is no measurement, so the relief is
-                        // generated - bounded by what this material can actually stand (which
-                        // `surface_detail` asks `granular` for, never decides itself) and scaled by how
-                        // steep this ground already MEASURES, so a plain stays a plain.
-                        //
-                        // Sean's upstream-8 REMOVED this, correctly reasoning that one 192-cell cap has
-                        // nowhere to put metre-scale relief. That holds for one tier; the ladder is what
-                        // gives it somewhere to go, so the rule is kept and the sampler adopted.
-                        let (lat, lon) = crate::geo::lat_lon_from_dir(dir);
-                        let m = &mats[mi];
-                        let mu = m.friction_coefficient as f64;
-                        let h_crit = crate::granular::critical_bank_height(
-                            m.fracture_strength,
-                            m.density,
-                            9.81,
-                        ) as f64;
-                        // How many halvings below the raster THIS tier's cells can actually show:
-                        // generating finer than the mesh can carry costs time and draws nothing.
-                        let octaves =
-                            crate::surface_detail::detail_octaves(detail, cell_m, raster_step_m)
-                                .min((raster_step_m / cell_m).max(1.0).log2())
-                                .min(octave_budget);
-                        let relief = if octaves > 0.0 {
-                            // How close this ground already is to what the material can hold - the measured
-                            // slope against its own limit. It turns a CEILING into this ground's roughness.
-                            let frac = if mu > 0.0 {
-                                (tier_slope / mu).clamp(0.0, 1.0)
-                            } else {
-                                0.0
-                            };
-                            // A surface-tangent frame in metres, so the lattice is stable in the WORLD and
-                            // not in the view - look away and back, same ground (Law IV).
-                            let px = lon.to_radians() * planet_radius * lat.to_radians().cos();
-                            let pz = lat.to_radians() * planet_radius;
-                            crate::surface_detail::micro_relief_m(
-                                px,
-                                pz,
-                                raster_step_m,
-                                octaves,
-                                mu,
-                                h_crit,
-                                frac,
-                            )
+                    }
+                    // **The mesh's own cell here** — and on a polar segment that VARIES, finer toward the
+                    // centre where the rings bunch. Differentiating the squared ring spacing gives
+                    // `2·sqrt(a·cap)/rings` radians per ring at angular distance `a`, so the generated
+                    // relief is bounded by what the mesh can actually carry AT THIS POINT rather than by
+                    // one number for the whole patch, which is what a uniform grid forced.
+                    let a_ang = dir.dot(built.center).clamp(-1.0, 1.0).acos();
+                    // ★ The floor is the INNERMOST RING's own spacing (`cap/rings²`), not an epsilon.
+                    // Squared ring spacing sends the local step to zero at the centre, and a cell size of
+                    // zero lets the octave count run away: `log2(base/cell)` grew past 11, the finest
+                    // generated wavelength fell under a millimetre, and `value_noise`'s lattice
+                    // coordinate (position × frequency, ~1e7 × 1e3) overflowed i32 and panicked. The
+                    // centre does not have an infinitely fine cell — it has the first ring's.
+                    let inner_m = built.cap_angle / (rings_f * rings_f) * planet_radius;
+                    let cell_m = (2.0 * (a_ang * built.cap_angle).sqrt() / rings_f * planet_radius)
+                        .max(inner_m)
+                        .max(1e-3);
+                    let m = &mats[mi];
+                    let mu = m.friction_coefficient as f64;
+                    let h_crit =
+                        crate::granular::critical_bank_height(m.fracture_strength, m.density, 9.81)
+                            as f64;
+                    let octaves =
+                        crate::surface_detail::detail_octaves(detail, cell_m, base_feature_m)
+                            .min((base_feature_m / cell_m).max(1.0).log2())
+                            .min(octave_budget);
+                    if octaves > 0.0 {
+                        let frac = if mu > 0.0 {
+                            (tier_slope / mu).clamp(0.0, 1.0)
                         } else {
                             0.0
                         };
-                        // The sampler's offset is already in display units; the relief is metres.
-                        (col, off + relief * ds * exag + lift, mat)
-                    };
-                    crate::terra::ground_cap::fill_ground_cap(
-                        &mut verts, view.up, view.east, view.north, view.eye, r_disp, cap_angle,
-                        res, sample,
-                    );
-                }
-                self.queue.write_buffer(
-                    &self.cap_gpu[tier].vertex_buf,
-                    0,
-                    bytemuck::cast_slice(&verts),
+                        let px = lon.to_radians() * planet_radius * lat.to_radians().cos();
+                        let pz = lat.to_radians() * planet_radius;
+                        let relief = crate::surface_detail::micro_relief_m(
+                            px,
+                            pz,
+                            base_feature_m,
+                            octaves,
+                            mu,
+                            h_crit,
+                            frac,
+                        );
+                        off += relief * ds * exag;
+                    }
+                    (col, off, mat)
+                };
+                crate::terra::segment::fill_segment(
+                    &mut verts,
+                    built.center,
+                    view.east,
+                    view.north,
+                    built.anchor,
+                    r_disp,
+                    built.cap_angle,
+                    res,
+                    sample,
                 );
-                // Camera-relative draw: identity model, eye at the ORIGIN. tint.a = the cross-fade alpha.
+                if let Some(gpu) = self.segment_gpu.as_ref() {
+                    self.queue
+                        .write_buffer(&gpu.vertex_buf, 0, bytemuck::cast_slice(&verts));
+                }
+                self.segment_built = Some(built);
+            }
+            if let Some(uni) = self.segment_uni.as_ref() {
+                let model = glam::DMat4::from_translation(built.anchor - view.eye).as_mat4();
                 write_space_uniform(
                     &self.queue,
-                    &self.cap_uni[tier],
+                    uni,
                     view.vp_rel,
-                    Mat4::IDENTITY,
+                    model,
                     sun_light,
-                    [1.0, 1.0, 1.0, cap_fade],
-                    // emissive.xyz = the triplanar anchor (his), so the relief textures stay glued to
-                    // the surface under the camera-relative draw instead of swimming with the eye.
-                    [anchor.x, anchor.y, anchor.z, 1.0],
+                    [1.0, 1.0, 1.0, 1.0],
+                    [anchor.x, anchor.y, anchor.z, self.veil_column_fraction()],
                     self.air(),
-                    NO_GLOW,
+                    glow_of(&crate::planet::body(&self.body_id)),
                 );
             }
-            self.cap_verts = verts;
+            self.segment_verts = verts;
         }
     }
 }

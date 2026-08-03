@@ -3,6 +3,259 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-02 — one surface: the globe and the cap collapse into a segment of a sphere
+
+**What.** Terra and the space band both draw a planet's surface as ONE thing now — `terra::segment`, a
+disc on the sphere whose angular radius is simply what is visible from the eye. The cube-sphere globe and
+the tangent ground cap are both deleted, in both scenes, along with everything that existed to mediate
+between them: `cap_fade`, `cap_lift_disp`, `cap_covers_view`, the `draw_globe` decision, the tier ladder,
+`fill_ground_cap` itself. Net −323 lines from `lib.rs` on the Terra step; `ground_cap` fell from a builder
+to 289 lines holding the two things that were never about having two meshes — the cache rule and the
+raster hand-off.
+
+**Why, in Robin's words, because the framing is the point.** Told that Ground looks good close up and
+Terra looks good far away, she answered: *"BECAUSE it should ALL BE THE SAME. The Earth should be the
+Earth, the Moon the Moon, no matter how close or how far the camera pans."* That is Law IV said exactly.
+The camera was not choosing how finely Earth was drawn — it was choosing WHICH EARTH YOU GET, and an
+explanation ending "each is good at its own range" is a statement of the bug, not a defence of the design.
+Then the mechanism: *"we just map a texture onto a segment of a sphere, whether it's a small chord or a
+full globe"*, and *"mathematically it is matter, but we only materialize that matter visually when we
+need to, and only the amount we need to."*
+
+**★ The blocker was the parameterization, not the idea — and finding that out collapsed the problem.**
+`fill_ground_cap` was gnomonic (`center + east·du + north·dv`, normalized): a tangent plane projected onto
+the sphere, which reaches 90° only as `du → ∞`. `CAP_MAX_ANGLE = 0.6` was never a tuning limit, it was the
+projection's own asymptote. A polar parameterization has none — and the extent actually required is
+**exactly a hemisphere**, because from any finite altitude you see strictly less than one. So the old
+projection could not reach the one extent the job needs, and the new one reaches it by construction.
+
+**★ Rings follow the camera's GAZE, not its feet.** Resolution concentrates at the segment's centre, which
+is only right if the camera looks straight down. A descent looks AHEAD, so the first cut spent its fine
+rings on ground behind the eye and the corridor came back with visibly jagged biome edges.
+`segment::look_centre` intersects the view ray with the surface and centres there. This is a DRAW
+decision and legitimately so: Law VI lets interest decide what is drawn, while only necessity decides what
+is computed.
+
+**★ Deleting the second mesh changed a measured number, which is the nicest kind of evidence that it was
+really one thing pretending to be two.** A depth-fight lift exists ONLY to hold two copies of one surface
+apart, so `CapTierBuild` lost `lift_m` and `tier_is_current` went from three conditions to two. The lift
+was LINEAR in altitude and therefore tripped its octave first; with only the cell condition left — and the
+cell going as √(h(h+2R)) — the mesh cache now survives about four times the altitude drop instead of two.
+**A 500 km descent costs nine rebuilds where it used to cost eighteen.** The exact boundary is solved
+rather than eyeballed: from 500 km the cell halves at 128,607 m, not the 125,000 a quartering suggests.
+
+**Verified.** 463/463 native, `mod app` clean for wasm32. Terra's 11.9-decade ladder runs end to end at
+p50 0.4 ms per rung with tiles streaming and no panics; the descent corridor completes all five stations
+with zero console errors. Against the pre-collapse build, the A/B at four altitudes (10,000 km → 300 m)
+gave ink identical, detail within noise and mean pixel differences of 1.3–3.4/255 — inside the same-code
+drift band.
+
+**★ A bug the browser found that a unit test could not.** On a polar segment the cell size VARIES —
+squared ring spacing sends the local step toward zero at the centre — so `log2(base/cell)` ran past 11
+octaves, the finest generated wavelength fell under a millimetre, and `world::value_noise`'s lattice
+coordinate (position ~1e7 × frequency ~1e3) overflowed i32 and panicked. The centre does not have an
+infinitely fine cell; it has the FIRST RING's, `cap/rings²`. A uniform grid could not hit this, which is
+why the cap never did. `value_noise` now states its own limit rather than leaving a landmine: past the
+i32 lattice it returns a flat field instead of panicking in debug and SILENTLY WRAPPING in release.
+
+**★ And the rig that verified it was Mac-only until today, which is its own finding.** `mac_corridor.mjs`
+carried a bare `chromium.launch({ headless: false })` — which CLAUDE.md rule 4b forbids outright — and a
+default PORT of 7299. Its header blamed Apple Metal. Neither was true: it was a bare launcher and a dead
+port, and one of the engine's headline behaviours was unverifiable anywhere but one machine. Renamed to
+`corridor.mjs`, pointed at the shared launcher, and it runs here.
+
+**NOT verified, and it bounds the claim.** The corridor's mid and low stations look different after the
+collapse (brighter; the surface fills the frame where the globe used to occupy part of it), and they could
+NOT be A/B'd at identical poses because the arc's descent is not reproducible frame-for-frame. Only the
+pre-arc `1-celestial` frame is pose-identical, and it is unchanged (mean|diff| 0.63/255, ink 14.0 → 13.9%,
+detail 33.08 → 33.02). A fixed-pose rig for the space band is the missing instrument.
+
+## 2026-07-31 — the tier became a cache, the price collapsed, and the detail did not arrive
+
+**What.** A ground tier is now a CACHE OF THE VIEW. `fill_ground_cap` emits vertices relative to a fixed
+world `origin` instead of the eye, and the draw carries `anchor - eye` in the model matrix, so
+`world = (p - anchor) + (anchor - eye) = p - eye` — the shader, and the triplanar anchor that reads
+`wpos`, see exactly what they always did. `tier_is_current` then decides when a rebuild is owed. This is
+the work the 2026-07-24 entry below named as next: *"a tier is a cache of the VIEW… anchor each tier's mesh
+to a fixed point and carry the eye offset in the model matrix"*.
+
+**The rebuild question is asked the way `air_reaches` asks about the air** — *would including this change
+the answer* — never as a refresh interval, which would be a dial with no physics in it. Coverage: the
+cached disc must still contain the one a fresh build needs, and the slack it may drift into is exactly the
+`CAP_MARGIN` it was over-built by, so nothing new is declared. Resolution and lift: both must hold within
+an OCTAVE, the unit `cap_fade` already spans for "unambiguously visible".
+
+**★ An absolute angular test was tried FIRST and is wrong — the failure is the interesting part.**
+`|Δcell| / range ≤ θ`, the docs/49 budget that sizes everything else in this module, collapses at low
+altitude: a horizon-sized cap has ~52 m cells at 2 m altitude, so ANY descent changes them by more than the
+eye resolves and the answer is "rebuild" forever (**measured: ~13,000 rebuilds per halving**, worse than
+the per-frame rebuild it replaces). It is not lying — those cells really are visibly coarse. But the cure
+for a mesh too coarse to express the ground is another TIER, not another rebuild of the same one, and the
+budget cannot tell those apart. The octave measures a rebuild against what a rebuild can actually deliver.
+
+**Verified.** 452/452 native, `mod app` clean for wasm32. The anchoring is pinned vertex-for-vertex
+(`an_anchored_cap_draws_exactly_where_an_eye_relative_one_did`): anchored mesh + model translation IS the
+eye-relative mesh, not an approximation. Rig on the 5060 Ti, paced to ~60 fps
+(`web/rig/terra_anchor_drift.mjs`), the same rig run on `main` and on this branch:
+
+| | p50 render | frames per 1.2 s window |
+|---|---|---|
+| `main`, 4 tiers | **700–772 ms** | 15–17 |
+| anchored, 4 tiers | **0.4 ms** | 134–161 |
+| anchored, 1 tier | **0.4 ms** (was 45.2) | — |
+
+**★ And the picture is unchanged — proven against the confound, not asserted.** Branch-vs-`main`
+screenshots differ, but so do two runs of the SAME code, because the starfield rotates and the sun moves
+between runs. So the control was measured: branch-run-1 vs branch-run-2 (same code, ~40 min apart) differs
+by mean 2.5–4.8/255, while branch vs `main` differs by **0.43–0.64** — five to ten times LESS than the
+run-to-run drift. A raw before/after diff here would have read as a large change and been entirely time.
+
+**★ The negative result, which is the half that matters.** Tiers are now affordable, so the obvious next
+move was to raise `TERRA_DEFAULT_TIERS` off 1. **Measured first, and it does not earn its place.** A/B at a
+fixed camera over the Himalaya, 1 tier vs 4, at the full 16-octave relief budget:
+
+| altitude | max pixel Δ (1 vs 4 tiers) | ground luminance stddev, 1 → 4 |
+|---|---|---|
+| 8,000 m | 18 | 8.80 → 9.54 |
+| 2,000 m | 8 | 1.46 → 1.92 |
+| 500 m | 6 | 1.12 → 1.10 |
+| 100 m | 4 | 0.94 → 0.98 |
+
+Below ~2 km the fourth tier changes nothing a person could see, and the ground gets FLATTER on the way
+down (stddev 8.8 → 0.9), which is the opposite of the ask. The first run of this A/B used a 4-octave
+budget and I nearly reported it as-is; at 4 octaves the finest generated wavelength is 19.55 km / 2⁴ =
+1.2 km, so the test had been starved. Re-run at 16 and the conclusion is unchanged — which is the only
+reason it can be stated.
+
+So the 2026-07-24 diagnosis — *"the mesh is the limit, not the maths"* — was right about the COST and is
+not the whole story about the DETAIL. Anchoring removed the cost (642 ms → 0.4 ms) and the detail did not
+follow, so something else is between the camera and detailed ground. `TERRA_DEFAULT_TIERS` stays 1, now
+for a measured reason rather than a budgetary one.
+
+**The hitch, and the fix (same day).** Anchoring turned a sustained per-frame cost into a rare one, but a
+4-tier rebuild was still a **224–310 ms freeze**. The cause is worth stating because it is not obvious: the
+staleness tests are RELATIVE (an octave of a quantity that scales with altitude), so on a descent every rung
+of the ladder trips at the *same altitude* and all four re-derive in one frame. `tier_owed_a_rebuild` now
+spends the frame's whole rebuild budget on the outermost tier that needs one. **Worst frame 224–310 ms →
+61–79 ms** — one tier's rebuild, which is the floor for this approach — with p50 still 0.4 ms.
+
+Outermost-first for two reasons rather than one: it is the tier whose staleness shows worst (a coverage gap
+at tier 0 is a hole at the horizon with only the coarse globe behind it, while a gap in an inner tier just
+reveals the coarser tier drawn underneath), and it keeps the built set a PREFIX, which is what lets
+`tiers_ready` be a count rather than a mask. That count is load-bearing: a tier that has never been built
+holds an empty vertex buffer, so the draw is capped at it, and the globe is no longer skipped while the
+outermost tier is still missing — otherwise the frames right after a world load would draw nothing at all.
+
+Deferring is affordable because a deferred tier keeps drawing its cached mesh and the amount it is allowed
+to be wrong by is the `CAP_MARGIN` it was over-built by — tens of kilometres of ground at low altitude
+against the metres a camera covers in the three frames it waits. Verified: 455/455, and the rendered frames
+differ from the pre-spread branch by mean 2.6–5.2/255, inside the 2.5–4.8 same-code drift band measured
+above — i.e. not at all.
+
+**★ And then the actual question: WHY does the ground flatten on descent** (docs/46 row 27). Two causes,
+measured, and the dominant one is not where I looked first. **It is not the amplitude law** — run the same
+generator at `slope_fraction = 1.0` and it gives RMS slope ~1.0 and 106 m of relief inside a 109 m frame,
+violently rough. The generator is fine; what multiplies it is not.
+
+1. **`slope_fraction` compares two quantities measured four orders of magnitude apart.** It is
+   `tier_slope / mu`, where `tier_slope` is the elevation gradient over a baseline of two raster texels —
+   **39 km** on the shipped Earth — and `mu` is a grain-scale friction coefficient. A 39 km baseline is a
+   regional TILT and cannot be steep. Measured over the shipped raster at 4,096 land points: median
+   **0.00202**, p90 0.01149, largest anywhere **0.0667**. **Everest itself reads 0.0328**, because
+   averaging over 39 km flattens it. In frame at 100 m altitude that is 11.8 m of relief at Earth's
+   roughest point and **0.36 m on median land**.
+2. **The amplitude law is scale-invariant, so approaching cannot reveal roughness even in principle.**
+   `relief_amplitude_m` is `min(drop/2, λ/4)`; for cohesive rock the cohesion term wins the OR everywhere a
+   camera cares about (granite's `h_crit` is 453 m), so the binding term is the `λ/4` no-overhang cap — a
+   HEIGHTFIELD property, not the rock's. Amplitude ∝ wavelength is Hurst exponent **H = 1**, the smoothest
+   self-affine surface and the one whose slope is identical at every scale. Real topography has H ≈ 0.5–0.7.
+
+Together they are the symptom exactly: above ~20 km the frame spans more than one texel and shows real
+measured mountains; below it the frame fits INSIDE one texel, the raster contributes only a smooth ramp,
+and every visible bump must come from a generator scaled to ~0.003 that cannot roughen as you approach.
+
+**No fix attempted, deliberately** — the fix is not a multiplier, that is a dial (Law V), and a wrong
+exponent cannot be corrected by a coefficient anyway. Pinned by two new tests so the diagnosis cannot be
+re-derived from scratch, and both are written to FAIL if either half is ever corrected.
+
+**★ Then the exponent was MEASURED, and it is the accepted one.**
+`earths_topography_is_self_affine_and_its_exponent_is_not_one` takes the structure function of the shipped
+raster over land — golden-angle points, great-circle pairs, both ends land, because the sea floor is a
+different surface and the coastline between them is a kilometres-tall step. RMS Δz runs 137.9 m at 19.5 km
+to 905.2 m at 625 km; the log-log slope over 39–625 km is **H = 0.483** (5,846 land points, ~40k pairs per
+lag). Turcotte's spherical-harmonic spectrum gives S(k) ∝ k⁻² below 10,000 km with β = 2H+1, so β ≈ 2 means
+H ≈ 0.5, and a recent Earth/Venus roughness study reports H ≈ 0.55 at β = −2.1 — the measurement landed on
+the literature without being aimed at it. **The generator's implied H = 1 is 50× too smooth at 10 m
+wavelength**, and the same measurement supplies the anchor a fix would need: RMS Δz at one texel = 137.9 m,
+a real roughness rather than a regional tilt. Caveat stated rather than buried: the local slope drifts from
+~0.77 at the shortest pair to ~0.41 at the longest, so one H over that range is a fit, not a constant, and
+extrapolating it four more decades to metre scale is a declared model whose resolved counterpart is data.
+
+**Finer elevation data exists and is free — and it is the PRIMARY fix, not a companion to the exponent.
+★ I first wrote the opposite and Robin caught it.** Copernicus GLO-30
+(30 m, TanDEM-X, COG on AWS Open Data); ETOPO 2022 (15 arc-sec ~450 m topo+bathy, NOAA public domain — the
+drop-in upgrade, being the same *kind* of seamless land+sea product); AWS Terrain Tiles (global z/x/y
+**terrarium PNG**, no auth, RGB-packed metres — the same encoding this engine already reads). The generator must cover from the data's resolution down to 0.1 m, and that
+span is what decides how much the exponent matters: **5.29 decades today (H=1 wrong by 544× at 0.1 m),
+2.48 with GLO-30 (19×), 1.68 with z=15 tiles (7.4×)**. And the part I missed: finer data **repairs the
+`slope_fraction` category error BY CONSTRUCTION**, because that bug is really that two texels is 39 km —
+at 30 m texels the baseline is 60 m, where real ground does approach what the material can hold, so the
+ratio finally measures what its name claims. With 30 m data there is real relief in frame at 94 m altitude
+and the flat green fill is simply gone.
+
+What data still cannot do: reach 10 cm (2.5 decades short at GLO-30), or ship as a file — even ETOPO 2022
+is 7.5 GB raw, and a single file within a web budget buys ~5–10 km per texel, three decades short. So the
+route is **tiled, fetched-by-necessity data** (docs/44's ladder applied to data instead of matter; AWS's
+terrarium tiles are already the encoding this engine reads), with the exponent covering the residual.
+
+**★ THE NORTH-STAR LADDER, WALKED.** Robin: *"from mars-earth distance to 10 cm above the surface …
+so we can prove our frame of reference/increased detail system works … without noticeable frame-rate
+impact."* `web/rig/terra_scale_ladder.mjs` walks 25 rungs over **11.9 decades**, 78 Gm (Mars at opposition)
+to 0.10 m, paced to ~60 fps.
+
+**Frame rate holds: p50 render 0.4 ms at EVERY rung, top to bottom.** No cliff in twelve decades; the only
+blemish is the known 38–70 ms tier-rebuild hitch. **The picture is continuous for nine decades and frozen
+for three.** Ink rises 0.7% → 74.7% as the planet grows in (rungs 5–8, smooth and monotonic), fills the
+frame by 2.7 Mm, and then detail decays 13.97 → 4.12 between 2.9 km and 94 m and **freezes at 4.12–4.13 for
+the last six rungs — 94 m, 30 m, 9.6 m, 3.1 m, 0.98 m, 0.31 m, 0.10 m**. At 8,474 km the frame is a
+recognisable Earth with continents, biomes, limb and stars; at 94 m it is a flat green fill, and it does not
+change again. **The last three decades of the zoom deliver no information.** That is docs/46 row 27
+rendered rather than argued — the scale machinery is sound across the whole ladder, and what runs out is
+the surface DATA MODEL.
+
+**★★ Two traps, both already written down here, both walked into anyway.** (1) The first run was black
+below 4,300 km and looked like a renderer collapse — it was lon 86 at 17:00 UTC, the dead of night.
+Measured: 0.3% lit at lon 90, 78% at lon −90, sub-solar longitude −75°. `terra_lit_probe.mjs` now answers
+that question before it can be mistaken for a bug. (2) The rig measured its own frames by `drawImage`-ing
+the WebGPU canvas on a later tick and got BLANK — rule 0 says a WebGPU drawing buffer is readable only while
+current — so it reported 0% ink for frames that plainly contained a planet. **A rig that reports a
+confident wrong number is the same failure as a gate that passes on error.** Deleted; the PNGs are the
+measurement. Robin's steer on the first one is the better fix and is not built: a test rig should command
+the clock rather than wait for the sun.
+
+**★ THE EPOCH KNOB — a rig commands the clock now** (Robin: *"this being a test rig, you should be able to
+rotate earth as you see fit to run a test?"*). `Terra::set_epoch` / `clear_epoch` / `set_epoch_sun_over_lon`
+/ `sub_solar`, over one `celestial_epoch_s()` that both the terminator and the star field read — the scene
+was calling the wall clock in three independent places. The aiming lives in `orbit::epoch_for_sub_solar_lon`
+(Newton on the subsolar longitude, converging in two steps) rather than in a rig, because the rule a harness
+writes for itself — subsolar longitude ≈ 180° − 15°·UTC_hours — has no equation of time and no
+sidereal/solar day distinction and is wrong by degrees, which is exactly the error that makes someone
+mistake dusk for a bug. Deliberately NOT the simulation's clock: the flight advances on elapsed wall time
+because that is a duration, while this is an instant, and a rig that froze both could not film anything.
+
+**Verified three ways.** (1) The site that was pitch black below 4,300 km — lat 28, lon 86 — now renders at
+every rung, ink 100% all the way to 0.10 m. (2) **Reproducibility: two runs differ by mean 0.003–0.26/255,
+against the 2.5–4.8 free-running drift** that previously had to be measured with a control run before any
+screenshot comparison could be believed. (3) It exposed a confound in the detail metric nobody had named:
+aiming the sun at the site's own longitude is local NOON, the worst light for relief. The same Himalaya
+rungs read detail **0.65 at noon and 4.0–4.5 under slanting light**, so the rig now offsets the subsolar
+longitude 70° east by default. **And the freeze survives the correction** — detail is 4.04 at 30 m, 9.6 m,
+3.1 m, 0.98 m, 0.31 m and 0.10 m alike — so the flat ground is an absence of geometry, not of shadow.
+
+**NOT done.** 61–79 ms is still a visible hitch; going below it means splitting a single tier's rebuild
+across frames, not scheduling whole tiers. Also untouched: the `terra_lod_cost.mjs` table in the entry
+below is now historical — it measured the per-frame rebuild.
+
 ## 2026-07-25 (step 5) — the environment answers where its own surface is, and terrain stops being special
 
 **What.** Sean's `upstream-5-ground-ball` is integrated: the declared ball is cohesive matter whose fate is

@@ -16,6 +16,25 @@
 // material's own cited roughness (it does — see `texture::height_at`) and would converge to resolved
 // micro-geometry as the budget grows.
 
+// **The material's own ALBEDO, blended the same three ways.** This lived as a private `triplanar` in
+// `world.wgsl` while its partner — the NORMAL blend below — had already been extracted here, i.e. half a
+// law in the shared file and half in one scene's shader. The consequence was visible: Terra's globe and
+// ground cap BIND this texture array and never sampled it, so every material on that planet wore a flat
+// biome colour with a bump map on top, while the same materials in another scene showed their grain.
+//
+// It is not decoration. The texture is generated from the material's CITED optical properties (`texture.rs`
+// — albedo, `color_variance`, metallic, and the same fbm the normal map's height field comes from), so a
+// material's visible grain and its bump agree by construction, and at distance the mip chain averages back
+// to exactly the flat albedo it replaced. Detail fades in as the camera closes; nothing is added far away.
+fn surface_albedo_triplanar(local : vec3<f32>, n : vec3<f32>, layer : u32, scale : f32) -> vec3<f32> {
+    var w = abs(n);
+    w = w / (w.x + w.y + w.z);
+    let cx = textureSample(tex, samp, local.yz * scale, layer).rgb;
+    let cy = textureSample(tex, samp, local.xz * scale, layer).rgb;
+    let cz = textureSample(tex, samp, local.xy * scale, layer).rgb;
+    return cx * w.x + cy * w.y + cz * w.z;
+}
+
 fn surface_normal_triplanar(local : vec3<f32>, n : vec3<f32>, layer : u32, scale : f32) -> vec3<f32> {
     var w = abs(n);
     w = w / (w.x + w.y + w.z);
