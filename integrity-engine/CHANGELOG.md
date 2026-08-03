@@ -9,6 +9,29 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The appearance integral (`terra::appearance`).** A surface footprint's area-weighted material
+  MIXTURE and the variance of its slope about the mesh normal — the two moments docs/63 asks for.
+  `Appearance::combine` is the law of total variance, so refining a footprint does not change its
+  answer; `rough_diffuse` in the shared shader chunk spends the variance, and at `sigma = 0` returns
+  bit-identical Lambert, so ground the mesh fully resolves looks exactly as before.
+  ★ **Measured negative result:** at Terra's 469 m mesh cell the shipped rasters have nothing to
+  integrate — the land cover is 19.5 km/texel (and DERIVED from latitude bands, not measured), so a
+  cell holds one material and the elevation is a plane across it. The data is what the ground was
+  missing, not the appearance function (docs/46 rows 28-29).
+  ★ **Costs 3x the mesh-rebuild hitch** as written (44-53 ms -> 158-186 ms on a 5060 Ti); steady-state
+  render is unchanged at p50 0.4 ms. Structural fix named: a mip pyramid of moments per tile.
+- **`resolution::WorkBudget`** — how much work this machine can afford, MEASURED from the time work
+  actually took rather than read off a table of device names, so it degrades on slow hardware and
+  scales up on hardware that does not exist yet. Its ceiling is the DATA: once the sample grid is as
+  fine as the measurement underneath it the integral is complete, and growth stops by construction.
+- **`mesher::Vertex` gained `rough`** (RMS slope angle the mesh is not showing) and the
+  `([f32;3], f64, u32)` surface tuple became **`terra::globe_mesh::SurfaceSample`**. BREAKING for any
+  caller building a `Vertex` literal or a `fill_segment`/`build_globe` sampler.
+- **`clock::now_seconds` is public** — measuring how long work took is a second legitimate caller, and
+  a module that could not reach it would write a second clock.
+- **`terra::raster::shipped::earth_landcover`** (test-only) so a test can read the land cover the scene
+  reads, together with the biome map that decodes it.
+
 - **ONE surface geometry: `terra::segment`.** A planet's surface is a disc on the sphere — centre
   direction plus angular radius, from a chord underfoot to a hemisphere — and both scenes draw it. This
   REMOVES the cube-sphere globe mesh and the tangent ground cap, and with them `ground_cap::fill_ground_cap`,

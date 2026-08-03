@@ -151,7 +151,19 @@ and the km-scale skyline — which the displaced segment already carries.
 
 ### One appearance function
 
-The material response integrated over the pixel's footprint, and it needs TWO moments, not one:
+The material response integrated over the footprint, and it needs TWO moments, not one:
+
+> **AMENDED 2026-08-02 — the footprint is the MESH CELL, not the pixel.** This section said "the
+> pixel's footprint" and the measurements do not support it. At 100 m altitude Terra's pixel footprint
+> is ~0.09 m, which is BELOW the 8 m material tile where the texture's own mip chain already answers —
+> so on that reading the integral is a no-op exactly where the ground is worst. The gap that actually
+> exists is between the material tile and the mesh cell: at that altitude the cell is ~469 m while a
+> streamed elevation tile pixel is ~3.71 m, so about **sixteen thousand measured samples sit inside
+> one cell** and none of them reach the screen. The correct domain is simply *the area one drawn
+> sample stands for*, and for a per-vertex quantity that is the cell — a per-vertex value cannot vary
+> faster than the mesh. Where the pixel is LARGER than the cell (from orbit) the GPU's own averaging
+> covers the rest; where it is smaller, the vertex value interpolates. (Robin's call, on the
+> measurements.)
 
 - **Mean albedo** — below the material tile this is the texture's own mip chain (already there); above it,
   it is the MIXTURE of materials over the footprint, which does not exist today.
@@ -191,12 +203,48 @@ the slope law it claims to obey.
    so its mid-stations could not be A/B'd across the collapse; only the pre-arc `1-celestial` frame is
    pose-identical (and is unchanged, mean|diff| 0.63/255). Until that rig exists, close-range changes in
    that scene are unverifiable.
-2. **The appearance integral** — material mixture over the footprint, and normal variance carried as
-   roughness — with the convergence invariant as its test.
-3. **Matter on demand**, for the pixel or the interaction, never triggered by camera altitude. Ground
+2. ~~**The appearance integral**~~ **BUILT 2026-08-02 (`terra::appearance`), and it produced a
+   NEGATIVE RESULT that re-orders everything below it.** The mixture, the variance-about-the-mean, the
+   law-of-total-variance combine and the convergence invariant all exist and are pinned
+   (`refining_the_footprint_does_not_change_the_answer`, mutation-checked twice). `rough_diffuse`
+   spends the second moment, because Lambert is roughness-blind and a variance with nowhere to go is a
+   variance discarded; at `sigma = 0` it is bit-identical Lambert, so it converges the way Law VIII
+   requires.
+   ★★★ **AND IT CHANGES ALMOST NOTHING, BECAUSE THERE IS NOTHING TO INTEGRATE.** The land-cover raster
+   is 19.5 km per texel, so a 469 m mesh cell sits INSIDE one texel and the mixture has exactly one
+   constituent; the elevation raster at the same resolution is a plane across a cell, and a plane has
+   no slope variance. Measured through the engine at the ladder's own site: mixture length **1**,
+   sigma **< 1e-3 rad** (docs/46 row 28). The surface's own description is also **invented** — six
+   latitude bands, per its own `SOURCES.txt` — and maps forest to `pine` TIMBER, so the Amazon renders
+   the colour of cut lumber.
+   **So step 3 below is no longer "next", it is PREREQUISITE.** The appearance function is not what the
+   ground was missing; the materials and the data are. It also costs 3x the rebuild hitch as written
+   (docs/46 row 29); the structural fix is a mip pyramid of moments over the elevation, built once per
+   tile, not a smaller sampling budget.
+3. **A surface made of REAL, MEASURED materials — promoted to prerequisite 2026-08-02.** Robin:
+   *"we need to vastly expand our materials to include rainforest canopy leaves, rainforest woods,
+   different sands, all kinds of things ... seed all that from NASA data (use geological data for
+   regions, biome data to extrapolate flora) ... Work on Earth is not wasted; it can all be catalogued
+   in a model that will be used again and again"* and *"Since Earth is Earth, and the more detail the
+   more accurate our representation/physics."*
+   ★ **The distinction that keeps this inside Law V: a substance is not an assembly.** Leaf tissue,
+   tropical hardwood, quartz/calcareous/basaltic sand, laterite, peat and silt are SUBSTANCES and
+   belong in `data/materials.json` with sourced properties. A rainforest CANOPY is not — it is mostly
+   air with leaves distributed through it at some leaf-area-index, and giving it a bulk density would
+   declare a number that traces to nothing. So a biome is an **assembly placed over an area**, exactly
+   as a pool table is an assembly placed at a coordinate, and what it hands the renderer is a material
+   MIXTURE — which `Appearance.mix` already consumes unchanged.
+   Verified open, no-auth sources: **ESA WorldCover** (10 m, 11 classes, public S3, CC-BY 4.0),
+   **SoilGrids** (250 m sand/silt/clay fractions, ODbL), **GLiM** (global lithology). NOT HLS: it is
+   Earthdata-Login-gated surface reflectance in MGRS COGs — imagery, not materials, and a photograph
+   draped on the ground is the stand-in-FOR-matter this doc rejects. **MODIS MCD43A3 is a measured
+   global albedo product**, which upgrades the convergence invariant from internal consistency to
+   agreement with reality: integrate our mixture over a footprint and compare against what was
+   actually observed there.
+4. **Matter on demand**, for the pixel or the interaction, never triggered by camera altitude. Ground
    already owns this machinery (voxel/granular matter, `deposit_event`, cohesive bodies, the SPH cap) and
    it should be attached to the real surface rather than to an invented patch.
-4. **Scenes as data** (docs/46 row 14), at which point a pool table is a definition and not a code change.
+5. **Scenes as data** (docs/46 row 14), at which point a pool table is a definition and not a code change.
 
 ### What this retires
 

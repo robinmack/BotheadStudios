@@ -359,6 +359,87 @@ mod tests {
         crate::materials::load()
     }
 
+    /// **THE NEGATIVE RESULT, pinned: at mesh-cell scale the shipped rasters have nothing to
+    /// integrate.** (docs/46 row 28.)
+    ///
+    /// The machinery in this module is correct and tested, and at 100 m altitude over the Colorado
+    /// Rockies it changes the picture by almost nothing. This test says why, so nobody re-derives it
+    /// from a screenshot:
+    ///
+    /// - The land-cover raster is **19.5 km per texel**. Terra's mesh cell at 100 m altitude is ~469 m.
+    ///   A cell is therefore INSIDE one texel, the mixture has exactly one constituent, and a
+    ///   fraction-weighted mean of one material is that material. There is no mixture to find.
+    /// - The elevation raster is the same resolution, so across 469 m it is a smooth bilinear ramp —
+    ///   a plane — and a plane has no slope VARIANCE (that is `a_plane_is_not_rough_however_steep_it_is`
+    ///   restated on real data). Only the streamed tiles carry metre-scale relief, and their bounded
+    ///   3x3 patch covers a few kilometres of a segment tens of kilometres wide.
+    ///
+    /// So the appearance integral is not what is missing from the ground; **the DATA is**, exactly as
+    /// Robin said on seeing it. This test FAILS when better land cover lands — which is the point: it
+    /// is the reason the expansion is worth doing, stated as an assertion rather than a memory.
+    #[test]
+    fn the_shipped_rasters_cannot_express_a_mixture_at_mesh_cell_scale() {
+        let mats = mats();
+        let (lc, biomes) = crate::terra::raster::shipped::earth_landcover();
+        let (elev, range) = crate::terra::raster::shipped::earth_elevation();
+        // The land cover a 469 m cell can distinguish. One texel spans 19.5 km, so the answer is one.
+        let texel_km = 40_075.0 / lc.w as f64;
+        assert!(
+            texel_km > 15.0,
+            "this test describes a COARSE raster; it is now {texel_km:.1} km/texel"
+        );
+        let biome_mats: Vec<usize> = (0..=5)
+            .map(|i| {
+                crate::materials::index_of(
+                    &mats,
+                    biomes
+                        .get(&i.to_string())
+                        .map(String::as_str)
+                        .unwrap_or("granite"),
+                )
+            })
+            .collect();
+        let (lat, lon) = (39.0, -106.0); // the scale ladder's own site
+        let cell_m = 469.0;
+        let r = 6.371e6;
+        let mut scratch = Moments::new();
+        let a = integrate_on_sphere(
+            &mut scratch,
+            crate::geo::dir_from_lat_lon(lat, lon),
+            r,
+            cell_m,
+            30.0, // sample far FINER than the raster, to prove the raster is what is flat
+            64,
+            &mats,
+            |la, lo| {
+                let b = lc.biome_at(la, lo) as usize;
+                (
+                    elev.elevation_m_at(la, lo, range[0], range[1]),
+                    biome_mats.get(b).copied().unwrap_or(0),
+                )
+            },
+        );
+        assert_eq!(
+            a.mix.len(),
+            1,
+            "a 469 m cell sits inside one 19.5 km texel, so the mixture has ONE constituent: {:?}",
+            a.mix
+        );
+        // And the relief it can see over that cell is a bilinear ramp — a plane, hence no variance.
+        // (Not exactly zero: the cell straddles a texel boundary where the ramp's slope changes.)
+        assert!(
+            a.sigma_rad() < 1.0e-3,
+            "the coarse raster is a plane at this scale; sigma {} rad is too large to be one",
+            a.sigma_rad()
+        );
+        // The mean slope, by contrast, is real and is what the MESH already shows.
+        let mean = (a.mean_slope[0].powi(2) + a.mean_slope[1].powi(2)).sqrt();
+        assert!(
+            mean > 1.0e-4,
+            "the regional gradient IS there and the mesh carries it: {mean}"
+        );
+    }
+
     /// **THE CONVERGENCE INVARIANT** (docs/63): *"Resolve a patch to matter, integrate its appearance
     /// over the footprint that was being drawn, and the result must equal the texture that was already
     /// being drawn there. If they differ, one of them is lying."*
