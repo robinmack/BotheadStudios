@@ -3,6 +3,67 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-03 — a cannon on a coast: assemblies, oxidation, and a shot that lands in the sea
+
+**What.** Robin's acceptance test for the whole assembly architecture — *"as long as we can build a
+working cannon and a working planet, and put a working cannon on a working planet and fire it, we know
+our assembly build is sound"* — passes, and can be watched at **/yarr.html**:
+
+    cannon: Fired at 589 m/s, peak 426 MPa, recoil 2.96 m/s,
+            ejecting 2.09 kg gas + 1.53 kg smoke at 1950 K
+    arrival: 10.9 kg at 0.1 km/s = 9.06e4 J
+
+**Why this shape.** docs/64 (the compiled assembly) says a planet and an ocean liner are not different
+kinds of thing: both are catalogued materials arranged in space, differing only in how the arrangement
+is INDEXED. The cannon is the test of that claim, because it is emphatically not a sphere.
+
+**Three assemblies, not one** (Robin): the GUN persists and recoils, the CHARGE is consumed, the SHOT is
+transferred out — so containment is a relationship with state and an assembly GRAPH, because a tree
+cannot express reloading. **Nothing declares a mass**: 2,375.7 kg and a centre of gravity 0.631 m behind
+the midpoint both follow from thirteen parts and the material catalogue. A cached mass is a CACHE —
+`verify_cache` re-derives and reports a mismatch as stale, "the parts win".
+
+★ **The ball's SIZE follows from its NAME.** 24 lb of cast iron as a sphere is 5.53 inches across
+against a historical 5.82 in bore; the difference is windage. A consequence, not a parameter.
+
+★★ **Substances before compounds.** Black powder was BACKED OUT as a material after a first draft
+carried an invented `specific_heat: 1000.0`. It is a MIXTURE — potassium nitrate, charcoal and sulfur,
+each catalogued with sources — and its bulk properties derive: 891.3 J/kg/K, true density 1957 kg/m3
+against a poured 1000, **and that gap IS the 48.9% porosity**, which is a property of an arrangement and
+not of matter. Hence `Part::packing`.
+
+★★ **`oxidation::apply_heat` is the general way matter is lit**, not `fire_gun` (Robin: *"we want these
+to not be tied to specific scene information... apply_heat would be useful in a forest fire"*). One call
+covers lightning on a tree — clearing oak's own catalogued 573 K — a linstock on a charge, and the same
+joules through 100x the mass NOT lighting it, which is why a bonfire needs kindling.
+
+★★★ **The number that makes it gunpowder, as a comparison between two derived quantities:** at 75/15/10
+the KNO3 supplies 0.356 kg O2 per kg against a fuel demand of 0.499 — **71% of stoichiometric with no
+air at all**. A fire is ventilation-limited; a charge is not. That single ratio is the whole difference.
+
+**Verified.** 507/507 native, `mod app` clean for wasm32, rig-verified on the 5060 Ti, deployed live.
+
+**★ Three disagreements with reality, all RECORDED rather than tuned.** The idealised black-powder
+equation over-states permanent gas by ~25%; deriving the flame temperature from the burn energy gives
+6751 K against a sourced 1950 K, because **over half of the product mass is CONDENSED** and heating those
+solids absorbs the energy while exerting no pressure; and the constant-volume assumption ignores that
+real powder burns while the shot is already moving. Muzzle velocity comes out 589 m/s against a
+historical ~450 for exactly these reasons. `naive_flame_k` is kept, unused, so the size of the deferred
+energy split can be READ — a deferred computation you cannot size is not an IOU.
+
+**★★ A scene must never introduce physics, and it is now enforced.** `PlanetAir` — the type answering
+what gravity is, what the air is, where the surface is — lived inside `mod app`. And a trajectory
+integrator written here took a DRAG COEFFICIENT as an argument, putting the caller in charge of how hard
+the air pushes back; it was deleted in favour of `flight::Flight`, which already flies meteors and
+integrates quadratic drag in closed form. `laws::scene_purity_tests::a_scene_never_introduces_physics`
+pairs each physics primitive with its owning module and fails the build if a scene calls one — verified
+against the exact violation committed hours earlier.
+
+**★ And the last picture told the truth about the one before it.** The scene looks orange because it IS
+`pine` — the catalogue's pine TIMBER — since `earth.json` maps "forest" to it and Ireland sits in the
+derived cover's boreal band. Lighting was MEASURED innocent (ground luminance 117.9 noon / 14.2
+midnight). Colours emerge from materials exactly as they should; the material is wrong (docs/46 row 28).
+
 ## 2026-08-02 — the appearance integral, and the negative result that re-orders the plan
 
 **What.** `terra::appearance` integrates the surface over the patch a vertex stands for and reports two
