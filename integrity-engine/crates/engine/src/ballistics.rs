@@ -564,6 +564,21 @@ mod tests {
         let (site, arrival, ilat, ilon) =
             found.expect("somewhere on Earth a 24-pounder stands on land and fires into the sea");
 
+        // Report the site the search FOUND. A test that discovers something should say what.
+        let a0 = crate::geo::dir_from_lat_lon(site.lat_deg, site.lon_deg);
+        let range_m = r_e * a0.dot(arrival.at.normalize()).clamp(-1.0, 1.0).acos();
+        println!(
+            "  gun on land at {:.0} lat, {:.0} lon, bearing {:.0} deg, 45 deg elevation\n  \
+             muzzle {:.0} m/s -> splash at {:.2}, {:.2}  |  range {:.0} m  |  arrives with {:.1} MJ",
+            site.lat_deg,
+            site.lon_deg,
+            site.bearing_deg,
+            fired.muzzle_ms,
+            ilat,
+            ilon,
+            range_m,
+            arrival.energy_j / 1.0e6
+        );
         assert!(
             land.land_at(site.lat_deg, site.lon_deg),
             "the gun is on land at {:.1}, {:.1}",
