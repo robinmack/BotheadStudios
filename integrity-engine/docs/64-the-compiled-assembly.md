@@ -33,6 +33,66 @@ says cannot exist.** "One high cost compile" is a budget. This is what to spend 
 
 ---
 
+## 0. What this must hold — and why a planet is only one case
+
+Robin, correcting a reading of this document that had drifted orbital (2026-08-02):
+
+> *"while now we're focusing on orbital, we're building a general purpose game engine. At some point we
+> may be allowing people to explore the jungle and see Mayan temples (constructions) or the Pyramids, or
+> Paris. We may spend an entire game in a small section of Puerto Rico walking around. We are building
+> solid physics to be used by all kinds of things... the collison engine may one day be used to simulate
+> gunpowder in a cannon, the shot, and the cannonball splintering an enemy ship."*
+
+> *"We're getting closer to simulating the gemini missions, and that is REALLY cool. But we are building
+> the physics to demonstrate it works, and will be applying it at different scales in different
+> settings."*
+
+**The orbital work is the DEMONSTRATION, not the destination.** That sentence belongs at the top of this
+document because a format designed around compiling planets would quietly make everything else a special
+case, and the special cases are where the games actually are. The centre of gravity here is the
+ASSEMBLY. **A planet is simply the assembly whose spatial index happens to be a sphere.**
+
+Five requirements follow that a planet-shaped design would have missed, and each is a real constraint
+rather than an aspiration:
+
+1. **Assemblies are PLACED, and they place on surfaces.** A Mayan temple stands on jungle terrain; the
+   Pyramids sit on a plateau. So an assembly carries a placement (body, coordinate, orientation) and the
+   SURF quadtree must be able to record what stands on it — a foundation cuts and bears on the ground.
+   docs/63 said it first: *"a scene is an assembly placed at a coordinate ... everything else comes free
+   whether we use it or not."* A construction is not a scene that owns a planet.
+2. **A part carries its material's ORIENTATION, not only its identity** (docs/46 row 30). `oak` is
+   already catalogued with 90 MPa tensile along the grain against 5.5 MPa across it — **that 16x ratio
+   IS splintering** — and a plank with no grain direction cannot express it however good the material
+   data is. Rolled steel and composite layup are the same requirement.
+3. **Joins are a FAILURE model, not a static-load check.** §6 and §7 first asked *"does this join carry
+   its load?"*, which is the shipwright's question. A cannonball asks a different one: *given this
+   impulse, what breaks, and into what pieces?* Both come from the same material properties, but only
+   the second produces splinters, and the format must carry what fragmentation needs (join geometry and
+   extent, not merely capacity).
+4. **The BOTTOM of the scale range is where the game lives.** *"an entire game in a small section of
+   Puerto Rico walking around"* happens between a millimetre and a hundred metres. The scale ladder has
+   been measured downward from Mars distance; the settings will be measured upward from a footprint. So
+   the SURF tree must descend far past any global dataset, and matter-on-demand (docs/63 item 3) is core
+   work rather than a finishing touch.
+5. **Authoring is a first-class input.** Paris does not compile out of a satellite dataset. It is
+   authored assemblies plus measured data plus instancing at city scale, so the SOURCE form of an
+   assembly matters as much as the binary, and "scenes as data" (docs/46 row 14) stops being a tidiness
+   argument and becomes the thing that lets anyone build content at all.
+
+**One chain, to keep the ambition concrete.** Gunpowder deflagrating in a bore -> gas at pressure -> the
+shot accelerating -> exterior ballistics through real air -> impact on oak planking -> splinters. Traced
+against what exists today: the gas thermodynamics is half-present (`eos.rs` Tillotson, verified;
+`atmosphere.rs` deriving a specific gas constant from molar mass), exterior ballistics is largely there
+(verified drag, entry heating, `flight.rs`), contact and cohesion are there and scale-invariant. **The
+two honest gaps are chemical energy release, which does not exist at all (docs/46 row 31), and
+anisotropic failure, whose DATA is already catalogued and read by nothing (row 30).** Neither is a
+reason to approximate: they are named, and a propellant gets sourced properties before any code uses it.
+
+That chain is the same contact law that settles a grain of sand and the same one that splits a moon.
+Which is the charter — *one law, every scale, every scene* — stated as something a player does.
+
+---
+
 ## 1. Why compile at all — the measurements that forced it
 
 Three, all taken 2026-08-02:
