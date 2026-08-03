@@ -431,6 +431,15 @@ differ, one is lying. That single requirement forces the two readings to be one 
 - **up close**, instanced plant assemblies with real geometry, resolved by necessity (docs/44), never by
   camera altitude alone.
 
+★★ **And "up close" means eye level, which is where the acceptance bar actually sits.** Robin
+(2026-08-03), standing at the gun: *"that should change at the elevation of the cannon, looking toward
+the horizon, there should be real trees one day."* A foliage albedo is what a FOOTPRINT looks like; from
+a gun deck on a shore the same matter has to be individual trees with trunks and crowns and gaps you can
+see between. Both readings are the same description at two resolutions, and the convergence invariant
+above is what forbids them from being two different Irelands — integrate the trees over a footprint and
+you must get the mixture back. That is the flora case of the one thing docs/63 exists to say: *the Earth
+should be the Earth, no matter how close or how far the camera pans.*
+
 Which is Robin's own sentence from docs/63 — *"we only materialize that matter visually when we need to,
 and only the amount we need to"* — with a rainforest as the worked example instead of a hillside.
 
