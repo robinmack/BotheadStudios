@@ -79,6 +79,15 @@ rather than an aspiration:
    assembly matters as much as the binary, and "scenes as data" (docs/46 row 14) stops being a tidiness
    argument and becomes the thing that lets anyone build content at all.
 
+★ **The format's first test is a cannon, not a planet.** The direct enforcement of everything above is
+to exercise a NON-PLANET through the same path the planets use — build a cannon (or a plank, or a
+bolted joint) as a PARTS assembly, round-trip it, and run the §7 validations on it. If the format ever
+drifts planet-shaped, that test is what breaks, and it breaks before a second body is ever compiled. A
+suite whose only assemblies are Sun, Moon and Earth cannot tell a general format from a planetary one.
+(`laws::every_catalogued_material_number_is_read_or_declared_unwired` is the other half, and it is a
+proxy: it keeps the DATA and the CODE in step — the mechanism by which ambition rots into the demo's
+subset — but it cannot see a structure that is planet-shaped.)
+
 **One chain, to keep the ambition concrete.** Gunpowder deflagrating in a bore -> gas at pressure -> the
 shot accelerating -> exterior ballistics through real air -> impact on oak planking -> splinters. Traced
 against what exists today: the gas thermodynamics is half-present (`eos.rs` Tillotson, verified;
