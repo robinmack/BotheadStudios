@@ -9,6 +9,23 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **ONE surface geometry: `terra::segment`.** A planet's surface is a disc on the sphere — centre
+  direction plus angular radius, from a chord underfoot to a hemisphere — and both scenes draw it. This
+  REMOVES the cube-sphere globe mesh and the tangent ground cap, and with them `ground_cap::fill_ground_cap`,
+  `cap_fade`, `cap_angle`, `cap_covers_view`, `cap_lift_disp`, `cap_lift_m`, `cap_indices`, `tiers_ready`,
+  `tier_owed_a_rebuild`, `Terra::set_cap_ladder` (now `set_octave_budget`) and the whole tier ladder.
+  `CapTierBuild` loses `lift_m`; `tier_is_current` drops to two conditions. New: `segment::visible_angle`
+  (the extent — what is not over the horizon), `segment::look_centre` (the centre — what the camera looks
+  at), `View::forward`, `Terra::set_alt_bounds`.
+- **Measured elevation streams (`terra::tiles`).** `Terra::tiles_wanted()` / `add_tile()` / `tile_count()`:
+  the engine names the tiles it needs, the host fetches them. AWS terrarium PNG, bounded 3×3 patch.
+- **Materials wear their own texture.** `surface_albedo_triplanar` joins `surface_normal_triplanar` in the
+  shared shader chunk; `globe.wgsl` sampled neither before. The Rayleigh veil is scaled by the air actually
+  between the eye and the surface (`1 − e^(−h/H)`) instead of the full column at every altitude.
+- **The sky can be pinned.** `Terra::set_epoch` / `clear_epoch` / `set_epoch_sun_over_lon` / `sub_solar`,
+  over one `celestial_epoch_s()` that the terminator and the star field share;
+  `orbit::epoch_for_sub_solar_lon` solves for the instant that lights a given longitude.
+
 - **A ground tier is a cache of the view, not a per-frame rebuild.** `ground_cap::fill_ground_cap`'s
   `eye` parameter is now `origin`: the mesh is emitted relative to any fixed world point, and the caller
   puts `anchor - eye` in the model matrix, so the draw stays camera-relative (`world = (p - anchor) +

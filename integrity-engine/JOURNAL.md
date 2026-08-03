@@ -3,6 +3,73 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-02 — one surface: the globe and the cap collapse into a segment of a sphere
+
+**What.** Terra and the space band both draw a planet's surface as ONE thing now — `terra::segment`, a
+disc on the sphere whose angular radius is simply what is visible from the eye. The cube-sphere globe and
+the tangent ground cap are both deleted, in both scenes, along with everything that existed to mediate
+between them: `cap_fade`, `cap_lift_disp`, `cap_covers_view`, the `draw_globe` decision, the tier ladder,
+`fill_ground_cap` itself. Net −323 lines from `lib.rs` on the Terra step; `ground_cap` fell from a builder
+to 289 lines holding the two things that were never about having two meshes — the cache rule and the
+raster hand-off.
+
+**Why, in Robin's words, because the framing is the point.** Told that Ground looks good close up and
+Terra looks good far away, she answered: *"BECAUSE it should ALL BE THE SAME. The Earth should be the
+Earth, the Moon the Moon, no matter how close or how far the camera pans."* That is Law IV said exactly.
+The camera was not choosing how finely Earth was drawn — it was choosing WHICH EARTH YOU GET, and an
+explanation ending "each is good at its own range" is a statement of the bug, not a defence of the design.
+Then the mechanism: *"we just map a texture onto a segment of a sphere, whether it's a small chord or a
+full globe"*, and *"mathematically it is matter, but we only materialize that matter visually when we
+need to, and only the amount we need to."*
+
+**★ The blocker was the parameterization, not the idea — and finding that out collapsed the problem.**
+`fill_ground_cap` was gnomonic (`center + east·du + north·dv`, normalized): a tangent plane projected onto
+the sphere, which reaches 90° only as `du → ∞`. `CAP_MAX_ANGLE = 0.6` was never a tuning limit, it was the
+projection's own asymptote. A polar parameterization has none — and the extent actually required is
+**exactly a hemisphere**, because from any finite altitude you see strictly less than one. So the old
+projection could not reach the one extent the job needs, and the new one reaches it by construction.
+
+**★ Rings follow the camera's GAZE, not its feet.** Resolution concentrates at the segment's centre, which
+is only right if the camera looks straight down. A descent looks AHEAD, so the first cut spent its fine
+rings on ground behind the eye and the corridor came back with visibly jagged biome edges.
+`segment::look_centre` intersects the view ray with the surface and centres there. This is a DRAW
+decision and legitimately so: Law VI lets interest decide what is drawn, while only necessity decides what
+is computed.
+
+**★ Deleting the second mesh changed a measured number, which is the nicest kind of evidence that it was
+really one thing pretending to be two.** A depth-fight lift exists ONLY to hold two copies of one surface
+apart, so `CapTierBuild` lost `lift_m` and `tier_is_current` went from three conditions to two. The lift
+was LINEAR in altitude and therefore tripped its octave first; with only the cell condition left — and the
+cell going as √(h(h+2R)) — the mesh cache now survives about four times the altitude drop instead of two.
+**A 500 km descent costs nine rebuilds where it used to cost eighteen.** The exact boundary is solved
+rather than eyeballed: from 500 km the cell halves at 128,607 m, not the 125,000 a quartering suggests.
+
+**Verified.** 463/463 native, `mod app` clean for wasm32. Terra's 11.9-decade ladder runs end to end at
+p50 0.4 ms per rung with tiles streaming and no panics; the descent corridor completes all five stations
+with zero console errors. Against the pre-collapse build, the A/B at four altitudes (10,000 km → 300 m)
+gave ink identical, detail within noise and mean pixel differences of 1.3–3.4/255 — inside the same-code
+drift band.
+
+**★ A bug the browser found that a unit test could not.** On a polar segment the cell size VARIES —
+squared ring spacing sends the local step toward zero at the centre — so `log2(base/cell)` ran past 11
+octaves, the finest generated wavelength fell under a millimetre, and `world::value_noise`'s lattice
+coordinate (position ~1e7 × frequency ~1e3) overflowed i32 and panicked. The centre does not have an
+infinitely fine cell; it has the FIRST RING's, `cap/rings²`. A uniform grid could not hit this, which is
+why the cap never did. `value_noise` now states its own limit rather than leaving a landmine: past the
+i32 lattice it returns a flat field instead of panicking in debug and SILENTLY WRAPPING in release.
+
+**★ And the rig that verified it was Mac-only until today, which is its own finding.** `mac_corridor.mjs`
+carried a bare `chromium.launch({ headless: false })` — which CLAUDE.md rule 4b forbids outright — and a
+default PORT of 7299. Its header blamed Apple Metal. Neither was true: it was a bare launcher and a dead
+port, and one of the engine's headline behaviours was unverifiable anywhere but one machine. Renamed to
+`corridor.mjs`, pointed at the shared launcher, and it runs here.
+
+**NOT verified, and it bounds the claim.** The corridor's mid and low stations look different after the
+collapse (brighter; the surface fills the frame where the globe used to occupy part of it), and they could
+NOT be A/B'd at identical poses because the arc's descent is not reproducible frame-for-frame. Only the
+pre-arc `1-celestial` frame is pose-identical, and it is unchanged (mean|diff| 0.63/255, ink 14.0 → 13.9%,
+detail 33.08 → 33.02). A fixed-pose rig for the space band is the missing instrument.
+
 ## 2026-07-31 — the tier became a cache, the price collapsed, and the detail did not arrive
 
 **What.** A ground tier is now a CACHE OF THE VIEW. `fill_ground_cap` emits vertices relative to a fixed

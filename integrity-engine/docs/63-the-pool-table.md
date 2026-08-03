@@ -174,13 +174,23 @@ the slope law it claims to obey.
 
 ## The order that follows from it
 
-1. **Collapse globe and cap into ONE sphere segment** whose extent follows the camera, and delete the
-   machinery that mediated between them. This is what makes "the Earth is the Earth" true in the code.
-   ★ The blocker is the parameterization, not the idea: `fill_ground_cap` is gnomonic
-   (`center + east·du + north·dv`, normalized), which reaches 90° only as `du → ∞` — hence today's
-   `CAP_MAX_ANGLE = 0.6`. Covering a hemisphere needs a parameterization that degrades gracefully to π.
+1. ~~**Collapse globe and cap into ONE sphere segment**~~ **DONE 2026-08-02, both scenes.**
+   `terra::segment` is polar rather than gnomonic, because the tangent projection reaches 90° only as
+   `du → ∞` — and a hemisphere is the one extent actually required, since from any finite altitude you
+   see strictly less than one. Extent is `visible_angle`; the centre is `look_centre`, the point the view
+   ray meets, because rings concentrate at the centre and an obliquely-looking camera would otherwise
+   spend them behind itself. Deleted with the second mesh: the globe, the tangent cap, `cap_fade`, the
+   depth-fight lift, `cap_covers_view`, the `draw_globe` decision and the tier ladder — net −323 lines
+   from `lib.rs` on the Terra step alone. ★ The lift going away CHANGED A MEASURED NUMBER: it was linear
+   in altitude and tripped its octave first, so with only the cell condition left the mesh cache now
+   survives ~4× the altitude drop instead of 2×, and a 500 km descent costs **nine** rebuilds where it
+   cost eighteen.
 1b. **The height march** — toward the sun for self-shadowing, along the view ray for occlusion — which is
-   what lets the segment stay coarsely tessellated.
+   what lets the segment stay coarsely tessellated. NOT started.
+1c. **A fixed-pose rig for the space band.** The corridor's descent is not reproducible frame-for-frame,
+   so its mid-stations could not be A/B'd across the collapse; only the pre-arc `1-celestial` frame is
+   pose-identical (and is unchanged, mean|diff| 0.63/255). Until that rig exists, close-range changes in
+   that scene are unverifiable.
 2. **The appearance integral** — material mixture over the footprint, and normal variance carried as
    roughness — with the convergence invariant as its test.
 3. **Matter on demand**, for the pixel or the interaction, never triggered by camera altitude. Ground

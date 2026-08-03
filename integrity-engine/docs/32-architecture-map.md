@@ -189,13 +189,26 @@ not exist and rebuild them; they are real, tested, and partly wired.
   Barnes–Hut self-gravity (exists in aggregate.rs), drop the box ghosts, add the energy equation (exists in
   apply_thermo). Points b+d already exist — only the EOS is new (§5).
 - **texture.rs** (247) — procedural per-material textures from optical properties, zero image assets.
-- **terra/** (5 files, 910) — the docs/43 worlds-as-data planet scene, backing the `Terra` struct (§1).
-  `terra/mod.rs` (9), `terra/world_def.rs` (221 — the world JSON schema: a scene defined as DATA the engine
-  loads, rather than as a code path per scene), `terra/fly_camera.rs` (240 — ONE altitude-blended camera,
-  orbit ⇄ ground, docs/43 Phase 4), `terra/raster.rs` (175 — equirectangular raster sampling),
-  `terra/globe_mesh.rs` (126 — displaced cube-sphere globe mesh, Phase 3). `world_def.rs` is where a world's
-  declared properties live, so it is the natural home for per-world physical data (atmosphere composition
-  and mass, gravity, materials) as scenes stop being branches.
+- **terra/** (7 files) — the docs/43 worlds-as-data planet scene, backing the `Terra` struct (§1).
+  `terra/mod.rs`, `terra/world_def.rs` (the world JSON schema: a scene defined as DATA the engine loads,
+  rather than as a code path per scene), `terra/fly_camera.rs` (ONE altitude-blended camera, orbit ⇄
+  ground, docs/43 Phase 4), `terra/raster.rs` (equirectangular raster sampling),
+  `terra/globe_mesh.rs` (the shared `SurfaceSampler` — what the surface IS in a direction).
+  `world_def.rs` is where a world's declared properties live, so it is the natural home for per-world
+  physical data (atmosphere composition and mass, gravity, materials) as scenes stop being branches.
+  - ★ **`terra/segment.rs` — THE surface geometry (docs/63, 2026-08-02).** One primitive: a disc on the
+    sphere, centre direction plus angular radius, from a chord underfoot to a hemisphere. Extent is
+    `visible_angle` — literally the surface not over the horizon — and it is centred on `look_centre`,
+    the point the view ray meets, because rings concentrate at the centre and an obliquely-looking camera
+    would otherwise spend them behind itself. **This retired the globe mesh AND the tangent cap in BOTH
+    scenes**, along with everything that mediated between them: the cross-fade, the depth-fight lift, the
+    "may I skip the globe" test, and the tier ladder. Polar rather than gnomonic because the tangent
+    projection reaches 90° only as `du → ∞`, and a hemisphere is the one extent actually required.
+  - ★ **`terra/tiles.rs` — measured elevation streamed by necessity (docs/46 row 27).** The engine names
+    the tiles it needs (`zoom_for_ground_size`, the same angular budget as everything else); the host
+    fetches them. A bounded 3×3 patch follows the camera, and the camera moving IS the eviction policy.
+  - `terra/ground_cap.rs` is what SURVIVED the collapse: the cache rule (`CapTierBuild`,
+    `tier_is_current`) and the raster hand-off. It no longer builds anything.
 
 ## 4. The unification map — laws shared, solvers/containers forked
 

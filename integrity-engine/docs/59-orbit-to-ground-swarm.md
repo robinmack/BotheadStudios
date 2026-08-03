@@ -325,6 +325,15 @@ before running it again:
   (hard rule 0), so it reported 0% for frames that plainly contained a planet. Deleted — the PNGs are the
   measurement.
 
+#### 2026-08-02: the tier ladder is gone, and so is the second mesh
+
+Everything in the two sections above that reasons about a CAP, a tier ladder or a globe to fade against is
+now historical. `terra::segment` draws one surface at whatever extent is visible (docs/63), so `build_cap`,
+`cap_fade`, the depth-fight lift, `cap_covers_view` and the ladder itself were deleted in both scenes. The
+measurements stand — they are why the ladder was retired — but the mechanism they measured no longer
+exists. `slope_fraction` and the generated relief moved to `build_segment` unchanged, so row 27's diagnosis
+is unaffected.
+
 #### Streaming it — built 2026-08-01 (`terra::tiles`)
 
 `Terra::tiles_wanted()` → a host fetches → `Terra::add_tile()`. The **engine** chooses which tiles (a
