@@ -70,6 +70,7 @@ mod render;
 pub use render::Drawn;
 pub mod arc; // the out-and-back demo arc: one continuous camera path, surface <-> celestial, pacing derived
 pub mod assembly; // docs/64 - matter with a shape, in a place
+pub mod ballistics; // docs/46 row 33 - a confined gas doing work on a moving boundary
 /// docs/53 — the engine driven by a DEFINITION: builds the world, applies declared matter events through
 /// the shared primitives, and steps. No scene struct, no canvas. This is what re-consumes the systems
 /// deleting terrain orphaned (docs/46 ledger row 15).
