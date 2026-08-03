@@ -113,6 +113,10 @@ pub struct Reaction {
     /// reaction liberates** — how much is actually available depends on the products, which is the
     /// reaction's business rather than the substance's.
     pub oxygen_content: f64,
+    /// Moles of PERMANENT GAS this reactant contributes per mole of itself. Condensed products (the
+    /// potassium salts, soot) do not count — they carry mass but exert no pressure, and for a gun the
+    /// difference between the two is most of the answer.
+    pub moles_gas_per_mole: f64,
     /// The balanced equation these numbers describe, so the stoichiometry is auditable by eye.
     pub equation: String,
 }
@@ -133,6 +137,14 @@ impl Reaction {
             return 0.0;
         }
         self.moles_o2_per_mole * O2_MOLAR_MASS / self.reactant_molar_mass
+    }
+
+    /// Moles of permanent gas produced per kg of this reactant.
+    pub fn gas_moles_per_kg(&self) -> f64 {
+        if self.reactant_molar_mass <= 0.0 {
+            return 0.0;
+        }
+        self.moles_gas_per_mole / self.reactant_molar_mass
     }
 
     /// kg of O2-equivalent this oxidiser CARRIES per kg of itself — the quantity that decides whether a

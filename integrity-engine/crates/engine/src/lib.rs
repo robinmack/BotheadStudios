@@ -90,6 +90,7 @@ pub mod matter;
 mod mesher;
 mod neighbors;
 mod orbit;
+pub mod oxidation; // docs/46 row 31 - rapid oxidation: fires, charges, one reaction
 pub mod recohere; // docs/61 — the batch downward rung: a settled particle field re-coheres to ground
 pub mod refine; // docs/62, the upward rung: the celestial field initializes the local patch, conserved
 pub mod resolution; // docs/44 — resolution by necessity: the quasi-static admission test

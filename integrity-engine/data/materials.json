@@ -2096,6 +2096,7 @@
     "moles_o2_per_mole": 0.0,
     "product_formation_enthalpy": 0.0,
     "oxygen_content": 1.5,
+    "moles_gas_per_mole": 0.5,
     "equation": "2 KNO3 + 3 C + S -> K2S + N2 + 3 CO2 (the classic idealised black-powder reaction)"
    }
   },
@@ -2147,6 +2148,7 @@
     "moles_o2_per_mole": 1.0,
     "product_formation_enthalpy": -296840.0,
     "oxygen_content": 0.0,
+    "moles_gas_per_mole": 1.0,
     "equation": "S + O2 -> SO2"
    }
   },
@@ -2199,6 +2201,7 @@
     "moles_o2_per_mole": 1.0,
     "product_formation_enthalpy": -393510.0,
     "oxygen_content": 0.0,
+    "moles_gas_per_mole": 1.0,
     "equation": "C + O2 -> CO2"
    }
   }
