@@ -466,6 +466,15 @@ to run them, and several of these are checks **nothing currently performs at all
 - **Quadtree self-consistency.** Every SURF parent must equal `combine(children)` — §5's invariant,
   verified over the whole tree at build time rather than sampled at runtime.
 
+★★★ **And the same physics must be available at RUN time, not only at compile time, because a
+destroyed assembly is the interesting case.** Robin: *"a ball slightly too large, a charge too strong,
+should be able to destroy a cannon as history shows it did."* A compile-time check that the gun holds
+its proof charge is necessary and not sufficient — the gun that bursts is the one loaded wrongly, and
+that happens in play. So §7's structural closure is not a gate that blesses an assembly once; it is a
+predicate the assembly carries and is re-asked under real load. **An engine in which a cannon can never
+burst is not simpler than one in which it can — it is one that has quietly declared the failure mode out
+of existence**, which is Law IV inverted and would make the whole join taxonomy decorative.
+
 The results go into the header's `validation_summary` and the PROV section, so **an assembly carries the
 evidence that it was checked**, and a consumer can see which checks ran, which passed, and which were
 skipped for want of data. A check that could not run is recorded as *not run* — an unknown stays unknown
