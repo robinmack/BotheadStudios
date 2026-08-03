@@ -146,9 +146,31 @@ runtime integral SUB-SAMPLES a footprint it cannot afford to read completely. A 
 quadtree is the COMPLETE integral over that patch, computed once, exactly. The budget stays for whatever
 is still derived live; the measured surface stops needing it.
 
-**The Moon gets a SURF section the day it has data** (LOLA elevation, and there are lunar mineral maps)
-with no format change — the slot exists, it is simply absent from `moon.assembly` today. That is the
-test of whether §3's directory is doing its job.
+### ★ Every body reserves a SURF slot, and SURF must never speak of "biomes"
+
+Robin: *"I think all planets should have a surf slot reserved; if it's not filled we don't use it. I'm
+hoping we have data for mars, venus, etc from space missions, and more to come in future."*
+
+The slot costs nothing — the directory already makes every section optional, so an unfilled SURF is an
+absent directory entry, not a stub. What the rule really buys is a **constraint on the node's contents**,
+and it is worth stating because getting it wrong would be invisible until the second body arrived:
+
+★ **A SURF node carries a MATERIAL MIXTURE, never a land-cover class.** If nodes stored "biome index 3"
+the format would be Earth-shaped, and every airless body would need a special case — or worse, a fake
+biome vocabulary. Storing catalogued materials and their fractions means Mars's dust-over-basalt, the
+Moon's mare regolith and Earth's rainforest are the same record with different entries, and a body with
+no vegetation needs no exception. It is also what the appearance integral already consumes
+(`Appearance.mix`), so nothing has to translate.
+
+This is exactly the mistake the shipped Earth already made once, one level up: `earth.json` maps six
+biome indices to materials, and index 3 ("forest") maps to `pine` — pine TIMBER — so the Amazon renders
+the colour of cut lumber (docs/46 row 28). A class is a label; a mixture is matter.
+
+**Verified public topography for the bodies next in line**, all no-auth via USGS Astrogeology Astropedia
+and the PDS Geosciences Node: **Mars** MGS MOLA global DEM at 463 m, and an HRSC/MOLA blend at 200 m;
+**the Moon** LRO LOLA LDEM at 118 m; **Venus** Magellan global topography at 4,641 m. Robin: *"We'll
+likely have to roll our own rasters based on real data"* — which is precisely what the compiler is for,
+and it is the same fusion step Earth's needs.
 
 ---
 
@@ -185,6 +207,46 @@ definition rather than a fourth `#[wasm_bindgen]` struct.
 **Summary by volume.** A parent part's mixture is its children's, weighted by volume, through the same
 reduction a continent uses weighted by area. **So a ship seen from orbit summarises exactly the way a
 landmass does**, and resolution-by-necessity (docs/44) needs no second vocabulary for man-made objects.
+
+### ★ Reusable assemblies — biomes and flora, and the one thing that must NOT be baked
+
+Robin: *"would it make sense to go ahead and create data for biomes (texture of flora, reusable assets
+the compiler can grab and place as needed?"*
+
+**Yes — and the reusable asset is an ASSEMBLY, not a texture.** That distinction is the whole answer.
+
+A biome is already an assembly in this design's own terms: a stack (§4) of materials with a structure —
+canopy over understory over litter over soil over parent rock — plus the statistics of what is
+distributed through it. "Tropical broadleaf evergreen forest" is one such assembly, and the Amazon and
+the Congo are two PLACEMENTS of it with locally measured parameters (canopy height from GEDI, leaf area
+index from MODIS, soil texture from SoilGrids, parent lithology from GLiM). That is instancing (§6),
+which the format already has. **No new concept is required, and inventing a separate "biome library"
+format would be a second answer to a question this one already answers (Law II).**
+
+What must NOT be baked is a picture of a forest. The file carries matter, never appearance (§2), and a
+photographic canopy texture draped on the ground is the stand-in-FOR-matter docs/63 rejects. The good
+news is that nothing needs one: leaf tissue and tropical hardwood are MATERIALS, `texture.rs` already
+generates a material's visible grain from its cited optical properties, and above the material tile the
+appearance integral mixes materials over the footprint. The chain from "what it is made of" to "what it
+looks like" is already complete and is currently starving for exactly this input.
+
+★ **The invariant that makes a reusable biome honest, and it is docs/63's own, applied to flora:**
+resolve the biome to actual instanced plants — trunks, branches, leaves as real parts — integrate their
+appearance over a footprint, and **it must equal the mixture the coarse description gave**. If they
+differ, one is lying. That single requirement forces the two readings to be one description:
+
+- **at distance**, a mixture and a roughness — what `Appearance` already carries, cheap, and enough to
+  end the flat green fill;
+- **up close**, instanced plant assemblies with real geometry, resolved by necessity (docs/44), never by
+  camera altitude alone.
+
+Which is Robin's own sentence from docs/63 — *"we only materialize that matter visually when we need to,
+and only the amount we need to"* — with a rainforest as the worked example instead of a hillside.
+
+**And this work is NOT blocked on the binary format.** The material catalogue entries (leaf tissue,
+tropical hardwoods, quartz/calcareous/basaltic sands) and the biome assembly definitions are SOURCE
+data; the compiler consumes them. They can be authored, sourced and reviewed before a single byte of the
+format exists, and they are needed whether or not the format ever ships.
 
 ---
 
@@ -262,6 +324,14 @@ boundary; it is not the atmosphere's behaviour.
   quantisation is a silent fudge — this makes it a stated, checkable one.
 - **Deduplicate by content hash.** Ocean nodes are identical over vast areas; a hull's ribs are one
   shape a hundred times. Identical subtrees and identical part definitions are stored once.
+- ★ **The client never holds a whole planet, and that is the design rather than a fallback.** Robin:
+  *"If the compiled planets get too big, we can stream what clients need to them JIT."* The three
+  properties above are what make that work without a second delivery mechanism — a breadth-first
+  progressive prefix gives a usable coarse body immediately, node offsets make any refinement an HTTP
+  Range request, and deltas keep each refinement small. **The file IS the stream**; there is no separate
+  streaming format, and `terra::tiles` already proves the host/engine split it needs (the engine names
+  what it wants, the host fetches). A compiled Earth that is too large to download is therefore not a
+  problem to be solved later — it is the expected case.
 
 ---
 
