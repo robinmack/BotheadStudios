@@ -79,6 +79,80 @@ rather than an aspiration:
    assembly matters as much as the binary, and "scenes as data" (docs/46 row 14) stops being a tidiness
    argument and becomes the thing that lets anyone build content at all.
 
+★★★ **THE ACCEPTANCE TEST FOR THE WHOLE ARCHITECTURE** (Robin, 2026-08-02): *"As long as we can build a
+working cannon and a working planet, and put a working cannon on a working planet and fire it, we know
+our assembly build is sound."*
+
+That is one sentence and it exercises every claim this document makes: a PARTS assembly (the cannon), a
+STACK+SURF assembly (the planet), an assembly PLACED on a body at a coordinate (§0 item 1), chemical
+energy becoming gas becoming motion (the gap at row 31), ballistics through that planet's real gravity
+and real air, and a shot landing on real terrain. **Nothing in it can be faked without another part of
+it failing**, which is what makes it an acceptance test rather than a demo.
+
+★★ **A SHIP'S CANNON, not a barrel on the ground** (Robin): *"the cannon needs to be more than just a
+capped cylinder; it will need a way to place/hold it on the ground. Possibly a ship cannon would be the
+right first approach (simplest, the barrel is on a blocky assembly tied to the ground to keep it from
+rolling far in recoil)."*
+
+This is what stops the first assembly being a toy, and it is genuinely the simpler carriage — a naval
+truck carriage is blocks and axles, where a field carriage needs a trail, large wheels and an elevating
+screw. It forces the format to carry parts of DIFFERENT materials joined in DIFFERENT ways, which one
+capped cylinder never would:
+
+| part | material | joined how |
+|---|---|---|
+| barrel | bronze or cast iron | trunnions resting in the carriage cheeks — a BEARING that carries load in compression and permits rotation |
+| carriage cheeks, bed, trucks | oak — and its **anisotropy is load-bearing here** (docs/46 row 30) | pinned and bolted |
+| breeching rope | hemp | **tension only, with slack** — it does nothing until it comes taut, then arrests the recoil |
+| carriage on deck | — | `Rest`: no tension capacity at all, friction decelerating the recoil |
+
+★ **Two additions to §6's join taxonomy fall straight out of it**, which is the point of building a real
+object early: a **bearing** (carries compression, permits rotation about an axis) and a **tension-only
+member with slack** (a rope does nothing until taut — a join whose capacity depends on its current
+extension, not merely on its material). Neither appears in a hull made of welded plate, and neither
+would have been noticed by designing the taxonomy from first principles.
+
+★★ **And recoil hands us a FREE, EXACT validation that needs no historical figure at all: momentum must
+balance.** The shot's momentum out of the muzzle equals the gun-and-carriage momentum backwards, and
+that check is independent of whether our muzzle velocity is right — it tests the interior-ballistics
+chain's *bookkeeping* rather than its calibration. Then friction on the deck and the breeching rope
+arrest it, which exercises `Rest` and the tension-only member under a real impulse rather than a
+declared one.
+
+### ★ Black powder is a MIXTURE, not a substance — found by trying to catalogue it (2026-08-02)
+
+The first attempt at the cannon began where the SOP says it must: source the propellant before any code
+uses it (Law VII). It got this far and then hit something worth writing down.
+
+**Sourced cleanly** — the ENERGETIC properties, which is what a gun actually needs: specific energy
+**2.86 MJ/kg**; permanent gas yield **~0.265 m³/kg at STP** (converted from the ~1.05 in³ per grain
+quoted for muzzleloaders — black powder is unusual in that much of its product mass stays CONDENSED as
+potassium salts and smoke, which is why its gas yield is far below a smokeless propellant's);
+products' specific-heat ratio **γ ≈ 1.2**; Noble-Abel covolume **~1 cm³/g**; and a flame temperature of
+**~1950 K at 1000 psi** for the classic 75/15/10 composition.
+
+**Could NOT be sourced** — the properties of the SOLID: specific heat, decomposition temperature,
+thermal conductivity. And `materials::thermal_data_tests` rightly refuses an entry without a specific
+heat, on the correct principle that *"specific heat is measurable for everything, so everything has
+one"*.
+
+★ **The block is the answer, not an obstacle.** Black powder is not a substance — it is a mechanical
+MIXTURE of three: ~75% potassium nitrate, ~15% charcoal, ~10% sulfur, none of which is in the catalogue.
+Its bulk specific heat, density and conductivity are *derivable from its constituents* by exactly the
+mixture reduction §4 already specifies; what is irreducibly its own is the ENERGY RELEASED when those
+three react, which is a property of the reaction rather than of any one of them.
+
+So the SOP-correct order is: **catalogue KNO₃, charcoal and sulfur as substances; represent black powder
+as a mixture of them plus a reaction; derive the bulk thermal properties rather than typing them.** A
+first draft of the entry did the opposite and quietly carried `specific_heat: 1000.0` — a number
+invented at the keyboard, and precisely the defect `Material::specific_heat` was built to prevent (840
+in `impact.rs`, 1000 in `aggregate.rs`, 1000 in `matter.rs`: one unknown, three answers). It was backed
+out rather than landed with a plausible figure.
+
+This is the substance-versus-assembly distinction from §6b arriving from the other direction — first met
+in a rainforest canopy, met again in a keg of powder — which is the sign it is real and not a
+convenience of the biome discussion.
+
 ★ **The format's first test is a cannon, not a planet.** The direct enforcement of everything above is
 to exercise a NON-PLANET through the same path the planets use — build a cannon (or a plank, or a
 bolted joint) as a PARTS assembly, round-trip it, and run the §7 validations on it. If the format ever
