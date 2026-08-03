@@ -147,6 +147,42 @@ pub struct Part {
     /// Centre of the part, in the assembly's own frame, metres.
     #[serde(default)]
     pub at_m: [f64; 3],
+    /// **How much of this part's SHAPE is actually matter**, 0..1. `1.0` (the default) is solid.
+    ///
+    /// ★ The shape is the ENVELOPE — the space the part occupies. Packing says how much of that
+    /// envelope is the substance and how much is void. A powder charge, a shovel of gravel, snow, a
+    /// bale of hay and a stack of shot are all matter in an ARRANGEMENT, and the arrangement is not a
+    /// property of the substance: the same powder poured, shaken or rammed fills different volumes at
+    /// the same mass.
+    ///
+    /// This is the distinction `data/materials.json` already draws when it records charcoal's TRUE
+    /// density of 1400 kg/m3 beside a poured bulk of 260-380 — and it is why the catalogue carries the
+    /// true one. **Mass is envelope x packing x density**, so a loosely packed part weighs less than a
+    /// solid one of the same size while its substance is unchanged, which is exactly right.
+    ///
+    /// It was added because the alternative was worse: sizing a charge's parts to their SOLID volume
+    /// made an 8 lb charge occupy half the chamber it really fills, and chamber volume sets the
+    /// pressure a burn reaches.
+    #[serde(default = "one")]
+    pub packing: f64,
+}
+
+/// serde default for [`Part::packing`] — solid unless stated.
+fn one() -> f64 {
+    1.0
+}
+
+impl Part {
+    /// The space this part takes up, m³ — its shape, void included.
+    pub fn envelope_volume_m3(&self) -> f64 {
+        self.shape.volume_m3()
+    }
+
+    /// The volume of actual SUBSTANCE in it, m³. Packing outside `0..=1` is clamped: more matter than
+    /// space is not a denser arrangement, it is a broken definition.
+    pub fn matter_volume_m3(&self) -> f64 {
+        self.shape.volume_m3() * self.packing.clamp(0.0, 1.0)
+    }
 }
 
 /// A named connection between two parts, by part name.
@@ -190,7 +226,11 @@ pub struct Assembly {
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
 pub struct Derived {
     pub mass_kg: f64,
-    pub volume_m3: f64,
+    /// The space the assembly occupies, m³ — envelopes, void included. What it displaces.
+    pub envelope_volume_m3: f64,
+    /// The volume of actual substance, m³. Equals the envelope for a solid assembly; less for anything
+    /// containing a packed arrangement. The gap between the two IS the porosity.
+    pub matter_volume_m3: f64,
     pub centre_of_mass_m: [f64; 3],
 }
 
@@ -208,7 +248,7 @@ impl Assembly {
     pub fn mass_kg(&self, mats: &[Material]) -> Result<f64, String> {
         let mut total = 0.0;
         for p in &self.parts {
-            total += p.shape.volume_m3() * self.density_of(p, mats)?;
+            total += p.matter_volume_m3() * self.density_of(p, mats)?;
         }
         Ok(total)
     }
@@ -218,7 +258,7 @@ impl Assembly {
         let mut acc = [0.0f64; 3];
         let mut total = 0.0;
         for p in &self.parts {
-            let m = p.shape.volume_m3() * self.density_of(p, mats)?;
+            let m = p.matter_volume_m3() * self.density_of(p, mats)?;
             total += m;
             for k in 0..3 {
                 acc[k] += p.at_m[k] * m;
@@ -238,7 +278,7 @@ impl Assembly {
         let mut total = 0.0f64;
         for p in &self.parts {
             let idx = self.index_of(p, mats)?;
-            let m = p.shape.volume_m3() * mats[idx].density as f64;
+            let m = p.matter_volume_m3() * mats[idx].density as f64;
             total += m;
             match mix.iter_mut().find(|(i, _)| *i == idx) {
                 Some((_, f)) => *f += m as f32,
@@ -268,7 +308,8 @@ impl Assembly {
     pub fn derive(&self, mats: &[Material]) -> Result<Derived, String> {
         Ok(Derived {
             mass_kg: self.mass_kg(mats)?,
-            volume_m3: self.parts.iter().map(|p| p.shape.volume_m3()).sum(),
+            envelope_volume_m3: self.parts.iter().map(|p| p.envelope_volume_m3()).sum(),
+            matter_volume_m3: self.parts.iter().map(|p| p.matter_volume_m3()).sum(),
             centre_of_mass_m: self.centre_of_mass_m(mats)?,
         })
     }
@@ -292,10 +333,16 @@ impl Assembly {
                 self.id, cached.mass_kg, fresh.mass_kg
             ));
         }
-        if off(cached.volume_m3, fresh.volume_m3) {
+        if off(cached.envelope_volume_m3, fresh.envelope_volume_m3) {
             return Err(format!(
-                "'{}' caches volume {} m3 but its parts occupy {}",
-                self.id, cached.volume_m3, fresh.volume_m3
+                "'{}' caches an envelope volume of {} m3 but its parts occupy {}",
+                self.id, cached.envelope_volume_m3, fresh.envelope_volume_m3
+            ));
+        }
+        if off(cached.matter_volume_m3, fresh.matter_volume_m3) {
+            return Err(format!(
+                "'{}' caches {} m3 of matter but its parts contain {}",
+                self.id, cached.matter_volume_m3, fresh.matter_volume_m3
             ));
         }
         for k in 0..3 {
@@ -442,6 +489,7 @@ mod tests {
                         length: 0.5,
                     },
                     at_m: [-1.0, 0.0, 0.0],
+                    packing: 1.0,
                 },
                 Part {
                     name: "chase".into(),
@@ -452,6 +500,7 @@ mod tests {
                         length: 1.5,
                     },
                     at_m: [0.5, 0.0, 0.0],
+                    packing: 1.0,
                 },
             ],
         };
@@ -497,6 +546,7 @@ mod tests {
                         length: 1.0,
                     },
                     at_m: [0.0; 3],
+                    packing: 1.0,
                 },
                 Part {
                     name: "bed".into(),
@@ -507,6 +557,7 @@ mod tests {
                         z: 0.6,
                     },
                     at_m: [0.0; 3],
+                    packing: 1.0,
                 },
             ],
         };
@@ -628,7 +679,7 @@ mod shipped_cannon_tests {
             .iter()
             .map(|n| {
                 let p = charge.part(n).expect("a powder part");
-                p.shape.volume_m3()
+                p.matter_volume_m3()
                     * mats[crate::materials::index_of(&mats, &p.material)].density as f64
             })
             .sum();
@@ -651,7 +702,7 @@ mod shipped_cannon_tests {
         .iter()
         .map(|n| {
             let p = gun.part(n).expect("a barrel part");
-            p.shape.volume_m3()
+            p.matter_volume_m3()
                 * mats[crate::materials::index_of(&mats, &p.material)].density as f64
         })
         .sum();
@@ -715,7 +766,7 @@ mod shipped_cannon_tests {
             "a fresh cache agrees with its parts"
         );
         let cached = gun.derived.expect("cache");
-        assert!(cached.mass_kg > 0.0 && cached.volume_m3 > 0.0);
+        assert!(cached.mass_kg > 0.0 && cached.envelope_volume_m3 > 0.0);
 
         // ★ Now change the GEOMETRY and leave the cache alone — a founder boring the barrel out wider.
         // The stale mass must be caught, not preferred.
@@ -733,6 +784,80 @@ mod shipped_cannon_tests {
         assert!(
             err.contains("stale") && err.contains("parts win"),
             "and it must say which side is the truth: {err}"
+        );
+    }
+
+    /// **Packing: the shape is the ENVELOPE, and how much of it is matter is a separate question.**
+    ///
+    /// Robin (2026-08-03), on adding it: *"let's do the honest fix"*, and *"that will come in handy in a
+    /// number of ways in future"* — snow, soil, gravel, rubble, a bag of sand, a stack of shot.
+    ///
+    /// The charge is the case that forced it. Sized to its SOLID volume, 8 lb of powder occupied half
+    /// the chamber it really fills; and chamber volume sets the pressure a burn reaches, so that is a
+    /// physics error rather than a cosmetic one. With packing, the shape is the space the powder fills
+    /// and the mass still comes out at 8 lb.
+    #[test]
+    fn a_packed_charge_fills_its_chamber_while_weighing_what_its_matter_weighs() {
+        let mats = mats();
+        let charge = shipped::load("charge-24pdr-service");
+        const LB: f64 = 0.45359237;
+
+        let powder = ["saltpetre", "charcoal", "brimstone"];
+        let mass: f64 = powder
+            .iter()
+            .map(|n| {
+                let p = charge.part(n).expect("powder");
+                p.matter_volume_m3()
+                    * mats[crate::materials::index_of(&mats, &p.material)].density as f64
+            })
+            .sum();
+        // ★ The MASS is the service charge: 8 lb of powder to a 24 lb ball.
+        assert!(
+            (mass - 8.0 * LB).abs() < 1e-3,
+            "the powder weighs its service charge: {mass:.4} kg vs {:.4}",
+            8.0 * LB
+        );
+
+        // ★ The ENVELOPE is what it fills: mass over the POURED bulk density of corned powder.
+        let envelope: f64 = powder
+            .iter()
+            .map(|n| charge.part(n).expect("powder").envelope_volume_m3())
+            .sum();
+        const RHO_BULK: f64 = 1000.0; // poured corned powder
+        assert!(
+            (envelope - mass / RHO_BULK).abs() < 1e-6,
+            "the charge fills mass/bulk-density of chamber: {:.1} cm3 against {:.1}",
+            envelope * 1e6,
+            mass / RHO_BULK * 1e6
+        );
+
+        // ★★ And the gap between them IS the porosity — matter in an arrangement, which is a property
+        // of the arrangement and not of the substance. About half of a powder charge is void.
+        let matter: f64 = powder
+            .iter()
+            .map(|n| charge.part(n).expect("powder").matter_volume_m3())
+            .sum();
+        let void = 1.0 - matter / envelope;
+        assert!(
+            (0.45..0.55).contains(&void),
+            "corned powder is roughly half void; derived {:.1} percent",
+            void * 100.0
+        );
+
+        // A solid part is unaffected: the wad is wood, packing 1, envelope == matter.
+        let wad = charge.part("wad").expect("a wad");
+        assert!(
+            (wad.envelope_volume_m3() - wad.matter_volume_m3()).abs() < 1e-15,
+            "a solid part's envelope IS its matter"
+        );
+
+        // Nonsense packing cannot create matter: more substance than space is a broken definition,
+        // not a denser arrangement.
+        let mut impossible = wad.clone();
+        impossible.packing = 4.0;
+        assert!(
+            (impossible.matter_volume_m3() - wad.envelope_volume_m3()).abs() < 1e-15,
+            "packing above 1 clamps rather than inventing matter"
         );
     }
 }
