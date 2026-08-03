@@ -205,6 +205,123 @@ pub fn build_uv_sphere(
     Mesh { vertices, indices }
 }
 
+/// **A box of arbitrary extents**, centred on its own origin — carriage cheeks, a bed, a bulkhead.
+///
+/// `build_cube` already existed but takes ONE half-extent, so it can only make cubes. A slab is the
+/// commoner shape in anything built rather than grown, and approximating one with a cube would change
+/// the mass an assembly derives from it.
+pub fn build_box(hx: f32, hy: f32, hz: f32, mat: u32, color: [f32; 3]) -> Mesh {
+    let mut vertices: Vec<Vertex> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    for (_, normal, corners) in FACES.iter() {
+        let base = vertices.len() as u32;
+        for c in corners.iter() {
+            vertices.push(Vertex {
+                pos: [
+                    (c[0] * 2.0 - 1.0) * hx,
+                    (c[1] * 2.0 - 1.0) * hy,
+                    (c[2] * 2.0 - 1.0) * hz,
+                ],
+                nrm: *normal,
+                col: color,
+                mat,
+                rough: 0.0,
+            });
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    Mesh { vertices, indices }
+}
+
+/// **A tube along +X**, centred on its own origin: outer wall, bore wall, and the annular end caps
+/// between them. `r_bore = 0` gives a solid cylinder with flat caps.
+///
+/// Along +X because that is the axis a barrel lies on, and a gun is what wanted this shape. The bore
+/// wall is wound inward so that looking down the muzzle shows the inside of the barrel rather than
+/// nothing — a hollow thing that is only hollow from outside is a picture of a tube, not a tube.
+pub fn build_tube(
+    r_outer: f32,
+    r_bore: f32,
+    length: f32,
+    segments: usize,
+    mat: u32,
+    color: [f32; 3],
+) -> Mesh {
+    use std::f32::consts::TAU;
+    let n = segments.max(6);
+    let (hl, ri) = (length * 0.5, r_bore.max(0.0).min(r_outer));
+    let mut vertices: Vec<Vertex> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    let mut quad = |a: u32, b: u32, c: u32, d: u32, idx: &mut Vec<u32>| {
+        idx.extend_from_slice(&[a, b, c, a, c, d]);
+    };
+    for i in 0..n {
+        let (t0, t1) = (i as f32 / n as f32 * TAU, (i + 1) as f32 / n as f32 * TAU);
+        let (c0, s0, c1, s1) = (t0.cos(), t0.sin(), t1.cos(), t1.sin());
+        // Outer wall — normals point away from the axis.
+        let base = vertices.len() as u32;
+        for &(y, z, ny, nz, x) in &[
+            (c0 * r_outer, s0 * r_outer, c0, s0, -hl),
+            (c1 * r_outer, s1 * r_outer, c1, s1, -hl),
+            (c1 * r_outer, s1 * r_outer, c1, s1, hl),
+            (c0 * r_outer, s0 * r_outer, c0, s0, hl),
+        ] {
+            vertices.push(Vertex {
+                pos: [x, y, z],
+                nrm: [0.0, ny, nz],
+                col: color,
+                mat,
+                rough: 0.0,
+            });
+        }
+        quad(base, base + 1, base + 2, base + 3, &mut indices);
+        if ri > 0.0 {
+            // Bore wall — normals point INWARD, toward the axis, so it is visible from inside.
+            let b = vertices.len() as u32;
+            for &(y, z, ny, nz, x) in &[
+                (c0 * ri, s0 * ri, -c0, -s0, -hl),
+                (c0 * ri, s0 * ri, -c0, -s0, hl),
+                (c1 * ri, s1 * ri, -c1, -s1, hl),
+                (c1 * ri, s1 * ri, -c1, -s1, -hl),
+            ] {
+                vertices.push(Vertex {
+                    pos: [x, y, z],
+                    nrm: [0.0, ny, nz],
+                    col: color,
+                    mat,
+                    rough: 0.0,
+                });
+            }
+            quad(b, b + 1, b + 2, b + 3, &mut indices);
+        }
+        // The two end faces: an annulus when bored, a disc when solid.
+        for (x, nx) in [(-hl, -1.0f32), (hl, 1.0f32)] {
+            let b = vertices.len() as u32;
+            let ring = [
+                (c0 * ri, s0 * ri),
+                (c1 * ri, s1 * ri),
+                (c1 * r_outer, s1 * r_outer),
+                (c0 * r_outer, s0 * r_outer),
+            ];
+            for &(y, z) in &ring {
+                vertices.push(Vertex {
+                    pos: [x, y, z],
+                    nrm: [nx, 0.0, 0.0],
+                    col: color,
+                    mat,
+                    rough: 0.0,
+                });
+            }
+            if nx > 0.0 {
+                quad(b, b + 1, b + 2, b + 3, &mut indices);
+            } else {
+                quad(b + 3, b + 2, b + 1, b, &mut indices);
+            }
+        }
+    }
+    Mesh { vertices, indices }
+}
+
 /// Build the REAL bulk-Earth surface as a curved CAP that FOLLOWS the same terrain relief as the voxel
 /// patch (NOT a flat decorative plane, and NOT a smooth shelf pinned at one height above the valleys):
 /// a tessellated polar disk that samples the SHARED [`crate::world::terrain_height`] at every vertex AND

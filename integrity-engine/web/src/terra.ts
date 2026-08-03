@@ -252,6 +252,29 @@ async function main(): Promise<void> {
     });
     hud.add("actions", swarm);
 
+    // **The cannon.** The scene's entire contribution is placement: it says a 24-pounder stands at the
+    // point below the camera and points along this bearing. The engine burns the charge, checks the
+    // barrel holds, works out the muzzle velocity and flies the shot through the air — the same flight
+    // path the meteor swarm uses. Nothing here touches physics, and `laws::scene_purity_tests` fails the
+    // build if it ever does.
+    const fire = document.createElement("button");
+    fire.textContent = "Fire cannon";
+    fire.title = "Fire a 24-pounder from the ground below the camera, seaward at 20 degrees elevation";
+    Object.assign(fire.style, {
+      marginLeft: "8px", padding: "8px 14px", borderRadius: "999px", cursor: "pointer",
+      border: "1px solid rgba(255,255,255,0.25)", background: "rgba(20,22,30,0.72)", color: "#eee",
+      font: "600 13px system-ui, sans-serif",
+    });
+    fire.addEventListener("click", () => {
+      // The camera's own heading is where the gun points — you fire where you are looking.
+      const bearing = (terra.camera_bearing?.() ?? 0);
+      const v = terra.fire_cannon(bearing, 20);
+      hud.notify(v > 0
+        ? `cannon fired — ${v.toFixed(0)} m/s at bearing ${bearing.toFixed(0)}\u00b0`
+        : "the gun did not fire — see the console");
+    });
+    hud.add("actions", fire);
+
     // **Follow a fragment down.** The engine says where its matter IS (`heaviest_fragment` / `fragment`);
     // this decides where to put a camera because of it and hands the engine a POSE. The engine has no
     // notion of "following" and does not need one — which is the whole point of feeding it coordinates and

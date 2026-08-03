@@ -5743,6 +5743,13 @@ mod app {
         /// can be compared on the same frame before either is deleted.
         segment_gpu: Option<GpuMesh>,
         segment_uni: Option<UniformSlot>,
+        /// **The cannon, as geometry derived from its assembly** — built once from
+        /// `Assembly::mesh`, so the picture and the mass come from the same statement of what is there.
+        /// `None` until the gun is emplaced.
+        cannon_gpu: Option<GpuMesh>,
+        cannon_uni: Option<UniformSlot>,
+        /// Where the gun stands: (lat, lon, bearing). The scene's whole contribution — placement.
+        cannon_at: Option<(f64, f64, f64)>,
         segment_verts: Vec<Vertex>,
         /// What the segment's mesh currently HOLDS — the same cache-of-the-view rule the ground tiers use
         /// (`ground_cap::tier_is_current`), on the one mesh instead of a ladder of them. The LIFT term is
@@ -5779,6 +5786,8 @@ mod app {
         // contribution is the button that declares initial conditions and the draw that presents the
         // result; everything between is `flight::Flight` running the same code the ground patch runs.
         flight: crate::flight::Flight,
+        /// Shots fired from this scene's cannon — a counter for the HUD and the rig, not physics.
+        cannon_shots: u32,
         /// Wall-clock stamp of the last frame, so the flight advances in real seconds.
         last_frame_s: f64,
         /// The scene-agnostic renderer for whatever the engine is holding (`render::MatterField`).
@@ -5948,6 +5957,28 @@ mod app {
                 &normal_view,
                 &sampler,
             ));
+            // **The cannon's geometry, DERIVED from its assembly** (docs/64). There is no cannon model
+            // in this repo: the barrel is a tube because `naval-24pdr-gun.json` says it is a tube, and
+            // each part wears its own material's colour and texture layer. Built here for the same
+            // reason the segment is — this is where the bind layout and the material views are in
+            // scope. Robin: the picture *"should be a product of the assembly and the engine"*.
+            let (cannon_gpu, cannon_uni) = {
+                let a =
+                    crate::assembly::compiled::parse(crate::assembly::compiled::NAVAL_24PDR_GUN);
+                let m = a.mesh(&mats, 20);
+                let gpu = make_dynamic_mesh(&device, "terra-cannon", m.vertices.len(), &m.indices);
+                queue.write_buffer(&gpu.vertex_buf, 0, bytemuck::cast_slice(&m.vertices));
+                (
+                    Some(gpu),
+                    Some(make_space_uniform(
+                        &device,
+                        &bind_layout,
+                        &tex_view,
+                        &normal_view,
+                        &sampler,
+                    )),
+                )
+            };
             let shell_count = 4096; // ~2.8° grain spacing — resolves continents/biomes (Phase 2, grain shell)
             let shell_unis: Vec<UniformSlot> = (0..shell_count)
                 .map(|_| {
@@ -5977,6 +6008,7 @@ mod app {
             Ok(Terra {
                 detail: Default::default(),
                 flight: crate::flight::Flight::default(),
+                cannon_shots: 0,
                 last_frame_s: 0.0,
                 matter,
                 flight_env,
@@ -6012,6 +6044,9 @@ mod app {
                 body_id: "earth".into(),
                 stars: None,
                 segment_gpu,
+                cannon_gpu,
+                cannon_uni,
+                cannon_at: None,
                 segment_uni,
                 segment_built: None,
                 surface_loaded: false,
@@ -6197,6 +6232,95 @@ mod app {
         /// The same, with the fragment COUNT given — the resolution the disruption is divided at (docs/44),
         /// which is a declaration a caller is allowed to make. Exposed so a rig can vary the workload and
         /// measure what actually costs frame time instead of guessing.
+        /// **Emplace the gun at the point below the camera.**
+        ///
+        /// Placement only — WHICH assembly, WHERE, and WHICH WAY. The geometry was built from the
+        /// assembly in `new()` (where the bind layout and material textures are in scope, the same
+        /// reason the segment's are), so this sets a coordinate and nothing else.
+        pub fn emplace_cannon(&mut self, bearing_deg: f64) {
+            self.cannon_at = Some((self.fly.lat, self.fly.lon, bearing_deg));
+            log::info!(
+                "cannon emplaced at lat {:.3} lon {:.3}, bearing {bearing_deg:.0}",
+                self.fly.lat,
+                self.fly.lon
+            );
+        }
+
+        /// The compass bearing the camera is looking along — so a gun points where you are looking.
+        /// Reads the fly camera's yaw; it computes nothing.
+        pub fn camera_bearing(&self) -> f64 {
+            self.fly.yaw.to_degrees().rem_euclid(360.0)
+        }
+
+        /// **Fire a 24-pounder from the point below the camera, out along the given bearing.**
+        ///
+        /// ★ This is the whole of the scene's contribution, and it is deliberately nothing but
+        /// placement: WHICH assemblies are present (the three compiled ones), WHERE the gun stands (the
+        /// surface point under the camera), and WHICH WAY it points. `ballistics::fire_gun` derives the
+        /// burn, the chamber pressure, the containment check and the muzzle velocity from those
+        /// assemblies and the material catalogue; `flight::Flight` then carries the shot through the
+        /// air exactly as it carries a meteor. **Nothing here computes a force, and
+        /// `laws::scene_purity_tests` fails the build if it ever does.**
+        ///
+        /// Returns the muzzle velocity in m/s, or 0 if the gun did not fire (a burst or a squib, which
+        /// the engine decides and the scene merely reports).
+        pub fn fire_cannon(&mut self, bearing_deg: f64, elevation_deg: f64) -> f64 {
+            use crate::assembly::compiled;
+            let gun = compiled::parse(compiled::NAVAL_24PDR_GUN);
+            let charge = compiled::parse(compiled::CHARGE_24PDR_SERVICE);
+            let shot = compiled::parse(compiled::ROUND_SHOT_24PDR);
+            if self.cannon_at.is_none() {
+                self.emplace_cannon(bearing_deg);
+            }
+            let (glat, glon, _) =
+                self.cannon_at
+                    .unwrap_or((self.fly.lat, self.fly.lon, bearing_deg));
+            let e = crate::ballistics::Emplacement {
+                lat_deg: glat,
+                lon_deg: glon,
+                height_m: 12.0,
+                bearing_deg,
+                elevation_deg,
+            };
+            match crate::ballistics::fire_gun(
+                &gun,
+                &charge,
+                &shot,
+                &e,
+                self.planet_radius,
+                &self.mats,
+            ) {
+                Ok((fired, Some(body))) => {
+                    self.flight.introduce(body);
+                    self.cannon_shots += 1;
+                    log::info!(
+                        "cannon: {:?} at {:.0} m/s, peak {:.0} MPa, recoil {:.2} m/s, from lat {:.2} lon {:.2} bearing {bearing_deg:.0}",
+                        fired.outcome, fired.muzzle_ms, fired.peak_pressure_pa / 1.0e6,
+                        fired.recoil_ms, self.fly.lat, self.fly.lon
+                    );
+                    fired.muzzle_ms
+                }
+                Ok((fired, None)) => {
+                    log::warn!(
+                        "cannon: {:?} — peak {:.0} MPa against a wall good for {:.0} MPa",
+                        fired.outcome,
+                        fired.peak_pressure_pa / 1.0e6,
+                        fired.peak_hoop_pa / 1.0e6
+                    );
+                    0.0
+                }
+                Err(e) => {
+                    log::error!("cannon: {e}");
+                    0.0
+                }
+            }
+        }
+
+        /// How many shots this gun has fired — for the HUD and for a rig to assert against.
+        pub fn cannon_shots(&self) -> u32 {
+            self.cannon_shots
+        }
+
         pub fn launch_swarm_n(&mut self, count: usize) {
             let iron = materials::index_of(&self.mats, "iron");
             // Where the swarm is headed: the point on the surface under the camera. THE shared conversion
@@ -6996,6 +7120,17 @@ mod app {
                         pass.set_pipeline(&self.globe_pipeline);
                         draw(&mut pass, uni, gpu);
                     }
+                    // **The cannon**, standing where it was emplaced. Its geometry came from its
+                    // assembly and its uniform was written in `build_segment` beside the surface it
+                    // stands on; this only draws it.
+                    if let (Some(gpu), Some(uni)) =
+                        (self.cannon_gpu.as_ref(), self.cannon_uni.as_ref())
+                    {
+                        if self.cannon_at.is_some() {
+                            pass.set_pipeline(&self.globe_pipeline);
+                            draw(&mut pass, uni, gpu);
+                        }
+                    }
                 } else {
                     pass.set_pipeline(&self.pipeline);
                     for uni in self.shell_unis.iter() {
@@ -7319,6 +7454,41 @@ mod app {
                         .write_buffer(&gpu.vertex_buf, 0, bytemuck::cast_slice(&verts));
                 }
                 self.segment_built = Some(built);
+            }
+            // **Stand the cannon on the surface.** Placement only: the assembly supplied the shape,
+            // this says where it is and which way it faces. The model matrix maps the assembly's own
+            // axes (barrel along +X, up along +Y) onto the local tangent frame at the gun's feet, and
+            // scales metres into display units — camera-relative, like every other draw here.
+            if let (Some(uni), Some((glat, glon, bearing))) =
+                (self.cannon_uni.as_ref(), self.cannon_at)
+            {
+                let (up, north, east) = crate::geo::tangent_frame(glat, glon);
+                let b = bearing.to_radians();
+                let fwd = (north * b.cos() + east * b.sin()).normalize();
+                let side = up.cross(fwd).normalize();
+                // ★ The gun stands on the GROUND, not at sea level. Placing it at `r_disp` buried
+                // it under a coastline hundreds of metres above the datum — the first rig frame showed
+                // terrain and no cannon, which is exactly what a buried model looks like. The height
+                // comes from the same surface the camera stands on, so the two cannot disagree.
+                let at = up * (r_disp + self.ground_disp_at(glat, glon));
+                let model = glam::DMat4::from_cols(
+                    (fwd * ds).extend(0.0),
+                    (up * ds).extend(0.0),
+                    (side * ds).extend(0.0),
+                    (at - view.eye).extend(1.0),
+                )
+                .as_mat4();
+                write_space_uniform(
+                    &self.queue,
+                    uni,
+                    view.vp_rel,
+                    model,
+                    sun_light,
+                    [1.0, 1.0, 1.0, 1.0],
+                    [anchor.x, anchor.y, anchor.z, self.veil_column_fraction()],
+                    self.air(),
+                    [0.0, 0.0, 0.0, 0.0],
+                );
             }
             if let Some(uni) = self.segment_uni.as_ref() {
                 let model = glam::DMat4::from_translation(built.anchor - view.eye).as_mat4();

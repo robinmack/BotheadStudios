@@ -272,6 +272,135 @@ pub fn launch(e: &Emplacement, muzzle_ms: f64, body_radius_m: f64) -> (glam::DVe
     (up * (body_radius_m + e.height_m), dir * muzzle_ms)
 }
 
+/// **Fire a gun that is an ASSEMBLY, at an emplacement, and hand back the shot in flight.**
+///
+/// ★ This exists so a SCENE can fire a cannon without touching physics. Robin: *"scenes specify
+/// assemblies present, their positions, and starting velocities. They must NEVER introduce physics."*
+/// A scene names three assemblies and an emplacement — which assemblies are present, where they are and
+/// which way they point — and everything else is derived HERE: the charge's mass from its parts, the
+/// burn from `oxidation`, the chamber from the charge's envelope, the bore and wall from the barrel's
+/// own geometry, the products' behaviour from the catalogue's reaction data.
+///
+/// Returns the outcome and, when it fired, a [`crate::flight::FlyingBody`] ready to be introduced into
+/// [`crate::flight::Flight`] — which then carries it through the air exactly as it carries a meteor.
+/// The caller never sees a pressure, a drag coefficient or an acceleration.
+pub fn fire_gun(
+    gun: &crate::assembly::Assembly,
+    charge: &crate::assembly::Assembly,
+    shot: &crate::assembly::Assembly,
+    e: &Emplacement,
+    body_radius_m: f64,
+    mats: &[crate::materials::Material],
+) -> Result<(Shot, Option<crate::flight::FlyingBody>), String> {
+    use crate::assembly::Shape;
+
+    // The barrel's bore and wall come from the barrel, not from a caller.
+    let reinforce = gun
+        .parts
+        .iter()
+        .find_map(|p| match p.shape {
+            Shape::Tube {
+                r_outer,
+                r_bore,
+                length,
+            } => Some((r_outer, r_bore, length)),
+            _ => None,
+        })
+        .ok_or("the gun has no bored barrel")?;
+    let bored: f64 = gun
+        .parts
+        .iter()
+        .filter_map(|p| match p.shape {
+            Shape::Tube { length, .. } => Some(length),
+            _ => None,
+        })
+        .sum();
+    // The chamber is what the charge OCCUPIES — its envelope, void included. Using the matter volume
+    // would halve it and double the pressure (the packing distinction, docs/64).
+    let chamber: f64 = charge.parts.iter().map(|p| p.envelope_volume_m3()).sum();
+    let area = std::f64::consts::PI * reinforce.1 * reinforce.1;
+    let barrel_mat = gun
+        .parts
+        .iter()
+        .find(|p| matches!(p.shape, Shape::Tube { .. }))
+        .map(|p| p.material.clone())
+        .ok_or("no barrel material")?;
+    let wall_strength = mats
+        .iter()
+        .find(|m| m.id == barrel_mat)
+        .ok_or("unknown barrel material")?
+        .fracture_strength as f64;
+
+    // Burn the charge, sealed in: no air reaches powder rammed to the bottom of a bore.
+    let powder: Vec<(&crate::materials::Material, f64)> = charge
+        .parts
+        .iter()
+        .filter_map(|p| {
+            let m = mats.iter().find(|m| m.id == p.material)?;
+            m.reaction.as_ref()?;
+            Some((m, p.matter_volume_m3() * m.density as f64))
+        })
+        .collect();
+    if powder.is_empty() {
+        return Err("the charge contains nothing that burns".into());
+    }
+    let burn = crate::oxidation::burn(&powder, 0.0);
+
+    // The products' behaviour is the OXIDISER's reaction data — it is what decides which reaction ran.
+    let rx = powder
+        .iter()
+        .filter_map(|(m, _)| m.reaction.as_ref())
+        .find(|r| r.flame_temperature > 0.0)
+        .ok_or("no catalogued products for this reaction")?;
+    let gas_kg = burn.gas_moles * rx.products_molar_mass;
+
+    let shot_part = shot.parts.first().ok_or("the shot has no parts")?;
+    let shot_kg = shot.mass_kg(mats)?;
+    let shot_r = shot_part.shape.equivalent_radius_m();
+    let shot_mat = mats
+        .iter()
+        .position(|m| m.id == shot_part.material)
+        .ok_or("unknown shot material")?;
+
+    let bore = Bore {
+        r_m: reinforce.1,
+        chamber_m3: chamber,
+        travel_m: (bored - chamber / area).max(0.0),
+        wall_m: reinforce.0 - reinforce.1,
+        wall_strength_pa: wall_strength,
+        // Wadding and the ball's clearance fit. *Flagged*: a representative value until the
+        // `InterferenceFit` join carries its own normal pressure and friction (docs/64 §6).
+        shot_start_pa: 15.0e6,
+    };
+    let fired = fire(
+        &burn,
+        &bore,
+        shot_kg,
+        gun.mass_kg(mats)?,
+        gas_kg,
+        rx.products_gamma,
+        rx.products_covolume,
+        rx.flame_temperature,
+    );
+    if fired.outcome != Outcome::Fired {
+        return Ok((fired, None));
+    }
+    let (pos, vel) = launch(e, fired.muzzle_ms, body_radius_m);
+    Ok((
+        fired,
+        Some(crate::flight::FlyingBody {
+            id: 0,
+            pos,
+            vel,
+            mass_kg: shot_kg,
+            material: shot_mat,
+            radius_m: shot_r,
+            temp_k: 288.0,
+            skin_m: 0.0,
+        }),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

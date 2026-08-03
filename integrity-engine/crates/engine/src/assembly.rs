@@ -362,6 +362,66 @@ impl Assembly {
     }
 }
 
+impl Assembly {
+    /// **The assembly's own geometry, as a mesh** — derived from its parts, never authored beside them.
+    ///
+    /// Robin: the visible thing *"should be a product of the assembly and the engine"*. So there is no
+    /// cannon model anywhere: the barrel is a tube because the assembly says it is a tube, the cheeks
+    /// are slabs because the assembly says so, and each part wears its own material's colour and
+    /// texture layer. Change a dimension in the JSON and the picture changes with the mass, because
+    /// both come from the same statement of what is there.
+    ///
+    /// Cylinders and tubes lie along the assembly's +X, which is the axis a barrel runs on. `segments`
+    /// is a RESOLUTION choice, not physics (docs/44): the same shape sampled more finely.
+    pub fn mesh(&self, mats: &[Material], segments: usize) -> crate::mesher::Mesh {
+        let mut out = crate::mesher::Mesh {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+        };
+        for p in &self.parts {
+            let Some(mi) = mats.iter().position(|m| m.id == p.material) else {
+                continue; // an unknown material draws nothing rather than drawing a lie
+            };
+            let (col, mat) = (mats[mi].albedo, mi as u32);
+            let part = match p.shape {
+                Shape::Sphere { r } => crate::mesher::build_uv_sphere(r as f32, mat, col, 12, 20),
+                Shape::Cylinder { r, length } => {
+                    crate::mesher::build_tube(r as f32, 0.0, length as f32, segments, mat, col)
+                }
+                Shape::Tube {
+                    r_outer,
+                    r_bore,
+                    length,
+                } => crate::mesher::build_tube(
+                    r_outer as f32,
+                    r_bore as f32,
+                    length as f32,
+                    segments,
+                    mat,
+                    col,
+                ),
+                Shape::Slab { x, y, z } => crate::mesher::build_box(
+                    (x * 0.5) as f32,
+                    (y * 0.5) as f32,
+                    (z * 0.5) as f32,
+                    mat,
+                    col,
+                ),
+            };
+            let base = out.vertices.len() as u32;
+            for mut v in part.vertices {
+                v.pos[0] += p.at_m[0] as f32;
+                v.pos[1] += p.at_m[1] as f32;
+                v.pos[2] += p.at_m[2] as f32;
+                out.vertices.push(v);
+            }
+            out.indices
+                .extend(part.indices.into_iter().map(|i| i + base));
+        }
+        out
+    }
+}
+
 /// **Hoop stress in a pressurised tube**, Pa — `σ = p·r/t` for a thin wall.
 ///
 /// This is the number that decides whether a gun bursts, and it is why a barrel is loaded in the one
@@ -376,6 +436,33 @@ pub fn hoop_stress_pa(pressure_pa: f64, r_bore_m: f64, wall_m: f64) -> f64 {
         return 0.0;
     }
     pressure_pa * r_bore_m / wall_m
+}
+
+/// **The COMPILED assemblies the engine ships**, baked in at build time.
+///
+/// `include_str!` rather than a file read, for the same reason `data/materials.json` is: the engine runs
+/// in a browser where there is no filesystem, and an asset a scene has to fetch is an asset a scene can
+/// forget to fetch. These are the COMPILED forms — `derived` already filled by `bin/compile-assemblies`
+/// — so a runtime that wants a gun's mass reads it instead of summing thirteen parts.
+///
+/// ★ Baking the compiled form is only safe because it is checkable: `compile-assemblies --check` fails
+/// if recompiling would change any of them, so a stale bake cannot ship quietly.
+pub mod compiled {
+    use super::Assembly;
+
+    /// The 24-pounder naval gun, its service charge, and its round shot.
+    pub const NAVAL_24PDR_GUN: &str =
+        include_str!("../../../assets/assemblies/compiled/naval-24pdr-gun.json");
+    pub const CHARGE_24PDR_SERVICE: &str =
+        include_str!("../../../assets/assemblies/compiled/charge-24pdr-service.json");
+    pub const ROUND_SHOT_24PDR: &str =
+        include_str!("../../../assets/assemblies/compiled/round-shot-24pdr.json");
+
+    /// Parse a baked assembly. Panics on malformed input, because a compiled asset that does not parse
+    /// is a build error wearing a runtime error's clothes.
+    pub fn parse(text: &str) -> Assembly {
+        Assembly::from_json(text).expect("a compiled assembly parses")
+    }
 }
 
 /// **The assemblies the engine SHIPS, loaded from `assets/assemblies/`** (test-only).
@@ -858,6 +945,73 @@ mod shipped_cannon_tests {
         assert!(
             (impossible.matter_volume_m3() - wad.envelope_volume_m3()).abs() < 1e-15,
             "packing above 1 clamps rather than inventing matter"
+        );
+    }
+
+    /// **The picture comes from the assembly** — every part contributes geometry, and a change to a
+    /// dimension moves both the mass and the mesh, because both read the same statement of what is
+    /// there. Robin: the visible thing *"should be a product of the assembly and the engine"*.
+    #[test]
+    fn an_assembly_draws_itself_from_its_own_parts() {
+        let mats = mats();
+        let gun = shipped::load("naval-24pdr-gun");
+        let m = gun.mesh(&mats, 16);
+        assert!(!m.vertices.is_empty() && !m.indices.is_empty());
+        assert_eq!(m.indices.len() % 3, 0, "triangles");
+        let n = m.vertices.len() as u32;
+        assert!(m.indices.iter().all(|&i| i < n), "every index is real");
+
+        // The mesh must SPAN the gun: its extent along the barrel axis matches the parts' own layout,
+        // so nothing was dropped and nothing was drawn at the origin by mistake.
+        let (lo, hi) = m.vertices.iter().fold((f32::MAX, f32::MIN), |(a, b), v| {
+            (a.min(v.pos[0]), b.max(v.pos[0]))
+        });
+        let (plo, phi) = gun.parts.iter().fold((f64::MAX, f64::MIN), |(a, b), p| {
+            (a.min(p.at_m[0]), b.max(p.at_m[0]))
+        });
+        assert!(
+            (hi - lo) as f64 > (phi - plo) * 0.8,
+            "the mesh spans the assembly: {:.2} m of mesh against {:.2} m of layout",
+            hi - lo,
+            phi - plo
+        );
+
+        // ★ A BORED barrel must be hollow — the bore wall exists, or looking down the muzzle shows
+        // nothing and the tube is only a tube from outside.
+        let bore_r = gun.parts.iter().find_map(|p| match p.shape {
+            Shape::Tube { r_bore, .. } => Some(r_bore as f32),
+            _ => None,
+        });
+        let bore_r = bore_r.expect("the gun has a bore");
+        let inward = m
+            .vertices
+            .iter()
+            .filter(|v| {
+                let d = (v.pos[1] * v.pos[1] + v.pos[2] * v.pos[2]).sqrt();
+                (d - bore_r).abs() < 1e-3 && (v.nrm[1] * v.pos[1] + v.nrm[2] * v.pos[2]) < 0.0
+            })
+            .count();
+        assert!(inward > 0, "the bore wall is drawn, facing inward");
+
+        // Changing a dimension changes the picture — the mesh is not a separate authored thing.
+        let mut wider = gun.clone();
+        let i = wider.parts.iter().position(|p| p.name == "chase").unwrap();
+        if let Shape::Tube { r_outer, .. } = &mut wider.parts[i].shape {
+            *r_outer += 0.05;
+        }
+        let m2 = wider.mesh(&mats, 16);
+        assert_ne!(
+            m.vertices
+                .iter()
+                .map(|v| v.pos[1] as f64)
+                .sum::<f64>()
+                .to_bits(),
+            m2.vertices
+                .iter()
+                .map(|v| v.pos[1] as f64)
+                .sum::<f64>()
+                .to_bits(),
+            "a changed dimension must change the geometry"
         );
     }
 }

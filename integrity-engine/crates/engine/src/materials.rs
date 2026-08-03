@@ -117,6 +117,22 @@ pub struct Reaction {
     /// potassium salts, soot) do not count — they carry mass but exert no pressure, and for a gun the
     /// difference between the two is most of the answer.
     pub moles_gas_per_mole: f64,
+    /// **The PRODUCTS' properties** — of the reaction this `equation` describes, not of any one
+    /// constituent, which is why they sit on the OXIDISER: the oxidiser is what decides which reaction
+    /// is happening, since the same fuels burning in air give entirely different products.
+    ///
+    /// Zero where uncharacterised. A gun needs all four; a campfire needs none of them.
+    #[serde(default)]
+    pub flame_temperature: f64,
+    /// Specific-heat ratio of the products.
+    #[serde(default)]
+    pub products_gamma: f64,
+    /// Noble-Abel covolume of the products, m³/kg — the volume the gas cannot be compressed below.
+    #[serde(default)]
+    pub products_covolume: f64,
+    /// Mean molar mass of the permanent gas, kg/mol.
+    #[serde(default)]
+    pub products_molar_mass: f64,
     /// The balanced equation these numbers describe, so the stoichiometry is auditable by eye.
     pub equation: String,
 }
