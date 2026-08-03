@@ -893,4 +893,73 @@ mod tests {
             fired.flame_k
         );
     }
+
+    /// **The Yarrr! scene's own emplacement, read from the page and fired through the engine.**
+    ///
+    /// A scene that claims its gun points at the sea should have that checked, not asserted in a
+    /// comment. This parses `web/yarr.html`'s `data-cannon` attribute — the single piece of data that
+    /// makes that page a different scene from `terra.html` — and puts its shot through the same flight
+    /// path the engine uses for everything else. Move the gun inland and this fails.
+    #[test]
+    fn the_yarr_scenes_gun_puts_its_shot_in_the_sea() {
+        let page =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/yarr.html"))
+                .expect("yarr.html exists");
+        let attr = page
+            .split("data-cannon=\"")
+            .nth(1)
+            .and_then(|r| r.split('"').next())
+            .expect("the page declares a gun emplacement");
+        let n: Vec<f64> = attr
+            .split(',')
+            .map(|v| v.trim().parse().expect("a number"))
+            .collect();
+        assert_eq!(n.len(), 4, "lat,lon,bearing,elevation — got {attr:?}");
+        let e = Emplacement {
+            lat_deg: n[0],
+            lon_deg: n[1],
+            height_m: 0.0,
+            bearing_deg: n[2],
+            elevation_deg: n[3],
+        };
+
+        let mats = mats();
+        let gun = shipped::load("naval-24pdr-gun");
+        let charge = shipped::load("charge-24pdr-service");
+        let shot = shipped::load("round-shot-24pdr");
+        let earth = crate::planet::body("earth");
+        let r_e = earth.radius();
+        let (fired, body, _) =
+            fire_gun(&gun, &charge, &shot, &e, r_e, &mats).expect("the gun fires");
+        assert_eq!(fired.outcome, Outcome::Fired);
+        let body = body.expect("a shot in flight");
+
+        let land = crate::terra::raster::shipped::earth_landmask();
+        assert!(
+            land.land_at(e.lat_deg, e.lon_deg),
+            "the gun stands on land at {:.2}, {:.2}",
+            e.lat_deg,
+            e.lon_deg
+        );
+
+        let env = crate::flight::PlanetAir::of(&mats, "earth", r_e);
+        let mut fl = crate::flight::Flight::default();
+        fl.introduce(body);
+        let mut arrival = None;
+        for _ in 0..6000 {
+            if let Some(a) = fl.step(&env, &mats, 1.0 / 60.0).into_iter().next() {
+                arrival = Some(a);
+                break;
+            }
+            if fl.bodies().is_empty() {
+                break;
+            }
+        }
+        let a = arrival.expect("the shot comes down");
+        let (ilat, ilon) = crate::geo::lat_lon_from_dir(a.at.normalize());
+        assert!(
+            !land.land_at(ilat, ilon),
+            "the scene's shot must land in the SEA, not on Ireland: splash at {ilat:.3}, {ilon:.3}"
+        );
+    }
 }

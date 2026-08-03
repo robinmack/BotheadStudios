@@ -14,8 +14,9 @@ p.on('console', m => { const t = m.text(); if (/cannon|arrival|error|panic/i.tes
 await p.goto(`http://127.0.0.1:${PORT}/yarr.html`, { waitUntil: 'load' });
 await p.waitForFunction(() => !!window.__terra, null, { timeout: 60000 });
 await p.waitForTimeout(4000);
-// Pin the sky so the run is reproducible and the shore is lit.
-await p.evaluate(() => window.__terra.set_epoch_sun_over_lon(-75 + 50));
+// ★ The sun is NOT pinned. This scene runs on the real clock, so what this rig photographs is the
+// light Ireland actually has at the moment it runs — which is the point of moving it there. A pinned
+// sun would make the rig reproducible and the claim ("it is daylit") meaningless.
 await p.waitForTimeout(1500);
 
 await p.screenshot({ path: `${out}/yarr-0-start.png` });
