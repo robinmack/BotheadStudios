@@ -1,0 +1,300 @@
+# docs/64 — The compiled assembly: matter, described once, validated by physics, read fast
+
+Robin (2026-08-02), on watching the appearance integral find nothing to integrate and hearing what the
+materials expansion would cost:
+
+> *"I'm curious now that Earth is becoming more complex if we could create a use-case optimized binary
+> representation of Earth that could serve up very quick sections as needed, complete with
+> biomes/geographical features as needed (rather than having to rebuild every time from JSON as we do
+> now). Essentially compile an 'earth' from data and material sources for time savings (one high cost
+> compile and done/fast)."*
+
+Then the generalisation, which is the more important half:
+
+> *"I suggest we make it capable of supporting multiple objects, too. It may be that we want to model an
+> ocean liner or a spaceship, treating it as an assembly of materials in a binary format seems to make
+> sense in all these cases."*
+
+And then the instruction that shapes the rest of this document:
+
+> *"This will be brand new; please let's blue sky this for optimization, materials, joining type, etc.
+> Even atmosphere can be baked in to some degree, **with the engine's physics guiding/validating
+> construction**."*
+
+**A planet and an ocean liner are not different kinds of thing to this engine.** Both are matter: some
+arrangement of catalogued materials in space. They differ in how that arrangement is best INDEXED —
+radial shells for a star, a quadtree over a sphere for a planet's surface, a graph of joined parts for a
+hull — and not at all in what is being described. docs/63 already said a scene is *"an ASSEMBLY placed
+at a coordinate"*. This is that sentence given a file format.
+
+And the last clause is the one that makes this more than a serialisation exercise: **the compiler runs
+the engine's own physics against what it is building, and refuses to emit an assembly that the physics
+says cannot exist.** "One high cost compile" is a budget. This is what to spend it on.
+
+---
+
+## 1. Why compile at all — the measurements that forced it
+
+Three, all taken 2026-08-02:
+
+1. **The data cannot be shipped raw.** ESA WorldCover is 10 m over ~149 million km² of land: about
+   1.5 × 10¹² samples. The land cover shipping today is 2048×1024. There is no version of "fetch the
+   sources and derive at runtime" that works, so the fusion happens once, offline.
+2. **The runtime derivation is already the expensive part.** The appearance integral cost 173–184 ms per
+   mesh rebuild before it was taught to stop early, and that was *without* any new data. Every quantity
+   it derives per vertex per rebuild — material mixture, slope moments — is a property of the ground,
+   not of the frame. Deriving a constant repeatedly is the definition of work worth precomputing.
+3. **The cost profile says where the work belongs.** Pinning the integral's sample grid from 1×1 to 8×8
+   moved the rebuild 173.3 → 176.1 ms — flat (docs/46 row 29). Probe count was never the cost. But it
+   *will* be, the moment tiles cover more area at 10 m instead of 3.71 m. Precomputing means that cost
+   never arrives, rather than arriving and then being optimised.
+
+---
+
+## 2. What a compiled assembly IS — and what it must never become
+
+**It is a cache of a derivation.** The sources are `assets/bodies/*.json`, `data/materials.json`, and
+the open datasets. The compiled file is what you get by fusing them. If the two disagree, **the sources
+win and the file is stale.** That direction is one-way, and the file must never be edited by hand — a
+hand-edited compiled artifact is a number that traces to nothing (Law V) wearing a binary format for
+cover.
+
+Four rules make that enforceable rather than aspirational:
+
+- **Deterministic.** Recompiling the same sources produces byte-identical output, pinned by a golden
+  hash in the suite. A format that cannot reproduce itself cannot be checked against its sources.
+- **Catalogue-versioned, and this one is a live trap.** Material indices are POSITIONAL. An assembly
+  built against one `data/materials.json` and loaded against a reordered one silently means *different
+  materials* — forest becomes iron and nothing errors anywhere. The header carries a hash of the
+  catalogue and the loader REFUSES a mismatch; the file also names its materials by string id, so a
+  stale file can be diagnosed rather than merely rejected.
+- **Provenance survives compilation.** Every field group records dataset, version, date, and whether it
+  is MEASURED or DERIVED. `web/public/bodies/earth/SOURCES.txt` does this in plain text today and is the
+  only reason anyone discovered the land cover was invented (docs/46 row 28). That property matters
+  *more* once the data is binary, not less, because a binary file cannot be opened and doubted.
+- **It describes MATTER, not appearance.** Material mixtures and geometric moments — what is there and
+  how it is arranged. **No colour.** Albedo comes from the material catalogue at runtime, so correcting
+  a material's optical properties improves every assembly ever compiled without rebuilding one of them.
+  Baking colour would invert Law VI, freezing a render decision into the description of the world.
+
+---
+
+## 3. The shape
+
+```
+header      magic, format version, assembly id + name
+            catalogue_hash        — refuse to load on mismatch
+            source_manifest_hash
+            extent (bounding radius, or an AABB for a part-built assembly)
+            validation_summary    — what physics was run, and what it found (§7)
+directory   [ (section kind, byte offset, byte length, item count) ]
+sections
+  MATS      material ids used, by NAME, with their catalogue indices
+  STACK     ordered material stacks — radial shells, surface strata, part laminates (§4)
+  SURF      a quadtree over the sphere; each node is the integrated description of its patch (§5)
+  PARTS     positioned parts, and the JOINS between them (§6)
+  AIR       the atmosphere's declared composition and its derived equilibrium profile (§8)
+  PROV      provenance records, one per field group
+```
+
+Not every assembly has every section — that is what the directory is for. **The Sun is STACK and nothing
+else. An ocean liner is PARTS. Earth is STACK + SURF + AIR.** One reader, one loader, one set of
+invariants.
+
+---
+
+## 4. Materials — mixtures, and the stack unification
+
+Two representations, and they are enough:
+
+**A mixture** is `(material index, fraction)`, which is already
+`terra::appearance::Appearance.mix` and already what `materials::aggregate_albedo` reduces. Used
+wherever matter is intermingled below the resolution being described: a biome's canopy-plus-litter-plus-
+soil, a beach's quartz-and-shell, a regolith.
+
+**A stack** is an ordered run of `(material, thickness)` along an axis. And the observation worth making:
+**radial shells, surface strata and part laminates are the same concept with different axes.**
+
+| | axis | example |
+|---|---|---|
+| radial shells | body radius | Earth's core → crust; the Sun's three plasma bins |
+| surface strata | depth below local surface | topsoil over clay over bedrock |
+| part laminate | the part's own normal | hull plate: primer, steel, antifouling |
+
+One record type, one summary rule, three anchors. A leaf is cuticle-over-mesophyll; a hull is
+paint-over-steel; a continent is soil-over-rock. Writing that three times would be three answers to one
+question (Law II), and it is the kind of duplication that only becomes obvious once the third case
+arrives — so it is being written down before the third case arrives.
+
+---
+
+## 5. SURF — and why the quadtree node is exactly `Appearance`
+
+A SURF node describes the surface over its own patch: the **material mixture**, the **mean gradient**
+(what a mesh vertex's normal should show), the **variance of the gradient** about that mean (the
+roughness a coarse mesh cannot carry), and the **elevation** mean and range.
+
+★ **A parent node is its children combined by the law of total variance** — which is
+`Appearance::combine`, already written and already tested. So docs/63's convergence invariant —
+*"resolve a patch to matter, integrate its appearance over the footprint, and the result must equal the
+texture that was already being drawn there"* — stops being a property the runtime must be trusted to
+have and becomes **the rule the file is built by**. Any node can be recomputed from its children and
+must reproduce itself, which is the strongest form the invariant can take: structural, not asserted.
+
+It also retires the sampling budget for the elevation half. `resolution::WorkBudget` exists because the
+runtime integral SUB-SAMPLES a footprint it cannot afford to read completely. A node read from the
+quadtree is the COMPLETE integral over that patch, computed once, exactly. The budget stays for whatever
+is still derived live; the measured surface stops needing it.
+
+**The Moon gets a SURF section the day it has data** (LOLA elevation, and there are lunar mineral maps)
+with no format change — the slot exists, it is simply absent from `moon.assembly` today. That is the
+test of whether §3's directory is doing its job.
+
+---
+
+## 6. PARTS and JOINS — and joins are not new physics
+
+A part is a material (or a stack, or a mixture), a shape, and a place: a primitive (box, cylinder,
+sphere, shell, extrusion) or a mesh reference, plus a transform.
+
+**A join is first-class, because where an assembly breaks is decided by how it was fastened, not by what
+it is made of.** A welded bulkhead and a bolted one are the same steel and fail completely differently.
+
+The critical discipline: **a join must be expressed in quantities the material catalogue already has, so
+it is a boundary condition on the existing contact/cohesion law rather than a second physics** (Law II).
+
+| join | what carries the load | fails by |
+|---|---|---|
+| `Weld` | parent material continuity, optionally heat-affected-zone-reduced | the parent's own `fracture_strength` |
+| `Fastener` (bolt) | preload + shank shear/tensile area, at discrete points | shear or tensile capacity of the fastener material |
+| `Rivet` | shear across the shank | shear capacity; no meaningful tension |
+| `Adhesive` | bond area | area × bond strength; and weak in PEEL, which is the honest reason a glued joint is not a welded one |
+| `Interference fit` | normal pressure × `friction_coefficient` | slip, using the same μ every grain contact uses |
+| `Rest` / contact | nothing in tension at all | separates under any tensile load — this is what a stack of blocks has |
+
+Every one of those resolves to `fracture_strength`, `friction_coefficient` or cohesion — all already in
+`data/materials.json` and already used by `granular::Contact` and `granular::critical_bank_height`. **A
+join that needed a new material property is a signal that the property should be sourced and catalogued
+(the Law VII SOP), not that joins need their own physics.**
+
+**Nesting and instancing, for the complex assemblies that are coming.** A part may reference another
+assembly by id plus a transform. Sixteen billiard balls are one ball assembly and sixteen transforms; a
+ship contains a galley contains a stove. This is what makes docs/63 item 4 land — a pool table becomes a
+definition rather than a fourth `#[wasm_bindgen]` struct.
+
+**Summary by volume.** A parent part's mixture is its children's, weighted by volume, through the same
+reduction a continent uses weighted by area. **So a ship seen from orbit summarises exactly the way a
+landmass does**, and resolution-by-necessity (docs/44) needs no second vocabulary for man-made objects.
+
+---
+
+## 7. ★ Physics-guided construction — the compiler as a test harness
+
+This is the part that makes a compiled assembly worth more than a faster loader, and it is Robin's
+phrase: *"with the engine's physics guiding/validating construction."*
+
+A compile is the one moment where expensive checks are affordable. The engine already owns the physics
+to run them, and several of these are checks **nothing currently performs at all**:
+
+- **Mass closure.** The layer stack's integrated mass must equal the body's measured mass. Earth is
+  5.972 × 10²⁴ kg. A wrong density fails the compile instead of quietly changing every orbit in the
+  system.
+- **Moment of inertia.** Earth's polar moment factor is measured at I/MR² ≈ 0.3307, and the layer
+  profile predicts it. This is a strong, independent, free check on the interior model — a profile can
+  hit the right total mass with the wrong distribution, and only the moment of inertia notices.
+- **Surface gravity emerges and is checked**, never declared: 9.81 m/s² falls out of the composition or
+  the assembly is wrong (`crate::laws` already fails the build on a declared gravity).
+- **Hydrostatic consistency** via `hydrostatic.rs`: a layer profile not in equilibrium describes a body
+  that would immediately start evolving, which is a statement about the model rather than about the
+  planet.
+- **Structural closure for PARTS.** Under the assembly's own weight in its declared gravity, does every
+  join carry its load? An ocean liner whose deck joins fail under the deck is a modelling error the
+  compiler can catch, and the answer comes from the join table in §6 with no new physics.
+- **Quadtree self-consistency.** Every SURF parent must equal `combine(children)` — §5's invariant,
+  verified over the whole tree at build time rather than sampled at runtime.
+
+The results go into the header's `validation_summary` and the PROV section, so **an assembly carries the
+evidence that it was checked**, and a consumer can see which checks ran, which passed, and which were
+skipped for want of data. A check that could not run is recorded as *not run* — an unknown stays unknown
+at the boundary (Law VII), rather than being absent and indistinguishable from a pass.
+
+---
+
+## 8. Atmosphere — bake equilibria, never states
+
+`atmosphere.rs` derives a specific gas constant from molar mass and a scale height from that, so a CO₂
+atmosphere is genuinely more compact than an air one. It is instantiated in **no scene** (docs/46 row
+12) — built and unwired, the pattern docs/48 names.
+
+An AIR section carries: the **declared composition** (gas materials and fractions — gases are materials,
+per the Law VII SOP) and the **declared total mass**, plus the **derived equilibrium profile** as a
+sampled table. Surface pressure is never declared; it emerges as the weight of the column,
+`P = Mg/4πR²`, and the compiler checks the derived profile reproduces Earth's 101,325 Pa.
+
+★ **The rule that keeps this honest: bake EQUILIBRIA, never STATES.** The hydrostatic profile of a
+settled atmosphere is a static property of a body's composition, mass and temperature structure — a
+derivable constant, and caching a constant is free. Weather, wind, a heated column, an entry shock are
+STATES: dynamic, and baking one produces a number that has stopped responding to physics, which is a
+fudge however well-sourced its initial value. The profile is a starting condition and a far-field
+boundary; it is not the atmosphere's behaviour.
+
+---
+
+## 9. Optimization — blue sky, with the one rule that keeps it honest
+
+- **Zero-copy sections.** Fixed layout, little-endian, aligned so a fetched range casts straight to a
+  `bytemuck::Pod` struct. No parsing on the hot path; "serve up very quick sections" means the section
+  IS the in-memory form.
+- **Byte-range fetch per node.** The directory plus the quadtree's own offsets let a reader take one
+  node and its subtree by range — the same host/engine split `load_world` and `terra::tiles` already
+  use: the engine names what it needs, the host fetches it.
+- **Progressive prefix.** Nodes laid out breadth-first, so the first few kilobytes are a complete
+  coarse whole body. A viewer at interplanetary distance is finished after the prefix; a descent
+  extends it. The file's byte order becomes the LOD ladder.
+- **Delta-against-parent.** A child is stored as its difference from its parent's summary. Because the
+  parent IS the children's combination (§5), the residuals are small and centred — so **the
+  parent-child invariant doubles as the compression scheme**, which is the kind of coincidence that
+  indicates the structure is right.
+- **Quantisation, bounded by a real criterion.** Elevation to fixed-point against a per-node range;
+  gradients to f16; fractions to u8. ★ **The rule: quantisation error must be strictly smaller than the
+  source measurement's own uncertainty, and the file records both.** SRTM/GLO-30 vertical error is
+  metres; storing to centimetres is lossless *with respect to what is known*. Without that criterion,
+  quantisation is a silent fudge — this makes it a stated, checkable one.
+- **Deduplicate by content hash.** Ocean nodes are identical over vast areas; a hull's ribs are one
+  shape a hundred times. Identical subtrees and identical part definitions are stored once.
+
+---
+
+## 10. The starting set, in this order
+
+1. **The Sun.** STACK only, three shells, no surface. The smallest real assembly — it proves the header,
+   the directory, the catalogue-hash gate, the loader, and mass closure (its mass is what every orbit in
+   the system depends on) without any of the hard parts. If the format cannot express the Sun in a few
+   hundred bytes, it is already too complicated.
+2. **The Moon.** STACK only today — `assets/bodies/moon.json` is four shells and no surface block. It
+   proves a second body reuses the path with nothing special-cased, and leaves the SURF slot ready for
+   the lunar rasters that are coming.
+3. **Earth.** STACK + SURF + AIR, built first from the rasters that ship today so the format can be
+   validated against known behaviour, then rebuilt from the real datasets (docs/46 row 28: ESA
+   WorldCover, SoilGrids, GLiM). **Compiling Earth twice, from deliberately different data, is itself
+   the test that this is a pipeline and not a one-off.**
+
+Each is rebuildable on demand — that is what "one high cost compile and done" buys, and it is what lets
+a corrected material or a better dataset propagate without touching engine code.
+
+---
+
+## 11. What this does NOT decide
+
+- **The substances-and-assemblies model** (docs/46 row 28): what a "rainforest" resolves into as a
+  material mixture, and the substance-versus-assembly distinction that stops a canopy being given a bulk
+  density. That work FILLS this format; this doc defines the container.
+- **Whether the runtime still derives anything live.** It does, and should: generated relief below the
+  finest measured data has no dataset to come from and stays a function (docs/46 row 27). The compiled
+  assembly carries what was MEASURED; the generator carries what is below measurement, flagged as it is
+  today.
+
+**Related:** docs/43 (worlds as data) · docs/44 (resolution by necessity) · docs/46 (rows 12, 14, 27, 28,
+29) · docs/48 (built and unwired) · docs/51 (scenes as data) · docs/53 (the engine driven by a
+definition) · docs/58 (the generic body) · docs/63 (the pool table — the assembly-at-a-coordinate this
+format serialises).
