@@ -800,7 +800,11 @@ mod material_property_tests {
     ///   * a numeric property nothing reads and nobody declared -> FAIL (data added with no consumer)
     ///   * a declared property that IS now read -> FAIL (wire it, then delete the entry)
     ///
-    /// Only NUMBERS are enforced. `grain`, `notes`, `source` and `conductivity_note` are prose — they
+    /// `reaction` is scanned too, added when the first energetic substances were catalogued — a new
+    /// block of sourced numbers is exactly the case this guard exists for, and leaving it unscanned
+    /// would have made the oxidation data invisible to the very check written to catch invisible data.
+    ///
+    /// Only NUMBERS are enforced. `grain`, `notes`, `source`, `equation` and `conductivity_note` are prose — they
     /// document the data rather than being physical quantities, so nothing is expected to consume them.
     /// The `tillotson` block is excluded too: it is read wholesale as a struct and its fields are named
     /// `A`, `B`, `a`, `b`, `alpha`, so scanning source for them would match everything and prove nothing.
@@ -810,7 +814,7 @@ mod material_property_tests {
             .expect("data/materials.json parses");
         let mut props: std::collections::BTreeMap<String, usize> = Default::default();
         for m in json["materials"].as_array().expect("a materials array") {
-            for block in ["mechanical", "optical", "thermal"] {
+            for block in ["mechanical", "optical", "thermal", "reaction"] {
                 let Some(map) = m.get(block).and_then(|b| b.as_object()) else {
                     continue;
                 };

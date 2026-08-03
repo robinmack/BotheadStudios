@@ -2083,13 +2083,21 @@
     "thermal_conductivity": 0.0,
     "conductivity_note": "NOT CHARACTERIZED for the solid; molten KNO3 is 0.44-0.49 W/m/K over 350-450 C"
    },
-   "notes": "The OXIDISER of black powder (~75% by mass) and the reason the mixture burns without air: it carries its own oxygen. SOURCED: density, melting point (607 K / 334 C), decomposition (673 K / 400 C, to KNO2 + O2 — irreversible, hence `decomposes_k` rather than a boiling point), Mohs 2, and a specific heat DERIVED from the tabulated molar value 95.06 J/mol/K over the molar mass 0.101102 kg/mol = 940.2 J/kg/K. NOT CHARACTERIZED and left at 0 rather than guessed: latent heat of fusion, elastic moduli, strengths, and the SOLID thermal conductivity (only the molten value was found). `albedo` is a reasoned value for a white crystalline salt, on the same footing as every other albedo in this file — see the honesty note on `Material::albedo`.",
+   "notes": "The OXIDISER of black powder (~75% by mass) and the reason the mixture burns without air: it carries its own oxygen. SOURCED: density, melting point (607 K / 334 C), decomposition (673 K / 400 C, to KNO2 + O2 — irreversible, hence `decomposes_k` rather than a boiling point), Mohs 2, and a specific heat DERIVED from the tabulated molar value 95.06 J/mol/K over the molar mass 0.101102 kg/mol = 940.2 J/kg/K. NOT CHARACTERIZED and left at 0 rather than guessed: latent heat of fusion, elastic moduli, strengths, and the SOLID thermal conductivity (only the molten value was found). `albedo` is a reasoned value for a white crystalline salt, on the same footing as every other albedo in this file — see the honesty note on `Material::albedo`. ★ REACTION: this is the OXIDISER and releases no combustion energy of its own, so its `product_formation_enthalpy` is 0 and its `moles_o2_per_mole` is 0. What it contributes is `oxygen_content` = 1.5 mol O2-equivalent per mole, i.e. the 3 oxygen atoms in KNO3. **How much of that is actually AVAILABLE depends on the reaction, not on the substance** — in the classic idealised black-powder equation all six oxygens of 2 KNO3 end up in 3 CO2, whereas KNO3 heated alone gives up far less (2 KNO3 -> 2 KNO2 + O2). So this field states what the molecule CONTAINS, which is unambiguous from the formula; the products are the reaction's business.",
    "sources": [
     "https://en.wikipedia.org/wiki/Potassium_nitrate (density, melting point, decomposition, molar heat capacity 95.06 J/mol/K)",
     "https://www.webqc.org/compound.php?compound=Potassium+nitrate",
     "https://en.wikipedia.org/wiki/Niter (Mohs 2, specific gravity 2.10)",
     "Molten thermal conductivity: https://link.springer.com/article/10.1007/BF00502404"
-   ]
+   ],
+   "reaction": {
+    "role": "oxidiser",
+    "reactant_molar_mass": 0.101103,
+    "moles_o2_per_mole": 0.0,
+    "product_formation_enthalpy": 0.0,
+    "oxygen_content": 1.5,
+    "equation": "2 KNO3 + 3 C + S -> K2S + N2 + 3 CO2 (the classic idealised black-powder reaction)"
+   }
   },
   {
    "id": "sulfur",
@@ -2128,11 +2136,19 @@
     "thermal_conductivity": 0.205,
     "conductivity_note": "amorphous sulfur"
    },
-   "notes": "The FUEL and rate-modifier of black powder (~10% by mass); it lowers the mixture's ignition temperature. SOURCED: density, specific heat 709.607 J/kg/K, melting point 388.36 K (115.21 C, the alpha allotrope), boiling point 717.8 K (444.6 C), thermal conductivity 0.205 W/m/K, Mohs 2.0. NOT CHARACTERIZED and left at 0 rather than guessed: latent heats of fusion and vaporization, and `molar_mass` — sulfur VAPOUR is a temperature-dependent mixture of S8, S6 and S2, so a single molar mass would misstate the Clausius-Clapeyron curve; 0 makes the engine use the flat boiling point, which is the honest fallback the field documents. Elastic moduli and strengths likewise absent.",
+   "notes": "The FUEL and rate-modifier of black powder (~10% by mass); it lowers the mixture's ignition temperature. SOURCED: density, specific heat 709.607 J/kg/K, melting point 388.36 K (115.21 C, the alpha allotrope), boiling point 717.8 K (444.6 C), thermal conductivity 0.205 W/m/K, Mohs 2.0. NOT CHARACTERIZED and left at 0 rather than guessed: latent heats of fusion and vaporization, and `molar_mass` — sulfur VAPOUR is a temperature-dependent mixture of S8, S6 and S2, so a single molar mass would misstate the Clausius-Clapeyron curve; 0 makes the engine use the flat boiling point, which is the honest fallback the field documents. Elastic moduli and strengths likewise absent. ★ REACTION: S + O2 -> SO2 releases 296.84 kJ/mol (standard formation enthalpy of SO2), i.e. 9.26 MJ per kg of sulfur — about a third of carbon's, which is why sulfur is the minority fuel and is there mainly to lower the ignition temperature rather than to carry the energy.",
    "sources": [
     "https://en.wikipedia.org/wiki/Sulfur (density 2.07 g/cm3 alpha, specific heat 709.607 J/kg/K, melt 388.36 K, boil 717.8 K, thermal conductivity 0.205 W/m/K)",
     "https://periodictable.com/Properties/A/MohsHardness.v.html (Mohs 2.0)"
-   ]
+   ],
+   "reaction": {
+    "role": "fuel",
+    "reactant_molar_mass": 0.032065,
+    "moles_o2_per_mole": 1.0,
+    "product_formation_enthalpy": -296840.0,
+    "oxygen_content": 0.0,
+    "equation": "S + O2 -> SO2"
+   }
   },
   {
    "id": "charcoal",
@@ -2171,12 +2187,20 @@
     "thermal_conductivity": 0.0,
     "conductivity_note": "NOT CHARACTERIZED; charcoal is a poor conductor and the figure is strongly porosity-dependent, so no single value was sourced"
    },
-   "notes": "The FUEL of black powder (~15% by mass). SOURCED: true/skeletal density 1.3-1.5 g/cm3 (1400 taken as the midpoint) and specific heat 768 J/kg/K for softwood char measured at 313 K. ★ `density` here is the TRUE density of the solid substance, NOT the bulk density of a poured mass, which is 260-380 kg/m3 depending on species (birch 380, pine 290, spruce 260) because charcoal is 55-80% pore by volume. That distinction is the difference between the matter and an ARRANGEMENT of it, and this file describes the matter — the packing belongs to whatever assembly holds it. NOT CHARACTERIZED and left at 0: thermal conductivity (strongly porosity-dependent, no single cited figure), latent heats, and any melting or decomposition point — charcoal is largely amorphous carbon and does not melt at 1 atm; it OXIDISES, which is a reaction with its surroundings rather than a property of the substance alone. It is also not a pure substance: composition and properties depend on the parent wood and the pyrolysis conditions, so every number here is a representative value for wood char rather than a constant of nature.",
+   "notes": "The FUEL of black powder (~15% by mass). SOURCED: true/skeletal density 1.3-1.5 g/cm3 (1400 taken as the midpoint) and specific heat 768 J/kg/K for softwood char measured at 313 K. ★ `density` here is the TRUE density of the solid substance, NOT the bulk density of a poured mass, which is 260-380 kg/m3 depending on species (birch 380, pine 290, spruce 260) because charcoal is 55-80% pore by volume. That distinction is the difference between the matter and an ARRANGEMENT of it, and this file describes the matter — the packing belongs to whatever assembly holds it. NOT CHARACTERIZED and left at 0: thermal conductivity (strongly porosity-dependent, no single cited figure), latent heats, and any melting or decomposition point — charcoal is largely amorphous carbon and does not melt at 1 atm; it OXIDISES, which is a reaction with its surroundings rather than a property of the substance alone. It is also not a pure substance: composition and properties depend on the parent wood and the pyrolysis conditions, so every number here is a representative value for wood char rather than a constant of nature. ★ REACTION DATA is for the CARBON in it, not for charcoal as sold: C + O2 -> CO2 releases 393.51 kJ/mol (NIST formation enthalpy of CO2), which is 32.8 MJ per kg of pure carbon. Charcoal is typically only 70-90% fixed carbon with the balance volatiles and ash, so its real heating value is lower — the commonly quoted 28-31 MJ/kg. The catalogue stores the exact chemistry and lets a caller scale by carbon fraction, rather than storing a blended number that hides which part is thermodynamics and which is a sample.",
    "sources": [
     "True density 1.3-1.5 g/cm3 and porosity: http://ukrfuel.com/news-physical-properties-of-charcoal-22.html",
     "Softwood char specific heat 768 J/kg/K at 313 K: https://www.sciencedirect.com/science/article/abs/pii/S0016236102003988",
     "Eucalyptus charcoal apparent/bulk density and porosity: https://www.scielo.br/j/cerne/a/YHH8FZSMrYxMmMyhfF3fSFj/"
-   ]
+   ],
+   "reaction": {
+    "role": "fuel",
+    "reactant_molar_mass": 0.0120107,
+    "moles_o2_per_mole": 1.0,
+    "product_formation_enthalpy": -393510.0,
+    "oxygen_content": 0.0,
+    "equation": "C + O2 -> CO2"
+   }
   }
  ]
 }

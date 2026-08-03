@@ -24,6 +24,8 @@ struct RawMaterial {
     #[serde(default)]
     thermal: Option<RawThermal>,
     #[serde(default)]
+    reaction: Option<Reaction>,
+    #[serde(default)]
     tillotson: Option<TillotsonBlock>,
 }
 
@@ -84,6 +86,68 @@ struct RawOptical {
     #[serde(default)]
     color_variance: f32,
 }
+
+/// **The chemistry of burning, stored as its SOURCED PRIMARIES rather than as per-kilogram results.**
+///
+/// Robin (2026-08-02): *"Rapid oxidation will be an important principle in the engine (fires, etc)."*
+/// A campfire, a burning ship, a powder charge and a rusting hull are ONE reaction at different rates
+/// and different oxidiser availability, so this describes the chemistry once and lets the rate and the
+/// oxygen supply belong to the situation rather than to the substance.
+///
+/// A heat-of-combustion table gives one blended number per fuel. Standard formation enthalpies plus a
+/// balanced equation give the same number AND show their working — so the per-kg energy and the oxygen
+/// demand are DERIVED below instead of typed, and a reader can see which part is thermodynamics and
+/// which part is a particular sample of a messy natural material.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Reaction {
+    /// `"fuel"` (releases energy, consumes oxygen) or `"oxidiser"` (supplies it).
+    pub role: String,
+    /// kg/mol of the REACTING species — for charcoal this is carbon's, not the lump's.
+    pub reactant_molar_mass: f64,
+    /// Moles of O2 consumed per mole of reactant. 0 for an oxidiser.
+    pub moles_o2_per_mole: f64,
+    /// J/mol, the standard enthalpy of FORMATION of the product (negative when heat is released).
+    /// 0 for an oxidiser, which releases no combustion energy of its own.
+    pub product_formation_enthalpy: f64,
+    /// Moles of O2-equivalent the molecule CONTAINS, per mole. **What the molecule holds, not what a
+    /// reaction liberates** — how much is actually available depends on the products, which is the
+    /// reaction's business rather than the substance's.
+    pub oxygen_content: f64,
+    /// The balanced equation these numbers describe, so the stoichiometry is auditable by eye.
+    pub equation: String,
+}
+
+impl Reaction {
+    /// J/kg of reactant released on complete combustion — `-dHf(product) / M`. Carbon comes out at
+    /// 32.8 MJ/kg and sulfur at 9.26, from formation enthalpies alone, no combustion table consulted.
+    pub fn energy_per_kg(&self) -> f64 {
+        if self.reactant_molar_mass <= 0.0 {
+            return 0.0;
+        }
+        -self.product_formation_enthalpy / self.reactant_molar_mass
+    }
+
+    /// kg of O2 needed per kg of this fuel, from the stoichiometry.
+    pub fn oxygen_demand(&self) -> f64 {
+        if self.reactant_molar_mass <= 0.0 {
+            return 0.0;
+        }
+        self.moles_o2_per_mole * O2_MOLAR_MASS / self.reactant_molar_mass
+    }
+
+    /// kg of O2-equivalent this oxidiser CARRIES per kg of itself — the quantity that decides whether a
+    /// reaction needs air at all. Black powder works in a sealed bore because this is non-zero for KNO3.
+    pub fn oxygen_carried(&self) -> f64 {
+        if self.reactant_molar_mass <= 0.0 {
+            return 0.0;
+        }
+        self.oxygen_content * O2_MOLAR_MASS / self.reactant_molar_mass
+    }
+}
+
+/// kg/mol of O2 — the one reagent every oxidation shares, so its molar mass has ONE home rather than
+/// being retyped beside each fuel (Law II).
+pub const O2_MOLAR_MASS: f64 = 0.0319988;
 
 /// Thermal properties — enough to compute the energy to melt or vaporize the material (`docs/20`).
 /// Optional: only materials we've cited thermal data for carry it; without it, an impact can fracture
@@ -283,6 +347,14 @@ pub struct Material {
     /// NOT a licence to invent one. Ask through [`Material::specific_heat`] and friends rather than
     /// `map_or`-ing a number in at the call site (see those methods for what went wrong).
     pub thermal: Option<Thermal>,
+    /// **What this material does in an OXIDATION reaction** — `None` for matter that neither burns nor
+    /// supplies oxygen, which is most of the catalogue.
+    ///
+    /// Robin (2026-08-02): *"Rapid oxidation will be an important principle in the engine (fires, etc)."*
+    /// A campfire, a burning ship, a powder charge and a rusting hull are ONE reaction at different
+    /// rates and different oxidiser availability, so this describes the chemistry once and lets the
+    /// rate and the oxygen supply belong to the situation.
+    pub reaction: Option<Reaction>,
     /// Condensed-matter equation of state (Tillotson) — `None` for materials with no characterized EOS
     /// (gases use the ideal-gas closure; wood/soils fall back to the contact-penalty stiffness). Read
     /// through [`tillotson_block`] / `eos::Tillotson`, which treat this as the source of truth.
@@ -418,6 +490,7 @@ pub fn load() -> Vec<Material> {
                     thermal_conductivity: t.thermal_conductivity,
                     decomposition_suppressed_pa: t.decomposition_suppressed_pa,
                 }),
+                reaction: m.reaction,
                 tillotson: m.tillotson,
             }
         })
@@ -817,6 +890,91 @@ mod mixture_tests {
         assert!(
             (0.4..0.62).contains(&packing),
             "corned powder should be roughly half void; derived packing fraction {packing}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod reaction_tests {
+    /// **The chemistry of black powder, DERIVED from formation enthalpies — nothing typed.**
+    ///
+    /// Robin: *"Rapid oxidation will be an important principle in the engine (fires, etc) so this won't
+    /// be wasted."* So the first thing built is not a propellant but the general reaction data, and
+    /// this pins that the derivation reproduces the textbook figures without any combustion table.
+    ///
+    /// It also pins the property that makes gunpowder gunpowder: **it carries its own oxygen.** A fire
+    /// is air-limited; black powder is not, which is exactly why it works in a sealed bore. That is one
+    /// comparison between two numbers, and it is the whole difference.
+    #[test]
+    fn black_powders_chemistry_derives_from_formation_enthalpies() {
+        let mats = super::load();
+        let get = |id: &str| &mats[super::index_of(&mats, id)];
+        let (kno3, charcoal, sulfur) = (get("potassium_nitrate"), get("charcoal"), get("sulfur"));
+        let rx = |m: &super::Material| m.reaction.clone().expect("carries reaction data");
+        let (r_k, r_c, r_s) = (rx(kno3), rx(charcoal), rx(sulfur));
+
+        assert_eq!(r_c.role, "fuel");
+        assert_eq!(r_s.role, "fuel");
+        assert_eq!(r_k.role, "oxidiser");
+
+        // Carbon: -(-393.51 kJ/mol) / 0.0120107 kg/mol = 32.8 MJ/kg. The textbook figure, from the
+        // formation enthalpy of CO2 alone.
+        let e_c = r_c.energy_per_kg();
+        assert!(
+            (32.6e6..33.0e6).contains(&e_c),
+            "carbon should release ~32.8 MJ/kg, got {e_c:e}"
+        );
+        // Sulfur: ~9.26 MJ/kg, about a third of carbon's — which is why it is the minority fuel and is
+        // there to lower the ignition temperature rather than to carry the energy.
+        let e_s = r_s.energy_per_kg();
+        assert!(
+            (9.1e6..9.4e6).contains(&e_s),
+            "sulfur should release ~9.26 MJ/kg, got {e_s:e}"
+        );
+        assert!(e_c > 3.0 * e_s, "carbon carries the energy, not sulfur");
+
+        // Stoichiometry: one mole of O2 per mole of either fuel, so the mass ratio is just the molar
+        // ratio. Carbon is light, so it is thirsty per kilogram: 2.66 kg of O2 for every kg burnt.
+        let d_c = r_c.oxygen_demand();
+        assert!(
+            (2.6..2.7).contains(&d_c),
+            "carbon needs ~2.664 kg O2 per kg, got {d_c}"
+        );
+        assert!(
+            (0.99..1.01).contains(&r_s.oxygen_demand()),
+            "sulfur is nearly 1:1 by mass with O2 — its molar mass is almost O2's"
+        );
+
+        // An OXIDISER releases no combustion energy of its own and demands no oxygen.
+        assert_eq!(r_k.energy_per_kg(), 0.0);
+        assert_eq!(r_k.oxygen_demand(), 0.0);
+        // What it does is CARRY oxygen: 1.5 mol O2-equivalent per mole KNO3 = 0.475 kg per kg.
+        let carried = r_k.oxygen_carried();
+        assert!(
+            (0.46..0.49).contains(&carried),
+            "KNO3 carries ~0.475 kg O2 per kg, got {carried}"
+        );
+        // And the fuels carry none — a fuel that supplied its own oxygen would be a monopropellant.
+        assert_eq!(r_c.oxygen_carried(), 0.0);
+        assert_eq!(r_s.oxygen_carried(), 0.0);
+
+        // ★★ THE PROPERTY THAT MAKES IT GUNPOWDER. At the classic 75/15/10 by mass, does the KNO3
+        // carry enough oxygen for the charcoal and sulfur to burn with NO AIR? Compute both sides.
+        let (w_k, w_c, w_s) = (0.75, 0.15, 0.10);
+        let supplied = w_k * carried;
+        let demanded = w_c * d_c + w_s * r_s.oxygen_demand();
+        assert!(
+            supplied > 0.5 * demanded,
+            "the oxidiser must supply a large share of the demand, or this is just kindling: \
+             supplied {supplied:.3} kg/kg vs demanded {demanded:.3} kg/kg"
+        );
+        // It is deliberately OXYGEN-LEAN — real black powder does not burn its carbon all the way to
+        // CO2, which is why it smokes heavily and why its gas yield is far below a smokeless
+        // propellant's. Asserting a stoichiometric balance here would be asserting a chemistry the
+        // substance does not have.
+        assert!(
+            supplied < demanded,
+            "75/15/10 is oxygen-lean, not balanced: supplied {supplied:.3} vs demanded {demanded:.3}"
         );
     }
 }
