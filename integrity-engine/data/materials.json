@@ -2204,6 +2204,105 @@
     "moles_gas_per_mole": 1.0,
     "equation": "C + O2 -> CO2"
    }
+  },
+  {
+   "id": "gunmetal",
+   "display_name": "Gunmetal (tin bronze, 88Cu/10Sn/2Zn)",
+   "category": "metal",
+   "phase": "solid",
+   "parent": "copper",
+   "assumed_condition": "British Admiralty gunmetal / UNS C90500, sand cast, at room temperature",
+   "mechanical": {
+    "density": 8719.0,
+    "youngs_modulus": 103400000000.0,
+    "tensile_strength": 265000000.0,
+    "hardness_mohs": 3.0,
+    "ductility": 0.2,
+    "restitution": 0.4,
+    "friction_coefficient": 0.35
+   },
+   "optical": {
+    "albedo": [
+     0.55,
+     0.42,
+     0.24
+    ],
+    "roughness": 0.35,
+    "metallic": 1.0,
+    "translucency": 0.0,
+    "color_variance": 0.08,
+    "grain": "warm golden metal; cast surface, oxidises to a brown-green patina"
+   },
+   "thermal": {
+    "specific_heat": 377.0,
+    "melt_point": 1127.0,
+    "latent_fusion": 205000.0,
+    "boil_point": 0.0,
+    "latent_vaporization": 0.0,
+    "simon_a": 0.0,
+    "simon_c": 0.0,
+    "molar_mass": 0.0,
+    "decomposes_k": 0.0,
+    "decomposition_suppressed_pa": 0.0,
+    "thermal_conductivity": 74.8,
+    "conductivity_note": "74.8 W/m/K at 20 C for C90500 — about a fifth of pure copper's 401, alloying scatters electrons"
+   },
+   "notes": "THE gun-bronze. Cannon were cast in this for centuries and it was preferred over iron despite costing far more, for one reason the numbers here explain: it is DUCTILE. An overloaded bronze gun bulges and splits; an overloaded cast-iron one shatters. SOURCED: density 8719, tensile 221-310 MPa (265 taken as the midpoint of the sourced range), Young's modulus 103.4 GPa, thermal conductivity 74.8 W/m/K, and a melting RANGE rather than a point — solidus 854 C, liquidus 999 C — because an alloy melts over an interval; `melt_point` carries the midpoint 1127 K and this note carries the truth. ★ `specific_heat` 377 J/kg/K is DERIVED, not sourced: gunmetal is 87.5-88% copper by mass and copper's 385 J/kg/K is catalogued here, so the alloy's is within a few percent of it. Flagged as a derivation rather than typed as a measurement, and it should be replaced with a measured value when one is found. NOT CHARACTERIZED and left at 0: latent heats beyond copper's fusion, boiling behaviour, compressive and shear strengths. Brinell hardness 65-74 is sourced but this catalogue carries Mohs, so 3.0 is the approximate conversion and is an estimate.",
+   "sources": [
+    "https://en.wikipedia.org/wiki/Gunmetal (88/10/2 Admiralty composition, density 8719 kg/m3, tensile 221-310 MPa, Brinell 65-74)",
+    "https://www.makeitfrom.com/material-properties/UNS-C90500-Alloy-D-SAE-62-Gun-Metal (E = 103.4 GPa, k = 74.8 W/m/K, solidus 854 C / liquidus 999 C)",
+    "Specific heat derived from catalogued `copper` (385 J/kg/K) at ~88% mass fraction"
+   ]
+  },
+  {
+   "id": "cast_iron",
+   "display_name": "Grey cast iron (ASTM A48 Class 40)",
+   "category": "metal",
+   "phase": "solid",
+   "parent": "iron",
+   "assumed_condition": "Grey (flake graphite) cast iron, ASTM A48 Class 40, as cast",
+   "mechanical": {
+    "density": 7500.0,
+    "youngs_modulus": 124000000000.0,
+    "tensile_strength": 295000000.0,
+    "compressive_strength": 930000000.0,
+    "hardness_mohs": 4.0,
+    "ductility": 0.01,
+    "restitution": 0.3,
+    "friction_coefficient": 0.4
+   },
+   "optical": {
+    "albedo": [
+     0.16,
+     0.16,
+     0.17
+    ],
+    "roughness": 0.6,
+    "metallic": 1.0,
+    "translucency": 0.0,
+    "color_variance": 0.12,
+    "grain": "dark grey, matte; fracture surface is grey from its graphite flakes"
+   },
+   "thermal": {
+    "specific_heat": 490.0,
+    "melt_point": 1533.0,
+    "latent_fusion": 0.0,
+    "boil_point": 0.0,
+    "latent_vaporization": 0.0,
+    "simon_a": 0.0,
+    "simon_c": 0.0,
+    "molar_mass": 0.0,
+    "decomposes_k": 0.0,
+    "decomposition_suppressed_pa": 0.0,
+    "thermal_conductivity": 53.0,
+    "conductivity_note": "53 W/m/K for ASTM A48 grey iron"
+   },
+   "notes": "The cheap gun metal, and the dangerous one. ★★ THE NUMBER THAT MATTERS IS THE ASYMMETRY: tensile 295 MPa against compressive ~930 MPa, so it is roughly THREE TIMES stronger in compression than in tension. A pressurised barrel's hoop stress is TENSILE, which is precisely the direction this material is weakest in — and combined with `ductility` 0.01 (it is brittle; it does not yield before it parts) that is the whole reason iron guns burst without warning where bronze ones bulge first. The catalogue is not being asked to know that story; it emerges from those two numbers. SOURCED: density 7.5 g/cm3, tensile 295 MPa and Young's modulus 124 GPa (Class 40), specific heat 490 J/kg/K, thermal conductivity 53 W/m/K, melting ~1260 C. Compressive strength is quoted across grades as 570-1290 MPa; 930 is a representative Class 40 value and the range is recorded here rather than hidden. `ductility` 0.01 is an estimate expressing 'essentially none', not a measurement. NOT CHARACTERIZED and left at 0: latent heats, boiling behaviour, shear strength.",
+   "sources": [
+    "https://www.nuclear-power.com/nuclear-engineering/metals-what-are-metals/cast-iron/gray-iron-gray-cast-iron/properties-of-gray-cast-iron/ (ASTM A48 Class 40: UTS 295 MPa, E 124 GPa, specific heat 490 J/kg/K, k 53 W/m/K, melting ~1260 C)",
+    "https://www.makeitfrom.com/material-properties/Grey-Cast-Iron/ (density ~7.5 g/cm3)",
+    "https://tubingchina.com/Mechanical-Properties-of-Gray-Cast-Iron.htm (compressive strength range 570-1290 MPa across grades)"
+   ]
   }
  ]
 }

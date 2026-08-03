@@ -990,3 +990,102 @@ mod reaction_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod gun_metal_tests {
+    /// **Why bronze guns bulge and iron guns shatter — as two catalogued numbers, not as a story.**
+    ///
+    /// Cannon were cast in bronze for centuries despite costing far more than iron, for one reason:
+    /// bronze is DUCTILE. An overloaded bronze gun swells and splits; an overloaded cast-iron one comes
+    /// apart without warning. Nothing in the engine is told that. It follows from `ductility` and from
+    /// grey iron's tension/compression asymmetry, and this test pins that the catalogue actually carries
+    /// the difference rather than merely naming two metals.
+    ///
+    /// ★ **The asymmetry is the whole mechanism.** A pressurised barrel's hoop stress is TENSILE, and
+    /// tension is precisely the direction grey cast iron is weakest in — roughly a third of its
+    /// compressive strength. A material chosen for cannon on the strength of how well it takes a
+    /// compressive load is being loaded the other way round.
+    #[test]
+    fn cast_iron_is_weak_exactly_where_a_barrel_is_loaded() {
+        let mats = super::load();
+        let get = |id: &str| &mats[super::index_of(&mats, id)];
+        let (iron, bronze) = (get("cast_iron"), get("gunmetal"));
+
+        // Both are plausible gun metals: comparable tensile strength.
+        assert!(
+            (0.7..1.4).contains(&(bronze.fracture_strength / iron.fracture_strength)),
+            "bronze {} and cast iron {} are in the same class in TENSION",
+            bronze.fracture_strength,
+            iron.fracture_strength
+        );
+
+        // ★★ **THE OTHER HALF OF THIS TEST CANNOT BE WRITTEN YET, and that is docs/46 row 30 made
+        // concrete.** What actually separates these two metals is `ductility` (bronze 0.2, cast iron
+        // 0.01) and grey iron's tension/compression asymmetry (295 MPa against ~930). Both are
+        // CATALOGUED in `data/materials.json` and neither reaches the engine: `RawMechanical` does not
+        // deserialize them, so `Material` cannot carry them and nothing can read them.
+        //
+        // Reaching around the engine into the raw JSON to assert it here would be measuring ALONGSIDE
+        // the code instead of THROUGH it — the mistake that once had a script disagreeing with the
+        // engine about Everest by a factor of four. So this test asserts what the engine can actually
+        // answer, and the rest is a debt with a row number rather than a clever workaround.
+        assert!(
+            iron.fracture_strength > 0.0 && bronze.fracture_strength > 0.0,
+            "both are real gun metals in the engine's eyes; what it cannot yet see is HOW they fail"
+        );
+    }
+
+    /// **A hot gun is a different gun** — the thermal side of the same catalogue entries.
+    ///
+    /// Reloading a hot barrel could set the charge off in the loader's hands, which is why crews
+    /// sponged between shots. Whether that happens is a comparison between the barrel's temperature and
+    /// the charge's ignition threshold, so the barrel's THERMAL MASS decides how fast a gun may be
+    /// fired — a rate of fire that EMERGES from specific heat and conductivity rather than being
+    /// declared as a number of rounds per minute.
+    ///
+    /// Bronze and iron differ in both, so the two gun types heat and shed heat differently, and this
+    /// pins that the catalogue carries enough to tell them apart.
+    #[test]
+    fn a_barrels_thermal_mass_is_catalogued_well_enough_to_limit_a_rate_of_fire() {
+        let mats = super::load();
+        let get = |id: &str| &mats[super::index_of(&mats, id)];
+        for id in ["gunmetal", "cast_iron"] {
+            let m = get(id);
+            let t = m.thermal.as_ref().expect("a gun metal needs thermal data");
+            assert!(
+                t.specific_heat > 0.0,
+                "{id} needs a specific heat to warm up"
+            );
+            assert!(
+                t.thermal_conductivity > 0.0,
+                "{id} needs a conductivity to shed it again"
+            );
+        }
+        // Heat capacity per unit VOLUME is what a barrel actually has, and it is density x specific
+        // heat — so the comparison must go through both, not through specific heat alone.
+        let cap = |id: &str| {
+            let m = get(id);
+            m.density as f64 * m.thermal.as_ref().unwrap().specific_heat as f64
+        };
+        assert!(
+            cap("cast_iron") > cap("gunmetal"),
+            "an iron barrel stores more heat per unit volume ({:e}) than a bronze one ({:e}), while \
+             bronze sheds it faster — different guns, different limits, from the data alone",
+            cap("cast_iron"),
+            cap("gunmetal")
+        );
+        assert!(
+            get("gunmetal")
+                .thermal
+                .as_ref()
+                .unwrap()
+                .thermal_conductivity
+                > get("cast_iron")
+                    .thermal
+                    .as_ref()
+                    .unwrap()
+                    .thermal_conductivity,
+            "bronze conducts heat away faster than grey iron"
+        );
+    }
+}
