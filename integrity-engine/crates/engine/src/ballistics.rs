@@ -962,4 +962,48 @@ mod tests {
             "the scene's shot must land in the SEA, not on Ireland: splash at {ilat:.3}, {ilon:.3}"
         );
     }
+
+    /// **A gun must shoot where it POINTS** — the barrel as drawn and the shot as launched must agree.
+    ///
+    /// Robin, watching the scene: *"cannon seems to shoot to the side?!"* Two different pieces of code
+    /// turn a bearing into a direction — `assembly::place_on_surface` for the model matrix and
+    /// `ballistics::launch` for the velocity — and nothing forced them to agree. If they ever drift, the
+    /// gun visibly fires across itself, and no unit test of either one alone would notice.
+    #[test]
+    fn the_shot_leaves_along_the_barrel_it_was_drawn_with() {
+        for &(lat, lon, bearing) in &[
+            (53.10, -9.45, 200.0),
+            (0.0, 0.0, 0.0),
+            (-51.0, -75.0, 240.0),
+            (61.0, 24.0, 95.0),
+        ] {
+            // The barrel's axis, as the renderer places it: the model's +X column.
+            let m =
+                crate::assembly::place_on_surface(lat, lon, bearing, 1.0, 1.0, glam::DVec3::ZERO);
+            let barrel = m.x_axis.truncate().normalize();
+
+            // The shot's direction, as the gun launches it, with the elevation removed so the two are
+            // comparable — a raised barrel still points along the same compass line.
+            let e = Emplacement {
+                lat_deg: lat,
+                lon_deg: lon,
+                height_m: 0.0,
+                bearing_deg: bearing,
+                elevation_deg: 20.0,
+            };
+            let (pos, vel) = launch(&e, 500.0, 6.371e6);
+            let up = pos.normalize();
+            let horizontal = (vel - up * vel.dot(up)).normalize();
+
+            let along = barrel.dot(horizontal);
+            assert!(
+                along > 0.9999,
+                "at {lat},{lon} bearing {bearing} the shot leaves {:.1} degrees off the barrel it was \
+                 drawn with — the gun is firing across itself",
+                along.clamp(-1.0, 1.0).acos().to_degrees()
+            );
+            // And it leaves in FRONT of the gun, not out of the breech.
+            assert!(vel.dot(barrel) > 0.0, "the shot must leave the muzzle end");
+        }
+    }
 }

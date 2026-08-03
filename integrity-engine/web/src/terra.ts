@@ -319,29 +319,23 @@ async function main(): Promise<void> {
       // (`heaviest_fragment`); this decides where to put a camera because of it and hands the engine a
       // POSE. The engine has no notion of "following" and does not need one (docs/59) — and nothing
       // here touches physics, which `laws::scene_purity_tests` enforces.
+      // ★★ **FIRE, THEN HAND THE CAMERA TO THE FOLLOWER THAT ALREADY EXISTS.**
+      //
+      // Robin, watching: *"cannon seems to shoot to the side?! ... it all looks very weird."* The engine
+      // was innocent — `the_shot_leaves_along_the_barrel_it_was_drawn_with` pins the shot to within
+      // 0.01 degrees of the barrel as drawn, at four sites. The weirdness was a camera I hand-rolled
+      // here: it swung from behind the gun, THROUGH it, to a point downrange while racing 9 -> 909 m
+      // out, so half a second after firing the gun was off-screen and the view was 66 m in the air.
+      //
+      // This scene already had a proper chase camera — `driveFollowCamera`, which stands off a
+      // fragment by its own radius, looks at it, and ENDS ITSELF when it lands, handing the wheel back
+      // through the HUD. Writing a second one was the mistake; it is deleted. Selecting "follow" is now
+      // the whole of what firing does to the camera, so the shot is watched by the same code that
+      // watches a meteor.
       fire.addEventListener("click", () => {
-        let watching = true;
-        const started = performance.now();
-        const follow = () => {
-          if (!watching) return;
-          const f = terra.heaviest_fragment();
-          const t = (performance.now() - started) / 1000;
-          if (f.length === 0) {
-            // It has arrived. Stand off the splash and look back at it, then release the camera so the
-            // scene is flyable again.
-            const [sla, slo] = along(4600, gBearing);
-            terra.set_fly(sla, slo, 90, ((gBearing + 180) * Math.PI) / 180, -0.32);
-            hud.notify("splash — the shot is down");
-            watching = false;
-            return;
-          }
-          // Rise and swing downrange as the shot climbs, so the camera leads it rather than chasing.
-          const k = Math.min(t / 6, 1);
-          const [la, lo] = along(9 + 900 * k, gBearing + 180 * (1 - k));
-          terra.set_fly(la, lo, 3.2 + 260 * k, (gBearing * Math.PI) / 180, -0.16 - 0.2 * k);
-          requestAnimationFrame(follow);
-        };
-        requestAnimationFrame(follow);
+        standBehind(8.5, 2.8, -Math.atan((2.8 - 0.7) / 8.5));
+        // The body exists the moment the gun fires, so the follower has something to ride at once.
+        if (terra.heaviest_fragment().length > 0) hud.selectCamera("follow");
       });
     }
 
