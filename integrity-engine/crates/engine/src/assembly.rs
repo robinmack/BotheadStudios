@@ -24,7 +24,7 @@
 //! reloading.
 
 use crate::materials::Material;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// A primitive volume. **Not just spheres** — a gun barrel is a tube, a carriage cheek is a slab, and
 /// an assembly format that could only describe planets would be the whole problem restated.
@@ -32,7 +32,7 @@ use serde::Deserialize;
 /// Dimensions are metres. Every variant answers [`Shape::volume_m3`] in closed form, because a volume
 /// that had to be integrated numerically would make an assembly's mass depend on a sampling density —
 /// which is a rendering concern leaking into a physical quantity.
-#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Shape {
     Sphere {
@@ -118,7 +118,7 @@ impl Shape {
 /// ★ Every variant resolves to properties `data/materials.json` ALREADY carries, so a join is a boundary
 /// condition on the existing contact/cohesion law rather than a second physics (Law II). A join that
 /// needed a new material property would be a signal to source and catalogue that property.
-#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Join {
     /// Material continuity — fails at the parent's own `fracture_strength`.
@@ -138,7 +138,7 @@ pub enum Join {
 }
 
 /// One piece of matter: what it is made of, what shape it is, and where it sits.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Part {
     pub name: String,
     /// Material id into `data/materials.json`.
@@ -186,7 +186,7 @@ impl Part {
 }
 
 /// A named connection between two parts, by part name.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Connection {
     pub a: String,
     pub b: String,
@@ -194,7 +194,7 @@ pub struct Connection {
 }
 
 /// **An assembly.** Parts, and how they are joined.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Assembly {
     pub id: String,
     pub name: String,
@@ -223,7 +223,7 @@ pub struct Assembly {
 
 /// Bulk quantities computed from the parts. Cached to save the runtime the work, and checkable against
 /// a fresh derivation at any time — which is what makes it a cache rather than an assertion.
-#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Derived {
     pub mass_kg: f64,
     /// The space the assembly occupies, m³ — envelopes, void included. What it displaces.

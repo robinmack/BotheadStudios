@@ -464,6 +464,40 @@ pub(crate) const DEFINITION_OWNED: &[(&str, &str)] = &[
 /// state by hand is a scene dictating its own physics.
 pub(crate) const COLLISION_PRIMITIVES: &[&str] = &["swept_first_contact", "contact_velocity"];
 
+/// **Every engine physics primitive a SCENE must never call, paired with the module that owns it.**
+///
+/// Robin, having stated the rule repeatedly and then watched it broken anyway (2026-08-03): *"scenes
+/// specify assemblies present, their positions, and starting velocities. They must NEVER introduce
+/// physics"*, and — decisively — ***"laws without enforcement are vanity projects."***
+///
+/// ★ The boundary is not "a scene may not mention physics". A scene legitimately asks the engine to
+/// STEP (`flight.step(&env, ..)`, `sim.step(dt)`) and reads back what happened. What it may never do is
+/// compute a force, an acceleration, a contact or an atmosphere ITSELF — because then the answer to a
+/// physical question depends on which scene asked it.
+///
+/// Every entry is a failure that actually happened here:
+///   * `swept_first_contact`, `contact_velocity` — `OrbitDemo` ran its own swept-CCD loop, twice.
+///   * `drag_accel` — a cannon's trajectory integrator took a drag COEFFICIENT as an argument, putting
+///     the caller in charge of how hard the air pushes back. Deleted in favour of `flight::Flight`,
+///     which already flies meteors through the same air and integrates quadratic drag in closed form.
+///   * `AirShell::new` — building a world's atmosphere is deciding what its air IS. `PlanetAir` did
+///     exactly that from inside `mod app` until it was moved into `flight`, where it belongs.
+///   * `atmospheric_step`, `contact_accel`, `contact_force` — drag/heating/ablation, and the granular
+///     contact law.
+///
+/// The paired module is checked too: if the owner does not call it either, the entry guards nothing and
+/// the test says so rather than passing quietly.
+pub(crate) const SCENE_FORBIDDEN_PHYSICS: &[(&str, &str)] = &[
+    ("swept_first_contact", "interaction.rs"),
+    ("contact_velocity", "interaction.rs"),
+    ("drag_accel", "atmosphere.rs"),
+    ("atmospheric_step", "flight.rs"),
+    ("AirShell::new", "flight.rs"),
+    ("contact_accel", "granular.rs"),
+    ("contact_force", "granular.rs"),
+    ("surface_crossing", "flight.rs"),
+];
+
 /// The scene-facing modules: they own a canvas, a camera and a set of declared bodies, and nothing else.
 /// A scene describes objects, trajectories and user controls; the engine does the physics.
 pub(crate) const SCENE_MODULES: &[&str] = &["lib.rs", "ground_scene.rs"];
@@ -515,6 +549,56 @@ mod scene_purity_tests {
                 owner.contains(&format!("{prim}(")),
                 "the collision owner `interaction` must actually call `{prim}` — otherwise this test \
                  guards nothing"
+            );
+        }
+    }
+
+    /// **A SCENE MUST NEVER INTRODUCE PHYSICS** — the general form, and the one with teeth.
+    ///
+    /// Robin: *"scenes specify assemblies present, their positions, and starting velocities. They must
+    /// NEVER introduce physics"*, and *"laws without enforcement are vanity projects."*
+    ///
+    /// The sibling test above guards collision detection specifically. This guards the rest: drag, the
+    /// atmospheric response, the contact law, the surface crossing. Both halves matter, because the way
+    /// this rule actually breaks is never by someone re-implementing collisions — it is by a new module
+    /// reaching for whichever primitive its own job happens to need.
+    ///
+    /// ★ Verified by making it fail, in both directions: inserting `drag_accel(` or `AirShell::new(`
+    /// into a scene module turns it red, and an entry whose named owner does not call it is reported as
+    /// guarding nothing.
+    #[test]
+    fn a_scene_never_introduces_physics() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        let strip = |text: &str| -> String {
+            text.lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        for &scene in super::SCENE_MODULES {
+            let path = format!("{dir}/{scene}");
+            let text =
+                std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("{scene} must exist"));
+            let code = strip(&text);
+            for &(prim, owner) in super::SCENE_FORBIDDEN_PHYSICS {
+                assert!(
+                    !code.contains(&format!("{prim}(")),
+                    "{scene} calls `{prim}(` — that is PHYSICS, and it belongs to `{owner}`.\n\
+                     A scene specifies which assemblies are present, where they are and how fast they \
+                     are going. It asks the engine to step them; it never computes a force, an \
+                     acceleration, a contact or an atmosphere itself."
+                );
+            }
+        }
+        // Each entry must be REAL: if the named owner does not call it either, the line guards nothing.
+        for &(prim, owner) in super::SCENE_FORBIDDEN_PHYSICS {
+            let path = format!("{dir}/{owner}");
+            let text =
+                std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("{owner} must exist"));
+            assert!(
+                text.contains(&format!("{prim}(")),
+                "`{prim}` is declared as owned by `{owner}`, which does not call it — so this entry \
+                 forbids something nobody does, and guards nothing."
             );
         }
     }

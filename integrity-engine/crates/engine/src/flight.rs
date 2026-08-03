@@ -463,6 +463,95 @@ impl Flight {
     }
 }
 
+/// **A planet as a world to fly through**: gravity is the body's own layered mass, the air is its
+/// emergent hydrostatic column, and hard matter is its surface. A flat ground patch answers the same
+/// three questions from a heightfield (`simulation::GroundAir`), and the flight physics between them
+/// is the same code.
+///
+/// ★★ **This lived inside `mod app` — inside a SCENE — until 2026-08-03, and that was the defect.**
+/// Robin: *"SCENES must never apply physics."* Answering *what is gravity here, what is the air here,
+/// where is the surface* IS physics, so a scene that owns those answers is applying them; and being
+/// wasm-only, it could not be tested natively or reused by anything that was not a browser. It is the
+/// shape docs/46 row 15 records — capability reachable only THROUGH a scene. Now the scene merely
+/// names a body and the engine answers.
+pub struct PlanetAir {
+    matter: crate::planet::LayeredBody,
+    air: crate::atmosphere::AirShell,
+    radius_m: f64,
+}
+
+impl PlanetAir {
+    /// Resolve a placed body's matter and its emergent air once, so the flight step does not have to
+    /// rebuild the planet to ask what gravity is.
+    pub fn of(mats: &[crate::materials::Material], body_id: &str, radius_m: f64) -> Self {
+        let matter = crate::planet::body(body_id);
+        let air = match mats.iter().find(|m| m.id == "air") {
+            Some(a) => crate::atmosphere::AirShell::new(
+                matter.surface_pressure(),
+                a,
+                288.0,
+                matter.gravity_at(matter.radius()),
+            ),
+            None => crate::atmosphere::AirShell {
+                rho_surface: 0.0,
+                scale_height_m: 0.0,
+                ambient_temp_k: 288.0,
+            },
+        };
+        PlanetAir {
+            matter,
+            air,
+            radius_m,
+        }
+    }
+}
+
+impl FlightEnvironment for PlanetAir {
+    fn gravity_at(&self, pos: glam::DVec3) -> glam::DVec3 {
+        // Gauss's law over the body's REAL differentiated mass profile — not a declared surface g.
+        self.matter.acceleration_at(pos, glam::DVec3::ZERO)
+    }
+    fn air_at(&self, pos: glam::DVec3) -> Option<(f64, f64)> {
+        if !self.air.exists() {
+            return None; // an airless body: real vacuum, and its bodies fly ballistically
+        }
+        Some((
+            self.air.density_at(pos.length() - self.radius_m),
+            self.air.ambient_temp_k,
+        ))
+    }
+    fn arrival(
+        &self,
+        body: &FlyingBody,
+        from: glam::DVec3,
+        to: glam::DVec3,
+        _dt: f64,
+    ) -> Option<Met> {
+        if to.length() > self.radius_m {
+            return None;
+        }
+        // **The site is where the trajectory CROSSED the surface.** This used to return `to`, the
+        // post-step sample, which at orbital entry speed is kilometres inside the planet — the same
+        // defect the ground patch had, and worse here because the speeds are higher.
+        //
+        // The sphere is analytic, so the crossing can be resolved as finely as the loop allows; the
+        // tolerance that would matter is the elevation raster's, and this coarse shell does not carry
+        // one. (docs/46: the raster is 19.55 km/pixel, so a metre of site precision is already far
+        // below the surface this radius stands in for.)
+        let at = surface_crossing(from, to, |p| p.length() <= self.radius_m);
+        // A planet is immovable: the reduced mass is the arriving body's own.
+        let (energy_j, momentum) = delivered(body, glam::DVec3::ZERO, None);
+        Some(Met {
+            at,
+            energy_j,
+            momentum,
+        })
+    }
+    fn air_scale_height_m(&self) -> f64 {
+        self.air.scale_height_m
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

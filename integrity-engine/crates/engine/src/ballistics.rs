@@ -230,6 +230,48 @@ pub fn fire(
     }
 }
 
+/// **A gun placed on a body and aimed** — the exterior half of the same story.
+///
+/// Robin's acceptance test (docs/64): *"put a working cannon on a working planet and fire it"*, and
+/// *"on land pointed to sea"*. So an emplacement is a coordinate, a bearing and an elevation; where the
+/// shot lands is not a parameter of it.
+#[derive(Clone, Copy, Debug)]
+pub struct Emplacement {
+    pub lat_deg: f64,
+    pub lon_deg: f64,
+    /// Height of the muzzle above the local surface, m.
+    pub height_m: f64,
+    /// Compass bearing the gun points along: 0 = north, 90 = east.
+    pub bearing_deg: f64,
+    /// Elevation above the local horizontal, degrees.
+    pub elevation_deg: f64,
+}
+
+/// **The launch state of a shot leaving this gun** — position and velocity in the body frame.
+///
+/// ★ This is GEOMETRY, not physics, and the distinction is the point. Robin: *"shouldn't the engine
+/// itself be applying the air resistance? I don't want the scene computing it"*, and *"SCENES must
+/// never apply physics."* An emplacement knows where the gun stands and which way it points; what
+/// happens to the shot afterwards belongs to [`crate::flight::Flight`], which already flies meteors
+/// through the same air with the same drag, heating and ablation, sizing its own substeps against the
+/// atmosphere's scale height and integrating quadratic drag in CLOSED FORM rather than by Euler steps.
+///
+/// A first version of this module carried its own trajectory integrator taking a drag coefficient and
+/// an `AirShell` as arguments. That made the CALLER choose the physics, which is the rule above broken,
+/// and it was a second answer to a question `flight.rs` had already answered better (Law II). Deleted.
+pub fn launch(e: &Emplacement, muzzle_ms: f64, body_radius_m: f64) -> (glam::DVec3, glam::DVec3) {
+    // ★ The frame is (up, north, east) — see `geo::tangent_frame`. Destructuring it as
+    // (east, north, up) fired the shot SIDEWAYS along the surface and produced a 10,000 km "range",
+    // which a test caught. The doc comment had said so plainly.
+    let (up, north, east) = crate::geo::tangent_frame(e.lat_deg, e.lon_deg);
+    let b = e.bearing_deg.to_radians();
+    let el = e.elevation_deg.to_radians();
+    // Bearing 0 is north, 90 east — the surveyor's convention, not the mathematician's.
+    let horizontal = north * b.cos() + east * b.sin();
+    let dir = (horizontal * el.cos() + up * el.sin()).normalize();
+    (up * (body_radius_m + e.height_m), dir * muzzle_ms)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,5 +484,112 @@ mod tests {
             real.peak_pressure_pa,
             ideal.peak_pressure_pa
         );
+    }
+
+    /// ★★★ **THE CANNON ON EARTH, POINTED AT THE SEA** — Robin's acceptance test
+    /// (*"put a working cannon on a working planet and fire it"*, *"on land pointed to sea"*).
+    ///
+    /// ★★ **The shot is flown by the ENGINE, not by this test.** `crate::flight::Flight` is what
+    /// carries meteors through the same air; a cannonball is a `FlyingBody` with a different mass and a
+    /// slower launch, and `flight.rs` says so itself — *"nothing about flight is written for 'a
+    /// meteor'"*. Gravity, air density, drag, heating and the surface crossing all come from
+    /// `PlanetAir`, the engine's own environment. Nothing here chooses a drag coefficient.
+    ///
+    /// The site is FOUND, not typed: scanned for a land texel whose shot lands on water.
+    #[test]
+    fn the_cannon_stands_on_earth_and_puts_its_shot_in_the_sea() {
+        let mats = mats();
+        let (bore, shot_kg, gun_kg, gas_kg, burn, _p, gamma) = twenty_four_pounder();
+        let fired = fire(&burn, &bore, shot_kg, gun_kg, gas_kg, gamma, 0.001, FLAME_K);
+        assert_eq!(fired.outcome, Outcome::Fired);
+
+        let earth = crate::planet::body("earth");
+        let r_e = earth.radius();
+        // The engine's own environment — the same one Terra flies its meteor swarm through.
+        let env = crate::flight::PlanetAir::of(&mats, "earth", r_e);
+        let iron = crate::materials::index_of(&mats, "cast_iron");
+        let shot_r =
+            (3.0 * (shot_kg / mats[iron].density as f64) / (4.0 * std::f64::consts::PI)).cbrt();
+        let land = crate::terra::raster::shipped::earth_landmask();
+
+        let mut found = None;
+        'search: for (lat_i, lon_i) in (-60..60)
+            .step_by(3)
+            .flat_map(|a| (-180..180).step_by(3).map(move |b| (a, b)))
+        {
+            let (lat, lon) = (lat_i as f64, lon_i as f64);
+            if !land.land_at(lat, lon) {
+                continue;
+            }
+            for bearing in (0..360).step_by(15) {
+                let e = Emplacement {
+                    lat_deg: lat,
+                    lon_deg: lon,
+                    height_m: 12.0,
+                    bearing_deg: bearing as f64,
+                    elevation_deg: 45.0,
+                };
+                let (pos, vel) = launch(&e, fired.muzzle_ms, r_e);
+                let mut fl = crate::flight::Flight::default();
+                fl.introduce(crate::flight::FlyingBody {
+                    id: 0,
+                    pos,
+                    vel,
+                    mass_kg: shot_kg,
+                    material: iron,
+                    radius_m: shot_r,
+                    temp_k: 288.0,
+                    skin_m: 0.0,
+                });
+                // Step until it arrives. The ENGINE decides its own substeps.
+                let mut arrival = None;
+                for _ in 0..6000 {
+                    let a = fl.step(&env, &mats, 1.0 / 60.0);
+                    if let Some(a) = a.into_iter().next() {
+                        arrival = Some(a);
+                        break;
+                    }
+                    if fl.bodies().is_empty() {
+                        break;
+                    }
+                }
+                let Some(a) = arrival else { continue };
+                let (ilat, ilon) = crate::geo::lat_lon_from_dir(a.at.normalize());
+                if !land.land_at(ilat, ilon) {
+                    found = Some((e, a, ilat, ilon));
+                    break 'search;
+                }
+            }
+        }
+        let (site, arrival, ilat, ilon) =
+            found.expect("somewhere on Earth a 24-pounder stands on land and fires into the sea");
+
+        assert!(
+            land.land_at(site.lat_deg, site.lon_deg),
+            "the gun is on land at {:.1}, {:.1}",
+            site.lat_deg,
+            site.lon_deg
+        );
+        assert!(
+            !land.land_at(ilat, ilon),
+            "and the splash is at sea: {ilat:.3}, {ilon:.3}"
+        );
+
+        // The shot has to be a cannon shot rather than a number that merely lands wet.
+        let a0 = crate::geo::dir_from_lat_lon(site.lat_deg, site.lon_deg);
+        let range = r_e * a0.dot(arrival.at.normalize()).clamp(-1.0, 1.0).acos();
+        assert!(
+            (500.0..12_000.0).contains(&range),
+            "a 24-pdr at 45 degrees carries a few kilometres: {range:.0} m"
+        );
+        // ★ Drag is REAL, and the engine applied it: the range falls well short of the vacuum parabola.
+        // A trajectory matching v^2 sin(2t)/g would mean the air did nothing.
+        let g = earth.gravity_at(r_e);
+        let vacuum = fired.muzzle_ms.powi(2) * (2.0 * 45f64.to_radians()).sin() / g;
+        assert!(
+            range < 0.7 * vacuum,
+            "air costs it most of the vacuum range: {range:.0} m against {vacuum:.0} m in vacuum"
+        );
+        assert!(arrival.energy_j > 0.0, "and it arrives carrying energy");
     }
 }

@@ -5814,89 +5814,7 @@ mod app {
         /// The placed body's own matter and air, resolved ONCE. `planet::body()` deserializes its JSON on
         /// every call, and the flight step was calling it every frame — rebuilding the planet, in full,
         /// to ask what gravity is.
-        flight_env: PlanetAir,
-    }
-
-    /// **A planet as a world to fly through** — the whole of what Terra contributes to entry physics:
-    /// gravity is this body's own layered mass, the air is its emergent hydrostatic column, and hard
-    /// matter is its surface. A flat ground patch answers the same three questions from a heightfield
-    /// (`simulation::GroundAir`), and the flight physics between them is the same code.
-    struct PlanetAir {
-        matter: crate::planet::LayeredBody,
-        air: crate::atmosphere::AirShell,
-        radius_m: f64,
-    }
-
-    impl PlanetAir {
-        /// Resolve a placed body's matter and its emergent air once, so the flight step does not have to
-        /// rebuild the planet to ask what gravity is.
-        fn of(mats: &[materials::Material], body_id: &str, radius_m: f64) -> Self {
-            let matter = crate::planet::body(body_id);
-            let air = match mats.iter().find(|m| m.id == "air") {
-                Some(a) => crate::atmosphere::AirShell::new(
-                    matter.surface_pressure(),
-                    a,
-                    288.0,
-                    matter.gravity_at(matter.radius()),
-                ),
-                None => crate::atmosphere::AirShell {
-                    rho_surface: 0.0,
-                    scale_height_m: 0.0,
-                    ambient_temp_k: 288.0,
-                },
-            };
-            PlanetAir {
-                matter,
-                air,
-                radius_m,
-            }
-        }
-    }
-
-    impl crate::flight::FlightEnvironment for PlanetAir {
-        fn gravity_at(&self, pos: glam::DVec3) -> glam::DVec3 {
-            // Gauss's law over the body's REAL differentiated mass profile — not a declared surface g.
-            self.matter.acceleration_at(pos, glam::DVec3::ZERO)
-        }
-        fn air_at(&self, pos: glam::DVec3) -> Option<(f64, f64)> {
-            if !self.air.exists() {
-                return None; // an airless body: real vacuum, and its bodies fly ballistically
-            }
-            Some((
-                self.air.density_at(pos.length() - self.radius_m),
-                self.air.ambient_temp_k,
-            ))
-        }
-        fn arrival(
-            &self,
-            body: &crate::flight::FlyingBody,
-            from: glam::DVec3,
-            to: glam::DVec3,
-            _dt: f64,
-        ) -> Option<crate::flight::Met> {
-            if to.length() > self.radius_m {
-                return None;
-            }
-            // **The site is where the trajectory CROSSED the surface.** This used to return `to`, the
-            // post-step sample, which at orbital entry speed is kilometres inside the planet — the same
-            // defect the ground patch had, and worse here because the speeds are higher.
-            //
-            // The sphere is analytic, so the crossing can be resolved as finely as the loop allows; the
-            // tolerance that would matter is the elevation raster's, and this coarse shell does not carry
-            // one. (docs/46: the raster is 19.55 km/pixel, so a metre of site precision is already far
-            // below the surface this radius stands in for.)
-            let at = crate::flight::surface_crossing(from, to, |p| p.length() <= self.radius_m);
-            // A planet is immovable: the reduced mass is the arriving body's own.
-            let (energy_j, momentum) = crate::flight::delivered(body, glam::DVec3::ZERO, None);
-            Some(crate::flight::Met {
-                at,
-                energy_j,
-                momentum,
-            })
-        }
-        fn air_scale_height_m(&self) -> f64 {
-            self.air.scale_height_m
-        }
+        flight_env: crate::flight::PlanetAir,
     }
 
     #[wasm_bindgen]
@@ -6055,7 +5973,7 @@ mod app {
                 40_000_000.0,
             );
             let matter = MatterField::new(&device, config.format, 200_000);
-            let flight_env = PlanetAir::of(&mats, "earth", earth_radius_m());
+            let flight_env = crate::flight::PlanetAir::of(&mats, "earth", earth_radius_m());
             Ok(Terra {
                 detail: Default::default(),
                 flight: crate::flight::Flight::default(),
@@ -6160,7 +6078,8 @@ mod app {
             // The flight environment is this body's own matter and air — re-resolve it when the world
             // changes, and never again per frame. (Sean's branch predates this cache and dropped it;
             // without it the flight step deserializes the planet every frame.)
-            self.flight_env = PlanetAir::of(&self.mats, &self.body_id, self.planet_radius);
+            self.flight_env =
+                crate::flight::PlanetAir::of(&self.mats, &self.body_id, self.planet_radius);
             self.atm_twilight =
                 twilight_of(self.planet_radius, g_surface, &self.mats, self.atm_tau);
             self.world_name = w.name.clone();
