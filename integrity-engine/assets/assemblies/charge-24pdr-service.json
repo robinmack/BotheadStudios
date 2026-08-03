@@ -1,0 +1,63 @@
+{
+ "id": "charge-24pdr-service",
+ "name": "24-pounder service charge",
+ "notes": "A separate assembly SO THE GUN CAN BE RELOADED (Robin): the charge is consumed and ceases to exist, the shot is transferred out, the gun persists. A service charge for a 24-pounder was about a third of the shot's weight — 8 lb of powder to 24 lb of ball — here 3.629 kg. ★ The powder is THREE PARTS, not one material: black powder is a mechanical mixture of potassium nitrate, charcoal and sulfur at 75/15/10, and its bulk properties DERIVE from them (see `materials::mixture_tests`). Modelling it as one substance would have meant inventing a specific heat, which is exactly what was backed out on 2026-08-02. The wad is what holds the ball against the charge and is the reason a gun could be fired downhill. ★★ FLAGGED, and it matters: the three powder parts are sized to the right MASSES, so their combined SOLID volume is 1855 cm3 — but poured corned powder of this mass occupies about 3629 cm3, roughly twice as much, because it is ~49% void. The engine has no way yet to say 'this matter is packed loosely', so an assembly of solid parts under-states the CHAMBER VOLUME the charge fills. That is not cosmetic: chamber volume sets the pressure the burn reaches. Recorded rather than fudged with an inflated part — the honest fix is a packing fraction on a part, which is the same 'arrangement, not matter' distinction the material catalogue already draws between true and bulk density.",
+ "parts": [
+  {
+   "name": "saltpetre",
+   "material": "potassium_nitrate",
+   "shape": {
+    "kind": "cylinder",
+    "r": 0.0739,
+    "length": 0.075215
+   },
+   "at_m": [
+    0.0,
+    0.0,
+    0.0
+   ]
+  },
+  {
+   "name": "charcoal",
+   "material": "charcoal",
+   "shape": {
+    "kind": "cylinder",
+    "r": 0.0739,
+    "length": 0.022661
+   },
+   "at_m": [
+    0.0,
+    0.0,
+    0.0
+   ]
+  },
+  {
+   "name": "brimstone",
+   "material": "sulfur",
+   "shape": {
+    "kind": "cylinder",
+    "r": 0.0739,
+    "length": 0.010218
+   },
+   "at_m": [
+    0.0,
+    0.0,
+    0.0
+   ]
+  },
+  {
+   "name": "wad",
+   "material": "oak",
+   "shape": {
+    "kind": "cylinder",
+    "r": 0.0739,
+    "length": 0.03
+   },
+   "at_m": [
+    0.1,
+    0.0,
+    0.0
+   ]
+  }
+ ]
+}
