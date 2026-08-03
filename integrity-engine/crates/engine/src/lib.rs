@@ -6272,13 +6272,18 @@ mod app {
             if self.cannon_at.is_none() {
                 self.emplace_cannon(bearing_deg);
             }
-            let (glat, glon, _) =
+            // ★ A gun fires along ITS OWN bearing, not the camera's. The rig caught this: emplaced
+            // facing 240, the shot left on 208, because the button passed whichever way the camera
+            // happened to be looking. Where a gun points is a property of the gun.
+            let (glat, glon, bearing_deg) =
                 self.cannon_at
                     .unwrap_or((self.fly.lat, self.fly.lon, bearing_deg));
             let e = crate::ballistics::Emplacement {
                 lat_deg: glat,
                 lon_deg: glon,
-                height_m: 12.0,
+                // The gun's BASE is on the ground; how high its muzzle sits above that is the
+                // assembly's business and `fire_gun` derives it.
+                height_m: 0.0,
                 bearing_deg,
                 elevation_deg,
             };
@@ -6299,8 +6304,11 @@ mod app {
                     // flash needs no separate effect — the products leave far above the temperature at
                     // which `emission::incandescence` makes matter glow.
                     if let Some(x) = ejecta {
+                        // A muzzle blast is a CLOUD. Same mass, held more finely — a resolution
+                        // choice, not a physical one (Law IV). The cone is the gas expanding as it
+                        // leaves the bore's confinement.
                         self.flight
-                            .shed_at(x.mass_kg, x.material, x.pos, x.vel, x.temp_k);
+                            .shed_cloud(x.mass_kg, x.material, x.pos, x.vel, x.temp_k, 0.55, 160);
                     }
                     self.flight.introduce(body);
                     self.cannon_shots += 1;

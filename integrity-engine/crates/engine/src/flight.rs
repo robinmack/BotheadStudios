@@ -302,6 +302,53 @@ impl Flight {
         self.trail.shed(mass_kg, material, pos, vel, temp_k);
     }
 
+    /// **Shed a CLOUD** — the same mass, spread over many parcels and a spray of directions.
+    ///
+    /// A muzzle blast is not a point. `shed_at` puts all of it in one place, which is honest about mass
+    /// and useless as a picture; this divides it, which is a RESOLUTION choice and not a physical one
+    /// (Law IV, docs/44): the same matter, held more finely. `introduce_swarm` makes exactly this
+    /// distinction for a disintegrating bolide.
+    ///
+    /// The spread is derived from the jet itself — parcels leave within `cone` radians of the jet
+    /// direction at speeds from a third of it to the whole, which is what an expanding gas leaving a
+    /// tube does. Deterministic (a golden-angle spiral, not a random draw), so two runs of the same
+    /// shot produce the same cloud and a rig can compare frames.
+    pub fn shed_cloud(
+        &mut self,
+        mass_kg: f64,
+        material: usize,
+        pos: DVec3,
+        vel: DVec3,
+        temp_k: f64,
+        cone: f64,
+        parcels: usize,
+    ) {
+        let n = parcels.max(1);
+        let each = mass_kg / n as f64;
+        let dir = vel.normalize_or(DVec3::Y);
+        // A frame about the jet, so the spray is around IT rather than around a world axis.
+        let a = if dir.x.abs() < 0.9 {
+            DVec3::X
+        } else {
+            DVec3::Y
+        };
+        let u = dir.cross(a).normalize_or(DVec3::X);
+        let w = dir.cross(u);
+        let golden = std::f64::consts::PI * (3.0 - 5f64.sqrt());
+        for i in 0..n {
+            let t = (i as f64 + 0.5) / n as f64;
+            // Angle from the axis grows with sqrt(t) so parcels fill the cone evenly by AREA rather
+            // than bunching at the rim.
+            let (sa, ca) = (cone * t.sqrt()).sin_cos();
+            let phi = i as f64 * golden;
+            let d = (dir * ca + (u * phi.cos() + w * phi.sin()) * sa).normalize();
+            // Slower at the edges, fastest on the axis — a jet, not a shell.
+            let speed = vel.length() * (0.33 + 0.67 * (1.0 - t));
+            self.trail
+                .shed(each, material, pos + d * 0.5, d * speed, temp_k);
+        }
+    }
+
     pub fn trail(&self) -> &Trail {
         &self.trail
     }

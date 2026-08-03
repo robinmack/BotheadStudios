@@ -415,7 +415,27 @@ pub fn fire_gun(
     if fired.outcome != Outcome::Fired {
         return Ok((fired, None, None));
     }
-    let (pos, vel) = launch(e, fired.muzzle_ms, body_radius_m);
+    // ★ **The muzzle's height comes from the GUN, not from the caller.** `Emplacement::height_m` is
+    // where the gun's BASE sits — 0 on the ground, a gun deck's height on a ship — and the barrel's
+    // own height above that base is a fact about the assembly. A first version left the scene passing
+    // 12.0 (copied from a ship-deck test), so the shot and its smoke were born twelve metres above the
+    // carriage, clear of the gun and out of frame.
+    let base_y = gun
+        .parts
+        .iter()
+        .map(|p| p.at_m[1] - p.shape.equivalent_radius_m())
+        .fold(f64::MAX, f64::min);
+    let barrel_y = gun
+        .parts
+        .iter()
+        .filter(|p| matches!(p.shape, Shape::Tube { .. }))
+        .map(|p| p.at_m[1])
+        .fold(f64::MIN, f64::max);
+    let muzzle_e = Emplacement {
+        height_m: e.height_m + (barrel_y - base_y).max(0.0),
+        ..*e
+    };
+    let (pos, vel) = launch(&muzzle_e, fired.muzzle_ms, body_radius_m);
     // ★ The muzzle is where the BARREL ENDS — the bored length past the chamber, along the bore. The
     // ejecta leave there, not at the gun's feet, because the barrel's shape decides it.
     let dir = vel.normalize_or_zero();
