@@ -475,6 +475,14 @@ predicate the assembly carries and is re-asked under real load. **An engine in w
 burst is not simpler than one in which it can — it is one that has quietly declared the failure mode out
 of existence**, which is Law IV inverted and would make the whole join taxonomy decorative.
 
+★ **And it is cheap, which is the part that makes it practical rather than aspirational.** Robin:
+*"if it all checks out we hand the easy 1d to the renderer, if physics predicts catastrophy, we share
+that with the renderer. No need to actually render the matter particles, so should be a fast
+calculation."* Deciding whether an assembly fails is closed-form arithmetic on numbers it already
+carries; only a failure that IS happening needs matter resolved, and then only to show how it comes
+apart. So the expensive path is never entered speculatively — the assembly's own validation predicate
+is the trigger, and a sound gun costs nothing to prove sound.
+
 The results go into the header's `validation_summary` and the PROV section, so **an assembly carries the
 evidence that it was checked**, and a consumer can see which checks ran, which passed, and which were
 skipped for want of data. A check that could not run is recorded as *not run* — an unknown stays unknown
