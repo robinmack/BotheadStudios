@@ -197,7 +197,7 @@ mod single_source_tests {
     /// `#[cfg(test)]`, which in a file with an early test module discarded almost everything after it —
     /// `lib.rs` was 98% invisible to its own conformance check. Prose may name a number freely; a test
     /// asserting a value against a published reference is the opposite of a hidden duplicate.
-    fn strip(text: &str) -> String {
+    pub(super) fn strip(text: &str) -> String {
         let mut out = String::with_capacity(text.len());
         let mut skipping = false;
         let mut depth = 0i32;
@@ -871,8 +871,16 @@ mod material_property_tests {
     }
 
     /// Word-boundary search, so `cohesion` does not match `cohesion_ceiling` and `a` does not match
-    /// every word in the tree. Comments count as readers deliberately: a property named only in a
-    /// comment is at least VISIBLE to the next person, which is the thing being enforced.
+    /// every word in the tree.
+    ///
+    /// ★ **Comments do NOT count as readers, and the first version of this guard had that backwards.**
+    /// It counted them deliberately, on the reasoning that a property named in a comment is at least
+    /// VISIBLE. The flaw showed up the moment a test explained WHY `ductility` is unread: naming it in
+    /// prose marked it as read and the guard reported the debt paid. **A guard that a comment about the
+    /// gap can satisfy is a guard about prose, not about code.** Source is stripped of comments and of
+    /// `#[cfg(test)]` blocks (`single_source_tests::strip`, reused rather than rewritten) before
+    /// scanning, so only production code counts — which is the correct bar anyway: a property read only
+    /// by its own test is not consumed by the engine.
     fn reads_identifier(blob: &str, ident: &str) -> bool {
         let bytes = blob.as_bytes();
         let mut from = 0;
@@ -909,7 +917,7 @@ mod material_property_tests {
                     continue;
                 }
                 if let Ok(t) = std::fs::read_to_string(&p) {
-                    out.push_str(&t);
+                    out.push_str(&super::single_source_tests::strip(&t));
                     out.push('\n');
                 }
             }
