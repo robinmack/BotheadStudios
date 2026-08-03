@@ -2045,6 +2045,138 @@
     "https://webbook.nist.gov/chemistry/",
     "CRC Handbook of Chemistry and Physics, 97th ed., 'Thermal Conductivity of Gases' (300 K, 1 atm)"
    ]
+  },
+  {
+   "id": "potassium_nitrate",
+   "display_name": "Potassium nitrate (niter, saltpetre)",
+   "category": "mineral",
+   "phase": "solid",
+   "parent": null,
+   "assumed_condition": "Crystalline KNO3 (the mineral niter) at room temperature and 1 atm",
+   "mechanical": {
+    "density": 2109.0,
+    "hardness_mohs": 2.0
+   },
+   "optical": {
+    "albedo": [
+     0.72,
+     0.72,
+     0.72
+    ],
+    "roughness": 0.7,
+    "metallic": 0.0,
+    "translucency": 0.3,
+    "color_variance": 0.1,
+    "grain": "white to colourless prismatic crystals; translucent, vitreous"
+   },
+   "thermal": {
+    "specific_heat": 940.2,
+    "melt_point": 607.0,
+    "latent_fusion": 0.0,
+    "boil_point": 0.0,
+    "latent_vaporization": 0.0,
+    "simon_a": 0.0,
+    "simon_c": 0.0,
+    "molar_mass": 0.101102,
+    "decomposes_k": 673.0,
+    "decomposition_suppressed_pa": 0.0,
+    "thermal_conductivity": 0.0,
+    "conductivity_note": "NOT CHARACTERIZED for the solid; molten KNO3 is 0.44-0.49 W/m/K over 350-450 C"
+   },
+   "notes": "The OXIDISER of black powder (~75% by mass) and the reason the mixture burns without air: it carries its own oxygen. SOURCED: density, melting point (607 K / 334 C), decomposition (673 K / 400 C, to KNO2 + O2 — irreversible, hence `decomposes_k` rather than a boiling point), Mohs 2, and a specific heat DERIVED from the tabulated molar value 95.06 J/mol/K over the molar mass 0.101102 kg/mol = 940.2 J/kg/K. NOT CHARACTERIZED and left at 0 rather than guessed: latent heat of fusion, elastic moduli, strengths, and the SOLID thermal conductivity (only the molten value was found). `albedo` is a reasoned value for a white crystalline salt, on the same footing as every other albedo in this file — see the honesty note on `Material::albedo`.",
+   "sources": [
+    "https://en.wikipedia.org/wiki/Potassium_nitrate (density, melting point, decomposition, molar heat capacity 95.06 J/mol/K)",
+    "https://www.webqc.org/compound.php?compound=Potassium+nitrate",
+    "https://en.wikipedia.org/wiki/Niter (Mohs 2, specific gravity 2.10)",
+    "Molten thermal conductivity: https://link.springer.com/article/10.1007/BF00502404"
+   ]
+  },
+  {
+   "id": "sulfur",
+   "display_name": "Sulfur (alpha, rhombic)",
+   "category": "mineral",
+   "phase": "solid",
+   "parent": null,
+   "assumed_condition": "alpha-S8, orthorhombic, the stable allotrope below 95.3 C",
+   "mechanical": {
+    "density": 2070.0,
+    "hardness_mohs": 2.0
+   },
+   "optical": {
+    "albedo": [
+     0.8,
+     0.7,
+     0.12
+    ],
+    "roughness": 0.75,
+    "metallic": 0.0,
+    "translucency": 0.25,
+    "color_variance": 0.12,
+    "grain": "bright yellow, resinous to vitreous; brittle crystalline or powdery"
+   },
+   "thermal": {
+    "specific_heat": 709.607,
+    "melt_point": 388.36,
+    "latent_fusion": 0.0,
+    "boil_point": 717.8,
+    "latent_vaporization": 0.0,
+    "simon_a": 0.0,
+    "simon_c": 0.0,
+    "molar_mass": 0.0,
+    "decomposes_k": 0.0,
+    "decomposition_suppressed_pa": 0.0,
+    "thermal_conductivity": 0.205,
+    "conductivity_note": "amorphous sulfur"
+   },
+   "notes": "The FUEL and rate-modifier of black powder (~10% by mass); it lowers the mixture's ignition temperature. SOURCED: density, specific heat 709.607 J/kg/K, melting point 388.36 K (115.21 C, the alpha allotrope), boiling point 717.8 K (444.6 C), thermal conductivity 0.205 W/m/K, Mohs 2.0. NOT CHARACTERIZED and left at 0 rather than guessed: latent heats of fusion and vaporization, and `molar_mass` — sulfur VAPOUR is a temperature-dependent mixture of S8, S6 and S2, so a single molar mass would misstate the Clausius-Clapeyron curve; 0 makes the engine use the flat boiling point, which is the honest fallback the field documents. Elastic moduli and strengths likewise absent.",
+   "sources": [
+    "https://en.wikipedia.org/wiki/Sulfur (density 2.07 g/cm3 alpha, specific heat 709.607 J/kg/K, melt 388.36 K, boil 717.8 K, thermal conductivity 0.205 W/m/K)",
+    "https://periodictable.com/Properties/A/MohsHardness.v.html (Mohs 2.0)"
+   ]
+  },
+  {
+   "id": "charcoal",
+   "display_name": "Charcoal (wood char)",
+   "category": "organic",
+   "phase": "solid",
+   "parent": null,
+   "assumed_condition": "Wood charcoal, TRUE (skeletal) density — not the bulk/poured density, which is 3-8x lower",
+   "mechanical": {
+    "density": 1400.0,
+    "hardness_mohs": 1.0
+   },
+   "optical": {
+    "albedo": [
+     0.035,
+     0.035,
+     0.035
+    ],
+    "roughness": 0.95,
+    "metallic": 0.0,
+    "translucency": 0.0,
+    "color_variance": 0.2,
+    "grain": "matte black, friable, retains the parent wood's cell structure; highly porous"
+   },
+   "thermal": {
+    "specific_heat": 768.0,
+    "melt_point": 0.0,
+    "latent_fusion": 0.0,
+    "boil_point": 0.0,
+    "latent_vaporization": 0.0,
+    "simon_a": 0.0,
+    "simon_c": 0.0,
+    "molar_mass": 0.0,
+    "decomposes_k": 0.0,
+    "decomposition_suppressed_pa": 0.0,
+    "thermal_conductivity": 0.0,
+    "conductivity_note": "NOT CHARACTERIZED; charcoal is a poor conductor and the figure is strongly porosity-dependent, so no single value was sourced"
+   },
+   "notes": "The FUEL of black powder (~15% by mass). SOURCED: true/skeletal density 1.3-1.5 g/cm3 (1400 taken as the midpoint) and specific heat 768 J/kg/K for softwood char measured at 313 K. ★ `density` here is the TRUE density of the solid substance, NOT the bulk density of a poured mass, which is 260-380 kg/m3 depending on species (birch 380, pine 290, spruce 260) because charcoal is 55-80% pore by volume. That distinction is the difference between the matter and an ARRANGEMENT of it, and this file describes the matter — the packing belongs to whatever assembly holds it. NOT CHARACTERIZED and left at 0: thermal conductivity (strongly porosity-dependent, no single cited figure), latent heats, and any melting or decomposition point — charcoal is largely amorphous carbon and does not melt at 1 atm; it OXIDISES, which is a reaction with its surroundings rather than a property of the substance alone. It is also not a pure substance: composition and properties depend on the parent wood and the pyrolysis conditions, so every number here is a representative value for wood char rather than a constant of nature.",
+   "sources": [
+    "True density 1.3-1.5 g/cm3 and porosity: http://ukrfuel.com/news-physical-properties-of-charcoal-22.html",
+    "Softwood char specific heat 768 J/kg/K at 313 K: https://www.sciencedirect.com/science/article/abs/pii/S0016236102003988",
+    "Eucalyptus charcoal apparent/bulk density and porosity: https://www.scielo.br/j/cerne/a/YHH8FZSMrYxMmMyhfF3fSFj/"
+   ]
   }
  ]
 }

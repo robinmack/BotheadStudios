@@ -149,6 +149,16 @@ invented at the keyboard, and precisely the defect `Material::specific_heat` was
 in `impact.rs`, 1000 in `aggregate.rs`, 1000 in `matter.rs`: one unknown, three answers). It was backed
 out rather than landed with a plausible figure.
 
+★★ **And the physics this needs is RAPID OXIDATION, not "a propellant"** (Robin): *"Rapid oxidation will
+be an important principle in the engine (fires, etc) so this won't be wasted."* A campfire, a burning
+ship, a gunpowder charge and a rusting hull are one reaction at different rates and different oxidiser
+availability — the charter's own shape, one law at every scale. The distinguishing quantity is **where
+the oxygen comes from**: a fire is air-limited and therefore ventilation-limited; black powder is
+SELF-oxidising, which is exactly why it works in a sealed bore. So the three substances catalogued here
+already split along the axis the model needs — `potassium_nitrate` is the oxidiser, `charcoal` and
+`sulfur` the fuels — and what they still lack is REACTION data (enthalpy of combustion per kg,
+stoichiometric oxygen demand, available oxygen per kg) rather than anything about themselves.
+
 This is the substance-versus-assembly distinction from §6b arriving from the other direction — first met
 in a rainforest canopy, met again in a keg of powder — which is the sign it is real and not a
 convenience of the biome discussion.

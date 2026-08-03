@@ -727,3 +727,96 @@ mod atmospheric_gas_tests {
             "CO₂ sublimes at 1 atm: its sublimation point (194.7 K) is BELOW the 216.6 K triple-point melt");
     }
 }
+
+#[cfg(test)]
+mod mixture_tests {
+    /// **Black powder is a MIXTURE, not a substance — and this test is what that buys** (docs/64).
+    ///
+    /// The first attempt at the cannon tried to catalogue `black_powder` as one material and quietly
+    /// carried `specific_heat: 1000.0`, a number invented at the keyboard — the exact defect
+    /// [`Material::specific_heat`] exists to prevent. It was backed out. Its three constituents are
+    /// catalogued instead, each with sourced properties, and the bulk figures DERIVE.
+    ///
+    /// Two derivations, and **they take different weightings, which is the part worth pinning**:
+    ///
+    /// * **Specific heat is MASS-weighted.** It is already per-kilogram, so a kilogram of mixture is
+    ///   just its constituents' kilograms: `sum(w_i * c_i)`.
+    /// * **True density is VOLUME-weighted, i.e. the HARMONIC mean over mass fractions.** A kilogram of
+    ///   mixture occupies the sum of its constituents' volumes: `rho = 1 / sum(w_i / rho_i)`. Taking an
+    ///   arithmetic mean of densities here would be simply wrong, and wrong in a direction that looks
+    ///   plausible.
+    ///
+    /// ★★ **And the leftover is physics, not error.** The derived TRUE density comes out near 2000
+    /// kg/m^3 while poured black powder measures about 1000 — because corned powder is roughly half
+    /// void. **That gap IS the porosity**, and porosity is a property of an ARRANGEMENT of matter, not
+    /// of the matter itself. Which is the substance-versus-assembly distinction from docs/64 showing up
+    /// as a number: the catalogue describes the substance, the packing belongs to whatever holds it.
+    #[test]
+    fn black_powders_bulk_properties_derive_from_its_constituents() {
+        let mats = super::load();
+        let get = |id: &str| &mats[super::index_of(&mats, id)];
+        // The classic 75/15/10 by MASS (see the `black_powder` discussion in docs/64).
+        let mix = [
+            (get("potassium_nitrate"), 0.75f64),
+            (get("charcoal"), 0.15),
+            (get("sulfur"), 0.10),
+        ];
+        assert!(
+            (mix.iter().map(|(_, w)| w).sum::<f64>() - 1.0).abs() < 1e-12,
+            "mass fractions must close"
+        );
+
+        // Every constituent must carry a SOURCED specific heat — that is the whole reason the mixture
+        // can be derived rather than typed.
+        for (m, _) in &mix {
+            assert!(
+                m.specific_heat().is_some_and(|c| c > 0.0),
+                "{} needs a sourced specific heat for the mixture to derive",
+                m.id
+            );
+        }
+
+        // Mass-weighted: a kilogram of mixture is its constituents' kilograms.
+        let c_mix: f64 = mix
+            .iter()
+            .map(|(m, w)| w * m.specific_heat().unwrap())
+            .sum();
+        assert!(
+            (700.0..1000.0).contains(&c_mix),
+            "a derived specific heat between its constituents' extremes, got {c_mix}"
+        );
+        // It must lie strictly BETWEEN the extremes of what went in — a mixture cannot be hotter to
+        // heat than all of its parts, and a derivation that escaped that range would be a bug.
+        let (lo, hi) = mix.iter().fold((f64::MAX, f64::MIN), |(lo, hi), (m, _)| {
+            let c = m.specific_heat().unwrap();
+            (lo.min(c), hi.max(c))
+        });
+        assert!(
+            c_mix > lo && c_mix < hi,
+            "the mixture's {c_mix} must sit inside its constituents' [{lo}, {hi}]"
+        );
+
+        // Volume-weighted: a kilogram of mixture occupies the sum of its constituents' volumes.
+        let rho_true: f64 = 1.0 / mix.iter().map(|(m, w)| w / m.density as f64).sum::<f64>();
+        assert!(
+            (1800.0..2100.0).contains(&rho_true),
+            "the SOLID mixture's true density, got {rho_true}"
+        );
+        // The arithmetic mean is the wrong operator here, and this pins that it differs enough to
+        // matter — so nobody later "simplifies" the harmonic mean into an average.
+        let rho_arith: f64 = mix.iter().map(|(m, w)| w * m.density as f64).sum();
+        assert!(
+            (rho_arith - rho_true).abs() > 20.0,
+            "arithmetic {rho_arith} and volume-weighted {rho_true} must differ enough that using the \
+             wrong one is a real error, not a rounding one"
+        );
+
+        // ★ The gap to poured black powder (~1000 kg/m^3, the bulk figure quoted for corned powder) is
+        // POROSITY — an arrangement, not a substance. Roughly half void.
+        let packing = 1000.0 / rho_true;
+        assert!(
+            (0.4..0.62).contains(&packing),
+            "corned powder should be roughly half void; derived packing fraction {packing}"
+        );
+    }
+}
