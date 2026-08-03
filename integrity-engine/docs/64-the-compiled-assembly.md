@@ -163,6 +163,44 @@ This is the substance-versus-assembly distinction from §6b arriving from the ot
 in a rainforest canopy, met again in a keg of powder — which is the sign it is real and not a
 convenience of the biome discussion.
 
+### ★★★ THREE assemblies, not one — and the integration is the interesting part
+
+Robin (2026-08-03), and this is a structural correction rather than a detail: *"the gunpowder and its
+properties might be an assembly of its own... that way we can reload cannons"*, *"The cannonball another
+assembly"*, *"And the canon itself a third"*, *"The integration of them will be interesting."*
+
+A single `cannon.assembly` containing barrel, carriage, charge and ball would fire exactly once and
+could never be reloaded. Split three ways, each has its own lifetime:
+
+| assembly | lifetime | what happens to it |
+|---|---|---|
+| **the gun** — barrel, carriage, trunnions, breeching rope | persistent | recoils, is arrested, survives to be reloaded |
+| **the charge** — powder, wad | consumable | **CEASES TO EXIST**, converting to gas and residue |
+| **the shot** | transferred | leaves at ~450 m/s and becomes an independent assembly in flight |
+
+★ **So containment is a RELATIONSHIP with state, not a static parent-child link.** §6's nesting was
+written for a ship that contains a galley that contains a stove — true forever. A gun contains a charge
+only until it is fired. The format therefore needs a placement that can be **created, consumed and
+emptied**: `loaded -> fired -> empty -> loaded again`. That is the difference between an assembly
+GRAPH and an assembly TREE, and a tree cannot express reloading.
+
+★★ **And the integration hands us three free, exact validations — none needing a historical figure:**
+
+1. **Mass closes across the event.** `powder + shot + gun` before equals `gas + residue + shot + gun`
+   after. An assembly that is consumed must put its mass somewhere, and `oxidation::burn` already
+   reports what became gas; the remainder is condensed residue and fouling. Nothing may vanish.
+2. **Momentum closes.** The shot's momentum plus the gas's equals the gun-and-carriage's, backwards.
+   This tests the interior-ballistics BOOKKEEPING independently of whether its calibration is right,
+   which is what makes it worth having before the muzzle velocity is trusted.
+3. **The shot must LEAVE.** It stops being contained by the gun and starts being an assembly with its
+   own trajectory — so the format has to hand ownership over cleanly, which is exactly the operation a
+   static tree cannot perform and the one a game will do thousands of times.
+
+★ **Shot start is real physics, not bookkeeping.** A ball is held in the bore by wadding and by its
+clearance fit until pressure overcomes it — which is §6's *interference fit*, resolved through the same
+`friction_coefficient` every grain contact uses. So the moment the shot begins to move is derived from
+the join, not declared as a trigger, and the join taxonomy earns its keep the first time it is used.
+
 ★ **The format's first test is a cannon, not a planet.** The direct enforcement of everything above is
 to exercise a NON-PLANET through the same path the planets use — build a cannon (or a plank, or a
 bolted joint) as a PARTS assembly, round-trip it, and run the §7 validations on it. If the format ever
