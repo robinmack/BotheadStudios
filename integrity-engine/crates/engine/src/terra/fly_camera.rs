@@ -44,6 +44,10 @@ pub struct View {
     pub horizon: f64,
     /// The vertical field of view this frame was projected with (radians) — so no one has to guess it.
     pub fov_y: f64,
+    /// Where the camera is LOOKING (unit). The surface segment centres its fine rings on the point this
+    /// meets, because concentrating them under the eye spends them behind an obliquely-looking camera
+    /// (`segment::look_centre`).
+    pub forward: DVec3,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -156,6 +160,7 @@ impl FlyCamera {
             alt_disp,
             horizon,
             fov_y: DEFAULT_FOV_Y,
+            forward: fwd,
         }
     }
 
@@ -238,6 +243,7 @@ impl FlyCamera {
             alt_disp,
             horizon,
             fov_y,
+            forward: fwd,
         }
     }
 

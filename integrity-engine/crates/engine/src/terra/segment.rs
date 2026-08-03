@@ -79,6 +79,41 @@ pub fn visible_angle(alt_m: f64, radius_m: f64, margin: f64) -> f64 {
     (a * margin).min(std::f64::consts::FRAC_PI_2)
 }
 
+/// **Where the segment should be centred: what the camera is LOOKING at, not where it is standing.**
+///
+/// The rings concentrate resolution at the centre, which is only the right place if the camera looks
+/// straight down. It rarely does — a descent looks ahead along its path, and an oblique view puts the
+/// ground it cares about out at the sparse rim while spending the fine rings on ground below and behind
+/// the eye. Measured: the descent corridor's mid-stations came back with visibly jagged biome edges,
+/// which is the raster's texels showing through a ring spacing too coarse to resolve them.
+///
+/// This is a DRAW decision, and legitimately so — Law VI allows interest to decide what is drawn, while
+/// only necessity decides what is computed. The surface is the same surface either way; this chooses
+/// where to spend samples on it.
+///
+/// Returns the unit surface direction the view ray meets, or the sub-eye point when the ray misses the
+/// body entirely (looking at the sky), which is the only sensible fallback: there is nothing else to
+/// centre on.
+pub fn look_centre(eye: DVec3, forward: DVec3, r_surface: f64) -> DVec3 {
+    let nadir = eye.normalize_or(DVec3::Y);
+    let f = forward.normalize_or_zero();
+    if f == DVec3::ZERO || !(r_surface > 0.0) {
+        return nadir;
+    }
+    // Ray-sphere: |eye + t·f|² = r². The near root is the visible surface.
+    let b = eye.dot(f);
+    let c = eye.length_squared() - r_surface * r_surface;
+    let disc = b * b - c;
+    if disc <= 0.0 {
+        return nadir; // the ray misses the body — nothing to centre on but the nadir
+    }
+    let t = -b - disc.sqrt();
+    if t <= 0.0 {
+        return nadir; // the surface is behind the eye
+    }
+    (eye + f * t).normalize_or(nadir)
+}
+
 /// Fill `out` with a sphere segment's vertices (cleared first), centred on `center`, reaching `cap_angle`
 /// radians — up to π, which is the whole sphere.
 ///
@@ -335,6 +370,43 @@ mod tests {
         // The margin reaches past the horizon but is still clamped at the hemisphere.
         assert!(visible_angle(400_000.0, r, 1.3) > visible_angle(400_000.0, r, 1.0));
         assert!(visible_angle(7.8e10, r, 1.3) <= std::f64::consts::FRAC_PI_2);
+    }
+
+    /// **The segment follows the camera's GAZE, not its feet.** Rings concentrate at the centre, so the
+    /// centre has to be where the camera is looking or the fine samples are spent behind it.
+    #[test]
+    fn the_centre_follows_where_the_camera_looks() {
+        let r = 1.0;
+        let eye = DVec3::new(0.0, 1.2, 0.0); // 0.2 above the north pole
+                                             // Straight down: the centre is the nadir, as before.
+        let down = look_centre(eye, -DVec3::Y, r);
+        assert!(
+            down.dot(DVec3::Y) > 0.999,
+            "looking down centres on the nadir"
+        );
+        // Obliquely ahead: the centre moves TOWARD the look direction and stays on the surface.
+        let ahead = look_centre(eye, (DVec3::new(1.0, -1.0, 0.0)).normalize(), r);
+        assert!(
+            (ahead.length() - 1.0).abs() < 1e-12,
+            "still a surface direction"
+        );
+        // Computed, not guessed: the near root is t = 0.31938, so the surface point normalises to
+        // (0.22583, 0.97417, 0). ★ Third fixture this session I first typed from intuition (0.3) when
+        // the geometry says 0.2258 — the code was right again.
+        assert!(
+            (ahead.x - 0.225_834).abs() < 1e-5,
+            "the ray meets the surface at a computed point, got {ahead:?}"
+        );
+        assert!(
+            ahead.dot(DVec3::Y) < down.dot(DVec3::Y),
+            "and away from the nadir"
+        );
+        // Looking at the sky: nothing to centre on but the nadir — never a NaN or a point behind.
+        let up = look_centre(eye, DVec3::Y, r);
+        assert!(up.dot(DVec3::Y) > 0.999 && up.is_finite());
+        // Tangent-ish miss, and a degenerate forward, both fall back rather than producing nonsense.
+        assert!(look_centre(eye, DVec3::X, r).is_finite());
+        assert!(look_centre(eye, DVec3::ZERO, r).dot(DVec3::Y) > 0.999);
     }
 
     /// Rings concentrate toward the centre — resolution spent where the eye is looking — and the mapping

@@ -1412,8 +1412,10 @@ mod app {
             let cap_gpu = make_dynamic_mesh(
                 &device,
                 "corridor-cap",
-                CAP_RES * CAP_RES,
-                &crate::terra::ground_cap::cap_indices(CAP_RES),
+                crate::terra::segment::SegmentRes::new(SEG_RINGS, SEG_SPOKES).vertex_count(),
+                &crate::terra::segment::segment_indices(crate::terra::segment::SegmentRes::new(
+                    SEG_RINGS, SEG_SPOKES,
+                )),
             );
             let cap_uni =
                 make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
@@ -4576,7 +4578,7 @@ mod app {
             // the particle field is the matter, so no cap.
             let mut corridor_cap = false;
             let mut corridor_skip_globe = false;
-            if let (Some((eye_w, _, _, d_m)), Some(surf), false) =
+            if let (Some((eye_w, aim_w, _, d_m)), Some(surf), false) =
                 (arc_pose, self.earth_surface.as_ref(), self.sph_active)
             {
                 let theta = crate::resolution::ResolutionController::default().angular_resolution;
@@ -4592,22 +4594,37 @@ mod app {
                     .unwrap_or(0.0),
                     theta,
                 );
-                let fade = crate::terra::ground_cap::cap_fade(d_m, cap_start_alt);
-                if fade > 0.0 && self.globe_mesh.is_some() {
+                // Below the derived hand-off, the corridor's own surface takes over. This was
+                // `cap_fade(d_m, ..) > 0.0`, which meant exactly this and then spent the fade blending
+                // two meshes; with one mesh there is nothing to blend, only a threshold to cross.
+                if d_m < cap_start_alt && self.globe_mesh.is_some() {
                     let centre = target.map_or(earth_center, |(c, _, _)| c);
                     let ds = pretty_scale;
                     let r_draw = pretty_r_surf * ds;
                     let q_inv = spin_rot.conjugate();
                     let eye_body = (q_inv * (eye_w - centre)) * ds; // body frame, display units
-                    let dir_body = eye_body.normalize_or(glam::DVec3::Y);
+                                                                    // Centred on what the camera LOOKS at (`segment::look_centre`), not its own nadir:
+                                                                    // the descent looks AHEAD along its path, so centring under the eye would spend the
+                                                                    // fine rings on ground behind it. Measured as jagged biome edges at the corridor's
+                                                                    // mid-stations before this.
+                    let fwd_body = (q_inv * ((aim_w - eye_w) * ds))
+                        .normalize_or(-eye_body.normalize_or(glam::DVec3::Y));
+                    let dir_body = crate::terra::segment::look_centre(eye_body, fwd_body, r_draw);
                     let (lat, lon) = crate::geo::lat_lon_from_dir(dir_body);
                     let (up_b, north_b, east_b) = crate::geo::tangent_frame(lat, lon);
                     let h = (eye_body.length() - r_draw).max(1.0e-9);
                     let horizon = (h * (h + 2.0 * r_draw)).sqrt();
-                    let angle = crate::terra::ground_cap::cap_angle(horizon, r_draw);
-                    corridor_skip_globe =
-                        fade >= 1.0 && crate::terra::ground_cap::cap_covers_view(horizon, r_draw);
-                    let lift = crate::terra::ground_cap::cap_lift_disp(d_m, ds);
+                    // **ONE surface** (docs/63): the extent is what is VISIBLE from here, and the globe
+                    // is always skipped because there is no second mesh to blend with. No fade, and no
+                    // depth-fight lift — both existed only to hold two copies of one surface apart.
+                    let _ = horizon;
+                    let angle = crate::terra::segment::visible_angle(
+                        h / ds,
+                        r_draw / ds,
+                        crate::terra::ground_cap::CAP_MARGIN,
+                    );
+                    corridor_skip_globe = true;
+                    let lift = 0.0;
                     let mut verts = std::mem::take(&mut self.cap_verts);
                     {
                         let sampler = crate::terra::globe_mesh::SurfaceSampler::new(
@@ -4631,8 +4648,15 @@ mod app {
                                 mat,
                             )
                         };
-                        crate::terra::ground_cap::fill_ground_cap(
-                            &mut verts, up_b, east_b, north_b, eye_body, r_draw, angle, CAP_RES,
+                        crate::terra::segment::fill_segment(
+                            &mut verts,
+                            up_b,
+                            east_b,
+                            north_b,
+                            eye_body,
+                            r_draw,
+                            angle,
+                            crate::terra::segment::SegmentRes::new(SEG_RINGS, SEG_SPOKES),
                             sample,
                         );
                     }
@@ -4663,7 +4687,10 @@ mod app {
                         view_proj,
                         Mat4::from_translation(eye_spos) * spin_m,
                         earth_light,
-                        [1.0, 1.0, 1.0, fade as f32 * pretty_fade],
+                        // Opaque: the cross-fade alpha went with the mesh it was fading against.
+                        // `pretty_fade` stays — that is the docs/42 pretty-render blend, a different
+                        // thing entirely from the globe/cap hand-off.
+                        [1.0, 1.0, 1.0, pretty_fade],
                         [eye_disp.x as f32, eye_disp.y as f32, eye_disp.z as f32, 0.0],
                         self.air(),
                         glow_of(&crate::planet::body("earth")),
@@ -5633,11 +5660,10 @@ mod app {
     /// see `merge-reports/2026-07-25-sean-reid.md`.)
     const SPACE_FOV_Y: f32 = 0.9;
 
-    /// The one segment's resolution (docs/63). Rings out from under the eye, spokes around it — the same
-    /// vertex budget the 192² cap spent, arranged so the samples concentrate where the camera looks
-    /// instead of being spread evenly over a square that was mostly horizon.
-    const TERRA_SEG_RINGS: usize = 96;
-    const TERRA_SEG_SPOKES: usize = 192;
+    /// Terra's segment resolution is the SHARED one (`SEG_RINGS`/`SEG_SPOKES`) — two scenes drawing the
+    /// same planet at two densities would be two Earths again, in the one place that is easiest to miss.
+    const TERRA_SEG_RINGS: usize = SEG_RINGS;
+    const TERRA_SEG_SPOKES: usize = SEG_SPOKES;
     /// How far past the horizon the segment reaches, so its rim is never a visible edge. Same job, and
     /// same value, as the cap's own margin — the geometry changed, the reason did not.
     const TERRA_SEG_MARGIN: f64 = 1.3;
@@ -5661,9 +5687,11 @@ mod app {
     /// **45 ms** before this work — a pre-existing cost nobody had measured. The mesh, not the maths, is the
     /// budget.
     const TERRA_OCTAVE_BUDGET: f64 = 16.0;
-    /// (fixed topology) is built once. One resolution for every scene's cap — Terra's descent and the
-    /// space band's corridor build the same patch.
-    const CAP_RES: usize = 192;
+    /// (fixed topology) is built once. **One resolution for every scene's SEGMENT** — Terra's descent and
+    /// the space band's corridor build the same surface, by the same builder, at the same density
+    /// (docs/63). Rings out from under the eye, spokes around it.
+    const SEG_RINGS: usize = 96;
+    const SEG_SPOKES: usize = 192;
     /// The finest REAL feature the elevation raster carries (m). Detail below this is not in the data,
     /// so it must come from the material — see the micro-relief in the cap sample.
     const RASTER_FEATURE_M: f64 = 20_000.0;
@@ -7148,12 +7176,14 @@ mod app {
             // A cache of the view, the same rule the tiers use: re-derive only when re-deriving would
             // change something. Anchored to the surface point under the camera, so the eye moving is
             // carried by the model matrix and touches no vertex.
+            // Centred on what the camera LOOKS at, not on its own nadir: the rings concentrate at the
+            // centre, so an oblique view would otherwise spend its fine samples on ground behind the eye.
+            let look = crate::terra::segment::look_centre(view.eye, view.forward, r_disp);
             let fresh = crate::terra::ground_cap::CapTierBuild {
-                center: view.up,
-                anchor: view.up * r_disp,
+                center: look,
+                anchor: look * r_disp,
                 cap_angle: angle,
                 cell_m: (angle * self.planet_radius / res.rings as f64).max(1e-6),
-                lift_m: 0.0,
             };
             let built = match self.segment_built {
                 Some(b) if crate::terra::ground_cap::tier_is_current(&b, &fresh) => b,

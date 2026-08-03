@@ -1,0 +1,10 @@
+import { launch } from './_launch.mjs';
+const PORT = process.env.PORT || '5173';
+const b = await launch();
+const p = await b.newPage({ viewport: { width: 800, height: 600 } });
+p.on('pageerror', e => console.log('PAGEERR:', String(e.message).slice(0,300)));
+p.on('console', m => console.log('C[' + m.type() + ']:', m.text().slice(0, 250)));
+await p.goto(`http://127.0.0.1:${PORT}/groundzero.html`, { waitUntil: 'load' });
+await p.waitForTimeout(25000);
+console.log('has __demo:', await p.evaluate(() => !!window.__demo));
+await b.close();

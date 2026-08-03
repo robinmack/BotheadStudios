@@ -1,5 +1,14 @@
-// The descent corridor, verified by eye (mac_shot pattern: HEADED Chromium gets the real Apple
-// Metal WebGPU adapter; headless gets none). Presses the arc control on groundzero.html and
+// The descent corridor, verified by eye.
+//
+// ★ This was `mac_corridor.mjs`, and its header said headed Chromium was needed for "the real Apple
+// Metal WebGPU adapter; headless gets none". That baked a PLATFORM into the test fleet, which meant the
+// corridor — one of the engine's headline behaviours — was only verifiable on one machine. Which adapter
+// is available is the host's business and picking one is the engine's; a rig should ask for a GPU and get
+// whatever this box has. Renamed and run through `scripts/rigshot.sh` like every other rig, which
+// composites real headless WebGPU on the Linux box's own card.
+//
+// (It also passed its timeout as waitForFunction's ARGUMENT rather than its options, so it silently used
+// the 30 s default instead of the 60 s it asked for.) Presses the arc control on groundzero.html and
 // screenshots the descent at fixed distances-to-site so a reader can check the close-range
 // hand-off: the mid-corridor stations must show the rasters resolved by the ground cap (tiling)
 // and, low down, the material relief mottle — never the coarse globe's stretched blur.
@@ -16,23 +25,25 @@
 // arrives in daylight, then keeps that lit set.
 //
 // Run:  npx vite --port 7299 &   then   PORT=7299 node rig/mac_corridor.mjs
-import { chromium } from 'playwright';
+import { launch } from './_launch.mjs';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { decodePng } from './_png.mjs';
 
-const PORT = process.env.PORT || '7299';
-const OUT = process.env.OUT || '/tmp/mac-corridor';
+const PORT = process.env.PORT || '5173';
+const OUT = process.env.OUT || '/tmp/rigshot';
 const MAX_FLIGHTS = Number(process.env.MAX_FLIGHTS || 8);
 mkdirSync(OUT, { recursive: true });
 
-const b = await chromium.launch({ headless: false });
+// ★ Was a bare `chromium.launch({ headless: false })`, which CLAUDE.md rule 4b forbids outright and
+// which is what pinned this rig to one machine's adapter. `_launch.mjs` is the one place the flags live.
+const b = await launch();
 const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
 const errs = [];
 p.on('pageerror', e => errs.push(String(e.message).split('\n')[0].slice(0, 200)));
 p.on('console', m => { const t = m.text(); if (m.type() === 'error' || /parsing WGSL|ShaderModule|is invalid|CreateRenderPipeline/i.test(t)) errs.push(t.slice(0, 200)); });
 
 await p.goto(`http://127.0.0.1:${PORT}/groundzero.html`, { waitUntil: 'load' });
-await p.waitForFunction(() => !!window.__demo, { timeout: 60000 });
+await p.waitForFunction(() => !!window.__demo, null, { timeout: 120000 });
 await p.waitForTimeout(4000); // world + site + surface rasters load, first frames render
 
 const dist = () => p.evaluate(() => window.__demo.arc_distance_m());
@@ -64,6 +75,11 @@ const centerLuma = (name) => {
 };
 
 const arcBtn = await p.locator('button', { hasText: 'glide to the ball' }).elementHandle();
+// Press it directly rather than through actionability checks: the control is real and found, but the
+// HUD lays out for a headed window and playwright will wait forever for "visible, enabled and stable"
+// on a button the layout has pushed off a headless viewport. A rig driving a known control does not
+// need to simulate a mouse finding it.
+const pressArc = () => arcBtn.evaluate((el) => el.click());
 if (!arcBtn) { console.log('FAIL: arc control not present'); process.exit(1); }
 
 const stations = [
@@ -75,13 +91,13 @@ let lit = false;
 for (let flight = 1; flight <= MAX_FLIGHTS && !lit; flight++) {
   if (flight === 1) {
     await shot('1-celestial');
-    await arcBtn.click(); // idle -> glide down
+    await pressArc(); // idle -> glide down
   } else {
     console.log(`night arrival · re-flying (flight ${flight})`);
-    await arcBtn.click(); // low hold -> pull out
+    await pressArc(); // low hold -> pull out
     if (!await waitLabel('descend to the site', 60)) { console.log('FAIL: never reached the high hold'); break; }
     await p.waitForTimeout(500);
-    await arcBtn.click(); // high hold -> descend
+    await pressArc(); // high hold -> descend
   }
   for (const [name, d_target] of stations) {
     for (let i = 0; i < 2000; i++) {
