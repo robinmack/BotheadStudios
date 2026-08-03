@@ -5797,6 +5797,8 @@ mod app {
         /// grid is as fine as the elevation data underneath it — at which point the integral is complete
         /// and more samples re-read the same numbers.
         appearance_budget: crate::resolution::WorkBudget,
+        /// Rig override for the above: non-zero pins the grid side so the stage can be priced.
+        appearance_probes_pinned: usize,
         /// Diagnostic: skip UPLOADING and DRAWING the engine's matter while still simulating it. The
         /// physics and the render path both scale with the same number, so measuring either one alone is
         /// impossible without a knob that moves one and not the other (the gpu-perf rule: price a stage,
@@ -6071,6 +6073,7 @@ mod app {
                 // still bounds the hitch. Lowering the BASELINE is separate open work (JOURNAL
                 // 2026-07-31: "one tier's rebuild, the floor for scheduling WHOLE tiers").
                 appearance_budget: crate::resolution::WorkBudget::new(4, 110.0),
+                appearance_probes_pinned: 0,
                 cam_pose: None,
                 draw_matter: 2,
                 drawn_buf: Vec::new(),
@@ -6418,6 +6421,20 @@ mod app {
         /// count went with the tier ladder, docs/63.)
         pub fn set_octave_budget(&mut self, octave_budget: f64) {
             self.cap_octave_budget = octave_budget.max(0.0);
+            self.segment_built = None;
+        }
+
+        /// **Pin the appearance integral's sample grid, for PRICING it** (docs/63, docs/46 row 29).
+        ///
+        /// Normally `resolution::WorkBudget` sets this from measured time. A rig needs it PINNED
+        /// instead, because the way to find out what a stage costs is to move one thing and re-time —
+        /// not to delete the stage and re-time the whole build, which prices the deletion rather than
+        /// the stage (the gpu-perf rule). `0` hands control back to the budget.
+        ///
+        /// Cost should go as the grid AREA. If it does not, the cost is not in the probes and the
+        /// optimisation aimed at the probes would be aimed at the wrong thing.
+        pub fn set_appearance_probes(&mut self, side: u32) {
+            self.appearance_probes_pinned = side as usize;
             self.segment_built = None;
         }
 
@@ -7247,7 +7264,11 @@ mod app {
                 // What this machine can afford this rebuild — measured, not declared. See
                 // `resolution::WorkBudget`: it settles lower on a slow device and higher on a fast
                 // one, and stops growing once the grid reaches the data's own resolution.
-                let probe_side = self.appearance_budget.side();
+                let probe_side = if self.appearance_probes_pinned > 0 {
+                    self.appearance_probes_pinned
+                } else {
+                    self.appearance_budget.side()
+                };
                 // The finest grid the DATA under this segment could support, over the whole rebuild —
                 // the budget's convergence ceiling (see `WorkBudget::observe`).
                 let max_want = std::cell::Cell::new(1usize);
@@ -7333,11 +7354,22 @@ mod app {
                         mats,
                         |la, lo| (ground_m(la, lo).0, sampler.material_at(la, lo) as usize),
                     );
-                    crate::terra::globe_mesh::SurfaceSample {
-                        albedo: a.albedo,
-                        offset: off,
-                        material: a.material as u32,
-                        rough: a.sigma_rad() as f32,
+                    // An empty mixture means the footprint was finer than the data under it, so there
+                    // was nothing to integrate and the point sample IS the answer — with `rough = 0`,
+                    // which shades as exactly the Lambert it always did. Not a fallback for failure:
+                    // it is the correct result, arrived at without doing the work.
+                    if a.mix.is_empty() {
+                        crate::terra::globe_mesh::SurfaceSample {
+                            offset: off,
+                            ..point
+                        }
+                    } else {
+                        crate::terra::globe_mesh::SurfaceSample {
+                            albedo: a.albedo,
+                            offset: off,
+                            material: a.material as u32,
+                            rough: a.sigma_rad() as f32,
+                        }
                     }
                 };
                 crate::terra::segment::fill_segment(
@@ -7354,10 +7386,12 @@ mod app {
                 // One rebuild is one unit of work: fold its real cost back into the budget. The side
                 // REALLY used is the smaller of what we allowed and what the data supports — passing
                 // the allowance alone would let a cheap, data-bound rebuild argue for a bigger budget.
-                self.appearance_budget.observe(
-                    probe_side.min(max_want.get()),
-                    (crate::clock::now_seconds() - t_appearance) * 1000.0,
-                );
+                if self.appearance_probes_pinned == 0 {
+                    self.appearance_budget.observe(
+                        probe_side.min(max_want.get()),
+                        (crate::clock::now_seconds() - t_appearance) * 1000.0,
+                    );
+                }
                 if let Some(gpu) = self.segment_gpu.as_ref() {
                     self.queue
                         .write_buffer(&gpu.vertex_buf, 0, bytemuck::cast_slice(&verts));

@@ -336,6 +336,21 @@ pub fn integrate_on_sphere(
     if !(radius_m > 0.0) {
         return Appearance::null();
     }
+    // ★ **BELOW THE DATA'S OWN RESOLUTION THERE IS NOTHING TO INTEGRATE, and saying so is the whole
+    // optimisation.** When the footprint is smaller than one step of the measurement under it, every
+    // probe lands in the same texel or on the same bilinear ramp: the mixture has one constituent, the
+    // surface is a plane, and a plane has no slope variance. The honest answer is exactly the point
+    // sample, so computing it with four probes and a moment accumulator buys nothing at all.
+    //
+    // This is Law III applied to the integral itself — resolve what necessity requires, not what is
+    // uniform to write. It is also where essentially all of the cost was: measured on a 5060 Ti, the
+    // rebuild cost was FLAT at 173-184 ms from a 1x1 grid to an 8x8 one, because the streamed tiles
+    // cover only ~3.7 km of a ~71 km segment and every vertex outside them was clamped to a 1x1 grid
+    // ALREADY. The cost was never the probes; it was paying per-vertex for an integral that could not
+    // have anything to say.
+    if cell_m <= step_m {
+        return Appearance::null();
+    }
     let up = dir.normalize_or(glam::DVec3::Y);
     // A tangent frame. Any frame will do — the moments are rotation-invariant in the tangent plane —
     // so this only has to be well defined, including over the poles where `Y` is degenerate.
