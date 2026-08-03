@@ -159,6 +159,7 @@ export default defineConfig({
       input: {
         main: resolve(root, "index.html"),
         terra: resolve(root, "terra.html"), // docs/43 — the data-defined Earth world
+        yarr: resolve(root, "yarr.html"), // the same Terra scene, sited on a gun emplacement
         orbit: resolve(root, "orbit.html"),
         groundzero: resolve(root, "groundzero.html"), // the docs/23 demo as one data world (ground-zero)
         birth: resolve(root, "birth.html"),

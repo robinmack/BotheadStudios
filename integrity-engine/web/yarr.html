@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
+    <title>Integrity · Yarrr! (a gun on a shore)</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #05060a;
+        overflow: hidden;
+        font-family: ui-monospace, "SF Mono", Menlo, monospace;
+        -webkit-text-size-adjust: 100%;
+      }
+      #gpu-canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+        touch-action: none;
+      }
+      #stats {
+        position: fixed;
+        left: 12px;
+        bottom: 12px;
+        padding: 8px 12px;
+        border-radius: 6px;
+        background: rgba(6, 10, 18, 0.72);
+        border: 1px solid rgba(120, 150, 200, 0.25);
+        font-size: 12px;
+        line-height: 1.6;
+        color: #c7d6ef;
+        pointer-events: none;
+      }
+      #stats b {
+        color: #eaf2ff;
+      }
+      #status {
+        position: fixed;
+        inset: 0;
+        /* A full-viewport overlay: it must never eat pointer input meant for the canvas
+           (it sits over the whole scene whenever any message is showing). */
+        pointer-events: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 2rem;
+        text-align: center;
+        color: #dfe8f5;
+        font-size: 16px;
+        line-height: 1.7;
+      }
+      #status.err {
+        color: #ffd7d7;
+        background: #1a0d10;
+      }
+      [hidden] {
+        display: none !important;
+      }
+    </style>
+  </head>
+  <!-- ★ THE SAME EARTH. Not a copy of it.
+       This page loads `/worlds/earth/world.json` — the identical world `terra.html` loads, which in
+       turn names the identical body `assets/bodies/earth.json`. A first version of this scene copied
+       that world file, which would have been a SECOND Earth free to drift from the first: precisely
+       what docs/63 exists to end ("the Earth should be the Earth, no matter how close or how far the
+       camera pans"). A scene is not a world. It is what is PLACED in one and where you stand to watch.
+
+       So the only thing this page adds is `data-cannon` — a 24-pounder at a coordinate, facing a
+       bearing, at an elevation. The camera follows from the gun rather than being stated separately:
+       there is one fact here, not two that can disagree.
+
+       The site is the headland `ballistics` FOUND by scanning the shipped land mask for a coast whose
+       shot lands in water. Not a chosen viewpoint — a consequence. -->
+  <body data-world="/worlds/earth/world.json" data-cannon="-51,-75,240,20">
+    <canvas id="gpu-canvas"></canvas>
+    <div id="stats" hidden></div>
+    <div id="status">Loading world…</div>
+    <script type="module" src="/src/terra.ts"></script>
+  </body>
+</html>

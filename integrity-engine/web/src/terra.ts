@@ -275,6 +275,76 @@ async function main(): Promise<void> {
     });
     hud.add("actions", fire);
 
+    // ★ **A GUN EMPLACEMENT AS SCENE DATA.** `data-cannon="lat,lon,bearing,elevation"` on the page is
+    // the whole of what makes `yarr.html` a different scene from `terra.html`: the SAME Earth, the same
+    // world file, the same struct — one assembly placed on it, and somewhere to stand and watch.
+    //
+    // The camera is DERIVED from the gun rather than stated beside it, so there is one fact here and
+    // not two that can disagree: stand behind the breech along the reverse bearing, a little above,
+    // looking down the barrel's line.
+    const emplacement = document.body.dataset.cannon;
+    if (emplacement) {
+      const [gLat, gLon, gBearing, gElev] = emplacement.split(",").map(Number);
+      const M_PER_DEG = 111320;
+      // Metres along a compass bearing from the gun, as a (lat, lon) offset.
+      const along = (d: number, bearing: number): [number, number] => {
+        const r = (bearing * Math.PI) / 180;
+        return [
+          gLat + (d * Math.cos(r)) / M_PER_DEG,
+          gLon + (d * Math.sin(r)) / (M_PER_DEG * Math.cos((gLat * Math.PI) / 180)),
+        ];
+      };
+      const standBehind = (back: number, up: number, pitch: number) => {
+        const [la, lo] = along(back, gBearing + 180);
+        terra.set_fly(la, lo, up, (gBearing * Math.PI) / 180, pitch);
+      };
+
+      terra.set_alt_bounds(0.5, 4.0e7);
+      terra.set_fly(gLat, gLon, 3, (gBearing * Math.PI) / 180, -0.1);
+      terra.emplace_cannon(gBearing);
+      // Behind the breech and above it, looking down the barrel out to sea — the view Robin asked for,
+      // where the gun can actually be SEEN.
+      // ★ The pitch is DERIVED from the geometry, not guessed: standing `back` metres behind and
+      // `up` metres above a gun whose barrel sits ~0.7 m off the ground, the line to it is
+      // atan((up - 0.7) / back) below horizontal. A first version used a flat -0.16 and the gun sat on
+      // the bottom edge behind the HUD — the same class of error as every other typed number today.
+      {
+        const back = 8.5;
+        const up = 2.8;
+        standBehind(back, up, -Math.atan((up - 0.7) / back));
+      }
+      hud.notify("a 24-pounder, loaded and run out. Fire when ready.");
+
+      // **Fire, then follow the shot out and watch it land.** The engine says where its matter IS
+      // (`heaviest_fragment`); this decides where to put a camera because of it and hands the engine a
+      // POSE. The engine has no notion of "following" and does not need one (docs/59) — and nothing
+      // here touches physics, which `laws::scene_purity_tests` enforces.
+      fire.addEventListener("click", () => {
+        let watching = true;
+        const started = performance.now();
+        const follow = () => {
+          if (!watching) return;
+          const f = terra.heaviest_fragment();
+          const t = (performance.now() - started) / 1000;
+          if (f.length === 0) {
+            // It has arrived. Stand off the splash and look back at it, then release the camera so the
+            // scene is flyable again.
+            const [sla, slo] = along(4600, gBearing);
+            terra.set_fly(sla, slo, 90, ((gBearing + 180) * Math.PI) / 180, -0.32);
+            hud.notify("splash — the shot is down");
+            watching = false;
+            return;
+          }
+          // Rise and swing downrange as the shot climbs, so the camera leads it rather than chasing.
+          const k = Math.min(t / 6, 1);
+          const [la, lo] = along(9 + 900 * k, gBearing + 180 * (1 - k));
+          terra.set_fly(la, lo, 3.2 + 260 * k, (gBearing * Math.PI) / 180, -0.16 - 0.2 * k);
+          requestAnimationFrame(follow);
+        };
+        requestAnimationFrame(follow);
+      });
+    }
+
     // **Follow a fragment down.** The engine says where its matter IS (`heaviest_fragment` / `fragment`);
     // this decides where to put a camera because of it and hands the engine a POSE. The engine has no
     // notion of "following" and does not need one — which is the whole point of feeding it coordinates and

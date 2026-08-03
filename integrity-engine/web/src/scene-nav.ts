@@ -15,6 +15,7 @@ const SCENES: Scene[] = [
   { path: "/ground.html", label: "Ground" },
   { path: "/terra.html", label: "Earth" },
   { path: "/twomoons.html", label: "Two Moons" },
+  { path: "/yarr.html", label: "Yarrr!" },
 ];
 
 function install(): void {
