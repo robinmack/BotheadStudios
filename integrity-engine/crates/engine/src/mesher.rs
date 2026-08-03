@@ -17,6 +17,17 @@ pub struct Vertex {
     pub col: [f32; 3],
     /// Material index — the layer to sample in the procedural texture array (Phase 4).
     pub mat: u32,
+    /// **The RMS slope angle (rad) of the surface this vertex stands for, that the mesh is NOT
+    /// showing** — the appearance integral's second moment (docs/63,
+    /// [`crate::terra::appearance`]).
+    ///
+    /// `nrm` above is the MEAN normal over the same patch; this is the spread ABOUT that mean.
+    /// Sub-mesh geometry does not stop existing when the mesh stops resolving it, it becomes
+    /// roughness, and a shader that averaged the normals alone would have thrown it away and drawn
+    /// the ground glassy. **Zero means the mesh resolves its own surface** — Lambert, exactly as
+    /// before — which is the honest answer for every voxel mesher here: their vertices sit at the
+    /// resolution of the matter itself, so there is no unresolved residual to report.
+    pub rough: f32,
 }
 
 pub struct Mesh {
@@ -135,6 +146,7 @@ pub fn build(world: &World, materials: &[Material]) -> Mesh {
                             nrm: *normal,
                             col: color,
                             mat: mat as u32,
+                            rough: 0.0,
                         });
                     }
                     indices.extend_from_slice(&[
@@ -174,6 +186,7 @@ pub fn build_uv_sphere(
                 nrm: n,
                 col: color,
                 mat,
+                rough: 0.0,
             });
         }
     }
@@ -273,6 +286,7 @@ pub fn build_earth_cap(
             nrm: cap_nrm(x, z).into(),
             col,
             mat: grass as u32,
+            rough: 0.0,
         }
     };
 
@@ -379,6 +393,7 @@ pub fn build_cube(half: f32, color: [f32; 3]) -> Mesh {
                 nrm: *normal,
                 col: color,
                 mat: 0,
+                rough: 0.0,
             });
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -466,6 +481,7 @@ pub fn build_surface_nets(world: &World, materials: &[Material]) -> Mesh {
             nrm: out,
             col: materials[mat].albedo,
             mat: mat as u32,
+            rough: 0.0,
         });
     }
     Mesh {
@@ -518,6 +534,7 @@ pub fn build_sea(world: &World, materials: &[Material]) -> Mesh {
                 nrm: nrm.into(),
                 col,
                 mat: water as u32,
+                rough: 0.0,
             });
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);

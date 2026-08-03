@@ -17,13 +17,9 @@ const FACES: [([f64; 3], [f64; 3], [f64; 3]); 6] = [
 ];
 
 /// Build the globe surface. `res` = grid points per cube-face edge; `r_disp` = the sphere radius in display
-/// units; `sample(dir)` returns `(albedo, radius_offset_display, material_index)` for a unit surface direction — the caller
-/// (Terra) reads the rasters there (land biome + elevation lift, or ocean-floor depth).
-pub fn build_globe(
-    res: usize,
-    r_disp: f64,
-    sample: impl Fn(DVec3) -> ([f32; 3], f64, u32),
-) -> Mesh {
+/// units; `sample(dir)` answers what the surface IS at a unit direction — the caller (Terra) reads the
+/// rasters there (land biome + elevation lift, or ocean-floor depth).
+pub fn build_globe(res: usize, r_disp: f64, sample: impl Fn(DVec3) -> SurfaceSample) -> Mesh {
     assert!(res >= 2);
     let mut vertices: Vec<Vertex> = Vec::with_capacity(6 * res * res);
     let mut indices: Vec<u32> = Vec::with_capacity(6 * (res - 1) * (res - 1) * 6);
@@ -41,17 +37,21 @@ pub fn build_globe(
         let mut cols = vec![[0f32; 3]; res * res];
         // Which material each vertex is made OF — the shader picks its relief layer with it.
         let mut mats = vec![0u32; res * res];
+        // The unresolved residual each vertex carries (docs/63). This builder does not run the
+        // appearance integral, so it passes through whatever the sampler reported.
+        let mut roughs = vec![0f32; res * res];
         for j in 0..res {
             for i in 0..res {
                 let u = -1.0 + 2.0 * i as f64 / (res - 1) as f64;
                 let v = -1.0 + 2.0 * j as f64 / (res - 1) as f64;
                 let dir = (n + right * u + up * v).normalize();
-                let (col, off, mat) = sample(dir);
-                let p = dir * (r_disp + off);
+                let s = sample(dir);
+                let p = dir * (r_disp + s.offset);
                 dirs[j * res + i] = dir;
                 pos[j * res + i] = Vec3::new(p.x as f32, p.y as f32, p.z as f32);
-                cols[j * res + i] = col;
-                mats[j * res + i] = mat;
+                cols[j * res + i] = s.albedo;
+                mats[j * res + i] = s.material;
+                roughs[j * res + i] = s.rough;
             }
         }
         // Vertices — normals from central differences of the DISPLACED grid (relief shading); edges fall back
@@ -79,6 +79,7 @@ pub fn build_globe(
                     nrm: nrm.to_array(),
                     col: cols[j * res + i],
                     mat: mats[j * res + i],
+                    rough: roughs[j * res + i],
                 });
             }
         }
@@ -103,7 +104,7 @@ mod tests {
     #[test]
     fn globe_counts_and_indices_are_well_formed() {
         let res = 8;
-        let m = build_globe(res, 1.0, |_| ([0.5, 0.5, 0.5], 0.0, 0));
+        let m = build_globe(res, 1.0, |_| SurfaceSample::flat([0.5, 0.5, 0.5], 0.0, 0));
         assert_eq!(m.vertices.len(), 6 * res * res, "6 faces × res² vertices");
         assert_eq!(
             m.indices.len(),
@@ -122,7 +123,7 @@ mod tests {
         // A zero-offset sampler must yield a sphere of the given radius, with every normal pointing outward
         // (positive dot with the position) so the lit shader shades the day side, not the interior.
         let r = 2.5;
-        let m = build_globe(6, r, |_| ([1.0, 0.0, 0.0], 0.0, 0));
+        let m = build_globe(6, r, |_| SurfaceSample::flat([1.0, 0.0, 0.0], 0.0, 0));
         for v in &m.vertices {
             let p = Vec3::from_array(v.pos);
             assert!(
@@ -141,7 +142,7 @@ mod tests {
         // A face-centre sample gets a positive offset; that vertex must sit at radius r + off along its dir.
         let m = build_globe(3, 1.0, |dir| {
             let off = if dir.x > 0.9 { 0.3 } else { 0.0 };
-            ([0.0, 0.0, 0.0], off, 0)
+            SurfaceSample::flat([0.0, 0.0, 0.0], off, 0)
         });
         let max_r = m
             .vertices
@@ -152,6 +153,41 @@ mod tests {
             (max_r - 1.3).abs() < 1e-3,
             "displaced apex radius {max_r} != 1.3"
         );
+    }
+}
+
+/// **What a body's surface IS at one direction** — the answer every surface mesh builder here is
+/// built from.
+///
+/// It was a bare `([f32; 3], f64, u32)` tuple until the appearance integral needed a fourth member
+/// (docs/63). A tuple that has to grow is a struct that was not written down yet, and this one is
+/// passed through three builders and two scenes, where a silently reordered pair of `f64`s would
+/// compile perfectly and put the ground in the wrong place.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SurfaceSample {
+    /// Albedo to show here. Below the appearance integral this is one material's flat colour; where
+    /// the integral runs it is the fraction-weighted MIXTURE over the patch this vertex stands for.
+    pub albedo: [f32; 3],
+    /// Radial offset above the sea-level sphere, in DISPLAY units.
+    pub offset: f64,
+    /// The material whose texture layer the shader samples — the largest share where there is a mixture.
+    pub material: u32,
+    /// **RMS slope angle (rad) the mesh is not showing** — see [`crate::mesher::Vertex::rough`].
+    /// Zero is "this builder resolves its own surface, or has not measured the residual", never a
+    /// claim that real ground is glassy.
+    pub rough: f32,
+}
+
+impl SurfaceSample {
+    /// A sample with no measured sub-mesh residual — the shading it produces is exactly Lambert, as
+    /// it was before the integral existed.
+    pub fn flat(albedo: [f32; 3], offset: f64, material: u32) -> SurfaceSample {
+        SurfaceSample {
+            albedo,
+            offset,
+            material,
+            rough: 0.0,
+        }
     }
 }
 
@@ -203,7 +239,46 @@ impl<'a> SurfaceSampler<'a> {
     /// The surface at a unit direction in the BODY frame (the raster's own frame): biome albedo,
     /// radial offset above the sea-level sphere (display units), and the material the ground is
     /// made of there (the shader picks its relief layer with it).
-    pub fn sample(&self, dir: DVec3) -> ([f32; 3], f64, u32) {
+    ///
+    /// This is a POINT sample — one land-cover texel, one material. Where a caller draws a patch
+    /// bigger than a texel it should integrate instead ([`crate::terra::appearance`]), because a
+    /// point sample of a mixture is whichever constituent the probe happened to land on.
+    /// **Just which material the ground is, at a direction** — the appearance integral's inner loop.
+    ///
+    /// [`sample`](Self::sample) also reads the elevation raster and scales it, which an integral over a
+    /// footprint would pay for at every one of its probes and then discard, because the probe's height
+    /// comes from the caller's own ground function (the one that knows about streamed tiles). Same
+    /// rasters, same land test, same biome map — this asks the cheaper half of the question.
+    pub fn sample_material(&self, dir: DVec3) -> u32 {
+        let (lat, lon) = crate::geo::lat_lon_from_dir(dir);
+        self.material_at(lat, lon)
+    }
+
+    /// The same answer from a (lat, lon) the caller ALREADY has.
+    ///
+    /// ★ Measured, not guessed: the appearance integral first asked this through
+    /// [`sample_material`](Self::sample_material), which meant every probe ran
+    /// `dir → lat/lon → dir → lat/lon` — three trigonometric conversions where one suffices, half a
+    /// million times per mesh rebuild. It cost about 110 ms of a 180 ms rebuild.
+    pub fn material_at(&self, lat: f64, lon: f64) -> u32 {
+        let is_land = self
+            .landmask
+            .map(|r| r.land_at(lat, lon))
+            .unwrap_or_else(|| {
+                crate::planet::earth_surface_material(crate::geo::dir_from_lat_lon(lat, lon))
+                    == "granite"
+            });
+        if !is_land {
+            return self.water_idx as u32;
+        }
+        let biome = self.landcover.map_or(1, |r| r.biome_at(lat, lon) as usize);
+        self.biome_mats
+            .get(biome)
+            .copied()
+            .unwrap_or(self.water_idx) as u32
+    }
+
+    pub fn sample(&self, dir: DVec3) -> SurfaceSample {
         let (lat, lon) = crate::geo::lat_lon_from_dir(dir);
         // Fall back to the built-in coarse landmask only when a body ships no raster — never to
         // "re-invent" a surface a scene made up.
@@ -222,13 +297,13 @@ impl<'a> SurfaceSampler<'a> {
                 r.elevation_m_at(lat, lon, self.elev_range[0], self.elev_range[1])
             });
             // Land above sea level; below-sea-level land (Dead Sea etc.) clamps to the shore.
-            (
+            SurfaceSample::flat(
                 self.mats[mi].albedo,
                 e.max(0.0) * self.ds * self.exag,
                 mi as u32,
             )
         } else {
-            (self.mats[self.water_idx].albedo, 0.0, self.water_idx as u32)
+            SurfaceSample::flat(self.mats[self.water_idx].albedo, 0.0, self.water_idx as u32)
         }
     }
 }
