@@ -293,6 +293,15 @@ impl Flight {
     }
 
     /// What the bodies have ablated away — still on the books (docs/59).
+    /// **Shed mass into the world at a point** — matter leaving something, entering the air.
+    ///
+    /// An ablating meteor is one source; a gun's muzzle is another. Both put hot matter into the
+    /// atmosphere at a place with a velocity and a temperature, and both are then carried, cooled and
+    /// mixed by the same trail. Nothing here is written for either case.
+    pub fn shed_at(&mut self, mass_kg: f64, material: usize, pos: DVec3, vel: DVec3, temp_k: f64) {
+        self.trail.shed(mass_kg, material, pos, vel, temp_k);
+    }
+
     pub fn trail(&self) -> &Trail {
         &self.trail
     }

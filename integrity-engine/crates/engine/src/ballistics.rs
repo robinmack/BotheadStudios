@@ -92,6 +92,13 @@ pub struct Shot {
     pub recoil_ms: f64,
     /// Gas temperature at the instant of ignition, K.
     pub flame_k: f64,
+    /// Permanent gas produced, kg — what leaves the muzzle as a jet.
+    pub gas_kg: f64,
+    /// **Condensed products, kg — the SMOKE.** Over half of black powder's product mass is potassium
+    /// carbonate and sulfide, which carries mass and heat but exerts no pressure. It is why the stuff
+    /// smokes so heavily, and it is the same fact as its low gas yield. Mass closes: `gas + residue`
+    /// is the charge that went in.
+    pub residue_kg: f64,
 }
 
 /// The temperature the released energy WOULD bring the products to if every joule went into the
@@ -147,6 +154,8 @@ pub fn fire(
         work_j: 0.0,
         recoil_ms: 0.0,
         flame_k: 0.0,
+        gas_kg: 0.0,
+        residue_kg: 0.0,
     };
     if burn.gas_moles <= 0.0
         || bore.chamber_m3 <= 0.0
@@ -227,6 +236,8 @@ pub fn fire(
         work_j: work,
         recoil_ms: recoil,
         flame_k,
+        gas_kg,
+        residue_kg: 0.0,
     }
 }
 
@@ -272,6 +283,23 @@ pub fn launch(e: &Emplacement, muzzle_ms: f64, body_radius_m: f64) -> (glam::DVe
     (up * (body_radius_m + e.height_m), dir * muzzle_ms)
 }
 
+/// **What leaves the muzzle besides the shot** — the smoke and the flash, as matter.
+///
+/// Robin: *"smoke and flash should emerge naturally from the detonation/shape of barrel/velocity/amount
+/// of material, not the scene."* So every field here is derived: the MASS from what the charge became
+/// (gas plus the condensed products the reaction left over), the PLACE from where the barrel ends, the
+/// VELOCITY from the same Lagrange gas profile the recoil balance already uses, and the TEMPERATURE from
+/// the products' own flame temperature. A scene receives this and hands it to the engine; it computes
+/// none of it.
+#[derive(Clone, Copy, Debug)]
+pub struct Ejecta {
+    pub mass_kg: f64,
+    pub material: usize,
+    pub pos: glam::DVec3,
+    pub vel: glam::DVec3,
+    pub temp_k: f64,
+}
+
 /// **Fire a gun that is an ASSEMBLY, at an emplacement, and hand back the shot in flight.**
 ///
 /// ★ This exists so a SCENE can fire a cannon without touching physics. Robin: *"scenes specify
@@ -291,7 +319,7 @@ pub fn fire_gun(
     e: &Emplacement,
     body_radius_m: f64,
     mats: &[crate::materials::Material],
-) -> Result<(Shot, Option<crate::flight::FlyingBody>), String> {
+) -> Result<(Shot, Option<crate::flight::FlyingBody>, Option<Ejecta>), String> {
     use crate::assembly::Shape;
 
     // The barrel's bore and wall come from the barrel, not from a caller.
@@ -372,7 +400,7 @@ pub fn fire_gun(
         // `InterferenceFit` join carries its own normal pressure and friction (docs/64 §6).
         shot_start_pa: 15.0e6,
     };
-    let fired = fire(
+    let mut fired = fire(
         &burn,
         &bore,
         shot_kg,
@@ -382,10 +410,32 @@ pub fn fire_gun(
         rx.products_covolume,
         rx.flame_temperature,
     );
+    fired.gas_kg = gas_kg;
+    fired.residue_kg = burn.residue_kg(gas_kg);
     if fired.outcome != Outcome::Fired {
-        return Ok((fired, None));
+        return Ok((fired, None, None));
     }
     let (pos, vel) = launch(e, fired.muzzle_ms, body_radius_m);
+    // ★ The muzzle is where the BARREL ENDS — the bored length past the chamber, along the bore. The
+    // ejecta leave there, not at the gun's feet, because the barrel's shape decides it.
+    let dir = vel.normalize_or_zero();
+    let muzzle_pos = pos + dir * bore.travel_m;
+    // The gas's own speed: the same linear Lagrange profile the recoil balance uses, where the column
+    // runs from a stationary breech to a base moving with the shot, so its centre leaves at about half
+    // the muzzle velocity. Reusing it rather than choosing a fraction keeps one answer to one question.
+    let ejecta = Ejecta {
+        mass_kg: fired.gas_kg + fired.residue_kg,
+        // The condensed products are potassium salts; `charcoal` is the nearest catalogued stand-in for
+        // sooty carbonaceous smoke. *Flagged (Law V):* the real fix is catalouging K2CO3 and K2S, which
+        // is the same SOP step every other substance here went through.
+        material: mats
+            .iter()
+            .position(|m| m.id == "charcoal")
+            .ok_or("no material to carry the smoke")?,
+        pos: muzzle_pos,
+        vel: dir * (fired.muzzle_ms * 0.5),
+        temp_k: fired.flame_k,
+    };
     Ok((
         fired,
         Some(crate::flight::FlyingBody {
@@ -398,6 +448,7 @@ pub fn fire_gun(
             temp_k: 288.0,
             skin_m: 0.0,
         }),
+        Some(ejecta),
     ))
 }
 
@@ -735,5 +786,91 @@ mod tests {
             "air costs it most of the vacuum range: {range:.0} m against {vacuum:.0} m in vacuum"
         );
         assert!(arrival.energy_j > 0.0, "and it arrives carrying energy");
+    }
+
+    /// ★★ **THE MUZZLE'S SMOKE IS A PRODUCT OF THE CHEMISTRY, NOT AN EFFECT** — and mass closes.
+    ///
+    /// Robin: *"will there be a cloud of smoke? There should be... This should also be a natural
+    /// product of the engine"*, and *"also likely flash and fire would be visible... a product of the
+    /// heated gunpowder."*
+    ///
+    /// Both fall out of what `oxidation` already computes. Over half of black powder's product mass is
+    /// CONDENSED — the potassium carbonate and sulfide that make its smoke — and that is the same fact
+    /// as its famously low gas yield. It leaves at the products' flame temperature, which is well above
+    /// the ~800 K where `emission::incandescence` starts to glow: the flash is the same law that lights
+    /// a meteor.
+    #[test]
+    fn firing_ejects_gas_and_smoke_and_the_charge_mass_closes() {
+        let mats = mats();
+        let gun = shipped::load("naval-24pdr-gun");
+        let charge = shipped::load("charge-24pdr-service");
+        let shot = shipped::load("round-shot-24pdr");
+        let e = Emplacement {
+            lat_deg: -51.0,
+            lon_deg: -75.0,
+            height_m: 12.0,
+            bearing_deg: 240.0,
+            elevation_deg: 20.0,
+        };
+        let (fired, body, ejecta) =
+            fire_gun(&gun, &charge, &shot, &e, 6.371e6, &mats).expect("the gun fires");
+        assert_eq!(fired.outcome, Outcome::Fired);
+        let body = body.expect("a shot in flight");
+        let ejecta = ejecta.expect("something left the muzzle");
+
+        // ★ The ejecta leave at the MUZZLE — where the barrel ends — not at the gun's feet. The barrel's
+        // own bored length puts them there; nothing chose a distance.
+        let from_gun = (ejecta.pos - body.pos).length();
+        assert!(
+            from_gun > 1.0 && from_gun < 4.0,
+            "the smoke leaves at the muzzle, a barrel's length downrange: {from_gun:.2} m"
+        );
+        assert!(
+            ejecta.vel.dot(body.vel) > 0.0 && ejecta.vel.length() < body.vel.length(),
+            "the jet follows the shot out, slower than it"
+        );
+        assert!((ejecta.temp_k - fired.flame_k).abs() < 1e-9);
+
+        // ★ MASS CLOSES: everything that went in comes out as gas or as residue. Nothing vanishes.
+        let powder_kg: f64 = ["saltpetre", "charcoal", "brimstone"]
+            .iter()
+            .map(|n| {
+                let p = charge.part(n).expect("powder");
+                p.matter_volume_m3()
+                    * mats[crate::materials::index_of(&mats, &p.material)].density as f64
+            })
+            .sum();
+        assert!(
+            ((fired.gas_kg + fired.residue_kg) - powder_kg).abs() < 1e-9,
+            "gas {:.4} + residue {:.4} must equal the {:.4} kg charge",
+            fired.gas_kg,
+            fired.residue_kg,
+            powder_kg
+        );
+
+        // ★★ **AND HERE THE MODEL DISAGREES WITH REALITY — recorded, not tuned.** Real black powder is
+        // MAJORITY condensed by mass, which is why it smokes as it does. This model gives 2.09 kg of
+        // gas against 1.53 kg of residue: gas-heavy, the wrong way round. It is not a new error — it is
+        // the SAME over-predicted gas already pinned in `oxidation` (the idealised equation over-states
+        // permanent gas by ~25% because real powder makes potassium CARBONATE and CO as well, locking
+        // up carbon and oxygen the ideal equation spends on CO2). So the residue is under-predicted by
+        // exactly the mass the gas is over-predicted by, and this assertion holds the shape of that gap
+        // rather than asserting the answer we would like.
+        let residue_fraction = fired.residue_kg / (fired.gas_kg + fired.residue_kg);
+        assert!(
+            (0.3..0.5).contains(&residue_fraction),
+            "the model leaves {:.0} percent of the charge condensed; real black powder is over half, \
+             and the difference is the same over-predicted gas `oxidation` already records",
+            residue_fraction * 100.0
+        );
+        assert!(fired.residue_kg > 0.0, "there IS smoke");
+
+        // ★ The flash: the products leave far above the temperature at which matter radiates visibly,
+        // so no separate muzzle-flash effect is needed — the same incandescence that lights a meteor.
+        assert!(
+            fired.flame_k > 800.0,
+            "the ejecta glow by the engine's own incandescence threshold: {:.0} K",
+            fired.flame_k
+        );
     }
 }

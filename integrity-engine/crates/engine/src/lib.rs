@@ -6290,17 +6290,29 @@ mod app {
                 self.planet_radius,
                 &self.mats,
             ) {
-                Ok((fired, Some(body))) => {
+                Ok((fired, Some(body), ejecta)) => {
+                    // ★ **The muzzle's products go into the air, and the engine decided all of it.**
+                    // Robin: *"smoke and flash should emerge naturally from the detonation/shape of
+                    // barrel/velocity/amount of material, not the scene."* `fire_gun` returned WHERE
+                    // the barrel ends, HOW FAST the gas leaves, HOW MUCH there is and HOW HOT it is;
+                    // this hands that to the same door an ablating meteor's vapour goes through. The
+                    // flash needs no separate effect — the products leave far above the temperature at
+                    // which `emission::incandescence` makes matter glow.
+                    if let Some(x) = ejecta {
+                        self.flight
+                            .shed_at(x.mass_kg, x.material, x.pos, x.vel, x.temp_k);
+                    }
                     self.flight.introduce(body);
                     self.cannon_shots += 1;
                     log::info!(
-                        "cannon: {:?} at {:.0} m/s, peak {:.0} MPa, recoil {:.2} m/s, from lat {:.2} lon {:.2} bearing {bearing_deg:.0}",
+                        "cannon: {:?} at {:.0} m/s, peak {:.0} MPa, recoil {:.2} m/s, ejecting {:.2} kg gas + {:.2} kg smoke at {:.0} K, from lat {:.2} lon {:.2} bearing {bearing_deg:.0}",
                         fired.outcome, fired.muzzle_ms, fired.peak_pressure_pa / 1.0e6,
-                        fired.recoil_ms, self.fly.lat, self.fly.lon
+                        fired.recoil_ms, fired.gas_kg, fired.residue_kg, fired.flame_k,
+                        self.fly.lat, self.fly.lon
                     );
                     fired.muzzle_ms
                 }
-                Ok((fired, None)) => {
+                Ok((fired, None, _)) => {
                     log::warn!(
                         "cannon: {:?} — peak {:.0} MPa against a wall good for {:.0} MPa",
                         fired.outcome,
@@ -7455,27 +7467,19 @@ mod app {
                 }
                 self.segment_built = Some(built);
             }
-            // **Stand the cannon on the surface.** Placement only: the assembly supplied the shape,
-            // this says where it is and which way it faces. The model matrix maps the assembly's own
-            // axes (barrel along +X, up along +Y) onto the local tangent frame at the gun's feet, and
-            // scales metres into display units — camera-relative, like every other draw here.
+            // **Stand the cannon on the surface.** Placement only — the assembly supplied the shape
+            // and `assembly::place_on_surface` supplies the transform. The scene names a coordinate and
+            // a bearing; it does not build a basis, which is how it built a MIRRORED one.
             if let (Some(uni), Some((glat, glon, bearing))) =
                 (self.cannon_uni.as_ref(), self.cannon_at)
             {
-                let (up, north, east) = crate::geo::tangent_frame(glat, glon);
-                let b = bearing.to_radians();
-                let fwd = (north * b.cos() + east * b.sin()).normalize();
-                let side = up.cross(fwd).normalize();
-                // ★ The gun stands on the GROUND, not at sea level. Placing it at `r_disp` buried
-                // it under a coastline hundreds of metres above the datum — the first rig frame showed
-                // terrain and no cannon, which is exactly what a buried model looks like. The height
-                // comes from the same surface the camera stands on, so the two cannot disagree.
-                let at = up * (r_disp + self.ground_disp_at(glat, glon));
-                let model = glam::DMat4::from_cols(
-                    (fwd * ds).extend(0.0),
-                    (up * ds).extend(0.0),
-                    (side * ds).extend(0.0),
-                    (at - view.eye).extend(1.0),
+                let model = crate::assembly::place_on_surface(
+                    glat,
+                    glon,
+                    bearing,
+                    r_disp + self.ground_disp_at(glat, glon),
+                    ds,
+                    view.eye,
                 )
                 .as_mat4();
                 write_space_uniform(

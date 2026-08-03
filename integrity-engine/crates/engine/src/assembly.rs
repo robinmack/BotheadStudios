@@ -422,6 +422,49 @@ impl Assembly {
     }
 }
 
+/// **Stand an assembly on a body's surface, facing a bearing** — the engine's answer to "put it on the
+/// ground", so a scene never builds a transform by hand.
+///
+/// Robin: *"You should be able to tell the engine to place it on the ground; we should build that
+/// feature into the engine if it doesn't exist."* It did not. Terra was assembling its own model matrix
+/// from a tangent frame, which is a scene doing geometry it should be asking for.
+///
+/// The assembly's own axes are mapped onto the local frame at that coordinate: **+X along the bearing,
+/// +Y up, +Z completing a right-handed set** — which is the convention `naval-24pdr-gun.json` is
+/// authored in (barrel down +X, carriage hanging below at −Y). `surface_r` is the radius the assembly
+/// stands ON, in display units, so a caller that knows its terrain height passes it and the assembly
+/// sits on the ground rather than at the datum. `eye` makes the result camera-relative, the convention
+/// every draw in this engine uses.
+///
+/// ★★ **The basis must be RIGHT-HANDED, and getting that wrong is nearly invisible.** A first version
+/// used `up × forward` for the third axis, which is left-handed: determinant −1, so the model came out
+/// MIRRORED, and under back-face culling a mirrored mesh renders inside-out — every face that should be
+/// drawn is culled. The gun was there, occupying the right space, contributing thousands of changed
+/// pixels to an A/B, and simply could not be seen. `a_placed_assembly_is_not_mirrored` pins the
+/// determinant so it cannot come back.
+pub fn place_on_surface(
+    lat_deg: f64,
+    lon_deg: f64,
+    bearing_deg: f64,
+    surface_r: f64,
+    metres_to_display: f64,
+    eye: glam::DVec3,
+) -> glam::DMat4 {
+    let (up, north, east) = crate::geo::tangent_frame(lat_deg, lon_deg);
+    let b = bearing_deg.to_radians();
+    let fwd = (north * b.cos() + east * b.sin()).normalize();
+    // Right-handed: X cross Y = Z.
+    let side = fwd.cross(up).normalize();
+    let at = up * surface_r;
+    let s = metres_to_display;
+    glam::DMat4::from_cols(
+        (fwd * s).extend(0.0),
+        (up * s).extend(0.0),
+        (side * s).extend(0.0),
+        (at - eye).extend(1.0),
+    )
+}
+
 /// **Hoop stress in a pressurised tube**, Pa — `σ = p·r/t` for a thin wall.
 ///
 /// This is the number that decides whether a gun bursts, and it is why a barrel is loaded in the one
@@ -1013,5 +1056,57 @@ mod shipped_cannon_tests {
                 .to_bits(),
             "a changed dimension must change the geometry"
         );
+    }
+
+    /// **A placed assembly must not be MIRRORED**, and this is the test that would have saved an
+    /// evening. `up × forward` is left-handed; under back-face culling a mirrored mesh renders
+    /// inside-out and the object is invisible while still occupying exactly the right space — so an A/B
+    /// says "something is drawn" and a screenshot shows nothing.
+    #[test]
+    fn a_placed_assembly_is_not_mirrored() {
+        for &(lat, lon, bearing) in &[
+            (0.0, 0.0, 0.0),
+            (-51.0, -75.0, 240.0),
+            (45.0, 100.0, 90.0),
+            (-89.0, 12.0, 315.0),
+        ] {
+            let m = place_on_surface(lat, lon, bearing, 1.0, 1.0, glam::DVec3::ZERO);
+            let b = glam::DMat3::from_cols(
+                m.x_axis.truncate(),
+                m.y_axis.truncate(),
+                m.z_axis.truncate(),
+            );
+            let det = b.determinant();
+            assert!(
+                (det - 1.0).abs() < 1e-9,
+                "the basis at {lat},{lon} bearing {bearing} must be right-handed and unscaled; \
+                 determinant {det} (negative means MIRRORED, and a mirrored mesh is culled inside-out)"
+            );
+            // Orthonormal, or the assembly is sheared as well as turned.
+            for (i, a) in [b.x_axis, b.y_axis, b.z_axis].iter().enumerate() {
+                assert!((a.length() - 1.0).abs() < 1e-9, "axis {i} is not unit");
+            }
+            assert!(b.x_axis.dot(b.y_axis).abs() < 1e-9);
+            assert!(b.y_axis.dot(b.z_axis).abs() < 1e-9);
+        }
+
+        // +Y is UP: the carriage hangs below the barrel, so which way is up decides whether the gun
+        // stands on its wheels or on its muzzle.
+        let m = place_on_surface(0.0, 0.0, 0.0, 1.0, 1.0, glam::DVec3::ZERO);
+        let up = crate::geo::tangent_frame(0.0, 0.0).0;
+        assert!(
+            m.y_axis.truncate().dot(up) > 0.999,
+            "the assembly's +Y must be the local up"
+        );
+        // +X follows the bearing: due north at bearing 0.
+        let north = crate::geo::tangent_frame(0.0, 0.0).1;
+        assert!(
+            m.x_axis.truncate().dot(north) > 0.999,
+            "the assembly's +X must point along the bearing"
+        );
+        // The scale really scales, and the translation is camera-relative.
+        let scaled = place_on_surface(0.0, 0.0, 0.0, 2.0, 3.0, glam::DVec3::new(1.0, 0.0, 0.0));
+        assert!((scaled.x_axis.truncate().length() - 3.0).abs() < 1e-9);
+        assert!((scaled.w_axis.truncate() - (up * 2.0 - glam::DVec3::X)).length() < 1e-9);
     }
 }
