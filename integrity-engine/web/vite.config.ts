@@ -158,6 +158,7 @@ export default defineConfig({
       // unregistered page works in `npm run dev` and silently disappears from `npm run build`.
       input: {
         main: resolve(root, "index.html"),
+        architecture: resolve(root, "architecture.html"), // docs/65 — the scene/assembly/engine model, for readers
         terra: resolve(root, "terra.html"), // docs/43 — the data-defined Earth world
         yarr: resolve(root, "yarr.html"), // the same Terra scene, sited on a gun emplacement
         orbit: resolve(root, "orbit.html"),
