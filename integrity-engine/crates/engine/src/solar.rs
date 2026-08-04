@@ -394,3 +394,153 @@ mod signal_tests {
         );
     }
 }
+
+/// **How far through its autumn a place is** — 0 at the height of summer, 1 at midwinter.
+///
+/// Robin: *"Flora changes colors/albedo through the seasons… Grass starts green in spring on the
+/// prairie, transitions to golden-yellow, leaves burst into a riot of color in cold climates before
+/// falling."*
+///
+/// The driver is **how far the day length has fallen from its own annual maximum toward its own annual
+/// minimum, at this latitude** — which is pure geometry over the declination, with no threshold, no
+/// species constant and nothing to tune. Photoperiod is the real primary cue for deciduous senescence,
+/// and using the LOCAL range rather than an absolute hour count is what makes it work everywhere at
+/// once.
+///
+/// ★★ **It is a DECLARED model (Law V), and here is exactly what it defers.** Real senescence is
+/// pigment chemistry: chlorophyll degrades and is resorbed, unmasking carotenoids, while anthocyanins
+/// are synthesised anew. Its RATE is set by temperature as well as photoperiod, which is why a warm
+/// autumn runs late and a hard frost ends one overnight — and the engine has no surface-temperature
+/// field yet ([`daily_insolation`] is top-of-atmosphere). So this reproduces the SHAPE of the season
+/// and not its year-to-year variation, and it cannot produce a frost event at all.
+///
+/// ★★★ **The RESOLVED version is pigment-resolved, and that is a bigger idea than autumn colour.**
+/// A leaf's spectrum is the sum of what its pigments absorb, so the honest model carries the pigment
+/// COMPLEMENT and derives the spectrum — rather than interpolating between two measured leaves, which
+/// is what this does. Robin (2026-08-03): *"There is also red chlorophyll, which is useful for catching
+/// longer wavelengths."* Correct, and it is the reason the complement has to be a variable rather than
+/// a constant: chlorophyll *a* and *b* give out around 660–680 nm, while chlorophyll **d** and **f**
+/// absorb well past it — *f* beyond ~720 nm — which is how some cyanobacteria live on light a leaf
+/// would find useless. An engine that hard-codes "chlorophyll absorbs red" cannot represent them at
+/// all, and cannot represent an ocean's photosynthesisers either.
+/// The catalogue already holds the measurement this would need: the NEON samples carry chlorophyll AND
+/// carotenoid mass per sample, so the endmembers here are labelled with the pigment content that
+/// produced them rather than with a date.
+///
+/// ★ Two predictions it gets right for free, which is the argument for deriving rather than tabulating:
+/// the tropics barely senesce (day length hardly varies there, so the fraction stays near zero — and
+/// tropical broadleaf forest is indeed evergreen), and the far north turns early and hard.
+pub fn annual_day_length_range_h(lat_deg: f64) -> f64 {
+    let tilt = 23.44_f64.to_radians();
+    (day_length_hours(lat_deg, tilt) - day_length_hours(lat_deg, -tilt)).abs()
+}
+
+/// See [`senescence_fraction`]. Returns the phase AND the annual day-length range that phase is a
+/// fraction OF, because the phase alone is meaningless where the range is minutes.
+///
+/// ★★ **This is the declared model knowing when it is outside its own validity** — the same
+/// requirement docs/46 row 33 put on the interior-ballistics model, for the same reason: a model that
+/// answers confidently outside its assumptions does not become inaccurate, it answers a DIFFERENT
+/// question, and nothing downstream can tell. At the equator the annual swing is about five minutes, so
+/// normalising by it turns noise into a full autumn. The phase is still correct; it is simply a fraction
+/// of nearly nothing, and a consumer must weigh it by the range to know that.
+pub fn senescence_phase(lat_deg: f64, unix_s: f64) -> (f64, f64) {
+    (
+        senescence_fraction(lat_deg, unix_s),
+        annual_day_length_range_h(lat_deg),
+    )
+}
+
+pub fn senescence_fraction(lat_deg: f64, unix_s: f64) -> f64 {
+    let (dec_now, _) = crate::orbit::solar_declination_ra(unix_s);
+    // The extremes of the local day length are set by the extremes of the declination — the axial
+    // tilt itself. Asking for them this way keeps ONE source for the obliquity.
+    let tilt = 23.44_f64.to_radians();
+    let summer = day_length_hours(lat_deg, if lat_deg >= 0.0 { tilt } else { -tilt });
+    let winter = day_length_hours(lat_deg, if lat_deg >= 0.0 { -tilt } else { tilt });
+    let now = day_length_hours(lat_deg, dec_now);
+    let span = summer - winter;
+    if span.abs() < 1e-9 {
+        return 0.0; // the equator: no season to be part-way through
+    }
+    ((summer - now) / span).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod phenology_tests {
+    use super::*;
+    const JUN: f64 = 1_718_945_000.0;
+    const DEC: f64 = 1_734_744_000.0;
+    const MAR: f64 = 1_710_930_000.0;
+
+    /// **Midsummer is 0 and midwinter is 1**, in whichever hemisphere you stand.
+    #[test]
+    fn the_season_runs_from_midsummer_to_midwinter() {
+        for (lat, summer, winter) in [(53.3, JUN, DEC), (-41.3, DEC, JUN)] {
+            assert!(
+                senescence_fraction(lat, summer) < 0.02,
+                "at {lat}° the height of summer should be ~0, got {:.3}",
+                senescence_fraction(lat, summer)
+            );
+            assert!(
+                senescence_fraction(lat, winter) > 0.98,
+                "at {lat}° midwinter should be ~1, got {:.3}",
+                senescence_fraction(lat, winter)
+            );
+            let equinox = senescence_fraction(lat, MAR);
+            assert!(
+                (0.3..0.7).contains(&equinox),
+                "an equinox should sit near the middle, got {equinox:.3}"
+            );
+        }
+    }
+
+    /// **★ The tropics have no autumn, and nothing was told to make that true** — but the honest
+    /// statement is about the RANGE, not the phase.
+    ///
+    /// The phase at the equator swings the full 0..1 like everywhere else, because it is normalised by
+    /// the local range and the local range is about five minutes. That is the model reporting a
+    /// fraction of nearly nothing, and it is why `senescence_phase` hands back the range too. The
+    /// physical fact — the one that makes tropical broadleaf forest evergreen — is that the range
+    /// itself is negligible there and enormous in the north.
+    #[test]
+    fn whether_a_place_has_an_autumn_at_all_is_the_day_length_range() {
+        let equator = annual_day_length_range_h(0.5);
+        let dublin = annual_day_length_range_h(53.3);
+        let tromso = annual_day_length_range_h(69.6);
+        assert!(
+            equator < 0.3,
+            "the equator's annual day-length range is {equator:.2} h — there is no season to be in"
+        );
+        assert!(
+            dublin > 8.0,
+            "Dublin swings {dublin:.2} h across the year, which is what an autumn IS"
+        );
+        assert!(
+            tromso > dublin,
+            "and inside the Arctic circle it is larger still: {tromso:.2} h"
+        );
+        // The model REPORTS its own weakness rather than hiding it: full phase, no range.
+        let (phase, range) = senescence_phase(0.5, DEC);
+        assert!(
+            phase > 0.9 && range < 0.3,
+            "at the equator the phase runs ({phase:.2}) while the range does not ({range:.2} h) — a \
+             consumer must weigh one by the other, which is why both are returned"
+        );
+    }
+
+    /// **The far north turns harder than the mid-latitudes**, at the same date.
+    #[test]
+    fn autumn_arrives_earlier_the_further_north_you_stand() {
+        // Late September, when the north is well into its turn and the south of France is not.
+        let sept = 1_727_000_000.0;
+        let (tromso, nice) = (
+            senescence_fraction(69.6, sept),
+            senescence_fraction(43.7, sept),
+        );
+        assert!(
+            tromso > nice,
+            "Tromsø {tromso:.3} should be further through autumn than Nice {nice:.3}"
+        );
+    }
+}
