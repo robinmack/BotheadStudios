@@ -105,7 +105,7 @@ mod tests {
         );
     }
 
-    fn collect_json(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    pub(super) fn collect_json(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
@@ -985,7 +985,7 @@ mod material_property_tests {
         b.is_ascii_alphanumeric() || b == b'_'
     }
 
-    fn collect_rs(dir: &std::path::Path, out: &mut String) {
+    pub(super) fn collect_rs(dir: &std::path::Path, out: &mut String) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
@@ -1356,5 +1356,212 @@ mod scene_api_tests {
                 );
             }
         }
+    }
+}
+
+/// **Worlds that name a real place and then INVENT its ground** — declared, so the list can only shrink.
+///
+/// Robin, on finding the Ground scene still shipping (2026-08-03): *"It should be destroyed with fire.
+/// It is so wrong… a cube of terrain with no planet to support it, anathema to the engine."* And then
+/// the question that produced this guard: *"Since the scene defined by 'Ground' does not qualify at all
+/// under the new model where we add assemblies to the engine, is there something that we can do to
+/// guard against such merges in future?"*
+///
+/// ★★ **The honest answer is that the guard must be on the PROPERTY, not the file or the merge.** The
+/// history shows why: the terrain `Engine` was deleted (docs/50), and then the same idea was REBUILT
+/// under a different name as `ground_scene.rs` (PR #53). A tombstone naming `Engine` would have caught
+/// nothing, because nothing named `Engine` came back. And a merge-specific check would catch nothing
+/// either — `git log --diff-filter=A` shows the scene was added once and never resurrected.
+///
+/// So the sin is stated as a property instead, and it is exactly docs/63 item 1: **a world that names a
+/// real body and a real coordinate, and then declares its own surface relief.** That is a real place
+/// with imaginary ground. It is checkable, it fires on a fork's own CI before the work ever reaches
+/// this repo (AGENTS.md §2), and it catches a rebuild under any name.
+///
+/// Each entry is `(file, why it is still here)`. **The list may shrink and must never grow.**
+pub(crate) const WORLDS_THAT_INVENT_THEIR_GROUND: &[(&str, &str)] = &[
+    (
+        "ground-zero/world.json",
+        "the Ground Zero scene, still shipping — found BY this guard on the day it was written, which \
+         is the argument for property guards over tombstones. Same sin as the deleted Ground scene: \
+         it names earth and a lat/lon, then declares size_voxels/amplitude/octaves. Its surface must \
+         come from the body's measured elevation (terra::tiles), as Terra's does.",
+    ),
+    (
+        "ground-patch.json",
+        "NOT SHIPPED — an engine test fixture (assets/worlds/), kept when the Ground scene was deleted \
+         because three native tests use it to prove a ground patch still BUILDS from a definition. It \
+         is the specimen this guard exists to reject, retained deliberately so the capability outlives \
+         the diorama. If it ever moves under web/public it is a scene again and must be fixed first.",
+    ),
+];
+
+#[cfg(test)]
+mod world_surface_tests {
+    /// **A world may say WHERE it is. It may not then invent what is there.**
+    ///
+    /// Naming a body and a coordinate is a scene doing its job (docs/65: characters and setting).
+    /// Declaring the relief at that coordinate is the scene answering a question the body already
+    /// answers — one question, two answers, and the second one is fiction.
+    ///
+    /// Verified by making it fail: adding an `octaves` block to a world that names a planet turns this
+    /// red and prints the file.
+    #[test]
+    fn a_world_that_names_a_real_place_does_not_invent_its_ground() {
+        // What a world INVENTS: procedural relief dials, which describe a surface rather than locate one.
+        const INVENTS: &[&str] = &[
+            "\"octaves\"",
+            "\"amplitude_m\"",
+            "\"size_voxels\"",
+            "\"base_top_m\"",
+        ];
+        // What a world may honestly declare: where on which body it sits.
+        const LOCATES: &[&str] = &["\"planet\"", "\"body\"", "\"lat\""];
+
+        let mut files = Vec::new();
+        for root in ["../../web/public/worlds", "../../assets/worlds"] {
+            super::tests::collect_json(std::path::Path::new(root), &mut files);
+        }
+        assert!(
+            !files.is_empty(),
+            "no world files found — this guard scans nothing"
+        );
+
+        let declared: std::collections::BTreeSet<&str> = super::WORLDS_THAT_INVENT_THEIR_GROUND
+            .iter()
+            .map(|(f, _)| *f)
+            .collect();
+
+        let mut fresh = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for f in &files {
+            let text = std::fs::read_to_string(f).expect("readable world file");
+            let locates = LOCATES.iter().any(|k| text.contains(k));
+            let invents: Vec<&str> = INVENTS
+                .iter()
+                .copied()
+                .filter(|k| text.contains(k))
+                .collect();
+            if !locates || invents.is_empty() {
+                continue;
+            }
+            // Match a declared entry by suffix, so the list does not encode a directory layout.
+            let path = f.to_string_lossy().replace('\\', "/");
+            match declared.iter().find(|d| path.ends_with(**d)) {
+                Some(d) => {
+                    seen.insert(*d);
+                }
+                None => fresh.push(format!("  {path}  declares {invents:?}")),
+            }
+        }
+        assert!(
+            fresh.is_empty(),
+            "a world names a real place and then invents the ground there:\n{}\n\n\
+             docs/63 item 1: that is a real place with IMAGINARY ground, and it is the exact shape of \
+             the Ground scene Robin had destroyed — a cube of relief on a coordinate that has measured \
+             elevation available. A world says WHERE; the body says WHAT IS THERE.",
+            fresh.join("\n")
+        );
+        // The other direction: an entry that no longer describes anything must be struck off, or the
+        // register stops being true and starts being an excuse.
+        let stale: Vec<&str> = declared
+            .iter()
+            .copied()
+            .filter(|d| !seen.contains(d))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "WORLDS_THAT_INVENT_THEIR_GROUND lists {} file(s) that no longer do: {stale:?}\n\
+             Delete them from the list — a register that is not true is not a register.",
+            stale.len()
+        );
+    }
+}
+
+/// **Everything the engine exports to the browser, and what each one IS.**
+///
+/// A new entry appearing means the engine grew a new surface for content to attach to — which docs/65
+/// forbids: *"Setting a scene should never involve changes to the engine."* This is the census that
+/// would have caught `ground_scene.rs` on the day it landed, not because of its NAME (the deleted
+/// terrain scene was called `Engine`; nothing named `Engine` ever came back) but because it was a third
+/// exported struct owning a canvas and a render loop.
+///
+/// `GpuProbe` is here and is NOT a scene — it owns no canvas and draws nothing, it is a compute-only
+/// diagnostic. It is listed because the check is "what does the engine export", which is the question
+/// that has teeth; calling it a scene to make a test pass would be the test lying about the code.
+pub(crate) const WASM_EXPORTED_STRUCTS: &[(&str, &str)] = &[
+    (
+        "GpuProbe",
+        "compute-only diagnostic, no canvas — not a scene",
+    ),
+    (
+        "OrbitDemo",
+        "SCENE: the space band (docs/27 giant impact); owns gpu_sph",
+    ),
+    (
+        "Terra",
+        "SCENE: worlds-as-data planet (docs/43); owns terra::",
+    ),
+];
+
+#[cfg(test)]
+mod scene_struct_tests {
+    /// **No new scene struct.** Adding one is an engine edit to add content (docs/46 row 14).
+    #[test]
+    fn adding_a_scene_does_not_mean_editing_the_engine() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        let mut found = std::collections::BTreeSet::new();
+        let mut src = String::new();
+        super::material_property_tests::collect_rs(std::path::Path::new(dir), &mut src);
+        for text in [src] {
+            // A scene struct is one exported to the browser that owns a canvas surface.
+            for (i, line) in text.lines().enumerate() {
+                if !line.contains("pub struct ") {
+                    continue;
+                }
+                let before = text
+                    .lines()
+                    .skip(i.saturating_sub(3))
+                    .take(3)
+                    .collect::<String>();
+                if !before.contains("#[wasm_bindgen]") {
+                    continue;
+                }
+                if let Some(name) = line
+                    .split("pub struct ")
+                    .nth(1)
+                    .and_then(|r| r.split(|c: char| !c.is_alphanumeric() && c != '_').next())
+                {
+                    if !name.is_empty() {
+                        found.insert(name.to_string());
+                    }
+                }
+            }
+        }
+        let allowed: std::collections::BTreeSet<&str> = super::WASM_EXPORTED_STRUCTS
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
+        let fresh: Vec<&String> = found
+            .iter()
+            .filter(|f| !allowed.contains(f.as_str()))
+            .collect();
+        assert!(
+            fresh.is_empty(),
+            "the engine exports {fresh:?} to the browser, which the register does not know about.\n\
+             docs/65: a scene names which assemblies are present, where they are and where the watcher \
+             stands. It does not get a struct of its own inside the engine — that is docs/46 row 14, \
+             and it is how the Ground scene came to exist after its predecessor was deleted."
+        );
+        let stale: Vec<&str> = super::WASM_EXPORTED_STRUCTS
+            .iter()
+            .map(|(n, _)| *n)
+            .filter(|n| !found.contains(*n))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "the register lists {stale:?}, which the engine no longer exports — strike them off. \
+             (`Ground` was struck off here when its scene was deleted.)"
+        );
     }
 }
