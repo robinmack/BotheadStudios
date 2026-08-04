@@ -1117,3 +1117,254 @@ mod biome_material_tests {
         }
     }
 }
+
+/// **The complete set of engine calls a SCENE is allowed to make.**
+///
+/// Robin (2026-08-03): *"Setting a scene should never involve changes to the engine… I'm tired of
+/// scenes adding/accessing custom engine routes."* `docs/65` states the model: the scene sets the
+/// characters and the setting, the assemblies are the actors, the engine is the director and the stage.
+///
+/// Four verbs and nothing else:
+///   * **place**  — which assemblies are present, where, how fast: `load_world`
+///   * **observe** — where the watcher is: `set_camera_pose`, `clear_camera_pose`, `camera_state`, `resize`
+///   * **step**   — let time pass, draw what is: `advance`, `render`
+///   * **signal** — tell the universe something happened at a point: ★ DOES NOT EXIST YET
+///
+/// `add_tile`/`tiles_wanted` are here as the pattern worth copying: the ENGINE decides what data it
+/// needs and the host merely performs the I/O. The decision never leaves the engine.
+pub(crate) const SCENE_API_ALLOWED: &[&str] = &[
+    "add_tile",
+    "advance",
+    "camera_state",
+    "clear_camera_pose",
+    "load_world",
+    "render",
+    "resize",
+    "set_camera_pose",
+    "tiles_wanted",
+];
+
+/// **Every engine route a scene calls that it should not — declared, so the list can only shrink.**
+///
+/// Measured 2026-08-03: 79 distinct engine methods are called from `web/src/*.ts`, of which nine are
+/// legitimate. The rest are here. They fall into four kinds, and naming the kind is how each one gets
+/// paid off:
+///
+///   1. **An assembly's name in the engine's API** — `fire_cannon`, `emplace_cannon`, `brake_moon`,
+///      `drop_moon`, `reset_moon`, `throw_meteor`, `launch_swarm`, `moon_perigee_km`. These are five
+///      different spellings of ONE missing verb, `signal`. Robin's decomposition of the gun is the
+///      template (`docs/65` §2): the scene says *apply heat, here*; the engine asks the GUN assembly
+///      where its charge sits; combustion, pressure and launch follow as consequences nobody named.
+///   2. **A second answer to a question the engine already answers** — `set_fly`, `set_orbit`,
+///      `pan_view`, `drag_look`, `walk`, `move_tangent`, `pan_tangent`, `zoom_alt`, `aim_screen`,
+///      `set_alt_bounds`. Three scene structs, three camera models. `set_camera_pose` is the general
+///      one and is already allowed; the rest collapse into it.
+///   3. **Reads** — `altitude_m`, `latitude`, `longitude`, `world_name`, `particle_count`,
+///      `sun_elevation_deg`, `surface_material`, and the counters. These change nothing and decide
+///      nothing, so they do not break the model; but forty accessors is still forty pieces of API where
+///      one `state` query would do.
+///   4. **Scene-specific loading** — `load_earth_surface`, `load_impact_world`, `load_site_world`.
+///      `load_world` is the general form and is allowed.
+///
+/// ★ The entry to fix FIRST is the missing `signal`, because kind 1 cannot be paid off without it.
+pub(crate) const SCENE_API_DEBT: &[&str] = &[
+    "aim_screen",
+    "altitude_m",
+    "arc_available",
+    "arc_label",
+    "arc_press",
+    "arc_stop",
+    "body_probe",
+    "body_verdict",
+    "brake_moon",
+    "contact_distance_km",
+    "created_total",
+    "debris_extent_km",
+    "disk_stats_json",
+    "drag_look",
+    "drawn_count",
+    "drop_moon",
+    "drop_window_impact_s",
+    "drop_window_s",
+    "earth_binding_energy_j",
+    "earth_day_hours",
+    "emplace_cannon",
+    "enter_geologic_time",
+    "eye_altitude_m",
+    "fire_cannon",
+    "flight_count",
+    "focus_earth",
+    "focus_label",
+    "focus_moon",
+    "fragment",
+    "gpu_disk_stats_json",
+    "ground_biome",
+    "has_impacted",
+    "heaviest_fragment",
+    "impact_countdown_s",
+    "impact_energy_j",
+    "latitude",
+    "launch_swarm",
+    "load_earth_surface",
+    "load_impact_world",
+    "load_site_world",
+    "load_star_catalog",
+    "longitude",
+    "meteors_in_flight",
+    "meters_per_pixel",
+    "moon_binding_energy_j",
+    "moon_distance_km",
+    "moon_perigee_km",
+    "moon_speed_kms",
+    "move_tangent",
+    "nudge_aftermath_rate",
+    "pan_tangent",
+    "pan_view",
+    "particle_count",
+    "reset_moon",
+    "set_alt_bounds",
+    "set_fly",
+    "set_orbit",
+    "set_time_scale",
+    "sim_since_impact_s",
+    "site_status",
+    "start_gpu_impact",
+    "sun_elevation_deg",
+    "surface_material",
+    "throw_meteor",
+    "tile_count",
+    "time_scale_value",
+    "trail_mass_kg",
+    "walk",
+    "world_name",
+    "zoom_alt",
+];
+
+#[cfg(test)]
+mod scene_api_tests {
+    /// Every call a scene makes on the engine handle, with the file it was made from.
+    fn scene_calls() -> Vec<(String, String)> {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/src");
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(dir).expect("web/src exists").flatten() {
+            let p = e.path();
+            if p.extension().is_none_or(|x| x != "ts") {
+                continue;
+            }
+            let name = p.file_name().unwrap().to_string_lossy().to_string();
+            let Ok(src) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            // The handles a scene host holds the engine object by. Comments are stripped first so a
+            // method NAMED in prose does not count as a call — the same mistake `laws` already made
+            // once, when a comment mentioning a property counted as a consumer of it.
+            let code = super::single_source_tests::strip(&src);
+            for handle in ["terra", "demo", "g", "engine"] {
+                let needle = format!("{handle}.");
+                let mut rest = code.as_str();
+                while let Some(i) = rest.find(&needle) {
+                    let after = &rest[i + needle.len()..];
+                    let m: String = after
+                        .chars()
+                        .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_')
+                        .collect();
+                    // Only a CALL counts; `terra.foo` as a property read is not an API call.
+                    if !m.is_empty() && after[m.len()..].starts_with('(') {
+                        out.push((name.clone(), m));
+                    }
+                    rest = &rest[i + needle.len()..];
+                }
+            }
+        }
+        assert!(
+            !out.is_empty(),
+            "no scene calls found — this guard scans nothing"
+        );
+        out
+    }
+
+    /// **A scene may not grow a new engine route.** The ratchet, in both directions.
+    ///
+    /// Robin (2026-08-03): *"Somehow we need to codify this with tests, etc to ensure this vision is
+    /// preserved always."* So:
+    ///   * a call that is neither ALLOWED nor declared debt -> FAIL — somebody added a custom route
+    ///   * a declared entry nothing calls any more -> FAIL — delete it; the list must stay TRUE
+    ///
+    /// The second half is what stops this becoming a stale list that quietly forgives everything. It is
+    /// the same shape as `UNWIRED_MATERIAL_PROPERTIES`, which works for the same reason.
+    #[test]
+    fn a_scene_calls_only_the_general_engine_api() {
+        let calls = scene_calls();
+        let allowed: std::collections::BTreeSet<&str> =
+            super::SCENE_API_ALLOWED.iter().copied().collect();
+        let debt: std::collections::BTreeSet<&str> =
+            super::SCENE_API_DEBT.iter().copied().collect();
+
+        let mut fresh: std::collections::BTreeMap<String, String> = Default::default();
+        for (file, m) in &calls {
+            if !allowed.contains(m.as_str()) && !debt.contains(m.as_str()) {
+                fresh.insert(m.clone(), file.clone());
+            }
+        }
+        assert!(
+            fresh.is_empty(),
+            "a scene grew {} NEW engine route(s):\n{}\n\n\
+             docs/65: a scene names which assemblies are present, where they are, how fast they are \
+             going, and where the watcher stands. It does not get a method of its own.\n\
+             If the engine genuinely lacks a capability, say so and build it GENERAL — the way \
+             `oxidation::apply_heat` replaced `fire_gun` — rather than adding a route shaped like this \
+             one scene. If you are certain it belongs, add it to SCENE_API_ALLOWED and defend that in \
+             review; adding it to SCENE_API_DEBT is an admission, not a fix.",
+            fresh.len(),
+            fresh
+                .iter()
+                .map(|(m, f)| format!("  {m}  (called from {f})"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+
+        // The other direction: debt that is no longer owed must be struck off, or the list stops
+        // describing the code and starts excusing it.
+        let called: std::collections::BTreeSet<&str> =
+            calls.iter().map(|(_, m)| m.as_str()).collect();
+        let paid: Vec<&&str> = super::SCENE_API_DEBT
+            .iter()
+            .filter(|d| !called.contains(**d))
+            .collect();
+        assert!(
+            paid.is_empty(),
+            "SCENE_API_DEBT lists {} route(s) no scene calls any more: {:?}\n\
+             Delete them from the list. A debt register that is not true is not a register.",
+            paid.len(),
+            paid
+        );
+    }
+
+    /// **The allowed list must stay small, and it must stay general.**
+    ///
+    /// A whitelist defends nothing if the way to pass is to widen it. This pins the size, and pins that
+    /// no permitted call names a specific thing in the universe — the failure the whole document is
+    /// about is an assembly's name appearing in the engine's public surface.
+    #[test]
+    fn the_permitted_engine_api_names_no_particular_thing() {
+        assert!(
+            super::SCENE_API_ALLOWED.len() <= 12,
+            "the permitted scene API has grown to {} calls. docs/65 says four verbs: place, observe, \
+             step, signal. Widening the whitelist is how a whitelist stops being one.",
+            super::SCENE_API_ALLOWED.len()
+        );
+        // Nouns from the universe. An engine that knows what a cannon is has stopped being an engine.
+        const THINGS: &[&str] = &[
+            "cannon", "moon", "earth", "meteor", "swarm", "gun", "shot", "ship", "tree", "impact",
+        ];
+        for call in super::SCENE_API_ALLOWED {
+            for thing in THINGS {
+                assert!(
+                    !call.contains(thing),
+                    "`{call}` is in the permitted scene API and names `{thing}`. The engine knows \
+                     about matter, heat, contact, time and light; it must not know what a {thing} is."
+                );
+            }
+        }
+    }
+}
