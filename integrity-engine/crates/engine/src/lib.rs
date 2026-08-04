@@ -5797,6 +5797,9 @@ mod app {
         /// set it is the authority for this frame: `fly` is synced from it so the HUD, the ground cap and
         /// the LOD blend all still read one altitude, and `None` hands control back to the fly camera.
         cam_pose: Option<([f64; 3], [f64; 3], [f64; 3], f64, f64)>, // eye, forward, up, fov_y, alt_m
+        /// Where the eye actually WAS last frame, metres from the planet centre — the start of
+        /// the shell's swept resolve, so a fast camera cannot tunnel through the surface skin.
+        last_eye_m: Option<glam::DVec3>,
         /// Rig knobs for PRICING the ground ladder: how many tiers to build, and how many octaves of
         /// generated relief each vertex may sum. Both cost frame time and both buy detail, and the only way
         /// to know the exchange rate is to move one at a time (gpu-perf §5).
@@ -6028,6 +6031,7 @@ mod app {
                 appearance_budget: crate::resolution::WorkBudget::new(4, 110.0),
                 appearance_probes_pinned: 0,
                 cam_pose: None,
+                last_eye_m: None,
                 draw_matter: 2,
                 drawn_buf: Vec::new(),
                 inst_buf: Vec::new(),
@@ -6860,6 +6864,34 @@ mod app {
                                                                // view·projection, the f64 eye, and the tangent frame). The terrain height under the camera
                                                                // keeps "altitude" above the local ground (not sea level).
             let aspect = self.config.width as f64 / self.config.height.max(1) as f64;
+
+            // ★★ **THE CAMERA IS MATTER, and this is where that becomes true for Terra.**
+            //
+            // The eye the fly camera WANTS is resolved against the surface by the same contact law a
+            // grain obeys, and where it ends up is where it is. Nothing below gets a say: the resolved
+            // position is fed back into the camera itself, so the HUD's altitude, the LOD's idea of how
+            // close the ground is, and the picture all read one position.
+            //
+            // What this replaces: `alt_m.clamp(min_alt, ..)` stacked on a ground height that was the
+            // MAX over a 22 km neighbourhood. Two fudges, and neither could slide — a clamp only ever
+            // pushes the eye straight UP, so a camera driven into a steep face popped through it.
+            if self.cam_pose.is_none() {
+                let ds = display_scale();
+                let ground0 = self.ground_disp_at(self.fly.lat, self.fly.lon);
+                let (desired, _, _) = self.fly.view_basis(r_disp, ds, ground0);
+                let resolved = self.camera_shell_resolve(desired);
+                let m = resolved / ds;
+                if (resolved - desired).length() > 0.0 {
+                    let (la, lo) = crate::geo::lat_lon_from_dir(m.normalize_or(glam::DVec3::Y));
+                    self.fly.lat = la;
+                    self.fly.lon = lo;
+                    self.fly.alt_m =
+                        (m.length() - self.planet_radius - self.ground_disp_at(la, lo) / ds)
+                            .max(0.0);
+                }
+                self.last_eye_m = Some(m);
+            }
+
             let ground_disp = self.ground_disp_at(self.fly.lat, self.fly.lon);
             // An externally supplied pose is the authority when there is one; otherwise the fly camera.
             // (docs/59 observer/universe, PR #81 — Sean's branch predates it and dropped the whole arm.)
@@ -7220,42 +7252,119 @@ mod app {
         /// integrated into the same mesh (ocean cells sit at exactly sea level with the water material), so there
         /// is no separate ocean shell and no coast z-fighting. `EXAG` exaggerates relief so it reads on a radius-1
         /// globe (Everest is only ~0.05% of Earth's radius); the true ratio returns with the ground LOD (Phase 5).
-        /// Terrain height (display units, above the sea-level sphere) as a clearance floor for the fly camera at a
-        /// lat/lon. The fly camera adds this to `r_disp` so "altitude" means height above the local ground, not
-        /// sea level — otherwise the ×30 exaggerated mountains would swallow the eye at low altitude.
+        /// **THE ground height at a coordinate** (metres above sea level), and the size of the finest
+        /// datum that answered — measured elevation where a streamed tile covers, the shipped raster
+        /// otherwise, blended exactly as the mesh blends them.
         ///
-        /// It returns the MAX over a small neighbourhood (roughly the coarse mesh cell), not a point sample, so
-        /// the eye clears the terrain *envelope* around it and can never end up inside a neighbouring exaggerated
-        /// peak (the camera must never pass through solid ground). Ocean → 0 (the flat sea surface). The proper
-        /// per-triangle collision against the real-ratio ground surface arrives with the ground LOD (Phase 5).
+        /// ★★ This is an ASSOCIATED function taking its inputs rather than a method, so the segment
+        /// builder — which already holds `&self` pieces split across a mutable borrow — calls the SAME
+        /// code the camera and the cannon call. That is the whole point of it existing.
         ///
-        /// NOTE (architecture): this is a HEIGHTFIELD floor — single-valued along the radial. It cannot represent
-        /// caves (void below the surface) or arches (solid above void). Those need a VOLUMETRIC "is this point in
-        /// solid matter?" test against the material field (voxel/SDF/particle), which is where camera collision
-        /// must move once terrain is a real matter field (docs/39/42). Kept as a heightfield only as a stand-in.
-        fn ground_disp_at(&self, lat: f64, lon: f64) -> f64 {
-            let Some(elev) = self.elevation.as_ref() else {
-                return 0.0;
-            };
-            let land = self.landmask.as_ref();
-            // ±0.2° (~22 km) 3×3 max = the local terrain envelope: enough to clear any terrain the camera could
-            // reach before the floor rises (forced-up look-ahead), without floating far above a plain that merely
-            // has a distant peak. The whole visible ground cap at low altitude fits inside this radius.
-            let mut peak = 0.0f64;
-            for dlat in [-0.2, 0.0, 0.2] {
-                for dlon in [-0.2, 0.0, 0.2] {
-                    let (la, lo) = (lat + dlat, lon + dlon);
-                    let is_land = land.map(|r| r.land_at(la, lo)).unwrap_or(false);
-                    if !is_land {
-                        continue;
-                    }
-                    let e = elev
-                        .elevation_m_at(la, lo, self.elev_range[0], self.elev_range[1])
-                        .max(0.0);
-                    peak = peak.max(e);
+        /// **It replaces three different answers to one question** (Law II), found 2026-08-03:
+        ///   1. a closure inside `build_segment`, raster blended with streamed tiles — what the mesh
+        ///      draws, i.e. the surface you can actually see;
+        ///   2. `ground_disp_at`, raster only with NO tiles and a 3×3 **max over ±0.2° (~22 km)** — a
+        ///      "clearance envelope" that held the eye above the highest peak within 22 kilometres;
+        ///   3. and (2) again, used to stand the cannon, so **the gun floated above its own ground**
+        ///      whenever a hill stood anywhere within 22 km. That was a real bug and it shipped.
+        ///
+        /// The envelope existed to stop the camera flying into a mountain. That is a CONTACT problem
+        /// and it now has a contact answer (`camera_shell_resolve`): the camera is matter, it rests
+        /// against the surface and slides along it. Inflating the ground to fake a collision is exactly
+        /// the clamp fudge Law V forbids — and it could only ever push the eye straight up.
+        fn ground_elev_m(
+            elevation: Option<&crate::terra::raster::Raster>,
+            tiles: &crate::terra::tiles::TileStore,
+            elev_lo: f64,
+            elev_hi: f64,
+            raster_step_m: f64,
+            lat: f64,
+            lon: f64,
+        ) -> (f64, f64) {
+            let e_raster = elevation.map_or(0.0, |r| r.elevation_m_at(lat, lon, elev_lo, elev_hi));
+            match tiles.elevation_m_at(lat, lon) {
+                Some((e_tile, w)) => {
+                    let base = match tiles.pixel_ground_m(lat) {
+                        Some(px_m) if px_m > 0.0 && raster_step_m > 0.0 => {
+                            raster_step_m * (px_m / raster_step_m).powf(w)
+                        }
+                        _ => raster_step_m,
+                    };
+                    ((e_raster + w * (e_tile - e_raster)).max(0.0), base)
                 }
+                None => (e_raster.max(0.0), raster_step_m),
             }
-            peak * display_scale() * self.relief_exag
+        }
+
+        /// The pixel size of the shipped elevation raster on the ground, metres — the coarsest datum.
+        fn raster_step_m(&self) -> f64 {
+            self.elevation.as_ref().map_or(90.0, |r| {
+                2.0 * std::f64::consts::PI * self.planet_radius / r.w.max(1) as f64
+            })
+        }
+
+        /// [`ground_elev_m`] for callers that hold a plain `&self`, in DISPLAY units above the
+        /// sea-level sphere (so relief exaggeration is applied, as the mesh applies it).
+        fn ground_disp_at(&self, lat: f64, lon: f64) -> f64 {
+            let is_land = self
+                .landmask
+                .as_ref()
+                .map(|r| r.land_at(lat, lon))
+                .unwrap_or(false);
+            if !is_land {
+                return 0.0; // the sea surface is at sea level, and it is flat
+            }
+            let (e, _) = Self::ground_elev_m(
+                self.elevation.as_ref(),
+                &self.tiles,
+                self.elev_range[0],
+                self.elev_range[1],
+                self.raster_step_m(),
+                lat,
+                lon,
+            );
+            e * display_scale() * self.relief_exag
+        }
+
+        /// **The camera is MATTER** — a tiny transparent shell obeying the SAME contact law as a grain
+        /// (`granular::sweep_shell_resolve`), not a geometric clamp.
+        ///
+        /// Robin, canonical: *"If the camera isn't material, it can subvert our rules. Let's place a
+        /// tiny cube of matter around the camera (transparent) so the camera can't pierce through our
+        /// skin."* And, deciding it belongs here rather than in a scene (2026-08-03): *"Camera must
+        /// exist in the engine, but can be directed by the scene"*, because **"the engine does a lot of
+        /// calculation based on what can be seen, so it must know everything about the camera all the
+        /// time."** A camera the scene owns is a camera the engine's own resolution decisions trail by
+        /// a frame.
+        ///
+        /// The law was already built and had exactly ONE consumer — the Ground scene, which is being
+        /// deleted. Terra used `alt_m.clamp(min_alt, ..)` plus a 22 km max-filtered ground: two fudges
+        /// stacked, and neither can slide. This makes Terra a second consumer of the one law, on the
+        /// sphere.
+        ///
+        /// ★ **A tangent plane is exact at shell scale.** The shell is 0.35 m; over one metre of
+        /// tangent offset a 6371 km sphere departs from its own tangent plane by `x²/2R` ≈ **8e-8 m**,
+        /// which is eleven million times smaller than the shell. So presenting the sphere to the
+        /// heightfield primitive as a local y-up plane is a coordinate change, not an approximation
+        /// anybody has to defend.
+        ///
+        /// CONTACT, not excavation: nudging the eye into a hillside must not blast a crater. (Ram it in
+        /// at real speed and the same energy gate a meteor obeys would honestly dig — that is the rule
+        /// being universal, not a bug.)
+        fn camera_shell_resolve(&self, desired_disp: glam::DVec3) -> glam::DVec3 {
+            let ds = display_scale();
+            if ds <= 0.0 {
+                return desired_disp;
+            }
+            // The physics is in METRES — the shell is 0.35 m, and a display unit is an Earth radius.
+            let to_m = desired_disp / ds;
+            let resolved = crate::granular::sweep_shell_on_sphere(
+                self.last_eye_m.unwrap_or(to_m),
+                to_m,
+                self.planet_radius,
+                |lat, lon| self.ground_disp_at(lat, lon) / ds,
+            );
+            resolved * ds
         }
 
         /// **Build the ONE surface segment** (docs/63) — the collapse of globe + cap into a single mesh.
@@ -7288,9 +7397,7 @@ mod app {
             let detail = &self.detail;
             let planet_radius = self.planet_radius;
             let octave_budget = self.cap_octave_budget;
-            let raster_step_m = self.elevation.as_ref().map_or(90.0, |r| {
-                2.0 * std::f64::consts::PI * self.planet_radius / r.w.max(1) as f64
-            });
+            let raster_step_m = self.raster_step_m();
             // How steep this ground measures, as a fraction of what the material can hold — from the
             // TILES where they cover (a metres-long baseline, so the ratio means what its name says) and
             // from the raster otherwise. Same rule as the cap's, sampled once for the segment.
@@ -7359,20 +7466,7 @@ mod app {
                 // a probe that read only the raster would report a smooth bilinear ramp and the
                 // integral would conclude, wrongly, that the ground is flat.
                 let ground_m = |lat: f64, lon: f64| -> (f64, f64) {
-                    let e_raster =
-                        elevation.map_or(0.0, |r| r.elevation_m_at(lat, lon, elev_lo, elev_hi));
-                    match tiles.elevation_m_at(lat, lon) {
-                        Some((e_tile, w)) => {
-                            let base = match tiles.pixel_ground_m(lat) {
-                                Some(px_m) if px_m > 0.0 && raster_step_m > 0.0 => {
-                                    raster_step_m * (px_m / raster_step_m).powf(w)
-                                }
-                                _ => raster_step_m,
-                            };
-                            ((e_raster + w * (e_tile - e_raster)).max(0.0), base)
-                        }
-                        None => (e_raster.max(0.0), raster_step_m),
-                    }
+                    Self::ground_elev_m(elevation, tiles, elev_lo, elev_hi, raster_step_m, lat, lon)
                 };
                 let mut scratch = crate::terra::appearance::Moments::new();
                 // What this machine can afford this rebuild — measured, not declared. See

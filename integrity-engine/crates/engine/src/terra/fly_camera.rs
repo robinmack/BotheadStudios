@@ -249,10 +249,19 @@ impl FlyCamera {
 
     // --- input deltas ---
 
-    /// Multiply altitude (zoom): `factor < 1` descends, `> 1` climbs; clamped to [min, max]. `alt_m` is height
-    /// above the LOCAL ground (Terra offsets the eye by the terrain height), and `min_alt` is a hard clearance, so
-    /// the eye can never sink into the solid ground beneath it — the camera obeys real physics (no clipping
-    /// through rock/soil; gas/liquid is pass-through). Flank collision along the path is a TODO for Phase 5.
+    /// Multiply altitude (zoom): `factor < 1` descends, `> 1` climbs; held within [min, max].
+    ///
+    /// ★★ **`min_alt` IS NOT GROUND CLEARANCE, and this comment used to claim it was.** It said the
+    /// clamp meant *"the eye can never sink into the solid ground beneath it — the camera obeys real
+    /// physics"*. That is precisely backwards: a clamp is the OPPOSITE of obeying physics, it is a
+    /// special case exempting the camera from the world's rules, and it leaks in a way a picture shows
+    /// — it can only ever push the eye straight UP along the radial, so a camera driven at a steep face
+    /// pops through it instead of sliding along it.
+    ///
+    /// What keeps the eye out of the ground is `granular::sweep_shell_on_sphere`: the camera is a tiny
+    /// transparent shell of MATTER obeying the same contact law as a grain, resolved every frame in
+    /// `Terra::render`. These two numbers are now what they always honestly were — **a zoom range**,
+    /// the near and far limits of what the wheel may ask for.
     pub fn zoom_alt(&mut self, factor: f64) {
         self.alt_m = (self.alt_m * factor).clamp(self.min_alt, self.max_alt);
     }
