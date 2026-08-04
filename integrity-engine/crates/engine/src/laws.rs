@@ -1565,3 +1565,97 @@ mod scene_struct_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod one_earth_tests {
+    /// **Every scene that draws Earth draws the SAME Earth.**
+    ///
+    /// Robin, stating it as a requirement rather than a hope (2026-08-03): *"Because the scene just
+    /// calls out which assemblies to include, we should be able to get enhanced renders of earth in ALL
+    /// scenes from this work today. If not, we have a serious flaw in how we implement
+    /// scene/assembly/engine."* And, when it was called a prediction: *"Not a prediction, a confident
+    /// assertion of the rules I've decreed (and a way to ensure they are being met)."*
+    ///
+    /// This is the way. Earth's SURFACE — its rasters, its elevation range, its relief exaggeration and
+    /// its biome map — belongs to `assets/bodies/earth.json` and to nothing else. A world file that
+    /// grows its own `surface` for a body the engine already defines is a SECOND Earth, free to drift
+    /// from the first, which is what docs/63 exists to end.
+    #[test]
+    fn a_worlds_body_is_the_only_place_its_surface_is_described() {
+        let bodies = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/bodies");
+        let defined: std::collections::BTreeSet<String> = std::fs::read_dir(bodies)
+            .expect("assets/bodies exists")
+            .flatten()
+            .filter_map(|e| {
+                let p = e.path();
+                (p.extension()? == "json").then(|| p.file_stem()?.to_str().map(str::to_string))?
+            })
+            .collect();
+        assert!(defined.contains("earth"), "earth must be a defined body");
+
+        let mut files = Vec::new();
+        super::tests::collect_json(
+            std::path::Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../web/public/worlds"
+            )),
+            &mut files,
+        );
+        assert!(
+            !files.is_empty(),
+            "no world files — this guard scans nothing"
+        );
+
+        for f in &files {
+            let text = std::fs::read_to_string(f).expect("readable world");
+            let w: serde_json::Value = match serde_json::from_str(&text) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let Some(body) = w.get("body").and_then(|b| b.as_str()) else {
+                continue;
+            };
+            if !defined.contains(body) {
+                continue; // a body the engine has no definition for may still describe itself
+            }
+            assert!(
+                w.get("surface").is_none(),
+                "{}: names body `{body}`, which the engine defines, AND carries its own `surface`.\n\
+                 That is a second {body}, free to drift from the first. A world says WHICH body and \
+                 WHERE on it; assets/bodies/{body}.json says what its surface IS.",
+                f.display()
+            );
+        }
+    }
+
+    /// **The biome map is applied by ONE piece of code.**
+    ///
+    /// It was written twice — identically — inside `Terra::load_world` and
+    /// `OrbitDemo::load_earth_surface`. Nothing had diverged, and that is what made it dangerous: the
+    /// foliage change landed in the DATA, so both copies picked it up and the duplication stayed
+    /// invisible. Phenology is the change that would not be so kind, because it makes a biome's
+    /// material depend on the date — two copies, and one Earth turns while the other does not.
+    ///
+    /// So the mapping lives in `Surface::biome_materials` and this counts the implementations rather
+    /// than trusting that nobody re-types eight obvious lines.
+    #[test]
+    fn one_piece_of_code_turns_a_land_cover_class_into_a_material() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        let mut src = String::new();
+        super::material_property_tests::collect_rs(std::path::Path::new(dir), &mut src);
+        // The fallback is the mapping's signature: a class nobody mapped becomes bare rock.
+        let copies = src.matches("unwrap_or(\"granite\")").count();
+        assert_eq!(
+            copies, 1,
+            "the biome→material fallback appears {copies} times; it must appear ONCE, in \
+             `Surface::biome_materials`. Two scenes each turning a land-cover class into a material \
+             their own way is two Earths waiting to happen (Law II)."
+        );
+        // And both scenes must actually go through it, or the count above is one plus a dead copy.
+        assert_eq!(
+            src.matches("biome_materials(").count(),
+            3,
+            "expected the definition plus a call from each scene that draws a surface"
+        );
+    }
+}

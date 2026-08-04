@@ -494,6 +494,44 @@ pub struct Surface {
     pub biomes: HashMap<String, String>,
 }
 
+impl Surface {
+    /// **THE biome index → material index mapping. One implementation, for every scene.**
+    ///
+    /// Robin's rule, stated as an acceptance test (2026-08-03): *"Because the scene just calls out
+    /// which assemblies to include, we should be able to get enhanced renders of earth in ALL scenes…
+    /// If not, we have a serious flaw in how we implement scene/assembly/engine."*
+    ///
+    /// ★★ This existed TWICE — character-for-character the same logic, once inside `Terra::load_world`
+    /// and once inside `OrbitDemo::load_earth_surface`. Nothing had diverged, and that is exactly what
+    /// made it dangerous: when the foliage materials landed the change was in the DATA
+    /// (`assets/bodies/earth.json`), so both copies picked it up and the duplication stayed invisible.
+    /// A change to the LOGIC would not be so kind — and phenology is precisely that change, since a
+    /// biome's material will come to depend on the date. Two copies, and one Earth turns while the
+    /// other does not.
+    ///
+    /// The index is dense from 0 to the highest class the raster can hold, because a land-cover raster
+    /// stores a class number and the lookup is by that number. A class nobody mapped falls back to
+    /// `granite` — bare rock, the honest "I do not know what grows here", never a plausible guess.
+    pub fn biome_materials(&self, mats: &[crate::materials::Material]) -> Vec<usize> {
+        let max_idx = self
+            .biomes
+            .keys()
+            .filter_map(|k| k.parse::<usize>().ok())
+            .max()
+            .unwrap_or(0);
+        (0..=max_idx)
+            .map(|i| {
+                let id = self
+                    .biomes
+                    .get(&i.to_string())
+                    .map(String::as_str)
+                    .unwrap_or("granite");
+                crate::materials::index_of(mats, id)
+            })
+            .collect()
+    }
+}
+
 /// A world's atmosphere, DECLARED AS MATTER — its mass and what it is made of.
 ///
 /// **Surface pressure is deliberately not a field here.** `planet::LayeredBody::atmosphere_mass` states

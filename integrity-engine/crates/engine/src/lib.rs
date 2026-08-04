@@ -1701,24 +1701,7 @@ mod app {
                     .then(|| crate::terra::raster::Raster::new(w, h, 4, d.to_vec()).ok())
                     .flatten()
             };
-            let biome_mats = {
-                let max_idx = def
-                    .biomes
-                    .keys()
-                    .filter_map(|k| k.parse::<usize>().ok())
-                    .max()
-                    .unwrap_or(0);
-                (0..=max_idx)
-                    .map(|i| {
-                        let id = def
-                            .biomes
-                            .get(&i.to_string())
-                            .map(String::as_str)
-                            .unwrap_or("granite");
-                        materials::index_of(&self.mats, id)
-                    })
-                    .collect::<Vec<_>>()
-            };
+            let biome_mats = def.biome_materials(&self.mats);
             let surf = EarthSurface {
                 landmask: mk(landmask, lm_w, lm_h),
                 elevation: mk(elevation, ev_w, ev_h),
@@ -6188,22 +6171,7 @@ mod app {
                 if let Some(x) = s.relief_exaggeration {
                     self.relief_exag = x.max(0.0);
                 }
-                let max_idx = s
-                    .biomes
-                    .keys()
-                    .filter_map(|k| k.parse::<usize>().ok())
-                    .max()
-                    .unwrap_or(0);
-                self.biome_mats = (0..=max_idx)
-                    .map(|i| {
-                        let mat_id = s
-                            .biomes
-                            .get(&i.to_string())
-                            .map(String::as_str)
-                            .unwrap_or("granite");
-                        materials::index_of(&self.mats, mat_id)
-                    })
-                    .collect();
+                self.biome_mats = s.biome_materials(&self.mats);
             }
             // A new world is a different surface, so the cached segment is about the old one. The cache
             // is keyed on the CAMERA (`tier_is_current`), which cannot see that the planet underneath it
