@@ -15,7 +15,7 @@ for (const n of [1, 12, 1200]) {
     const orig = t.render.bind(t);
     window.__r = []; let last = performance.now();
     t.render = () => { const a = performance.now(); orig(); const bb = performance.now(); window.__r.push(bb - a); last = bb; };
-    t.set_fly(10, 0, 700000, 0, -0.55);
+    t.place_camera(10, 0, 700000, 0, -0.55);
   });
   await p.evaluate((n) => window.__terra.launch_swarm_n(n), n);
   await p.waitForTimeout(1000);

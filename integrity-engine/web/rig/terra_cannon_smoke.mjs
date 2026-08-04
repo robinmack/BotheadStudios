@@ -41,7 +41,7 @@ await p.evaluate(({ lat, lon, B }) => {
   const t = window.__terra;
   t.set_alt_bounds(0.05, 8e10);
   t.set_epoch_sun_over_lon(lon + 55);
-  t.set_fly(lat, lon, 3, B * Math.PI / 180, -0.1);
+  t.place_camera(lat, lon, 3, B * Math.PI / 180, -0.1);
   t.emplace_cannon(B);
 }, { lat: LAT, lon: LON, B });
 await p.waitForTimeout(1200);
@@ -53,7 +53,7 @@ await p.waitForTimeout(1200);
 // edge: 160 parcels drawn and nothing visible. The gun is 3 m long, so the camera has to look where it
 // points, not where it stands.
 const [la, lo] = along(9, B + 125);
-await p.evaluate(({ la, lo, B }) => window.__terra.set_fly(la, lo, 2.6, (B - 62) * Math.PI / 180, -0.02),
+await p.evaluate(({ la, lo, B }) => window.__terra.place_camera(la, lo, 2.6, (B - 62) * Math.PI / 180, -0.02),
   { la, lo, B });
 await p.waitForTimeout(900);
 await p.screenshot({ path: `${out}/smoke-0-before.png` });
@@ -95,7 +95,7 @@ console.log('--- panning downrange ---');
 for (const [i, [wait, pitch, alt]] of [[400, -0.05, 6], [700, -0.02, 14], [900, 0.02, 26], [1200, 0.05, 40]].entries()) {
   const [w, pi, al] = [wait, pitch, alt];
   await p.waitForTimeout(w);
-  await p.evaluate(({ la, lo, bearing, pi, al }) => window.__terra.set_fly(la, lo, al, bearing * Math.PI / 180, pi),
+  await p.evaluate(({ la, lo, bearing, pi, al }) => window.__terra.place_camera(la, lo, al, bearing * Math.PI / 180, pi),
     { la, lo, bearing: B, pi, al });
   await p.waitForTimeout(250);
   await p.screenshot({ path: `${out}/pan-${i}-downrange.png` });
@@ -104,7 +104,7 @@ for (const [i, [wait, pitch, alt]] of [[400, -0.05, 6], [700, -0.02, 14], [900, 
 
 // **The splash.** Move the camera out over the water to where the shot comes down and watch it arrive.
 const [sla, slo] = along(4800, B);
-await p.evaluate(({ sla, slo, bearing }) => window.__terra.set_fly(sla, slo, 120, (bearing + 180) * Math.PI / 180, -0.35),
+await p.evaluate(({ sla, slo, bearing }) => window.__terra.place_camera(sla, slo, 120, (bearing + 180) * Math.PI / 180, -0.35),
   { sla, slo, bearing: B });
 for (const [wait, name] of [[600, '0-approach'], [1200, '1-impact'], [1500, '2-after']]) {
   await p.waitForTimeout(wait);

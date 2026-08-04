@@ -21,7 +21,7 @@ for (const capMs of [0, 16.7]) {
       lastRender = now;
       const a = performance.now(); orig(); window.__r.push(performance.now() - a);
     };
-    t.set_fly(10, 0, 700000, 0, -0.55);
+    t.place_camera(10, 0, 700000, 0, -0.55);
     t.launch_swarm_n(1200);
   }, capMs);
   await p.waitForTimeout(1500);

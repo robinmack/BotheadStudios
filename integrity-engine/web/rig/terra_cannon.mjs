@@ -37,7 +37,7 @@ await p.evaluate(({ lat, lon, alt, bearing }) => {
   t.set_alt_bounds(0.05, 8e10);
   t.set_epoch_sun_over_lon(lon + 70);
   // Yaw is the bearing; a slight downward pitch so the gun at our feet is in frame.
-  t.set_fly(lat, lon, alt, bearing * Math.PI / 180, -0.35);
+  t.place_camera(lat, lon, alt, bearing * Math.PI / 180, -0.35);
 }, { lat: LAT, lon: LON, alt: ALT, bearing: BEARING });
 await p.waitForTimeout(2500);
 

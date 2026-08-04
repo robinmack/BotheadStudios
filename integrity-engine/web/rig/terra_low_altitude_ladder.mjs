@@ -25,7 +25,7 @@ await p.evaluate(
     const t = window.__terra;
     t.set_alt_bounds(minalt, 8e10);
     t.set_epoch_sun_over_lon(lon);
-    t.set_fly(lat, lon, 3000, 0, -0.6);
+    t.place_camera(lat, lon, 3000, 0, -0.6);
   },
   { lat: LAT, lon: LON, minalt: MINALT },
 );
@@ -37,7 +37,7 @@ for (const alt of [2000, 500, 100, 20, 5, 2, 1, 0.5, 0.2]) {
   const settled = await p.evaluate(
     async ({ lat, lon, alt }) => {
       const t = window.__terra;
-      t.set_fly(lat, lon, alt, 0, -0.25);
+      t.place_camera(lat, lon, alt, 0, -0.25);
       await new Promise((r) => setTimeout(r, 900));
       return t.altitude_m();
     },

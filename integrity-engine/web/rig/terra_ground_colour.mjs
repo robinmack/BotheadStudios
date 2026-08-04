@@ -45,7 +45,7 @@ for (const [name, lat, lon] of SITES) {
       const t = window.__terra;
       t.set_alt_bounds(0.05, 8e10);
       t.set_epoch_sun_over_lon(lon); // sun straight overhead: same illumination at every site
-      t.set_fly(lat, lon, 900, 0, -0.55);
+      t.place_camera(lat, lon, 900, 0, -0.55);
     },
     { lat, lon },
   );

@@ -503,3 +503,125 @@ mod tests {
         );
     }
 }
+
+/// **Where the observer sits when it is riding something** — the camera attached to an actor.
+///
+/// Robin's second camera verb (2026-08-03): *"place camera `<position, heading>` and camera-follow
+/// `<assembly>, <relative position>, <heading>`."* The scene names an actor, an offset in that actor's
+/// own frame, and where to look. It does not compute a trajectory, a basis, or a standoff.
+///
+/// ★ This replaced 43 lines of vector maths **in the scene** — normalising, cross products, building a
+/// basis and guessing a standoff from the subject's radius, every frame. That is the scene doing the
+/// engine's job, and it had the bug you would predict: the standoff scaled with the subject's own
+/// radius, so following a 7 cm cannonball put the eye 1 m away and filled the frame with sky.
+///
+/// **The subject's frame** is the honest one for a moving body: `forward` is where it is actually
+/// going, `up` is the local vertical (the planet's, not the body's), `side` completes it right-handed.
+/// A body barely moving has no meaningful velocity direction, so its frame falls back to local north —
+/// otherwise the camera would spin wildly as a near-stationary object jitters.
+///
+/// **Heading is separate from position**, which is the whole point of Robin's refinement: riding a shot
+/// does not oblige you to look at it. `yaw`/`pitch` are relative to the subject's frame, so 0,0 looks
+/// where the subject is going and `yaw = π` looks back down the trajectory at the gun that fired it.
+pub fn ride_pose(
+    subject_pos: DVec3,
+    subject_vel: DVec3,
+    back_m: f64,
+    up_m: f64,
+    side_m: f64,
+    yaw: f64,
+    pitch: f64,
+) -> (DVec3, DVec3, DVec3) {
+    let up = subject_pos.normalize_or(DVec3::Y);
+    // Where it is going. Below a walking pace the direction is noise, so use the local meridian.
+    let along = subject_vel - up * subject_vel.dot(up);
+    let fwd = if along.length() > 1.0 {
+        along.normalize()
+    } else {
+        let north = DVec3::Z - up * DVec3::Z.dot(up);
+        north.normalize_or(DVec3::X)
+    };
+    let side = fwd.cross(up).normalize_or(DVec3::X);
+    let eye = subject_pos - fwd * back_m + up * up_m + side * side_m;
+    // Heading, in the subject's frame: yaw about the local vertical, then pitch above the horizon.
+    let (sy, cy) = yaw.sin_cos();
+    let (sp, cp) = pitch.sin_cos();
+    let look = ((fwd * cy + side * sy) * cp + up * sp).normalize_or(fwd);
+    (eye, look, up)
+}
+
+#[cfg(test)]
+mod ride_tests {
+    use super::*;
+
+    fn at(lat: f64, lon: f64, alt: f64) -> DVec3 {
+        crate::geo::dir_from_lat_lon(lat, lon) * (6.371e6 + alt)
+    }
+
+    /// **The offset is in the SUBJECT's frame, and `back` means behind where it is going.**
+    #[test]
+    fn the_camera_rides_behind_what_it_follows() {
+        let pos = at(0.0, 0.0, 1000.0);
+        let (up, north, _east) = crate::geo::tangent_frame(0.0, 0.0);
+        let vel = north * 300.0; // heading north
+        let (eye, look, _) = ride_pose(pos, vel, 50.0, 10.0, 0.0, 0.0, 0.0);
+        // Behind: further south than the subject, i.e. against its velocity.
+        let behind = (pos - eye).dot(north);
+        assert!(
+            (behind - 50.0).abs() < 1e-6,
+            "the eye should sit 50 m behind along the track, got {behind:.3}"
+        );
+        assert!(
+            ((eye - pos).dot(up) - 10.0).abs() < 1e-6,
+            "and 10 m above it"
+        );
+        // Heading 0,0 looks where the subject is going.
+        assert!(
+            look.dot(north) > 0.999,
+            "looking along the track, got {look:?}"
+        );
+    }
+
+    /// **★ Heading is INDEPENDENT of position** — Robin's refinement, and the reason it is a separate
+    /// argument. Riding a shot must not oblige you to look at it: `yaw = π` looks back down the
+    /// trajectory at the gun, from the same seat.
+    #[test]
+    fn a_rider_can_look_back_down_the_trajectory() {
+        let pos = at(10.0, 20.0, 500.0);
+        let (_up, north, _east) = crate::geo::tangent_frame(10.0, 20.0);
+        let vel = north * 200.0;
+        let (eye_f, look_f, _) = ride_pose(pos, vel, 30.0, 5.0, 0.0, 0.0, 0.0);
+        let (eye_b, look_b, _) = ride_pose(pos, vel, 30.0, 5.0, 0.0, std::f64::consts::PI, 0.0);
+        assert!(
+            (eye_f - eye_b).length() < 1e-9,
+            "the seat is the same; only the heading changed"
+        );
+        assert!(
+            look_f.dot(look_b) < -0.999,
+            "looking back must be the opposite direction, got {:.4}",
+            look_f.dot(look_b)
+        );
+    }
+
+    /// **A near-stationary subject must not make the camera spin.** Velocity direction is noise below a
+    /// walking pace, so the frame falls back to the meridian rather than chasing jitter.
+    #[test]
+    fn a_still_subject_gives_a_steady_frame() {
+        let pos = at(45.0, -100.0, 20.0);
+        let a = ride_pose(pos, DVec3::ZERO, 10.0, 2.0, 0.0, 0.0, 0.0);
+        let b = ride_pose(
+            pos,
+            DVec3::new(0.01, -0.02, 0.015),
+            10.0,
+            2.0,
+            0.0,
+            0.0,
+            0.0,
+        );
+        assert!(
+            (a.0 - b.0).length() < 1e-6,
+            "a millimetre-per-second wobble moved the seat by {:.4} m",
+            (a.0 - b.0).length()
+        );
+    }
+}

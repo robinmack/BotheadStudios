@@ -41,10 +41,10 @@ for (const [name, lat, lon] of SITES) {
       t.set_alt_bounds(0.001, 8e10);
       t.set_epoch_sun_over_lon(lon);
       // Arrive high, so the streamed tiles for this place are asked for and land.
-      t.set_fly(lat, lon, 3000, 0, -0.6);
+      t.place_camera(lat, lon, 3000, 0, -0.6);
       await new Promise((r) => setTimeout(r, 2500));
       // Now ask for an eye 200 m BELOW the local ground.
-      t.set_fly(lat, lon, -200, 0, -0.05);
+      t.place_camera(lat, lon, -200, 0, -0.05);
       await new Promise((r) => setTimeout(r, 1200));
       return { alt: t.altitude_m(), lat: t.latitude(), lon: t.longitude() };
     },

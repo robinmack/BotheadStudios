@@ -10,7 +10,7 @@ const read = () => p.evaluate(() => ({ lat:+window.__terra.latitude().toFixed(3)
 const hud = () => p.evaluate(() => document.getElementById('stats')?.textContent ?? '');
 
 // Position over land at a modest altitude.
-await p.evaluate(() => window.__terra.set_fly(28, 84, 4000, 0, 0.05));
+await p.evaluate(() => window.__terra.place_camera(28, 84, 4000, 0, 0.05));
 await p.waitForTimeout(200);
 console.log('start:', JSON.stringify(await read()));
 
@@ -32,12 +32,12 @@ const l1 = (await read()).lon;
 console.log(`KeyD (right): lon ${l0} -> ${l1}  movedEast=${l1 > l0}`);
 
 // Biome readback over ocean vs land.
-await p.evaluate(() => window.__terra.set_fly(0, -140, 3000, 0, 0.05)); await p.waitForTimeout(150);
+await p.evaluate(() => window.__terra.place_camera(0, -140, 3000, 0, 0.05)); await p.waitForTimeout(150);
 console.log('mid-Pacific biome:', (await read()).biome);
-await p.evaluate(() => window.__terra.set_fly(23, 10, 3000, 0, 0.05)); await p.waitForTimeout(150);
+await p.evaluate(() => window.__terra.place_camera(23, 10, 3000, 0, 0.05)); await p.waitForTimeout(150);
 console.log('Sahara biome:', (await read()).biome);
 
-await p.evaluate(() => window.__terra.set_fly(28, 84, 1500, 0, 0.08)); await p.waitForTimeout(300);
+await p.evaluate(() => window.__terra.place_camera(28, 84, 1500, 0, 0.08)); await p.waitForTimeout(300);
 console.log('HUD:', await hud());
 await p.screenshot({ path: `${out}/controls-hud.png` });
 await b.close(); console.log('done');

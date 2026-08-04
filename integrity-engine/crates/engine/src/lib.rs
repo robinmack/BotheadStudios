@@ -5256,6 +5256,27 @@ mod app {
 
     const AIRLESS: Air = [0.0, 0.0, 0.0, crate::atmosphere::SUN_GAIN, 0.0];
 
+    /// What `camera_follow` is riding. An assembly the engine can point at — today that is anything in
+    /// flight; when assemblies carry identity (docs/64) this is where a gun or a ship joins the list.
+    #[derive(Clone, Copy, PartialEq)]
+    enum RideSubject {
+        /// Whichever body in flight is heaviest right now — survives a fragmenting subject.
+        Heaviest,
+        /// One body, by the engine's own id.
+        Body(u64),
+    }
+
+    /// A seat on a moving actor: which actor, where you sit in ITS frame, and where you look.
+    #[derive(Clone, Copy)]
+    struct Ride {
+        subject: RideSubject,
+        back_m: f64,
+        up_m: f64,
+        side_m: f64,
+        yaw: f64,
+        pitch: f64,
+    }
+
     impl Terra {
         /// This world's air, as the shared Rayleigh model wants it: the optical depth derived from the
         /// DECLARED atmosphere's mass (a world never declares τ, and never declares surface pressure —
@@ -5800,6 +5821,8 @@ mod app {
         /// Where the eye actually WAS last frame, metres from the planet centre — the start of
         /// the shell's swept resolve, so a fast camera cannot tunnel through the surface skin.
         last_eye_m: Option<glam::DVec3>,
+        /// What the camera is riding, if anything (`camera_follow`).
+        ride: Option<Ride>,
         /// Rig knobs for PRICING the ground ladder: how many tiers to build, and how many octaves of
         /// generated relief each vertex may sum. Both cost frame time and both buy detail, and the only way
         /// to know the exchange rate is to move one at a time (gpu-perf §5).
@@ -6032,6 +6055,7 @@ mod app {
                 appearance_probes_pinned: 0,
                 cam_pose: None,
                 last_eye_m: None,
+                ride: None,
                 draw_matter: 2,
                 drawn_buf: Vec::new(),
                 inst_buf: Vec::new(),
@@ -6776,12 +6800,91 @@ mod app {
         // maps input to these; the camera itself blends orbit⇄ground by altitude (see `terra::fly_camera`).
 
         /// Set the camera outright (lat/lon degrees, altitude metres, look yaw/pitch radians).
-        pub fn set_fly(&mut self, lat: f64, lon: f64, alt_m: f64, yaw: f64, pitch: f64) {
+        /// **PLACE THE CAMERA** — `<position, heading>`, the first of the two verbs a scene gets.
+        ///
+        /// Robin (2026-08-03): *"place camera `<position, heading>` and camera-follow `<assembly>,
+        /// `<relative position>`, `<heading>`."* This is a statement about where the observer STANDS,
+        /// in the body's own frame, which is the frame a scene naturally knows things in ("the gun is
+        /// at Galway; stand behind it"). Nothing about a camera MODEL crosses the boundary.
+        ///
+        /// It replaces `set_fly`, whose name was itself the problem: "fly" is a camera model, and a
+        /// scene that names a camera model is a scene that has one.
+        ///
+        /// ★ **This is a request, not a placement.** The camera is matter (docs/46 row 36), so the eye
+        /// ends up where the contact law allows — ask for a seat inside a mountain and you get one on
+        /// its slope. Read [`Terra::altitude_m`] afterwards for where it actually is.
+        pub fn place_camera(&mut self, lat: f64, lon: f64, alt_m: f64, yaw: f64, pitch: f64) {
+            self.ride = None; // a scene that names a place has stopped following something
             self.fly.lat = lat;
             self.fly.lon = lon;
             self.fly.alt_m = alt_m.clamp(self.fly.min_alt, self.fly.max_alt);
             self.fly.yaw = yaw;
             self.fly.pitch = pitch;
+        }
+
+        /// **CAMERA-FOLLOW** — `<assembly>, <relative position>, <heading>`, the second verb.
+        ///
+        /// `subject` names what to ride: `"heaviest"` for the largest thing in flight, or a body's id
+        /// as a decimal string. `back_m`/`up_m`/`side_m` are an offset **in the subject's own frame**
+        /// (behind where it is going, above it, beside it); `yaw`/`pitch` are the heading **relative to
+        /// that frame**, so `0,0` looks where the subject is going and `yaw = π` looks back down the
+        /// trajectory. Pass an empty subject to let go.
+        ///
+        /// ★★ **This deletes the scene's own chase camera**, which was 43 lines of vector maths run
+        /// every frame — normalising a velocity, crossing it with the local up to build a basis, and
+        /// scaling a standoff by the subject's radius. The engine knows where its own matter is; a
+        /// scene reading that back to compute a camera position is the wrong side of docs/65. It also
+        /// had the bug that follows from the standoff heuristic: riding a 7 cm cannonball put the eye
+        /// a metre away and filled the frame with sky.
+        pub fn camera_follow(
+            &mut self,
+            subject: &str,
+            back_m: f64,
+            up_m: f64,
+            side_m: f64,
+            yaw: f64,
+            pitch: f64,
+        ) -> bool {
+            let subject = subject.trim();
+            if subject.is_empty() || subject.eq_ignore_ascii_case("none") {
+                self.ride = None;
+                return false;
+            }
+            let which = if subject.eq_ignore_ascii_case("heaviest") {
+                RideSubject::Heaviest
+            } else {
+                match subject.parse::<u64>() {
+                    Ok(id) => RideSubject::Body(id),
+                    Err(_) => {
+                        log::warn!("camera_follow: no subject named '{subject}'");
+                        return false;
+                    }
+                }
+            };
+            // Refuse to ride something that is not there, rather than silently pointing at nothing.
+            let exists = match which {
+                RideSubject::Heaviest => self.flight.heaviest().is_some(),
+                RideSubject::Body(id) => self.flight.body(id).is_some(),
+            };
+            if !exists {
+                self.ride = None;
+                return false;
+            }
+            self.ride = Some(Ride {
+                subject: which,
+                back_m,
+                up_m,
+                side_m,
+                yaw,
+                pitch,
+            });
+            true
+        }
+
+        /// Is the camera riding something? Goes false on its own when the subject lands or is culled,
+        /// so a scene does not have to watch for that.
+        pub fn camera_is_following(&self) -> bool {
+            self.ride.is_some()
         }
 
         /// WASD: move across the surface. `forward`/`right` are −1/0/+1 intents; the step scales with altitude
@@ -6875,6 +6978,54 @@ mod app {
             // What this replaces: `alt_m.clamp(min_alt, ..)` stacked on a ground height that was the
             // MAX over a 22 km neighbourhood. Two fudges, and neither could slide — a clamp only ever
             // pushes the eye straight UP, so a camera driven into a steep face popped through it.
+            // **Riding an actor** (`camera_follow`): the engine knows where its own matter is, so it
+            // seats the observer itself rather than handing coordinates out for a scene to do maths on.
+            // The ride ENDS ITSELF when its subject lands or is culled — a scene should not have to
+            // watch for that, and the old scene-side version had to.
+            if let Some(ride) = self.ride {
+                let body = match ride.subject {
+                    RideSubject::Heaviest => self.flight.heaviest(),
+                    RideSubject::Body(id) => self.flight.body(id),
+                };
+                match body {
+                    Some(b) => {
+                        let ds = display_scale();
+                        let (eye_m, look, up) = crate::terra::fly_camera::ride_pose(
+                            b.pos,
+                            b.vel,
+                            ride.back_m,
+                            ride.up_m,
+                            ride.side_m,
+                            ride.yaw,
+                            ride.pitch,
+                        );
+                        // The camera is matter wherever it is — a seat behind a shot is still a seat
+                        // that cannot be inside a hillside.
+                        let eye = self.camera_shell_resolve(eye_m * ds);
+                        self.last_eye_m = Some(eye / ds);
+                        let (la, lo) =
+                            crate::geo::lat_lon_from_dir((eye / ds).normalize_or(glam::DVec3::Y));
+                        self.fly.lat = la;
+                        self.fly.lon = lo;
+                        self.fly.alt_m = ((eye / ds).length()
+                            - self.planet_radius
+                            - self.ground_disp_at(la, lo) / ds)
+                            .max(0.0);
+                        self.cam_pose = Some((
+                            eye.to_array(),
+                            look.to_array(),
+                            up.to_array(),
+                            0.9,
+                            self.fly.alt_m,
+                        ));
+                    }
+                    None => {
+                        self.ride = None;
+                        self.cam_pose = None;
+                    }
+                }
+            }
+
             if self.cam_pose.is_none() {
                 let ds = display_scale();
                 let ground0 = self.ground_disp_at(self.fly.lat, self.fly.lon);

@@ -89,7 +89,7 @@ console.log(`--- ${n + 1} rungs, ${decades.toFixed(1)} decades: ${fmt(TOP_M)} ->
 console.log('  altitude        p50 ms   worst ms   fps  tiles');
 for (const [i, alt] of rungs.entries()) {
   await p.evaluate(({ alt, LAT, LON }) => {
-    window.__terra.set_fly(LAT, LON, alt, 0.6, -0.45);
+    window.__terra.place_camera(LAT, LON, alt, 0.6, -0.45);
     window.__r.length = 0;
   }, { alt, LAT, LON });
   await p.waitForTimeout(900);

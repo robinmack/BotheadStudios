@@ -44,7 +44,7 @@ const stats = async () => p.evaluate(() => {
 console.log(`--- lateral walk, ${TIERS} tier(s), 500 m ---`);
 await p.evaluate((t) => { window.__terra.set_octave_budget(4); }, TIERS);
 for (const [i, dlat] of [0, 0.004, 0.008, 0.012, 0.02].entries()) {
-  await p.evaluate(({ dlat }) => window.__terra.set_fly(28 + dlat, 86, 500, 0.6, -0.20), { dlat });
+  await p.evaluate(({ dlat }) => window.__terra.place_camera(28 + dlat, 86, 500, 0.6, -0.20), { dlat });
   await p.waitForTimeout(1200);
   const s = await stats();
   await shoot(`walk${i}`);
@@ -56,7 +56,7 @@ for (const [i, dlat] of [0, 0.004, 0.008, 0.012, 0.02].entries()) {
 // while p50 stays cheap.
 console.log(`--- descent, ${TIERS} tier(s) ---`);
 for (const alt of [64000, 32000, 16000, 8000, 4000, 2000, 1000, 500]) {
-  await p.evaluate(({ alt }) => window.__terra.set_fly(28, 86, alt, 0.6, -0.30), { alt });
+  await p.evaluate(({ alt }) => window.__terra.place_camera(28, 86, alt, 0.6, -0.30), { alt });
   await p.waitForTimeout(1200);
   const s = await stats();
   await shoot(`alt${alt}`);

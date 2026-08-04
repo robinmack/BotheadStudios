@@ -44,10 +44,10 @@ for (const s of SCENES) {
       ({ g, lat, lon }) => {
         const t = window[g];
         if (typeof t.set_epoch_sun_over_lon === 'function') t.set_epoch_sun_over_lon(lon);
-        if (typeof t.set_fly === 'function') {
+        if (typeof t.place_camera === 'function') {
           t.set_alt_bounds?.(0.05, 8e10);
-          t.set_fly(lat, lon, 40000, 0, -1.2);
-          return 'set_fly';
+          t.place_camera(lat, lon, 40000, 0, -1.2);
+          return 'place_camera';
         }
         if (typeof t.focus_earth === 'function') {
           // ★★ THE SPACE BAND'S CAMERA CANNOT BE SET FROM OUTSIDE, and calling `set_orbit` looks like
