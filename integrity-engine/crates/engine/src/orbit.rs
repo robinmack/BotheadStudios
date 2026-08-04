@@ -756,7 +756,14 @@ mod tests {
 /// Low-precision solar position from the Astronomical Almanac (~0.01° over 1950–2050): good to a few
 /// kilometres of subsolar point, far below anything a viewer can see. FLAGGED: it ignores nutation and
 /// aberration, and uses mean rather than apparent sidereal time.
-pub fn solar_direction_earth_fixed(unix_seconds: f64) -> glam::DVec3 {
+/// **Where the Sun stands on the celestial sphere** — its declination and right ascension, radians.
+///
+/// Split out of [`solar_direction_earth_fixed`] because the DECLINATION is the season. Robin
+/// (2026-08-03): *"Even more honest is having the engine signal temperature changes based on the
+/// earth's tilt and position relative to the sun"*, and *"the model should be able to calculate amount
+/// of daylight in each area of biomes based on the tilt/season"*. Both of those are this one number
+/// plus a latitude, so it must not be re-derived anywhere else (Law II).
+pub fn solar_declination_ra(unix_seconds: f64) -> (f64, f64) {
     // Days since the J2000.0 epoch (2000-01-01 12:00 UTC = Unix 946_728_000).
     let n = (unix_seconds - 946_728_000.0) / 86_400.0;
     let mean_longitude = (280.460 + 0.985_647_4 * n).to_radians();
@@ -769,6 +776,12 @@ pub fn solar_direction_earth_fixed(unix_seconds: f64) -> glam::DVec3 {
     let obliquity = (23.439 - 4.0e-7 * n).to_radians(); // Earth's axial tilt — the reason there are seasons
     let declination = (obliquity.sin() * ecliptic.sin()).asin();
     let right_ascension = (obliquity.cos() * ecliptic.sin()).atan2(ecliptic.cos());
+    (declination, right_ascension)
+}
+
+pub fn solar_direction_earth_fixed(unix_seconds: f64) -> glam::DVec3 {
+    let n = (unix_seconds - 946_728_000.0) / 86_400.0;
+    let (declination, right_ascension) = solar_declination_ra(unix_seconds);
     // Greenwich mean sidereal time — how far Earth has turned under the stars. The subsolar longitude is
     // the Sun's right ascension measured from the Greenwich meridian.
     let gmst_hours = 18.697_374_558 + 24.065_709_824_419_08 * n;

@@ -66,6 +66,7 @@ mod planet;
 /// their helpers). Lifted out of `#[cfg(wasm32)] mod app`: all three scenes use these identically, so
 /// they were never scene code, and living there kept them out of every native build.
 mod render;
+pub mod solar; // the engine's time signal: what the sky is doing at a place, from tilt + orbit
 /// What the engine is holding, as it must be drawn — the one physics→picture mapping (docs/50).
 pub use render::Drawn;
 pub mod arc; // the out-and-back demo arc: one continuous camera path, surface <-> celestial, pacing derived
