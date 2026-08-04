@@ -87,6 +87,8 @@ struct RawOptical {
     color_variance: f32,
     #[serde(default)]
     spectrum: Option<Spectrum>,
+    #[serde(default)]
+    senescent_spectrum: Option<Spectrum>,
 }
 
 /// **What a spectrometer measured this material reflect, wavelength by wavelength.**
@@ -397,6 +399,12 @@ pub struct Material {
     /// numbers — which is most of them, and is exactly what the `albedo` field's honesty note is
     /// about. A material that has one is a material whose colour is a measurement.
     pub spectrum: Option<Spectrum>,
+    /// **What this material reflects when its chlorophyll is spent** — the other end of a season.
+    ///
+    /// `None` for everything that does not senesce, which is almost everything, and notably for
+    /// `conifer_foliage`: an evergreen having no senescent state is the model's own testable
+    /// prediction, not an omission.
+    pub senescent_spectrum: Option<Spectrum>,
     /// Thermal properties for melt/vaporization (`docs/20`), when we have cited data for the material.
     /// `None` for the 11 of 24 materials whose thermal data has not been sourced — an honest gap marker,
     /// NOT a licence to invent one. Ask through [`Material::specific_heat`] and friends rather than
@@ -533,6 +541,7 @@ pub fn load() -> Vec<Material> {
                 metallic: m.optical.metallic,
                 color_variance: m.optical.color_variance,
                 spectrum: m.optical.spectrum,
+                senescent_spectrum: m.optical.senescent_spectrum,
                 thermal: m.thermal.map(|t| Thermal {
                     specific_heat: t.specific_heat,
                     melt_point: t.melt_point,
@@ -1226,5 +1235,119 @@ mod gun_metal_tests {
                     .thermal_conductivity,
             "bronze conducts heat away faster than grey iron"
         );
+    }
+}
+
+impl Material {
+    /// **What this material looks like when `turned` of it has gone over to its senescent state.**
+    ///
+    /// Robin: *"wire it up so Ireland actually turns."* This is the wiring: `turned` is the fraction of
+    /// the footprint whose chlorophyll is spent (`solar::senescence_fraction`), the two measured spectra
+    /// are mixed by it, and the CIE observer turns the mixture into a colour — the SAME derivation that
+    /// produced the summer albedo, so a leaf in October and a leaf in June are one law apart.
+    ///
+    /// ★ Mixing REFLECTANCE, not colour. A footprint part-way through autumn genuinely contains both
+    /// kinds of leaf, so a linear spectral mixture is what is physically there — and blending the two
+    /// RGB triples instead would give a different, wronger answer, because the observer is not linear
+    /// in the way a naive colour lerp assumes.
+    ///
+    /// ★★ **It is a DECLARED stand-in for pigment chemistry** (docs/46 row 38). The resolved version
+    /// carries the pigment complement and sums what each absorbs; Robin's note is why that complement
+    /// must be a variable rather than a constant — chlorophyll *a*/*b* give out around 660–680 nm while
+    /// *d* and *f* absorb well past it. Two measured endmembers cannot express a pigment nobody
+    /// sampled. What this DOES buy is that both ends are measurements rather than choices.
+    ///
+    /// Materials with no senescent spectrum return their ordinary albedo whatever the season, which is
+    /// how an evergreen, a rock and the sea all behave correctly for free.
+    pub fn albedo_when_turned(&self, turned: f64) -> [f32; 3] {
+        const SUN_K: f64 = 5772.0;
+        let (Some(green), Some(dead)) = (&self.spectrum, &self.senescent_spectrum) else {
+            return self.albedo;
+        };
+        let t = turned.clamp(0.0, 1.0);
+        if t <= 0.0 {
+            return self.albedo;
+        }
+        // The two states must be sampled the same way, or "mixing" them is comparing two grids.
+        if green.lo_nm != dead.lo_nm
+            || green.step_nm != dead.step_nm
+            || green.reflectance.len() != dead.reflectance.len()
+        {
+            return self.albedo;
+        }
+        let mixed: Vec<f64> = green
+            .reflectance
+            .iter()
+            .zip(&dead.reflectance)
+            .map(|(g, d)| g * (1.0 - t) + d * t)
+            .collect();
+        crate::blackbody::reflectance_srgb(&mixed, green.lo_nm, green.step_nm, SUN_K)
+    }
+}
+
+#[cfg(test)]
+mod senescence_tests {
+    use super::*;
+
+    /// **A turning leaf gets brighter and yellower, and green stops winning.**
+    ///
+    /// Not a colour anybody picked: it follows from chlorophyll leaving. The measured endmembers differ
+    /// by 5.7x in chlorophyll (1.96 vs 11.10 mg/g), and as it falls the leaf reflects MORE in both the
+    /// green and the red — which is what the eye reads as gold.
+    #[test]
+    fn a_leaf_that_loses_its_chlorophyll_turns() {
+        let mats = load();
+        let leaf = &mats[index_of(&mats, "broadleaf_foliage")];
+        let summer = leaf.albedo_when_turned(0.0);
+        let autumn = leaf.albedo_when_turned(1.0);
+        assert_eq!(
+            summer, leaf.albedo,
+            "an unturned leaf is exactly its summer self"
+        );
+        let lum = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        assert!(
+            lum(autumn) > lum(summer),
+            "autumn foliage is brighter: {:?} vs {:?}",
+            autumn,
+            summer
+        );
+        // Yellower: red climbs relative to green, because the red trough fills in as chlorophyll goes.
+        assert!(
+            autumn[0] / autumn[1] > summer[0] / summer[1],
+            "the red:green ratio must rise, {:.3} -> {:.3}",
+            summer[0] / summer[1],
+            autumn[0] / autumn[1]
+        );
+        // And it is monotone, so a half-turned wood sits between the two.
+        let half = leaf.albedo_when_turned(0.5);
+        assert!(
+            lum(half) > lum(summer) && lum(half) < lum(autumn),
+            "half-turned must sit between the ends"
+        );
+    }
+
+    /// **★ An evergreen does not turn, and nothing had to say so.** `conifer_foliage` carries no
+    /// senescent spectrum, so it answers with the same colour in January and July — the model's own
+    /// prediction, and the reason a Maine hillside reads as mixed forest rather than uniformly gold.
+    #[test]
+    fn a_conifer_looks_the_same_in_january() {
+        let mats = load();
+        let fir = &mats[index_of(&mats, "conifer_foliage")];
+        assert!(
+            fir.senescent_spectrum.is_none(),
+            "an evergreen must carry no senescent state"
+        );
+        for t in [0.0, 0.5, 1.0] {
+            assert_eq!(
+                fir.albedo_when_turned(t),
+                fir.albedo,
+                "a conifer is unchanged at turned={t}"
+            );
+        }
+        // Rock and sea likewise — the mechanism must cost nothing for matter that does not live.
+        for id in ["granite", "water", "sand"] {
+            let m = &mats[index_of(&mats, id)];
+            assert_eq!(m.albedo_when_turned(1.0), m.albedo, "{id} has no season");
+        }
     }
 }

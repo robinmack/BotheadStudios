@@ -975,6 +975,10 @@ mod app {
         /// The giant impact's DECLARED initial conditions (docs/51). Defaults to the values that were
         /// Rust constants, so the scene is unchanged until a world file says otherwise.
         impact_def: crate::terra::world_def::ImpactDef,
+        /// **When this scene is set**, Unix seconds — `None` is now. A world may declare it; the
+        /// birth-of-the-Moon scene is proto-Earth while Terra is this afternoon, and both draw the
+        /// same Earth (docs/65: time is part of the setting, not part of the body).
+        scene_epoch: Option<f64>,
         surface: wgpu::Surface<'static>,
         device: wgpu::Device,
         queue: wgpu::Queue,
@@ -1536,6 +1540,7 @@ mod app {
                 "orbit demo ready: Sun+Earth+{num_moons} moon(s), sun-lit, {ORBIT_TIME_SCALE:.0}x time"
             );
             Ok(OrbitDemo {
+                scene_epoch: None,
                 impact_def: Default::default(),
                 surface,
                 device,
@@ -1737,6 +1742,10 @@ mod app {
         pub fn load_world(&mut self, world_json: &str) -> Result<(), JsValue> {
             use crate::terra::world_def::{BodyDef, World};
             let w = World::parse(world_json).map_err(|e| JsValue::from_str(&e))?;
+            // **When this scene is set** — a world may name its epoch (docs/65: time is part of the
+            // setting). The birth-of-the-Moon scene is proto-Earth; Terra is this afternoon. Same
+            // Earth, different dates.
+            self.scene_epoch = w.time.as_ref().and_then(|t| t.epoch);
             let defs = w
                 .bodies
                 .as_ref()
@@ -2217,6 +2226,12 @@ mod app {
         /// Put the camera's frame of reference on Earth (origin re-centres on the planet).
         /// Choosing a focus also snaps any pan offset back to zero: the button's promise is
         /// "frame THIS body", and a leftover offset would frame something else.
+        /// This scene's clock: its declared epoch, or now.
+        fn scene_epoch_s(&self) -> f64 {
+            self.scene_epoch
+                .unwrap_or_else(crate::orbit::unix_now_seconds)
+        }
+
         pub fn focus_earth(&mut self) {
             self.focus = 1;
             self.camera.pan = Vec3::ZERO;
@@ -4618,7 +4633,12 @@ mod app {
                             surf.elev_range,
                             ds,
                             surf.relief_exag,
-                        );
+                        )
+                        // THIS SCENE'S clock — its declared epoch if the world names one, else now.
+                        // A scene showing proto-Earth and a scene showing this afternoon are ONE Earth
+                        // at two times, which is a scene's own business (docs/65). What "one Earth"
+                        // forbids is two answers to *what Earth is made of*, not two dates.
+                        .at_epoch(self.scene_epoch_s());
                         // The spin's oblate figure as a radial factor — first-order identical to
                         // the globe draw's affine scale about the spin axis (the mesh's y), so the
                         // cap sits on the same flattened surface the globe draws.
@@ -6174,6 +6194,13 @@ mod app {
                 }
                 self.biome_mats = s.biome_materials(&self.mats);
             }
+            // **When this scene is set** (docs/65: time is part of the setting). A world that names an
+            // epoch gets it; one that does not runs on the wall clock. Robin: *"One earth assembly.
+            // Each scene can show different times, geological epochs, etc."*
+            if let Some(t) = w.time.as_ref().and_then(|t| t.epoch) {
+                self.epoch_s = Some(t);
+            }
+
             // A new world is a different surface, so the cached segment is about the old one. The cache
             // is keyed on the CAMERA (`tier_is_current`), which cannot see that the planet underneath it
             // changed — so anything that moves the surface has to say so here.
@@ -6575,7 +6602,13 @@ mod app {
         /// sidereal/solar day distinction.
         pub fn set_epoch_sun_over_lon(&mut self, lon_deg: f64) -> f64 {
             let t =
-                crate::orbit::epoch_for_sub_solar_lon(lon_deg, crate::orbit::unix_now_seconds());
+                // ★ Solve near the epoch ALREADY PINNED, if there is one — not always near now.
+                // Otherwise this silently threw away a date: a rig asking for "October, sun overhead"
+                // got "today, sun overhead", and a seasons run reported the same season on four
+                // different dates because the second call overwrote the first. Pinning a date and then
+                // pinning the daylight are not in conflict; they are latitude and longitude of the
+                // same instant.
+                crate::orbit::epoch_for_sub_solar_lon(lon_deg, self.celestial_epoch_s());
             self.epoch_s = Some(t);
             t
         }
@@ -6603,6 +6636,12 @@ mod app {
             let sun = crate::orbit::solar_direction_earth_fixed(self.celestial_epoch_s());
             let (up, _, _) = crate::geo::tangent_frame(lat_deg, lon_deg);
             up.dot(sun).clamp(-1.0, 1.0).asin().to_degrees()
+        }
+
+        /// **How far through its autumn this latitude is**, 0..1 — a read, for rigs and HUDs, of the
+        /// same `solar::senescence_fraction` the surface itself spends.
+        pub fn senescence_at(&self, lat_deg: f64) -> f64 {
+            crate::solar::senescence_fraction(lat_deg, self.celestial_epoch_s())
         }
 
         /// **Which land-cover class and which material the surface has at this coordinate** — the
@@ -7553,7 +7592,9 @@ mod app {
                 self.elev_range,
                 ds,
                 exag,
-            );
+            )
+            // The clock the sky is drawn with, so the leaves and the light agree about the date.
+            .at_epoch(self.celestial_epoch_s());
             // A cache of the view, the same rule the tiers use: re-derive only when re-deriving would
             // change something. Anchored to the surface point under the camera, so the eye moving is
             // carried by the model matrix and touches no vertex.

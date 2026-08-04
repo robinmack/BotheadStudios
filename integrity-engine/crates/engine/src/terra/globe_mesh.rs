@@ -208,9 +208,20 @@ pub struct SurfaceSampler<'a> {
     /// the declared relief exaggeration.
     exag: f64,
     water_idx: usize,
+    /// **When this surface is being drawn**, Unix seconds — so what grows here can answer for the
+    /// season it is actually in. `None` means "no clock supplied": every material answers with its
+    /// summer self, which is what a body with no orbit should do.
+    epoch_s: Option<f64>,
 }
 
 impl<'a> SurfaceSampler<'a> {
+    /// Tell this surface WHEN it is being drawn, so what grows on it can answer for the season.
+    /// Without it every material answers with its summer self.
+    pub fn at_epoch(mut self, unix_s: f64) -> Self {
+        self.epoch_s = Some(unix_s);
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         mats: &'a [crate::materials::Material],
@@ -224,6 +235,7 @@ impl<'a> SurfaceSampler<'a> {
     ) -> SurfaceSampler<'a> {
         let water_idx = crate::materials::index_of(mats, "water");
         SurfaceSampler {
+            epoch_s: None,
             mats,
             biome_mats,
             landmask,
@@ -296,12 +308,22 @@ impl<'a> SurfaceSampler<'a> {
             let e = self.elevation.map_or(0.0, |r| {
                 r.elevation_m_at(lat, lon, self.elev_range[0], self.elev_range[1])
             });
+            // ★★ **THE SEASON, ASKED HERE.** Robin: *"wire it up so Ireland actually turns."* The
+            // engine holds the clock; the material answers what it looks like now. A material with no
+            // senescent state — an evergreen, rock, sand, the sea — answers with its ordinary albedo
+            // and costs nothing, so this is free for almost all of the planet.
+            //
+            // The fraction is `solar::senescence_fraction` at THIS vertex's latitude, so a single
+            // frame can show a green tropics and a turned north at the same instant, which is what the
+            // real planet looks like from orbit in October.
+            let albedo = match self.epoch_s {
+                Some(t) if self.mats[mi].senescent_spectrum.is_some() => {
+                    self.mats[mi].albedo_when_turned(crate::solar::senescence_fraction(lat, t))
+                }
+                _ => self.mats[mi].albedo,
+            };
             // Land above sea level; below-sea-level land (Dead Sea etc.) clamps to the shore.
-            SurfaceSample::flat(
-                self.mats[mi].albedo,
-                e.max(0.0) * self.ds * self.exag,
-                mi as u32,
-            )
+            SurfaceSample::flat(albedo, e.max(0.0) * self.ds * self.exag, mi as u32)
         } else {
             SurfaceSample::flat(self.mats[self.water_idx].albedo, 0.0, self.water_idx as u32)
         }

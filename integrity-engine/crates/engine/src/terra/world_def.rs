@@ -615,6 +615,23 @@ pub struct TimeDef {
     pub rotation: bool,
     #[serde(default = "one")]
     pub scale: f64,
+    /// **WHEN this scene is set**, Unix seconds. `None` means "now".
+    ///
+    /// Robin (2026-08-04), correcting me on exactly this: *"One earth assembly. Each scene can show
+    /// different times, geological epochs, etc."*
+    ///
+    /// ★★ That distinction is the whole point and I had it wrong. **One Earth** means one definition
+    /// of what Earth IS — its materials, its surface, its biome map, the laws it obeys. It does NOT
+    /// mean every scene shows the same instant. The birth-of-the-Moon scene is proto-Earth; Terra is
+    /// this afternoon. That is ONE Earth at two times, not two Earths — and time is part of the
+    /// SETTING, which is a scene's own business (docs/65).
+    ///
+    /// I had reasoned that a scene without a clock would draw a green July Earth beside Terra's amber
+    /// October one and that this was a one-Earth violation. It is not. Two Earths would be two
+    /// different answers to *what is Earth made of*; this is one answer evaluated at two dates, which
+    /// is what a planet does.
+    #[serde(default)]
+    pub epoch: Option<f64>,
 }
 fn one() -> f64 {
     1.0
