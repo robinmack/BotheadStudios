@@ -500,7 +500,7 @@ pub(crate) const SCENE_FORBIDDEN_PHYSICS: &[(&str, &str)] = &[
 
 /// The scene-facing modules: they own a canvas, a camera and a set of declared bodies, and nothing else.
 /// A scene describes objects, trajectories and user controls; the engine does the physics.
-pub(crate) const SCENE_MODULES: &[&str] = &["lib.rs", "ground_scene.rs"];
+pub(crate) const SCENE_MODULES: &[&str] = &["lib.rs"];
 
 #[cfg(test)]
 mod scene_purity_tests {
@@ -1171,17 +1171,13 @@ pub(crate) const SCENE_API_ALLOWED: &[&str] = &[
 ///
 /// ★ The entry to fix FIRST is the missing `signal`, because kind 1 cannot be paid off without it.
 pub(crate) const SCENE_API_DEBT: &[&str] = &[
-    "aim_screen",
     "altitude_m",
     "arc_available",
     "arc_label",
     "arc_press",
     "arc_stop",
-    "body_probe",
-    "body_verdict",
     "brake_moon",
     "contact_distance_km",
-    "created_total",
     "debris_extent_km",
     "disk_stats_json",
     "drag_look",
@@ -1193,7 +1189,6 @@ pub(crate) const SCENE_API_DEBT: &[&str] = &[
     "earth_day_hours",
     "emplace_cannon",
     "enter_geologic_time",
-    "eye_altitude_m",
     "fire_cannon",
     "flight_count",
     "focus_earth",
@@ -1211,7 +1206,6 @@ pub(crate) const SCENE_API_DEBT: &[&str] = &[
     "load_site_world",
     "load_star_catalog",
     "longitude",
-    "meteors_in_flight",
     "meters_per_pixel",
     "moon_binding_energy_j",
     "moon_distance_km",
@@ -1221,7 +1215,6 @@ pub(crate) const SCENE_API_DEBT: &[&str] = &[
     "nudge_aftermath_rate",
     "pan_tangent",
     "pan_view",
-    "particle_count",
     "reset_moon",
     "set_alt_bounds",
     "set_orbit",
@@ -1230,12 +1223,9 @@ pub(crate) const SCENE_API_DEBT: &[&str] = &[
     "site_status",
     "start_gpu_impact",
     "sun_elevation_deg",
-    "surface_material",
-    "throw_meteor",
     "tile_count",
     "time_scale_value",
     "trail_mass_kg",
-    "walk",
     "world_name",
     "zoom_alt",
 ];

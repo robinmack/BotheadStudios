@@ -163,7 +163,6 @@ export default defineConfig({
         orbit: resolve(root, "orbit.html"),
         groundzero: resolve(root, "groundzero.html"), // the docs/23 demo as one data world (ground-zero)
         birth: resolve(root, "birth.html"),
-        ground: resolve(root, "ground.html"),
         twomoons: resolve(root, "twomoons.html"),
         gpuProbe: resolve(root, "gpu-probe.html"), // cross-device GPU probe (no scene, compute only)
       },

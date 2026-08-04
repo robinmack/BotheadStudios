@@ -75,9 +75,6 @@ pub mod ballistics; // docs/46 row 33 - a confined gas doing work on a moving bo
 /// the shared primitives, and steps. No scene struct, no canvas. This is what re-consumes the systems
 /// deleting terrain orphaned (docs/46 ledger row 15).
 pub mod flight;
-/// docs/55 — the ground scene, rebuilt from a DEFINITION. Browser-only (it owns a canvas surface).
-#[cfg(target_arch = "wasm32")]
-pub mod ground_scene;
 /// ONE entry point for "two things met — what does the engine do?". Delegates to the laws that already
 /// own each half, so a new scene finds them instead of writing a third path.
 pub mod interaction;
@@ -113,8 +110,6 @@ pub mod world;
 
 #[cfg(target_arch = "wasm32")]
 pub use app::OrbitDemo;
-#[cfg(target_arch = "wasm32")]
-pub use ground_scene::Ground; // terrain `Engine` deleted 2026-07-21 (docs/50) — the first scene, superseded
 
 /// World metres spanned by ONE screen pixel at the focal plane (distance `dist_m` from the eye),
 /// for a perspective camera with vertical field of view `fov_y` (radians) rendered into a viewport
@@ -287,7 +282,7 @@ mod one_earth_tests {
         // The GROUND: the shipped ground world's host planet is the same body.
         let gjson = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../web/public/worlds/ground/world.json"
+            "/../../assets/worlds/ground-patch.json"
         ))
         .expect("shipped ground world");
         let sim = crate::simulation::Simulation::from_json(&gjson, crate::materials::load())

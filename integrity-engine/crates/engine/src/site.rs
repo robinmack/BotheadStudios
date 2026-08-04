@@ -1437,7 +1437,7 @@ mod tests {
     fn shipped_ground_world() -> World {
         let json = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../web/public/worlds/ground/world.json"
+            "/../../assets/worlds/ground-patch.json"
         ))
         .expect("shipped ground world");
         World::parse(&json).expect("parses")

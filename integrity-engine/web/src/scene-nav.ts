@@ -12,7 +12,6 @@ const SCENES: Scene[] = [
   { path: "/orbit.html", label: "Space" },
   { path: "/groundzero.html", label: "Ground Zero" },
   { path: "/birth.html", label: "Birth of the Moon" },
-  { path: "/ground.html", label: "Ground" },
   { path: "/terra.html", label: "Earth" },
   { path: "/twomoons.html", label: "Two Moons" },
   { path: "/yarr.html", label: "Yarrr!" },

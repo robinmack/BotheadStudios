@@ -82,7 +82,15 @@ is being refactored toward is [`docs/33-architecture-realignment.md`](docs/33-ar
 - **Two scene structs** in `lib.rs`: `OrbitDemo` (space band, the giant impact / birth-of-the-Moon; owns
   a `gpu_sph::GpuSph` running `sph_step.wgsl`) and `Terra` (the docs/43 worlds-as-data planet scene,
   backed by `crates/engine/src/terra/`). The terrain `Engine` — the first scene designed — was DELETED
-  2026-07-21 at Robin's request (docs/50).
+  2026-07-21 at Robin's request (docs/50), and the **`Ground` scene that replaced it was deleted
+  2026-08-03** (docs/46 row 37): a 96³ voxel cube of invented relief claiming a real coordinate on Earth.
+  Its shader `world.wgsl` went with it, so there is one fewer surface render path.
+- ★★ **A SCENE IS CHARACTERS AND SETTING; AN ASSEMBLY IS AN ACTOR; THE ENGINE IS DIRECTOR AND STAGE**
+  (`docs/65`, Robin 2026-08-03). *"Setting a scene should never involve changes to the engine."* The
+  permitted scene API is tiny and `laws::scene_api_tests` is a RATCHET over it: a new route fails the
+  build, and a declared debt nothing calls any more ALSO fails. Read docs/65 before adding any method to
+  a scene struct. The camera is the worked example — `place_camera` and `camera_follow`, two verbs that
+  replaced ten.
 - **A scene should be DATA, and is not** (docs/46 ledger row 14). Robin's standing requirement: scenes
   carry object/assembly definitions, coordinates and materials and must *"not require special mods of the
   engine itself"*. Both remaining scenes are `#[wasm_bindgen]` structs INSIDE the engine crate with their
