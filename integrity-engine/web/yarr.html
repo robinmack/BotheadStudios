@@ -78,14 +78,39 @@
        bearing, at an elevation. The camera follows from the gun rather than being stated separately:
        there is one fact here, not two that can disagree.
 
-       The site is the west coast of Ireland above Galway Bay, found by scanning the shipped land mask
-       for a shore with open water inside the gun's actual reach — not a chosen viewpoint, a shore that
-       satisfies the shot. Ireland rather than the Patagonian headland the ballistics search first
-       returned, because this scene runs on the REAL clock: nothing pins the sun, so the light is
-       whatever the light is, and a scene nobody can see is a scene nobody looks at.
-       `the_yarr_scenes_gun_puts_its_shot_in_the_sea` reads this very attribute and fires it through the
-       engine, so the claim in this comment is checked rather than asserted. -->
-  <body data-world="/worlds/earth/world.json" data-cannon="53.10,-9.45,200,20">
+       FOUR shores, and the scene opens on whichever one the sun is up over. All four were found the
+       same way — by scanning the shipped land mask for a headland with open water inside the gun's
+       actual reach — so none is a chosen viewpoint; each is a shore that satisfies the shot. Galway
+       Bay on the west coast of Ireland; the Pacific coast of Patagonia, which the ballistics search
+       returned first; Mumbai, firing south-west into the Arabian Sea; and Sydney Harbour, firing east
+       into the Tasman.
+
+       ★ Why more than one: this scene runs on the REAL clock. Nothing pins the sun, so the light is
+       whatever the light is, and Robin arrived to find the gun standing in the dark — *"It's dark in
+       Galway… let's switch back to Chile. Probably need a scene button where you can flip to wherever
+       it's daylight of the two."*
+
+       ★★ Why FOUR and not two, and this was MEASURED rather than guessed. Ireland and Chile are only
+       65 degrees of longitude apart, so there is a stretch of every day when BOTH are in the dark:
+       **7.6 hours, worst case the sunnier of the two sitting 57 degrees BELOW its horizon.** Robin
+       proposed Mumbai to widen it (*"so we can be sure no matter when we test we can get day or night
+       as needed"*), which cuts that to 2.1 hours. Sydney closes it outright: across all four the worst
+       case any hour of the day is the sun **23 degrees ABOVE** the horizon, and there is no hour when
+       every shore is dark. `one_of_the_scenes_shores_is_always_in_daylight` sweeps a whole day through
+       the engine's own solar direction and fails if that ever stops being true, so the button's
+       promise is checked rather than hoped for.
+
+       The page does not work out which shore is lit: it asks the engine (`Terra::sun_elevation_deg`),
+       because solar geometry belongs to the engine and a page doing its own spherical trig would be a
+       second answer to a question already answered. The button only moves where you STAND — it does
+       not touch the sun.
+
+       `the_yarr_scenes_gun_puts_its_shot_in_the_sea` reads this very attribute and fires EVERY site
+       through the engine, so the claim in this comment is checked rather than asserted. -->
+  <body
+    data-world="/worlds/earth/world.json"
+    data-cannon="Ireland@53.10,-9.45,200,20;Chile@-51.0,-75.0,250,20;Mumbai@19.05,72.80,220,20;Sydney@-33.80,151.30,80,20"
+  >
     <canvas id="gpu-canvas"></canvas>
     <div id="stats" hidden></div>
     <div id="status">Loading world…</div>

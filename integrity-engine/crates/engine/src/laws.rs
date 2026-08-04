@@ -1008,3 +1008,112 @@ mod material_property_tests {
         }
     }
 }
+
+/// **What a body's surface SHOWS is the outside of the thing standing there, not its structure.**
+///
+/// Robin (2026-08-03), on a picture of the Irish coast that came back the colour of a plank:
+/// *"Pine Timber is always the wrong choice for flora though, we should look for 'pine needles' or
+/// 'pine leaves', same with other biomes."*
+///
+/// A land-cover class says *"this footprint is forest"*. What a forest presents to anything looking at
+/// it is the CANOPY — foliage. Timber is the trunk: barely visible from any distance, and a different
+/// substance with a different colour, density and thermal response. `assets/bodies/earth.json` mapped
+/// class 3 straight to `pine`, the catalogue's pine TIMBER (albedo [0.68, 0.48, 0.21], a brown), so
+/// every forest on Earth — the Amazon, the Congo, Ireland — was drawn as cut lumber, and a bronze
+/// cannon standing on it nearly vanished into ground the same colour as itself.
+///
+/// ★ **The criterion is physical, not a list of approved names.** Living vegetation is green because
+/// chlorophyll absorbs the red and the blue and leaves the green: a material standing for a vegetated
+/// surface must have its green channel above both others. A name-based rule would have to be extended
+/// by hand for every new material; this one is a property of the matter and extends itself.
+#[cfg(test)]
+mod biome_material_tests {
+    /// Every body definition on disk, since a rule that only checks Earth is a rule about Earth.
+    fn body_definitions() -> Vec<(String, crate::terra::world_def::World)> {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/bodies");
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(dir)
+            .expect("assets/bodies exists")
+            .flatten()
+        {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "json") {
+                let name = p.file_name().unwrap().to_string_lossy().to_string();
+                let text = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{name}: {e}"));
+                let body: crate::terra::world_def::World = serde_json::from_str(&text)
+                    .unwrap_or_else(|e| panic!("{name} parses as a body definition: {e}"));
+                out.push((name, body));
+            }
+        }
+        assert!(
+            !out.is_empty(),
+            "no body definitions found — this guards nothing"
+        );
+        out
+    }
+
+    #[test]
+    fn a_biome_never_paints_the_ground_with_the_inside_of_a_plant() {
+        let mats = crate::materials::load();
+        let json: serde_json::Value = serde_json::from_str(crate::materials::MATERIALS_JSON)
+            .expect("data/materials.json parses");
+        let organic: std::collections::BTreeSet<&str> = json["materials"]
+            .as_array()
+            .expect("a materials array")
+            .iter()
+            .filter(|m| m.get("category").and_then(|c| c.as_str()) == Some("organic"))
+            .filter_map(|m| m.get("id").and_then(|i| i.as_str()))
+            .collect();
+        assert!(
+            organic.contains("pine") && organic.contains("oak"),
+            "the woods must be catalogued as organic or this check cannot see the failure it exists for"
+        );
+
+        let mut checked = 0;
+        for (file, body) in body_definitions() {
+            let Some(surface) = body.surface else {
+                continue;
+            };
+            for (class, mat_id) in &surface.biomes {
+                if !organic.contains(mat_id.as_str()) {
+                    continue; // water, sand, snow, rock — not a living surface, not this rule's business
+                }
+                checked += 1;
+                let m = &mats[crate::materials::index_of(&mats, mat_id)];
+                let [r, g, b] = m.albedo;
+                assert!(
+                    g > r && g > b,
+                    "{file}: land-cover class {class} is painted with `{mat_id}`, whose albedo is \
+                     [{r:.3}, {g:.3}, {b:.3}] — that is not green, so it is not a living surface.\n\
+                     A land-cover class shows the OUTSIDE of what grows there: foliage, not the timber \
+                     inside the trunk. Reach for a foliage material (`conifer_foliage`, \
+                     `broadleaf_foliage`, `grass`), not the structural tissue that shares its name."
+                );
+            }
+        }
+        assert!(
+            checked >= 2,
+            "no body maps a land-cover class to an organic material — this guard is vacuous"
+        );
+    }
+
+    /// **And the guard must be able to fail**, which is only knowable by checking that the material
+    /// it was written to reject is still in the catalogue and still fails the criterion.
+    ///
+    /// Verified by mutation on 2026-08-03: putting `pine` back on class 3 turns
+    /// `a_biome_never_paints_the_ground_with_the_inside_of_a_plant` red with the albedo printed. This
+    /// test is what keeps that true after somebody edits the wood entry — a guard whose trigger has
+    /// quietly stopped triggering passes forever and teaches you to trust it.
+    #[test]
+    fn the_material_this_guard_rejects_is_still_rejectable() {
+        let mats = crate::materials::load();
+        for wood in ["pine", "oak"] {
+            let [r, g, b] = mats[crate::materials::index_of(&mats, wood)].albedo;
+            assert!(
+                !(g > r && g > b),
+                "`{wood}` now reads green ([{r:.3}, {g:.3}, {b:.3}]), so the biome guard would ACCEPT \
+                 timber as a vegetated surface and the rule it enforces has silently switched off"
+            );
+        }
+    }
+}

@@ -20,6 +20,7 @@ Outputs (equirectangular, -180..180 lon / +90..-90 lat, row 0 = north):
 """
 import json
 import os
+import sys
 import urllib.request
 
 import numpy as np
@@ -27,7 +28,10 @@ from PIL import Image, ImageDraw
 
 W, H = 2048, 1024
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.normpath(os.path.join(HERE, "../../web/public/worlds/earth"))
+# Earth's rasters belong to the BODY, not to a world that happens to place a camera on it — they moved
+# to bodies/earth when Earth became the one shared Earth. This path still said worlds/earth, so a rebake
+# would have written a full set of rasters into a directory nothing reads and reported success.
+OUT = os.path.normpath(os.path.join(HERE, "../../web/public/bodies/earth"))
 TMP = os.environ.get("BAKE_TMP", "/tmp/bake-earth")
 ELEV_LO, ELEV_HI = -11000.0, 9000.0  # metres; must match world.json.surface.elevation_range_m
 os.makedirs(OUT, exist_ok=True)
@@ -113,16 +117,25 @@ def bake_landcover(land, elev):
 
     if source == "derived":
         # DERIVED biome approximation (FLAGGED — not measured land cover): from latitude + elevation + coast.
-        # 0 water · 1 grass · 2 sand(desert) · 3 pine(forest) · 4 snow/ice · 5 granite(bare rock/high mtn).
+        # 0 water · 1 grass · 2 sand(desert) · 3 BROADLEAF forest · 4 snow/ice · 5 bare rock
+        # · 6 NEEDLELEAF forest.
+        #
+        # ★ 3 and 6 used to be one class. One "forest" covered both the tropics and the boreal band, so
+        # the Amazon and Siberia were the same material — and since the map pointed that class at pine
+        # TIMBER, both were drawn the colour of cut lumber. Splitting it costs one line and lets the
+        # catalogue's two foliage substances each have a consumer; leaving it merged would have shipped
+        # one of them wired to nothing, which is the pattern docs/48 exists to name.
+        # It is still an INVENTED cover — latitude bands, not a measurement — and that is what the
+        # ESA WorldCover work replaces (docs/46 row 28). This makes the invention less wrong, not right.
         lats = 90.0 - (np.arange(H) + 0.5) / H * 180.0
         latg = np.repeat(lats[:, None], W, axis=1)
         biome = np.zeros((H, W), np.uint8)  # ocean
         L = land
         alat = np.abs(latg)
         biome[L] = 1  # default land = grassland
-        biome[L & (alat < 23)] = 3  # tropics → forest
+        biome[L & (alat < 23)] = 3  # tropics → broadleaf forest
         biome[L & (alat >= 15) & (alat < 33) & (elev < 1500)] = 2  # subtropical desert bands
-        biome[L & (alat >= 45) & (alat < 66)] = 3  # boreal → forest
+        biome[L & (alat >= 45) & (alat < 66)] = 6  # boreal → needleleaf forest
         biome[L & (elev > 3000)] = 5  # high mountains → bare rock
         biome[L & ((alat >= 66) | (elev > 4500))] = 4  # polar / very high → snow/ice
         Image.fromarray(biome, "L").save(f"{OUT}/landcover.png")
@@ -140,7 +153,31 @@ def bake_landcover(land, elev):
     print(f"  landcover.png written (source: {source})")
 
 
+def read_baked_inputs():
+    """Recover `land` and `elev` from the rasters already shipped, so the land cover can be rebaked
+    without re-downloading a 450 MB DEM.
+
+    This exists so there is still exactly ONE implementation of the biome rule: the alternative was a
+    second script that derives biomes its own way, and two answers to one question is the thing this
+    engine is built not to do. It reverses `bake_elevation`'s own packing, so if that changes this
+    breaks loudly rather than silently decoding the old format.
+    """
+    land = np.asarray(Image.open(f"{OUT}/landmask.png").convert("L")) > 127
+    rgb = np.asarray(Image.open(f"{OUT}/elevation.png").convert("RGB")).astype(np.uint16)
+    v16 = (rgb[..., 0] << 8) | rgb[..., 1]
+    elev = ELEV_LO + v16.astype(np.float32) / 65535.0 * (ELEV_HI - ELEV_LO)
+    if land.shape != (H, W):
+        raise SystemExit(f"landmask is {land.shape}, expected {(H, W)} — rebake from source instead")
+    return land, elev
+
+
 def main():
+    if "--landcover-only" in sys.argv:
+        print("[landcover only] reusing the shipped landmask + elevation")
+        land, elev = read_baked_inputs()
+        bake_landcover(land, elev)
+        print(f"done → {OUT}")
+        return
     land = bake_landmask()
     elev = bake_elevation()
     bake_landcover(land, elev)

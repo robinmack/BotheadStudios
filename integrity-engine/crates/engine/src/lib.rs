@@ -6596,6 +6596,43 @@ mod app {
             vec![lat, lon]
         }
 
+        /// **How high the Sun stands above the horizon at this coordinate, in degrees** — negative
+        /// when it is below, i.e. when it is night there.
+        ///
+        /// Robin (2026-08-03), looking at the gun on the Irish coast after dark: *"It's dark in
+        /// Galway… let's switch back to Chile. Probably need a scene button where you can flip to
+        /// wherever it's daylight of the two."* A scene needs to know which of its sites is lit, and
+        /// the scene must not work that out for itself — solar geometry is the engine's, and a page
+        /// doing its own spherical trig is a second answer to a question already answered here.
+        ///
+        /// It is `asin(up · sun)`: the local up from [`geo::tangent_frame`] against the solar
+        /// direction the sky is already drawn with. No new physics — two existing primitives, dotted.
+        pub fn sun_elevation_deg(&self, lat_deg: f64, lon_deg: f64) -> f64 {
+            let sun = crate::orbit::solar_direction_earth_fixed(self.celestial_epoch_s());
+            let (up, _, _) = crate::geo::tangent_frame(lat_deg, lon_deg);
+            up.dot(sun).clamp(-1.0, 1.0).asin().to_degrees()
+        }
+
+        /// **Which land-cover class and which material the surface has at this coordinate** — the
+        /// engine's own answer, as `"<class>:<material id>"`.
+        ///
+        /// A read, not a control: it changes nothing and decides nothing. It exists so a rig can check
+        /// the PICTURE against the DATA instead of inferring one from the other. That distinction has
+        /// already cost real time here — a frame the colour of cut lumber was read as a lighting fault
+        /// for a whole session, and the thing that settled it was asking the engine what material it
+        /// thought it was standing on (`docs/46` row 28).
+        pub fn surface_material_at(&self, lat_deg: f64, lon_deg: f64) -> String {
+            let class = self
+                .landcover
+                .as_ref()
+                .map_or(1, |r| r.biome_at(lat_deg, lon_deg) as usize);
+            let id = self
+                .biome_mats
+                .get(class)
+                .map_or("<unmapped>", |&i| self.mats[i].id.as_str());
+            format!("{class}:{id}")
+        }
+
         /// **What measured elevation this view needs and does not have** — a JSON `[[z,x,y],…]`, nearest
         /// first, for a host to fetch and hand back through [`Terra::add_tile`].
         ///

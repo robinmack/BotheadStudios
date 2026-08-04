@@ -282,9 +282,33 @@ async function main(): Promise<void> {
     // The camera is DERIVED from the gun rather than stated beside it, so there is one fact here and
     // not two that can disagree: stand behind the breech along the reverse bearing, a little above,
     // looking down the barrel's line.
+    // ★★ **MORE THAN ONE SHORE, AND THE SUN DECIDES WHICH ONE YOU ARRIVE AT.**
+    //
+    // Robin, finding the gun standing in the dark: *"It's dark in Galway… let's switch back to Chile.
+    // Probably need a scene button where you can flip to wherever it's daylight of the two."*
+    //
+    // `data-cannon` is a `;`-separated list of `Name@lat,lon,bearing,elevation`; a bare
+    // `lat,lon,bearing,elevation` is still one unnamed site, so the old form keeps working. Which site
+    // is LIT is not computed here — `terra.sun_elevation_deg` answers it, because solar geometry is
+    // the engine's and a page doing its own spherical trig is a second answer to a settled question.
+    // The button moves where you stand. It does not move the sun.
     const emplacement = document.body.dataset.cannon;
     if (emplacement) {
-      const [gLat, gLon, gBearing, gElev] = emplacement.split(",").map(Number);
+      type Site = { name: string; lat: number; lon: number; bearing: number; elev: number };
+      const sites: Site[] = emplacement.split(";").filter(Boolean).map((chunk, i) => {
+        const at = chunk.indexOf("@");
+        const name = at >= 0 ? chunk.slice(0, at) : `site ${i + 1}`;
+        const [lat, lon, bearing, elev] = chunk.slice(at + 1).split(",").map(Number);
+        return { name, lat, lon, bearing, elev };
+      });
+      // Open on the sunniest one. Ask the engine where the sun is; do not work it out here.
+      let current = 0;
+      for (let i = 1; i < sites.length; i++) {
+        if (terra.sun_elevation_deg(sites[i].lat, sites[i].lon) >
+            terra.sun_elevation_deg(sites[current].lat, sites[current].lon)) current = i;
+      }
+      const site = () => sites[current];
+      let { lat: gLat, lon: gLon, bearing: gBearing } = site();
       const M_PER_DEG = 111320;
       // Metres along a compass bearing from the gun, as a (lat, lon) offset.
       const along = (d: number, bearing: number): [number, number] => {
@@ -300,20 +324,56 @@ async function main(): Promise<void> {
       };
 
       terra.set_alt_bounds(0.5, 4.0e7);
-      terra.set_fly(gLat, gLon, 3, (gBearing * Math.PI) / 180, -0.1);
-      terra.emplace_cannon(gBearing);
+
+      // Stand the gun at the current site and take up the watching position behind it. Called on load
+      // and again whenever the site changes, so there is ONE description of "here is the gun, here is
+      // where you watch from" rather than two that can drift apart.
+      const emplaceHere = () => {
+        ({ lat: gLat, lon: gLon, bearing: gBearing } = site());
+        terra.set_fly(gLat, gLon, 3, (gBearing * Math.PI) / 180, -0.1);
+        terra.emplace_cannon(gBearing);
+        const back = 8.5, up = 2.8;
+        standBehind(back, up, -Math.atan((up - 0.7) / back));
+      };
       // Behind the breech and above it, looking down the barrel out to sea — the view Robin asked for,
       // where the gun can actually be SEEN.
       // ★ The pitch is DERIVED from the geometry, not guessed: standing `back` metres behind and
       // `up` metres above a gun whose barrel sits ~0.7 m off the ground, the line to it is
       // atan((up - 0.7) / back) below horizontal. A first version used a flat -0.16 and the gun sat on
       // the bottom edge behind the HUD — the same class of error as every other typed number today.
-      {
-        const back = 8.5;
-        const up = 2.8;
-        standBehind(back, up, -Math.atan((up - 0.7) / back));
+      emplaceHere();
+
+      const sunAt = (s: Site) => terra.sun_elevation_deg(s.lat, s.lon);
+      const describe = (s: Site) => {
+        const e = sunAt(s);
+        return `${s.name} (sun ${e >= 0 ? "+" : ""}${e.toFixed(0)}°)`;
+      };
+      if (sites.length > 1) {
+        // **Weigh anchor.** Sail to the next shore — the gun, the camera and the horizon all follow
+        // from the site, so this changes one number and everything else is derived from it again.
+        const sail = document.createElement("button");
+        Object.assign(sail.style, {
+          marginLeft: "8px", padding: "8px 14px", borderRadius: "999px", cursor: "pointer",
+          border: "1px solid rgba(255,255,255,0.25)", background: "rgba(20,22,30,0.72)", color: "#eee",
+          font: "600 13px system-ui, sans-serif",
+        });
+        const label = () => {
+          const next = sites[(current + 1) % sites.length];
+          sail.textContent = `Sail to ${next.name}`;
+          sail.title =
+            `Move the gun to ${describe(next)}. Currently at ${describe(site())}. ` +
+            `The sun is where the sun is — this moves the ship, not the sky.`;
+        };
+        label();
+        sail.addEventListener("click", () => {
+          current = (current + 1) % sites.length;
+          emplaceHere();
+          label();
+          hud.notify(`made landfall at ${describe(site())}`);
+        });
+        hud.add("actions", sail);
       }
-      hud.notify("a 24-pounder, loaded and run out. Fire when ready.");
+      hud.notify(`a 24-pounder, loaded and run out at ${describe(site())}. Fire when ready.`);
 
       // **Fire, then follow the shot out and watch it land.** The engine says where its matter IS
       // (`heaviest_fragment`); this decides where to put a camera because of it and hands the engine a
@@ -333,7 +393,7 @@ async function main(): Promise<void> {
       // the whole of what firing does to the camera, so the shot is watched by the same code that
       // watches a meteor.
       fire.addEventListener("click", () => {
-        standBehind(8.5, 2.8, -Math.atan((2.8 - 0.7) / 8.5));
+        emplaceHere();
         // The body exists the moment the gun fires, so the follower has something to ride at once.
         if (terra.heaviest_fragment().length > 0) hud.selectCamera("follow");
       });

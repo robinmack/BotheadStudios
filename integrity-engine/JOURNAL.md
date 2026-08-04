@@ -3,6 +3,72 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-03 — a leaf is not a plank: colour derived from measured spectra
+
+**What.** Ireland stopped rendering as cut lumber. `earth.json` mapped land-cover class 3 to `pine` —
+the catalogue's pine TIMBER, albedo [0.68, 0.48, 0.21] — so every forest on Earth was drawn the colour
+of a board. Robin: *"Pine Timber is always the wrong choice for flora though, we should look for 'pine
+needles' or 'pine leaves', same with other biomes."*
+
+Two new substances, `conifer_foliage` and `broadleaf_foliage`, and **their colour is not chosen**:
+
+    449 measured fresh-leaf spectra (NEON domains + UCSB HyspIRI California, 98 taxa)
+      -> mean visible spectrum
+      -> convolved against the engine's OWN CIE 1931 observer under a 5772 K sun
+      -> conifer   [0.0896, 0.1177, 0.0544]
+         broadleaf [0.0738, 0.1006, 0.0400]
+
+**Why this shape.** `Material::albedo` has always carried an honesty note calling itself *"a summary
+property, a stand-in for the full spectral … optics … a placeholder to be grounded later, not an
+irreducible fact."* This is that grounding. `blackbody.rs` already had `cie_observer` and the XYZ→sRGB
+primaries for star colour, so a surface's colour and a star's colour are now one law — Planck through
+the same observer — rather than two. `albedo_derives_from_the_measured_spectrum` re-derives the triple
+every run, so what is in the file can only ever be a CACHE of the measurement.
+
+★ **Two independent cross-checks nobody tuned toward.** The pulled spectra's 400–700 nm means are 0.084
+(conifer) and 0.069 (broadleaf); the published measured values for those plant functional types are
+0.08–0.09, and CLM 5.0's defaults are 0.07 and 0.10. And the derived colours come out green because
+chlorophyll absorbs the red and the blue — nothing anywhere says "leaves are green".
+
+★ **The forest class was SPLIT.** One class covered both the tropics and the boreal band, so the Amazon
+and Siberia were the same material. Splitting it (3 broadleaf / 6 needleleaf) costs one line in
+`bake.py` — and without it the second foliage substance would have shipped wired to nothing, which is
+the pattern docs/48 exists to name.
+
+**Verified.** Measured A/B through the engine on the 5060 Ti — same rig, same sun, same camera, the data
+reverted and the wasm rebuilt for the control:
+
+| site | before | after |
+|---|---|---|
+| Galway | 148.3 / 130.9 / 68.1 red-brown | **82.1 / 111.6 / 64.4 GREEN** |
+| Amazon | 148.3 / 132.3 / 67.9 red-brown | **78.2 / 108.9 / 55.8 GREEN** |
+| Siberia | 146.9 / 124.7 / 66.9 red-brown | **74.7 / 101.8 / 62.3 GREEN** |
+| Sahara | 148.3 / 135.1 / 100.1 | 148.3 / 135.1 / 100.1 — **bit-identical** |
+
+The Sahara is the negative control: unchanged to the byte, so only the forest classes moved. Before the
+split all three forests were literally the same colour. 512/512 native, `mod app` clean for wasm32.
+
+**★★ And the honest gap, recorded rather than papered over (ledger row 35).** A closed canopy returns
+about a THIRD of what a single leaf does, because light scattering into it is caught by the next leaf
+down. That darkening is an ARRANGEMENT, not a substance — so a forest still renders brighter than a real
+forest, and both entries say so in their own notes. Darkening the leaf to compensate would put an
+assembly's property inside a substance, and the same leaf held in a hand would then be too dark. This is
+the substance-versus-assembly distinction arriving a fourth time.
+
+**★ Two guards, each verified by making it fail.** `a_biome_never_paints_the_ground_with_the_inside_of_a_
+plant` fails the build if any body's land-cover class points at an organic material that is not green —
+a physical criterion, not a list of approved names, so it extends itself to materials nobody has written
+yet. Putting `pine` back on class 3 turns it red with the albedo printed. And the Yarrr! scene grew from
+one shore to four after Robin found the gun standing in the dark: `one_of_the_scenes_shores_is_always_in_
+daylight` sweeps a day through the engine's own solar direction and fails if every shore is dark at once.
+**Two shores was measured and does not work** — Ireland and Chile are 65° of longitude apart, leaving 7.6
+hours a day with both dark, worst case 57° BELOW the horizon. Mumbai cuts that to 2.1 hours; Sydney
+closes it, worst case 23° above.
+
+**★ Found on the way, and it would have been silent:** `tools/bake-earth/bake.py` wrote to
+`web/public/worlds/earth/`, which stopped holding Earth's rasters when Earth became a shared body. A
+rebake would have written a complete set of rasters into a directory nothing reads, and said "done".
+
 ## 2026-08-03 — a cannon on a coast: assemblies, oxidation, and a shot that lands in the sea
 
 **What.** Robin's acceptance test for the whole assembly architecture — *"as long as we can build a

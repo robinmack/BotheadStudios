@@ -53,9 +53,10 @@
       "0": "water",
       "1": "grass",
       "2": "sand",
-      "3": "pine",
+      "3": "broadleaf_foliage",
       "4": "snow",
-      "5": "granite"
+      "5": "granite",
+      "6": "conifer_foliage"
     }
   }
 }

@@ -899,7 +899,12 @@ mod tests {
     /// A scene that claims its gun points at the sea should have that checked, not asserted in a
     /// comment. This parses `web/yarr.html`'s `data-cannon` attribute — the single piece of data that
     /// makes that page a different scene from `terra.html` — and puts its shot through the same flight
-    /// path the engine uses for everything else. Move the gun inland and this fails.
+    /// path the engine uses for everything else. Move a gun inland and this fails.
+    ///
+    /// ★ The scene now carries SEVERAL shores, because it runs on the real clock and Robin arrived to
+    /// find the gun standing in the dark (*"It's dark in Galway… let's switch back to Chile"*). Every
+    /// one of them is fired here. A guard that checked only the first site would pass while the button
+    /// sailed you to a gun aimed at a mountain.
     #[test]
     fn the_yarr_scenes_gun_puts_its_shot_in_the_sea() {
         let page =
@@ -910,18 +915,6 @@ mod tests {
             .nth(1)
             .and_then(|r| r.split('"').next())
             .expect("the page declares a gun emplacement");
-        let n: Vec<f64> = attr
-            .split(',')
-            .map(|v| v.trim().parse().expect("a number"))
-            .collect();
-        assert_eq!(n.len(), 4, "lat,lon,bearing,elevation — got {attr:?}");
-        let e = Emplacement {
-            lat_deg: n[0],
-            lon_deg: n[1],
-            height_m: 0.0,
-            bearing_deg: n[2],
-            elevation_deg: n[3],
-        };
 
         let mats = mats();
         let gun = shipped::load("naval-24pdr-gun");
@@ -929,37 +922,130 @@ mod tests {
         let shot = shipped::load("round-shot-24pdr");
         let earth = crate::planet::body("earth");
         let r_e = earth.radius();
-        let (fired, body, _) =
-            fire_gun(&gun, &charge, &shot, &e, r_e, &mats).expect("the gun fires");
-        assert_eq!(fired.outcome, Outcome::Fired);
-        let body = body.expect("a shot in flight");
-
         let land = crate::terra::raster::shipped::earth_landmask();
-        assert!(
-            land.land_at(e.lat_deg, e.lon_deg),
-            "the gun stands on land at {:.2}, {:.2}",
-            e.lat_deg,
-            e.lon_deg
-        );
-
         let env = crate::flight::PlanetAir::of(&mats, "earth", r_e);
-        let mut fl = crate::flight::Flight::default();
-        fl.introduce(body);
-        let mut arrival = None;
-        for _ in 0..6000 {
-            if let Some(a) = fl.step(&env, &mats, 1.0 / 60.0).into_iter().next() {
-                arrival = Some(a);
-                break;
+
+        let mut checked = 0;
+        for chunk in attr.split(';').filter(|c| !c.trim().is_empty()) {
+            // `Name@lat,lon,bearing,elevation`, or a bare `lat,lon,bearing,elevation`.
+            let (name, nums) = match chunk.split_once('@') {
+                Some((n, rest)) => (n.trim(), rest),
+                None => ("the site", chunk),
+            };
+            let n: Vec<f64> = nums
+                .split(',')
+                .map(|v| {
+                    v.trim()
+                        .parse()
+                        .unwrap_or_else(|e| panic!("{chunk:?}: {e}"))
+                })
+                .collect();
+            assert_eq!(n.len(), 4, "lat,lon,bearing,elevation — got {chunk:?}");
+            let e = Emplacement {
+                lat_deg: n[0],
+                lon_deg: n[1],
+                height_m: 0.0,
+                bearing_deg: n[2],
+                elevation_deg: n[3],
+            };
+
+            let (fired, body, _) =
+                fire_gun(&gun, &charge, &shot, &e, r_e, &mats).expect("the gun fires");
+            assert_eq!(fired.outcome, Outcome::Fired, "{name}");
+            let body = body.expect("a shot in flight");
+
+            assert!(
+                land.land_at(e.lat_deg, e.lon_deg),
+                "{name}: the gun stands on land at {:.2}, {:.2}",
+                e.lat_deg,
+                e.lon_deg
+            );
+
+            let mut fl = crate::flight::Flight::default();
+            fl.introduce(body);
+            let mut arrival = None;
+            for _ in 0..6000 {
+                if let Some(a) = fl.step(&env, &mats, 1.0 / 60.0).into_iter().next() {
+                    arrival = Some(a);
+                    break;
+                }
+                if fl.bodies().is_empty() {
+                    break;
+                }
             }
-            if fl.bodies().is_empty() {
-                break;
+            let a = arrival.unwrap_or_else(|| panic!("{name}: the shot comes down"));
+            let (ilat, ilon) = crate::geo::lat_lon_from_dir(a.at.normalize());
+            assert!(
+                !land.land_at(ilat, ilon),
+                "{name}: the scene's shot must land in the SEA — splash at {ilat:.3}, {ilon:.3}"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 2,
+            "the scene declares {checked} site(s); it should offer a choice"
+        );
+    }
+
+    /// **The scene's shores must not all be in the same daylight**, or the button that flips between
+    /// them cannot do the job it exists for.
+    ///
+    /// Robin: *"Probably need a scene button where you can flip to wherever it's daylight of the two."*
+    /// That only works if the sites are far enough apart in LONGITUDE that one is lit whenever the
+    /// other is dark. This checks the geometry rather than trusting that two place names sound distant:
+    /// at every hour of a day, at least one site must have the sun above its horizon.
+    #[test]
+    fn one_of_the_scenes_shores_is_always_in_daylight() {
+        let page =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/yarr.html"))
+                .expect("yarr.html exists");
+        let attr = page
+            .split("data-cannon=\"")
+            .nth(1)
+            .and_then(|r| r.split('"').next())
+            .expect("the page declares a gun emplacement");
+        let sites: Vec<(f64, f64)> = attr
+            .split(';')
+            .filter(|c| !c.trim().is_empty())
+            .map(|c| {
+                let nums = c.split_once('@').map_or(c, |(_, r)| r);
+                let n: Vec<f64> = nums
+                    .split(',')
+                    .take(2)
+                    .map(|v| v.trim().parse().unwrap())
+                    .collect();
+                (n[0], n[1])
+            })
+            .collect();
+        assert!(sites.len() >= 2, "a choice needs at least two shores");
+
+        // Sweep a full day at ten-minute resolution. The engine's own solar direction, so this is the
+        // same sun the sky is drawn with rather than a model written for the test. A coarse sweep is
+        // the failure mode here: sampling every half hour can step straight over a gap that a person
+        // sitting at the page for twenty minutes would land in.
+        let day = 86_400.0;
+        let steps = 144;
+        let mut worst: Option<(f64, f64)> = None;
+        for i in 0..steps {
+            let t = i as f64 / steps as f64 * day;
+            let sun = crate::orbit::solar_direction_earth_fixed(t);
+            let best = sites
+                .iter()
+                .map(|&(lat, lon)| {
+                    let (up, _, _) = crate::geo::tangent_frame(lat, lon);
+                    up.dot(sun).clamp(-1.0, 1.0).asin().to_degrees()
+                })
+                .fold(f64::NEG_INFINITY, f64::max);
+            if worst.is_none_or(|(w, _)| best < w) {
+                worst = Some((best, t));
             }
         }
-        let a = arrival.expect("the shot comes down");
-        let (ilat, ilon) = crate::geo::lat_lon_from_dir(a.at.normalize());
+        let (best_elev, at) = worst.expect("a sweep happened");
         assert!(
-            !land.land_at(ilat, ilon),
-            "the scene's shot must land in the SEA, not on Ireland: splash at {ilat:.3}, {ilon:.3}"
+            best_elev > 0.0,
+            "at t={at:.0}s into the day every shore is dark — the sunniest is {best_elev:.1}° below \
+             the horizon, so the 'sail to the daylight' button has nowhere lit to sail to. Move one \
+             site further round in longitude."
         );
     }
 

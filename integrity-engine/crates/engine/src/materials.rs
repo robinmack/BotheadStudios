@@ -85,6 +85,28 @@ struct RawOptical {
     metallic: f32,
     #[serde(default)]
     color_variance: f32,
+    #[serde(default)]
+    spectrum: Option<Spectrum>,
+}
+
+/// **What a spectrometer measured this material reflect, wavelength by wavelength.**
+///
+/// `albedo` is three numbers; this is what those three numbers are a summary OF. Where a material
+/// carries one, its albedo is not chosen — it is this convolved against the CIE 1931 observer under
+/// the sun (`blackbody::reflectance_srgb`), and `albedo_derives_from_the_measured_spectrum` re-derives
+/// it on every run so the stored triple can only ever be a CACHE of the measurement.
+///
+/// This is also the representation seasonal change needs. A leaf turning in autumn is chlorophyll
+/// degrading and carotenoids being unmasked — a different SPECTRUM, not a tint applied to this one —
+/// so phenology will add states here rather than a colour multiplier anywhere.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Spectrum {
+    /// Wavelength of the first sample, nm.
+    pub lo_nm: f64,
+    /// Spacing between samples, nm.
+    pub step_nm: f64,
+    /// Reflectance 0..1 at `lo_nm + i*step_nm`.
+    pub reflectance: Vec<f64>,
 }
 
 /// **The chemistry of burning, stored as its SOURCED PRIMARIES rather than as per-kilogram results.**
@@ -370,6 +392,11 @@ pub struct Material {
     pub metallic: f32,
     /// 0 (uniform) .. 1 (high per-grain spread). Drives procedural texture contrast (Phase 4).
     pub color_variance: f32,
+    /// **The measured reflectance spectrum this material's [`albedo`](Material::albedo) summarises**,
+    /// where one has been sourced. `None` for the materials whose colour is still three chosen
+    /// numbers — which is most of them, and is exactly what the `albedo` field's honesty note is
+    /// about. A material that has one is a material whose colour is a measurement.
+    pub spectrum: Option<Spectrum>,
     /// Thermal properties for melt/vaporization (`docs/20`), when we have cited data for the material.
     /// `None` for the 11 of 24 materials whose thermal data has not been sourced — an honest gap marker,
     /// NOT a licence to invent one. Ask through [`Material::specific_heat`] and friends rather than
@@ -505,6 +532,7 @@ pub fn load() -> Vec<Material> {
                 roughness: m.optical.roughness,
                 metallic: m.optical.metallic,
                 color_variance: m.optical.color_variance,
+                spectrum: m.optical.spectrum,
                 thermal: m.thermal.map(|t| Thermal {
                     specific_heat: t.specific_heat,
                     melt_point: t.melt_point,
@@ -611,6 +639,101 @@ mod tests {
 
         // Nothing known → black (no invented colour).
         assert_eq!(aggregate_albedo(&[], &mats), [0.0, 0.0, 0.0]);
+    }
+
+    /// **A material carrying a measured spectrum does not get to choose its colour.**
+    ///
+    /// `Material::albedo`'s own doc has always called itself *"a summary property, a stand-in for the
+    /// full spectral … optics … a placeholder to be grounded later, not an irreducible fact."* For the
+    /// materials with a `spectrum` block, this is that grounding: the three numbers in
+    /// `data/materials.json` are a CACHE of the convolution, and this re-derives it every run. If
+    /// somebody nudges a leaf greener because it looks better, the build goes red and prints the
+    /// number physics actually gives.
+    ///
+    /// The illuminant is the Sun as a 5772 K blackbody — the same `planck` the sky and the stars use,
+    /// so a leaf, a star and a hot ejecta parcel are lit and coloured by one law.
+    #[test]
+    fn albedo_derives_from_the_measured_spectrum() {
+        const SUN_K: f64 = 5772.0;
+        let mats = load();
+        let mut checked = 0;
+        // Collect ALL of them before failing: a test that stops at the first stale entry makes you
+        // run it once per material to find out what the answers are.
+        let mut stale = Vec::new();
+        for m in &mats {
+            let Some(s) = &m.spectrum else { continue };
+            checked += 1;
+            let want =
+                crate::blackbody::reflectance_srgb(&s.reflectance, s.lo_nm, s.step_nm, SUN_K);
+            if (0..3).any(|c| (m.albedo[c] - want[c]).abs() >= 5e-4) {
+                stale.push(format!(
+                    "  {}\n    stored  {:?}\n    derived [{:.6}, {:.6}, {:.6}]",
+                    m.id, m.albedo, want[0], want[1], want[2]
+                ));
+            }
+            // A leaf must be green, and it must be green because the SPECTRUM says so.
+            if m.id.contains("foliage") {
+                assert!(
+                    want[1] > want[0] && want[1] > want[2],
+                    "{} is foliage and must come out green, got {want:?}",
+                    m.id
+                );
+            }
+        }
+        assert!(
+            stale.is_empty(),
+            "albedo is a CACHE of the measured spectrum and these are stale:\n{}\n\
+             Put the derived triples in data/materials.json — do not adjust a spectrum to match a \
+             colour somebody liked.",
+            stale.join("\n")
+        );
+        assert!(
+            checked >= 2,
+            "no material carries a measured spectrum — this test is guarding nothing"
+        );
+    }
+
+    /// **Foliage is not timber, and the catalogue must be able to tell them apart.**
+    ///
+    /// Robin (2026-08-03): *"Pine Timber is always the wrong choice for flora though, we should look
+    /// for 'pine needles' or 'pine leaves', same with other biomes."* The surface of a forest seen
+    /// from anywhere is the CANOPY; timber is the trunk, which is barely visible and is a different
+    /// substance with a different colour, a different density and a different thermal response.
+    ///
+    /// This pins the difference numerically so the two can never be confused again by a map that
+    /// reaches for the first "pine"-shaped id it finds.
+    #[test]
+    fn foliage_is_a_different_substance_from_the_wood_it_grows_on() {
+        let mats = load();
+        let get = |id: &str| &mats[index_of(&mats, id)];
+        let foliage = get("conifer_foliage");
+        let timber = get("pine");
+
+        // Timber is BROWN: red is its strongest channel. Foliage is GREEN.
+        assert!(
+            timber.albedo[0] > timber.albedo[1],
+            "pine timber is a brown, {:?}",
+            timber.albedo
+        );
+        assert!(
+            foliage.albedo[1] > foliage.albedo[0] && foliage.albedo[1] > foliage.albedo[2],
+            "conifer foliage is green, {:?}",
+            foliage.albedo
+        );
+        // And far darker: cut lumber returns several times what a needle does.
+        let lum = |a: [f32; 3]| 0.2126 * a[0] + 0.7152 * a[1] + 0.0722 * a[2];
+        assert!(
+            lum(timber.albedo) > 2.0 * lum(foliage.albedo),
+            "timber {:.3} should be much brighter than foliage {:.3} — that difference IS why a \
+             forest mapped to timber reads as orange ground",
+            lum(timber.albedo),
+            lum(foliage.albedo)
+        );
+        // Different matter, not a shade of the same matter.
+        assert!(
+            foliage.density > timber.density,
+            "live needles at ~100% moisture are denser than dry pine timber"
+        );
     }
 
     #[test]
