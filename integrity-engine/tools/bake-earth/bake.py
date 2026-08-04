@@ -105,7 +105,13 @@ def bake_landcover(land, elev):
     source = "derived"
     try:
         url = ("https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?service=WMS&request=GetMap"
-               "&version=1.1.1&layers=MODIS_Terra_Land_Cover_Type_Yearly&srs=EPSG:4326"
+               # ★ THE LAYER NAME WAS WRONG, and that is why this silently fell back to invented
+               # latitude bands for months. GIBS answers `LayerNotDefined` with an HTTP **200** and an
+               # XML body, so `fetch` saw a successful download and only the PIL open failed — which the
+               # except clause swallowed as "GIBS unavailable". Verified 2026-08-04 against
+               # GetCapabilities: the real name is below, and a 1024x512 request returns a genuine
+               # 18-colour IGBP raster (17 classes + water).
+               "&version=1.1.1&layers=MODIS_Combined_L3_IGBP_Land_Cover_Type_Annual&srs=EPSG:4326"
                f"&bbox=-180,-90,180,90&width={W}&height={H}&format=image/png&TIME=2020-01-01")
         p = fetch(url, f"{TMP}/modis_landcover.png", "MODIS land cover (GIBS)")
         im = Image.open(p).convert("RGB")
