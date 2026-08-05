@@ -927,6 +927,381 @@ pub fn rayleigh_veil(
     out
 }
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// THE SKY, AS A MEDIUM (docs/66)
+//
+// `rayleigh_veil` above is a CLOSED FORM, and it is the closed form of one specific geometry: a slab
+// of air seen from OUTSIDE it, looking down. Along such a ray the sun path and the view path shorten
+// together, which is what lets the integral collapse to `1 − e^{−τ(1/μᵥ+1/μₛ)}`. Stand on the ground
+// and look UP and that pairing inverts — the view path grows with height while the sun path shrinks —
+// so the closed form is not merely approximate there, it is the wrong integral. (The retired
+// `shaders/sky.wgsl` used it anyway, with `μᵥ = ray.y`, which is also why it could only ever be a sky
+// for a flat world.)
+//
+// So the law below is the INTEGRAL, marched, and `rayleigh_veil` is its analytic special case — kept,
+// and used as the reference the march is pinned to (`the_march_reproduces_the_closed_form_from_above`).
+// One law, and the geometry decides which face of it you see:
+//
+//   * from orbit  — the blue marble and a limb that glows beyond the silhouette;
+//   * from the ground looking up — blue overhead, pale at the horizon, red at sunset;
+//   * from the ground looking ACROSS — aerial perspective over exactly the air in between;
+//   * after sunset — the low air is in the planet's shadow while the air above it is still lit, so
+//     TWILIGHT falls out of the shadow test rather than being a declared half-angle ramp.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// **The air along a ray, as the one scattering integral wants it.** Every field is emergent: `tau`
+/// from the declared air's own mass via [`rayleigh_tau`], `scale_height` from its molar mass and
+/// temperature under the body's own gravity ([`AirShell`]), `radius` from the body. A world that
+/// declares no atmosphere carries `tau = 0` and gets exactly nothing from every function below — the
+/// airless case needs no branch anywhere.
+///
+/// **Units are free but must agree**: metres in the physics, display units in the renderer. The
+/// integral is scale-invariant because the volume scattering coefficient is `τ/H`, which carries the
+/// length unit back out again.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AirColumn {
+    /// Vertical optical depth of the WHOLE column at the surface, per band.
+    pub tau: [f64; 3],
+    /// Barometric e-folding height.
+    pub scale_height: f64,
+    /// The surface the column stands on.
+    pub radius: f64,
+}
+
+impl AirColumn {
+    /// ★ **A body's own air, asked of the body.** Robin's rule for this whole feature (2026-08-04):
+    /// *"Sky must be a component of Earth assembly."* So the sky is not something a scene owns and
+    /// configures — it is what THIS body's declared mass of air does to light, and there is one place
+    /// that turns the one into the other. A body that declares no atmosphere returns a column that
+    /// scatters nothing, which is how the Moon gets a black sky without a single branch.
+    ///
+    /// Nothing here is chosen: the optical depth comes from the EMERGENT surface pressure (the weight
+    /// of the declared air over the declared radius), and the scale height from the air's own molar
+    /// mass at the body's own surface gravity.
+    pub fn of_body(body: &crate::planet::LayeredBody, mats: &[Material], temp_k: f64) -> Self {
+        let radius = body.radius();
+        let air = mats.iter().find(|m| m.id == "air");
+        AirColumn {
+            tau: rayleigh_tau(body.surface_pressure() / 101_325.0),
+            scale_height: air.map_or(0.0, |a| {
+                scale_height(a, temp_k, body.gravity_at(radius.max(1.0)))
+            }),
+            radius,
+        }
+    }
+
+    /// The same column in DISPLAY units — every length divided by the same scale. The integral is
+    /// scale-free (`β = τ/H` carries the unit back out), so this is a change of units and nothing else;
+    /// it exists because the renderer's positions are scaled so a planet radius is 1.
+    pub fn scaled(&self, per_metre: f64) -> Self {
+        AirColumn {
+            tau: self.tau,
+            scale_height: self.scale_height * per_metre,
+            radius: self.radius * per_metre,
+        }
+    }
+
+    /// **How far out THIS COMPONENT reaches** — the air's own contribution to the boundary of the
+    /// assembly it belongs to, measured from the body's centre.
+    ///
+    /// ★★ It is deliberately NOT called "where the body ends", and that correction is Robin's
+    /// (2026-08-05): *"'A body ends where its AIR ends' is not accurate, as bodies are assemblies. An
+    /// assembly ends at the outermost boundary of the assembly."* The rule is general —
+    /// **an assembly ends at the outermost boundary of its outermost component** — and air is merely
+    /// the outermost component Earth happens to have today. Name the rule after the air and the engine
+    /// learns a special case; the same question is asked by a tree's canopy, a ship's mast and a
+    /// cannon's muzzle, and it must have one answer.
+    ///
+    /// The context it was corrected in: a rig locating the planet's edge by scanning pixel columns.
+    /// *"This should be done in the engine as a boundary between the assembly (containing the
+    /// atmosphere as a component of Earth) and space, which should be a collection of assemblies of
+    /// type 'star' at coordinates."* The boundary is a fact the assembly holds; nothing downstream —
+    /// a renderer, a rig, a visibility test — should be inferring it from a picture.
+    ///
+    /// An airless body's air reaches exactly its surface, with no branch, so a body whose outermost
+    /// component is its rock reports its rock.
+    pub fn outer_reach(&self) -> f64 {
+        self.radius + if self.exists() { self.top() } else { 0.0 }
+    }
+
+    /// The angular radius this component subtends from `altitude` above the surface:
+    /// `asin(outer_reach / (radius + altitude))`, or π/2 from inside it. For a body whose air is its
+    /// outermost component this IS "how much of the frame is Earth" — and it is the assembly's own
+    /// answer rather than the observer's guess at it.
+    pub fn angular_reach_from(&self, altitude: f64) -> f64 {
+        let r_eye = self.radius + altitude;
+        let e = self.outer_reach();
+        if r_eye <= e {
+            return std::f64::consts::FRAC_PI_2;
+        }
+        (e / r_eye).asin()
+    }
+
+    /// Is there any air to scatter? (Blue band, because it is the last to vanish.)
+    pub fn exists(&self) -> bool {
+        self.tau[2] > 0.0 && self.scale_height > 0.0 && self.radius > 0.0
+    }
+
+    /// **Where the column stops being worth integrating** — the height above which the remaining air is
+    /// [`COLUMN_TAIL`] of the whole. `∫ρ` above `h` is `ρ₀H·e^{−h/H}`, so that height is `−H·ln(tail)`:
+    /// for Earth's 8.4 km scale height, 97 km. Nothing declares an "edge of the atmosphere" — this is a
+    /// stated truncation tolerance, the same argument [`air_reaches`] makes for drag.
+    pub fn top(&self) -> f64 {
+        -self.scale_height * COLUMN_TAIL.ln()
+    }
+}
+
+/// The fraction of the air column allowed to fall outside the integral (see [`AirColumn::top`]).
+const COLUMN_TAIL: f64 = 1.0e-5;
+
+/// **The resolution the sky is drawn at**, mirrored by `shaders/atmos.wgsl`. These are not taste: they
+/// are read off the convergence measurement in `the_integral_converges_with_sample_count`, which walks
+/// the WORST ray in the scene (near-horizontal view, near-horizontal sun) down against a 512×128
+/// reference. At these counts that ray is within 2%; halving them costs 6.6%, which is why they are
+/// what they are. A resolution is a resolution — raise them and the answer improves, which is the
+/// property a fudge does not have.
+pub const SKY_VIEW_STEPS: usize = 32;
+/// Sun-path samples per view sample — see [`SKY_VIEW_STEPS`].
+pub const SKY_SUN_STEPS: usize = 8;
+
+/// What the air did to a ray: what it ADDED (scattered sunlight) and what it PASSED (everything behind).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Scattered {
+    /// In-scattered radiance, per band, at the same exposure as every other view of this world.
+    pub inscatter: [f32; 3],
+    /// Transmittance of the ray's own endpoint through the air in front of it — the ground's reddening
+    /// under its own veil, and the reason a star low on the horizon is extinguished.
+    pub transmit: [f32; 3],
+}
+
+impl Scattered {
+    /// Vacuum: nothing added, everything passed.
+    pub const CLEAR: Scattered = Scattered {
+        inscatter: [0.0; 3],
+        transmit: [1.0; 3],
+    };
+}
+
+/// Radius of a point on the ray, as a RATIO of the eye's own radius. `k` is path length in units of
+/// that radius, `mu_v` the ray's cosine from the eye's zenith: `|r̂ + k·d̂| = √(1 + 2k·μᵥ + k²)`.
+#[inline]
+fn ray_radius_ratio(k: f64, mu_v: f64) -> f64 {
+    (1.0 + k * (2.0 * mu_v + k)).max(0.0).sqrt()
+}
+
+/// **Altitude of a point on the ray**, written so it survives f32 (the shader mirrors this line for
+/// line). The naive `|eye + t·d| − R` subtracts two numbers that agree to seven digits at ground level
+/// and keeps the noise; this multiplies by the conjugate instead, so every term is `O(h·R)` or `O(t·R)`
+/// and nothing cancels: `alt = (r² − R²)/(r + R)` with `r0² − R² = h₀(2R + h₀)`.
+#[inline]
+fn ray_altitude(k: f64, mu_v: f64, h0: f64, radius: f64) -> f64 {
+    let r0 = radius + h0;
+    let num = h0 * (2.0 * radius + h0) + r0 * r0 * k * (2.0 * mu_v + k);
+    // One refinement of the denominator: alt ≪ R, so `2R` is already within a fraction of a percent,
+    // and this removes even that.
+    let approx = num / (2.0 * radius);
+    num / (2.0 * radius + approx.max(0.0))
+}
+
+/// Path length (in units of the eye's radius `r0`) at which the ray from altitude `h0` reaches
+/// altitude `target_alt`, or `None` if it never does. Solves `k² + 2k·μᵥ − q = 0` for the first root
+/// ahead of the eye.
+///
+/// The altitudes are passed rather than the radii, and that is not tidiness: `target − r0` for the
+/// GROUND is `−h0`, and a camera 2 m up is 3·10⁻⁷ of Earth's radius — in the f32 the shader mirroring
+/// this runs in, subtracting the two radii returns noise where the answer should be. Passing the
+/// difference keeps every term small and exact.
+fn ray_reaches(mu_v: f64, radius: f64, h0: f64, target_alt: f64, want_far: bool) -> Option<f64> {
+    let r0 = radius + h0;
+    let q = (target_alt - h0) * (2.0 * radius + h0 + target_alt) / (r0 * r0);
+    let disc = mu_v * mu_v + q;
+    if disc < 0.0 {
+        return None; // the ray misses that radius entirely
+    }
+    let s = disc.sqrt();
+    let (near, far) = (-mu_v - s, -mu_v + s);
+    let pick = if want_far { far } else { near };
+    // A root behind the eye is not on this ray; fall through to the far one if it is ahead.
+    if pick > 0.0 {
+        Some(pick)
+    } else if far > 0.0 {
+        Some(far)
+    } else {
+        None
+    }
+}
+
+/// **Where along a ray to put the `i`-th of `n` samples, and how wide its step is.**
+///
+/// Uniform steps spend most of their samples on air that is not there: an exponential column varies by
+/// e-foldings along a near-horizontal ray, and the in-scatter is dominated by the densest stretch. So
+/// the samples are packed quadratically toward the ray's CLOSEST APPROACH to the surface — its densest
+/// point, wherever that falls — which is one rule covering a ray leaving the ground (perigee behind
+/// the eye, so samples bunch at the near end), a ray grazing the limb from orbit (perigee in the
+/// middle) and a ray straight up. Measured: it is what takes the worst ray in the scene from 9% error
+/// at 24 samples to under 1%, which is the difference between a sky the GPU can afford and one it
+/// cannot (`the_integral_converges_with_sample_count`).
+///
+/// Returns `(k, dk)` with `Σ dk = k1 − k0` exactly, so the quadrature stays a partition of the path.
+#[inline]
+fn ray_sample(i: usize, n: usize, k0: f64, k1: f64, mu_v: f64) -> (f64, f64) {
+    let span = k1 - k0;
+    let k_min = (-mu_v).clamp(k0, k1); // parameter of closest approach: dk/dr = 0 at k = −µ
+    let lo = (k_min - k0) / span;
+    let u = (i as f64 + 0.5) / n as f64;
+    let (k, s) = if u < lo {
+        let s = (lo - u) / lo; // 1 at the near end, 0 at the perigee
+        (k_min - (k_min - k0) * s * s, s)
+    } else {
+        let s = (u - lo) / (1.0 - lo).max(1.0e-12);
+        (k_min + (k1 - k_min) * s * s, s)
+    };
+    (k, 2.0 * span * s / n as f64)
+}
+
+/// **Optical depth from a point out to space along one direction**, per band — the sun path, which is
+/// also the whole of "does light reach here". Returns `None` when the planet itself is in the way:
+/// that is the shadow, and it is a geometric fact rather than a lighting term.
+///
+/// `h` is the point's altitude, `mu` the cosine of the direction from ITS local zenith.
+fn column_to_space(air: &AirColumn, h: f64, mu: f64, steps: usize) -> Option<[f64; 3]> {
+    // Does this ray graze into the ground? Perpendicular distance from the centre is `r·√(1−μ²)`; the
+    // ray misses iff that exceeds R. Expanded in `x = h/R` so the big numbers cancel algebraically
+    // instead of numerically: `(2x + x²)(1 − μ²) > μ²`.
+    if mu < 0.0 {
+        let x = h / air.radius;
+        let m2 = mu * mu;
+        if (2.0 * x + x * x) * (1.0 - m2) <= m2 {
+            return None; // shadowed by the body — no direct sunlight reaches this parcel
+        }
+    }
+    // Already above the column: lit, and with nothing left in front of the Sun. (Reached only by a
+    // sample that lands a hair outside the top; without it that sample would read as shadowed and
+    // punch a black speck through the limb.)
+    if h >= air.top() {
+        return Some([0.0; 3]);
+    }
+    let r0 = air.radius + h;
+    let k_top = ray_reaches(mu, air.radius, h, air.top(), true)?;
+    let mut depth = 0.0f64;
+    for i in 0..steps {
+        let (k, dk) = ray_sample(i, steps, 0.0, k_top, mu);
+        let alt = ray_altitude(k, mu, h, air.radius);
+        depth += (-alt / air.scale_height).exp() * dk;
+    }
+    let ds = depth * r0 / air.scale_height; // β = τ/H, and ds = r0·dk
+    Some([air.tau[0] * ds, air.tau[1] * ds, air.tau[2] * ds])
+}
+
+/// ★★ **THE atmosphere: light single-scattered into a view ray by the air it passes through.**
+///
+/// This is the whole sky, the whole limb, the whole aerial perspective and the whole terminator, in one
+/// integral — `L = F·(P(Θ)/4)·∫ β(h)·e^{−τ_sun(s)}·e^{−τ_view(s)} ds` along the ray, with the Rayleigh
+/// phase `P(Θ) = ¾(1+cos²Θ)` and `β(h) = (τ/H)·e^{−h/H}` from the DECLARED air. The `/4` rather than
+/// `/4π` is the engine's standing radiance convention (the surface term is likewise `albedo·μ·F`, not
+/// `albedo·μ·F/π`), so the sky and the ground it hangs over share one exposure.
+///
+/// All geometry arrives as cosines about the EYE's local zenith, which is what makes it identical in
+/// f64 here and in f32 on the GPU:
+/// * `h0` — the eye's altitude above the surface,
+/// * `mu_v` — cosine of the view ray from the eye's zenith (`+1` straight up),
+/// * `mu_s` — cosine of the sun from the eye's zenith (`<0` after sunset),
+/// * `cos_theta` — cosine between view ray and sun (the phase angle; constant along the ray, because
+///   the Sun subtends nothing at this distance — Robin: *"Sun is close to a point source"*),
+/// * `t_end` — where the ray STOPS: the distance to the ground fragment, or infinity for open sky.
+///
+/// SINGLE scatter, no Mie/aerosol, no ozone, and a point Sun. All four are flagged, none is a dial.
+pub fn air_inscatter(
+    air: &AirColumn,
+    h0: f64,
+    mu_v: f64,
+    mu_s: f64,
+    cos_theta: f64,
+    t_end: f64,
+    sun_gain: f64,
+    view_steps: usize,
+    sun_steps: usize,
+) -> Scattered {
+    if !air.exists() || view_steps == 0 || sun_steps == 0 {
+        return Scattered::CLEAR;
+    }
+    let r0 = air.radius + h0;
+    let top = air.top();
+    // Where the ray is inside the air at all. An eye ABOVE the column enters it at the near root; an eye
+    // inside it starts immediately and leaves at the far one.
+    let (mut k0, mut k1) = if h0 >= top {
+        match ray_reaches(mu_v, air.radius, h0, top, false) {
+            Some(k_in) => (
+                k_in,
+                ray_reaches(mu_v, air.radius, h0, top, true).unwrap_or(k_in),
+            ),
+            None => return Scattered::CLEAR, // looking past the planet's air entirely
+        }
+    } else {
+        (
+            0.0,
+            ray_reaches(mu_v, air.radius, h0, top, true).unwrap_or(0.0),
+        )
+    };
+    // The body itself stops the ray, whatever the caller said.
+    if let Some(k_hit) = ray_reaches(mu_v, air.radius, h0, 0.0, false) {
+        k1 = k1.min(k_hit);
+    }
+    k1 = k1.min(t_end / r0);
+    k0 = k0.max(0.0);
+    if !(k1 > k0) {
+        return Scattered::CLEAR;
+    }
+
+    let phase = 0.75 * (1.0 + cos_theta * cos_theta);
+    let mut tau_view = [0.0f64; 3];
+    let mut acc = [0.0f64; 3];
+    for i in 0..view_steps {
+        let (k, dk) = ray_sample(i, view_steps, k0, k1, mu_v);
+        let ds = dk * r0;
+        let alt = ray_altitude(k, mu_v, h0, air.radius);
+        let rho = (-alt / air.scale_height).exp();
+        // Optical depth this step contributes, per band: β·ds with β = (τ/H)·ρ.
+        let d_tau = [
+            air.tau[0] / air.scale_height * rho * ds,
+            air.tau[1] / air.scale_height * rho * ds,
+            air.tau[2] / air.scale_height * rho * ds,
+        ];
+        // The sample's own zenith, and the sun's cosine from IT — the two things that turn a flat-slab
+        // sky into a round one. `r̂ₚ = (r̂ + k·d̂)/|r̂ + k·d̂|`, so both cosines just divide by that length.
+        let rr = ray_radius_ratio(k, mu_v).max(1.0e-12);
+        let mu_s_p = (mu_s + k * cos_theta) / rr;
+        // Half a step of the current cell's depth puts the sample at its own midpoint rather than its
+        // near face (the difference is second order, and it is free).
+        let half = [
+            tau_view[0] + 0.5 * d_tau[0],
+            tau_view[1] + 0.5 * d_tau[1],
+            tau_view[2] + 0.5 * d_tau[2],
+        ];
+        if let Some(tau_sun) = column_to_space(air, alt, mu_s_p, sun_steps) {
+            for b in 0..3 {
+                acc[b] += (-(tau_sun[b] + half[b])).exp() * d_tau[b];
+            }
+        }
+        for b in 0..3 {
+            tau_view[b] += d_tau[b];
+        }
+    }
+    let gain = sun_gain * phase * 0.25;
+    Scattered {
+        inscatter: [
+            (gain * acc[0]) as f32,
+            (gain * acc[1]) as f32,
+            (gain * acc[2]) as f32,
+        ],
+        transmit: [
+            (-tau_view[0]).exp() as f32,
+            (-tau_view[1]).exp() as f32,
+            (-tau_view[2]).exp() as f32,
+        ],
+    }
+}
+
 /// Two-way transmittance of the surface's reflected light through the air (in on the sun path, out on
 /// the view path) — the slight reddening of the ground under its blue veil.
 pub fn rayleigh_transmit(mu_v: f64, mu_s: f64, tau: [f64; 3]) -> [f32; 3] {
@@ -1890,7 +2265,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod twilight_tests {
+mod sky_tests {
     use super::*;
 
     /// The day/night line must be a GRADIENT the width of the atmosphere, not a knife edge — the thing
@@ -1950,6 +2325,421 @@ mod twilight_tests {
         assert_eq!(
             moon_night, [0.0; 3],
             "airless body keeps its knife-edge terminator"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────────
+    // THE MARCHED INTEGRAL (docs/66) — the one law the closed form above is a special case of.
+    // ─────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// Earth's real air, as the integral wants it: optical depth from the emergent surface pressure,
+    /// scale height from the air's own molar mass under Earth's own gravity. Nothing here is chosen.
+    fn earths_air() -> AirColumn {
+        let mats = crate::materials::load();
+        let air = &mats[crate::materials::index_of(&mats, "air")];
+        let e = crate::planet::earth();
+        let g = e.gravity_at(e.radius());
+        AirColumn {
+            tau: rayleigh_tau(e.surface_pressure() / 101_325.0),
+            scale_height: scale_height(air, 288.0, g),
+            radius: e.radius(),
+        }
+    }
+
+    /// ★★ **The march IS `rayleigh_veil`, where `rayleigh_veil` is right.** The closed form is the
+    /// analytic solution for one geometry — a slab seen from outside, looking down — and in that
+    /// geometry the sun path and the view path shorten together, which is the only reason the integral
+    /// collapses. So the march must reproduce it there to the discretisation error and no worse.
+    ///
+    /// This is the pin that makes them ONE law rather than two (Law II). It is run in the flat limit
+    /// (R ≫ H) because that is the closed form's own assumption; the next test measures what the
+    /// sphericity is worth on the real Earth, rather than leaving it unquantified.
+    #[test]
+    fn the_march_reproduces_the_closed_form_from_above() {
+        let h = 8_400.0;
+        let flat = AirColumn {
+            tau: rayleigh_tau(1.0),
+            scale_height: h,
+            radius: 1.0e6 * h, // R/H = 1e6: plane-parallel to well beyond the tolerance below
+        };
+        // Eye above the whole column, looking DOWN at the ground — the closed form's geometry.
+        let eye = flat.top() * 1.5;
+        for &(mu_v, mu_s) in &[(1.0, 1.0), (0.9, 0.7), (0.7, 0.9), (0.5, 0.5), (0.35, 0.8)] {
+            let cos_theta = 0.5;
+            let marched = air_inscatter(
+                &flat,
+                eye,
+                -mu_v, // the ray travels downward; the closed form's µ is the upward view
+                mu_s,
+                cos_theta,
+                f64::INFINITY,
+                SUN_GAIN as f64,
+                256,
+                64,
+            );
+            let closed = rayleigh_veil(mu_v, mu_s, cos_theta, flat.tau, SUN_GAIN as f64, 0.0);
+            for b in 0..3 {
+                let rel = (marched.inscatter[b] - closed[b]).abs() / closed[b].max(1e-9);
+                assert!(
+                    rel < 0.01,
+                    "band {b} at µv={mu_v} µs={mu_s}: marched {} vs closed form {} ({:.2}% apart)",
+                    marched.inscatter[b],
+                    closed[b],
+                    rel * 100.0
+                );
+            }
+        }
+    }
+
+    /// What the closed form's flat-slab assumption is WORTH on the real Earth — measured, so the
+    /// number is inherited instead of re-argued. It is small looking down (the planet is nearly flat
+    /// over one scale height) and it is the whole story at grazing angles, which is where the
+    /// closed form has to cap `µ` at 0.08 to avoid dividing by zero and the march simply does not.
+    #[test]
+    fn sphericity_is_small_overhead_and_decisive_at_the_limb() {
+        let air = earths_air();
+        let eye = air.top() * 2.0;
+        let overhead = air_inscatter(
+            &air,
+            eye,
+            -0.9,
+            0.9,
+            0.5,
+            f64::INFINITY,
+            SUN_GAIN as f64,
+            256,
+            64,
+        );
+        let closed = rayleigh_veil(0.9, 0.9, 0.5, air.tau, SUN_GAIN as f64, 0.0);
+        let rel = ((overhead.inscatter[2] - closed[2]) / closed[2]).abs();
+        assert!(
+            rel < 0.05,
+            "looking straight down the round Earth agrees with the flat one ({:.1}%)",
+            rel * 100.0
+        );
+
+        // A ray that MISSES the surface but crosses the air — the limb. The closed form has no such
+        // ray at all: it is a slab, so every ray ends on the ground. This is the blue rim that stands
+        // OUTSIDE the planet's silhouette, and it cannot be drawn by any function of surface cosines.
+        // Closest approach of a ray leaving radius `r_eye` at zenith cosine µ is `r_eye·sin(θ)`, so
+        // aiming its perigee half a scale height above the ground fixes µ exactly.
+        let r_eye = air.radius + eye;
+        let perigee = (air.radius + 0.5 * air.scale_height) / r_eye;
+        let mu_limb = -(1.0 - perigee * perigee).sqrt();
+        let limb = air_inscatter(
+            &air,
+            eye,
+            mu_limb,
+            0.9,
+            0.5,
+            f64::INFINITY,
+            SUN_GAIN as f64,
+            256,
+            64,
+        );
+        assert!(
+            limb.inscatter[2] > 0.0,
+            "a ray that misses the ground still passes through lit air, got {limb:?}"
+        );
+    }
+
+    /// **Blue overhead, pale at the horizon — and neither is painted.** Overhead the path is one scale
+    /// height and only the λ⁻⁴ band scatters appreciably, so blue wins by a wide margin. Along the
+    /// horizon the path is hundreds of kilometres, every band saturates at `1 − e^{−τ}` → 1, and the
+    /// colour washes out. The ratio between them is the whole of "why the sky is paler near the ground".
+    #[test]
+    fn the_sky_is_blue_overhead_and_pale_at_the_horizon() {
+        let air = earths_air();
+        let up = air_inscatter(
+            &air,
+            2.0,
+            1.0,
+            0.9,
+            0.9,
+            f64::INFINITY,
+            SUN_GAIN as f64,
+            64,
+            16,
+        );
+        let horizon = air_inscatter(
+            &air,
+            2.0,
+            0.02,
+            0.9,
+            0.1,
+            f64::INFINITY,
+            SUN_GAIN as f64,
+            64,
+            16,
+        );
+        let blueness = |s: &Scattered| s.inscatter[2] / s.inscatter[0].max(1e-9);
+        assert!(
+            blueness(&up) > 3.0,
+            "the zenith is strongly blue, got B/R {:.2} ({:?})",
+            blueness(&up),
+            up.inscatter
+        );
+        assert!(
+            blueness(&horizon) < blueness(&up),
+            "the horizon washes out relative to the zenith ({:.2} vs {:.2})",
+            blueness(&horizon),
+            blueness(&up)
+        );
+        assert!(
+            horizon.inscatter[0] > up.inscatter[0],
+            "the long horizon path scatters MORE red than the short zenith one ({:?} vs {:?})",
+            horizon.inscatter,
+            up.inscatter
+        );
+    }
+
+    /// **Sunset is the blue being removed, not the red being added.** With the Sun on the horizon its
+    /// light crosses the whole atmosphere before it reaches the air above the observer, so the blue is
+    /// gone before it can scatter and what is left to scatter is red. Nothing in the code knows the
+    /// word "sunset": the same integral with a different `µs` produces it.
+    #[test]
+    fn a_setting_sun_reddens_the_sky_it_lights() {
+        let air = earths_air();
+        let toward = 0.15; // looking just above the horizon
+        let noon = air_inscatter(
+            &air,
+            2.0,
+            toward,
+            0.95,
+            0.3,
+            f64::INFINITY,
+            SUN_GAIN as f64,
+            64,
+            16,
+        );
+        let setting = air_inscatter(
+            &air,
+            2.0,
+            toward,
+            0.02,
+            0.99,
+            f64::INFINITY,
+            SUN_GAIN as f64,
+            64,
+            16,
+        );
+        let redness = |s: &Scattered| s.inscatter[0] / s.inscatter[2].max(1e-9);
+        assert!(
+            redness(&setting) > 3.0 * redness(&noon),
+            "the setting sky is far redder than the noon one (R/B {:.3} vs {:.3})",
+            redness(&setting),
+            redness(&noon)
+        );
+    }
+
+    /// ★★ **Twilight EMERGES, and this retires a declared number.** `twilight_half_angle` is an
+    /// openly-flagged stand-in: a `sqrt(2H/R)` ramp applied to the closed form because a flat slab has
+    /// no geometry that could produce twilight. The march has that geometry — the low air is inside
+    /// the planet's shadow while the air above it is still in sunlight — so the gradient falls out of
+    /// the shadow test and nothing declares its width.
+    ///
+    /// The assertions are geometric facts, not remembered values: a point at altitude `h` leaves the
+    /// shadow when the Sun's depression is `θ ≈ sqrt(2h/R)`, so the sky must be dark once the depression
+    /// exceeds that angle for the TOP of the column, and lit below it.
+    #[test]
+    fn twilight_emerges_from_the_planets_own_shadow() {
+        let air = earths_air();
+        // The depression at which the shadow swallows the whole column — pure geometry, no constant.
+        let full_dark = (2.0 * air.top() / air.radius).sqrt();
+        let sky = |depression: f64| {
+            air_inscatter(
+                &air,
+                2.0,
+                0.4,
+                -depression.sin(),
+                0.6,
+                f64::INFINITY,
+                SUN_GAIN as f64,
+                96,
+                24,
+            )
+            .inscatter[2]
+        };
+        let just_set = sky(0.2 * full_dark);
+        let deeper = sky(0.6 * full_dark);
+        assert!(
+            just_set > 0.0,
+            "the air above a set Sun is still lit, got {just_set}"
+        );
+        assert!(
+            deeper < just_set,
+            "twilight fades monotonically into night ({deeper} then {just_set})"
+        );
+        assert_eq!(
+            sky(1.4 * full_dark),
+            0.0,
+            "once the shadow clears the column the sky is honestly black"
+        );
+        // And the emergent width is the same scale the declared ramp was standing in for — which is
+        // why the ramp was a good stand-in and why it is no longer needed.
+        let declared = twilight_half_angle(air.scale_height, air.radius);
+        assert!(
+            sky(0.5 * declared) > sky(2.0 * declared),
+            "the emergent gradient spans the sqrt(2H/R) scale the declared ramp used"
+        );
+    }
+
+    /// **Air that is not there scatters nothing** — no branch, no epsilon, no faintly-blue vacuum. The
+    /// Moon gets a black sky by declaring no atmosphere, which is the only reason it should.
+    #[test]
+    fn a_world_with_no_air_has_no_sky() {
+        let vacuum = AirColumn {
+            tau: rayleigh_tau(0.0),
+            scale_height: 0.0,
+            radius: 1_737_400.0,
+        };
+        let s = air_inscatter(
+            &vacuum,
+            2.0,
+            0.5,
+            0.5,
+            0.5,
+            f64::INFINITY,
+            SUN_GAIN as f64,
+            64,
+            16,
+        );
+        assert_eq!(s, Scattered::CLEAR, "vacuum adds nothing and hides nothing");
+    }
+
+    /// **The integral converges, and this is what fixes the sample counts the shader ships with.** A
+    /// number of steps is a resolution, not a dial: the test measures where the answer stops moving and
+    /// the renderer spends that, so "cheap enough to draw" is a measured claim.
+    #[test]
+    fn the_integral_converges_with_sample_count() {
+        let air = earths_air();
+        // The hardest case for the march: a near-horizontal ray at low sun, where the path is longest
+        // and the density varies most along it.
+        let at = |v: usize, s: usize| {
+            air_inscatter(
+                &air,
+                2.0,
+                0.05,
+                0.05,
+                0.7,
+                f64::INFINITY,
+                SUN_GAIN as f64,
+                v,
+                s,
+            )
+            .inscatter
+        };
+        let reference = at(512, 128);
+        let err = |v: usize, s: usize| {
+            let got = at(v, s);
+            let worst = (0..3)
+                .map(|b| (got[b] - reference[b]).abs() / reference[b].max(1e-9))
+                .fold(0.0f32, f32::max);
+            println!(
+                "air_inscatter {v}x{s}: {got:?} vs {reference:?} — {:.2}%",
+                worst * 100.0
+            );
+            worst
+        };
+        // What ships, and why it is that and not less.
+        let shipped = err(SKY_VIEW_STEPS, SKY_SUN_STEPS);
+        assert!(
+            shipped < 0.02,
+            "the shipped {SKY_VIEW_STEPS}x{SKY_SUN_STEPS} is within 2% on the worst ray ({:.2}%)",
+            shipped * 100.0
+        );
+        let halved = err(SKY_VIEW_STEPS / 2, SKY_SUN_STEPS / 2);
+        assert!(
+            halved > 2.0 * shipped,
+            "halving the resolution must visibly cost accuracy, or the shipped count is wasted \
+             ({:.2}% vs {:.2}%)",
+            halved * 100.0,
+            shipped * 100.0
+        );
+        // MONOTONE in resolution — the property that makes this a resolution and not a fudge.
+        assert!(
+            err(64, 16) < shipped,
+            "spending more samples must improve the answer"
+        );
+    }
+
+    /// ★ **The air between the eye and the grass in front of it is the air between them** — which
+    /// sounds like nothing and replaces a flagged stand-in. `veil_column_fraction` scaled the FULL
+    /// column's in-scatter by `1 − e^{−h/H}` because the closed form had no way to stop early; it was
+    /// right vertically and wrong along the ground, so distant terrain got no aerial perspective at
+    /// all. Ending the integral at the surface point is the computation it was standing in for.
+    #[test]
+    fn a_ray_that_stops_early_only_crosses_the_air_it_crossed() {
+        let air = earths_air();
+        let sky = |t_end: f64| {
+            air_inscatter(&air, 1.7, 0.02, 0.7, 0.5, t_end, SUN_GAIN as f64, 64, 16).inscatter[2]
+        };
+        let open = sky(f64::INFINITY);
+        let near = sky(2.0); // grass two metres away
+        let far = sky(30_000.0); // a mountain thirty kilometres off
+        assert!(
+            near / open < 1.0e-3,
+            "two metres of air is not a sky ({near} vs {open})"
+        );
+        assert!(
+            far > 100.0 * near && far < open,
+            "thirty kilometres of it is real haze, short of the whole sky ({near} / {far} / {open})"
+        );
+    }
+}
+
+#[cfg(test)]
+mod assembly_boundary_tests {
+    use super::*;
+
+    /// ★★ **AN ASSEMBLY ENDS AT ITS OUTERMOST COMPONENT** — which for Earth today is its air (docs/66
+    /// §10). Robin's wording, correcting mine: *"'A body ends where its AIR ends' is not accurate, as
+    /// bodies are assemblies. An assembly ends at the outermost boundary of the assembly."*
+    ///
+    /// The difference is not decorative: it is the ~97 km of air a limb ray crosses, the reason the
+    /// terminator is a gradient rather than an edge, and the reason anything scanning for "the edge of
+    /// the planet" finds it in the wrong place if it looks for the rock.
+    #[test]
+    fn an_assembly_reaches_past_its_core_by_its_outermost_component() {
+        let mats = crate::materials::load();
+        let e = crate::planet::earth();
+        let air = AirColumn::of_body(&e, &mats, 288.0);
+
+        assert!(
+            air.outer_reach() > air.radius,
+            "Earth's assembly reaches past its surface — air is a component of it"
+        );
+        let km = (air.outer_reach() - air.radius) / 1000.0;
+        assert!(
+            (80.0..120.0).contains(&km),
+            "the air adds ~97 km of assembly (11.5 scale heights), got {km:.0} km"
+        );
+
+        // ★ AND THE MOON DOES NOT. Same code, same call, no branch: Luna is its own assembly, it
+        // declares no atmosphere, so its boundary IS its surface and its terminator is a knife edge.
+        let moon = crate::planet::body("moon");
+        let vacuum = AirColumn::of_body(&moon, &mats, 288.0);
+        assert_eq!(
+            vacuum.outer_reach(),
+            vacuum.radius,
+            "an assembly whose outermost component is its rock reports its rock — no special case"
+        );
+
+        // From orbit the assembly subtends more than the rock does — which is the limb.
+        let alt = 400_000.0;
+        let with_air = air.angular_reach_from(alt);
+        let rock_only = (air.radius / (air.radius + alt)).asin();
+        assert!(
+            with_air > rock_only,
+            "the air stands outside the silhouette ({:.4} rad vs {:.4})",
+            with_air,
+            rock_only
+        );
+        // Standing inside it, the assembly fills the sky.
+        assert_eq!(
+            air.angular_reach_from(1.7),
+            std::f64::consts::FRAC_PI_2,
+            "an observer inside the air is inside the assembly"
         );
     }
 }

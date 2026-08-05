@@ -26,3 +26,19 @@ export const launch = (opts = {}) => chromium.launch({ headless: false, args: AR
 export const PORT = process.env.PORT || '5173';
 export const OUT = process.env.OUT || '/tmp';
 export const url = (page) => `http://127.0.0.1:${PORT}/${page}`;
+
+// ★ **ONE viewport for the fleet.** Rigs each picked their own — eighteen different sizes, the smallest
+// 480x320 — and the ones that fill the gallery were among the smallest, so the pictures a human is meant
+// to judge textures from were the least judgeable ones. (Robin, 2026-08-05: *"your screen shots are
+// pretty low res… 640x480 seems to be the go-to?"* It was worse: the last batch was 560x400.)
+//
+// 2K, per Robin, matching the render Xorg's own ceiling — `scripts/start-render-xorg.sh` allocates the
+// framebuffer and a rig cannot capture more pixels than that server has. Override per run with
+// `RIG_W`/`RIG_H` (a measurement rig that only wants a mean level can run small and fast).
+//
+// The aspect is 16:10, deliberately unchanged from the 1280x800 that 50 rigs already used, so a rig's
+// framing and any width-fraction sampling survive the change untouched.
+export const VIEWPORT = {
+  width: Number(process.env.RIG_W || 2560),
+  height: Number(process.env.RIG_H || 1600),
+};

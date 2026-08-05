@@ -1,6 +1,6 @@
-import { launch, PORT } from './_launch.mjs';
+import { launch, PORT, VIEWPORT } from './_launch.mjs';
 const b = await launch();
-const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
+const p = await b.newPage({ viewport: VIEWPORT });
 const t0 = Date.now();
 p.on('console', m => { const t = m.text(); if (/ready|Failed|error/i.test(t)) console.log(`  +${((Date.now()-t0)/1000).toFixed(1)}s [console]`, t.slice(0,120)); });
 await p.goto(`http://127.0.0.1:${PORT}/birth.html`, { waitUntil: 'load' });

@@ -1,6 +1,6 @@
-import { launch, PORT } from './_launch.mjs';
+import { launch, PORT, VIEWPORT } from './_launch.mjs';
 const b = await launch();
-const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
+const p = await b.newPage({ viewport: VIEWPORT });
 p.on('console', m => console.log(`[${m.type()}]`, m.text().slice(0, 300)));
 p.on('pageerror', e => console.log('[PAGEERROR]', e.message.slice(0, 300)));
 await p.goto(`http://127.0.0.1:${PORT}/birth.html`, { waitUntil: 'load' });

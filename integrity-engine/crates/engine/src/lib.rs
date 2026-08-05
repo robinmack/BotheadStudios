@@ -917,6 +917,15 @@ mod app {
         /// x = bowl depth as a fraction of the surface radius. Derived from the EXCAVATED MASS actually
         /// lifted above the pristine surface, never authored — see `gpu_crater_depth_frac`.
         crater2: [f32; 4],
+        /// **Where the EYE stands in this body's air** (docs/66): xyz = its local zenith as seen from
+        /// the body's centre (unit), w = its altitude above the body's SEA LEVEL in metres. Computed in
+        /// f64 on the CPU, because a camera 2 m up is 3e-7 of Earth's radius and f32 cannot hold that
+        /// against 1.0 — which is why the altitude is passed rather than reconstructed in the shader.
+        eye_air: [f32; 4],
+        /// The column's shape: x = scale height (m), y = surface radius (m), z = where the column stops
+        /// (m above the surface), w = metres per display unit. The shader's positions are display units
+        /// and the integral is metres; this is the one place they meet.
+        air2: [f32; 4],
     }
 
     /// Byte offset of `SpaceUniforms::crater` — 2 mat4 (128) + 5 vec4 (80). The globe patches just these
@@ -1074,6 +1083,9 @@ mod app {
         interior_uni: UniformSlot,
         sun_uni: UniformSlot,
         atm_tau: [f64; 3],
+        /// The same air object Terra holds, from the same body (docs/66) — so one planet cannot have
+        /// two atmospheres depending on which scene is looking at it.
+        air_column: crate::atmosphere::AirColumn,
         atm_twilight: f64,
         interior_tint: [f32; 4],
         interior_glow: [f32; 4],
@@ -1376,9 +1388,11 @@ mod app {
                 make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
             // Rayleigh optical depths from the EMERGENT surface pressure (planet::earth's declared
             // atmosphere mass) — the blue marble is derived from the air, never painted (docs/26).
-            let atm_tau = crate::atmosphere::rayleigh_tau(
-                crate::planet::earth().surface_pressure() / 101_325.0,
-            );
+            // ★ Asked of the BODY, the same way Terra asks (docs/66), so the two scenes cannot end up
+            // drawing two different atmospheres for one planet.
+            let air_column =
+                crate::atmosphere::AirColumn::of_body(&crate::planet::earth(), &mats, AIR_TEMP_K);
+            let atm_tau = air_column.tau;
             let atm_twilight = {
                 let e = crate::planet::earth();
                 let h = mats
@@ -1576,6 +1590,7 @@ mod app {
                 interior_uni,
                 sun_uni,
                 atm_tau,
+                air_column,
                 atm_twilight,
                 stars: None,
                 impactor_uni,
@@ -1671,13 +1686,19 @@ mod app {
         /// This scene's air — Earth's, from Earth's own definition, at the shared exposure. Identical to
         /// `Terra::air()` by construction: one body, one atmosphere.
         fn air(&self) -> Air {
-            [
-                self.atm_tau[0] as f32,
-                self.atm_tau[1] as f32,
-                self.atm_tau[2] as f32,
-                crate::atmosphere::SUN_GAIN,
-                self.atm_twilight as f32,
-            ]
+            Air {
+                tau: [
+                    self.atm_tau[0] as f32,
+                    self.atm_tau[1] as f32,
+                    self.atm_tau[2] as f32,
+                ],
+                gain: crate::atmosphere::SUN_GAIN,
+                twilight: self.atm_twilight as f32,
+                scale_height_m: self.air_column.scale_height as f32,
+                radius_m: self.air_column.radius as f32,
+                top_m: self.air_column.top() as f32,
+                ..AIRLESS
+            }
         }
 
         /// Hand the scene the DEFINITIVE Earth's surface rasters (the host fetches whatever
@@ -4500,7 +4521,10 @@ mod app {
                     earth_light,
                     [1.0, 1.0, 1.0, pretty_fade],
                     [eye_disp.x as f32, eye_disp.y as f32, eye_disp.z as f32, 0.0],
-                    self.air(),
+                    // The globe's model matrix carries a −eye translation, so its centre sits at `spos`
+                    // in camera-relative display units and the eye is at −`spos` from that centre.
+                    self.air()
+                        .seen_from(-spos.as_dvec3(), 1.0 / display_scale()),
                     // The heat of whichever body this scene actually PLACED. Only the WHOLE-BODY birth impact
                     // goes back in time: it targets proto-Earth, a magma ocean, which glows rather than being
                     // lit. A CAP impact (docs/39) resolves modern Earth — cool rock whose bulk stays a solid
@@ -4701,7 +4725,7 @@ mod app {
                         // thing entirely from the globe/cap hand-off.
                         [1.0, 1.0, 1.0, pretty_fade],
                         [eye_disp.x as f32, eye_disp.y as f32, eye_disp.z as f32, 0.0],
-                        self.air(),
+                        self.air().seen_from(eye_w - focus, 1.0 / ds),
                         glow_of(&crate::planet::body("earth")),
                     );
                     corridor_cap = true;
@@ -4961,12 +4985,12 @@ mod app {
                         view: &view,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: 0.01,
-                                g: 0.01,
-                                b: 0.03,
-                                a: 1.0,
-                            }),
+                            // ★ **Space is BLACK.** This was a declared dark blue (0.01/0.01/0.03) —
+                            // a painted colour with nothing emitting it, and now that the sky is
+                            // derived it was also a floor under every night measurement: the first
+                            // sky rig read 3.9/4.1/9.3 for a "black" sky and that was entirely this.
+                            // What is left when nothing is drawn is nothing (Law V).
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                             store: wgpu::StoreOp::Store,
                         },
                     })],
@@ -5002,6 +5026,8 @@ mod app {
                         self.config.width as f32,
                         self.config.height as f32,
                         80.0,
+                        // The space band's camera floats between bodies, inside nobody's atmosphere.
+                        None,
                     );
                 }
                 pass.set_pipeline(&self.pipeline);
@@ -5242,10 +5268,49 @@ mod app {
         UniformSlot { buf, bind }
     }
 
-    /// A body's AIR, as the shaders want it: `[tau_r, tau_g, tau_b, exposure, twilight_half_angle]`.
-    /// One value carries the whole atmosphere so that adding a property does not mean a new argument at
-    /// every draw call — `write_space_uniform` unpacks it into the two uniform slots that hold it.
-    type Air = [f32; 5];
+    /// **A body's AIR, and where the eye stands in it** — everything the one scattering integral needs
+    /// (docs/66). One value carries the whole atmosphere so that adding a property does not mean a new
+    /// argument at every draw call; `write_space_uniform` unpacks it into the uniform slots that hold it.
+    ///
+    /// It grew the eye's stance when the ground stopped spending a closed form and started marching the
+    /// real integral: an in-scatter along the eye→surface ray needs to know where the ray STARTS.
+    #[derive(Clone, Copy, Debug)]
+    struct Air {
+        tau: [f32; 3],
+        /// The one exposure every view of this world shares.
+        gain: f32,
+        /// The declared-ramp terminator softener the CLOSED FORM needs. The march does not: it gets
+        /// twilight from the planet's own shadow. Kept for `space.wgsl`, which still spends the closed
+        /// form on bodies drawn as flat-lit shells.
+        twilight: f32,
+        scale_height_m: f32,
+        radius_m: f32,
+        top_m: f32,
+        /// The eye's local zenith from THIS body's centre (unit), and its altitude above this body's
+        /// sea level (m). Both computed in f64 — see `Air::seen_from`.
+        up: [f32; 3],
+        alt_m: f32,
+        metres_per_display: f32,
+    }
+
+    impl Air {
+        /// This air as seen from an eye `eye_rel` from the body's CENTRE, in display units. The altitude
+        /// is formed in f64 and handed over as a metre count, never reconstructed from two near-equal
+        /// f32 radii — a camera at head height is 3e-7 of Earth's radius, and that subtraction in f32
+        /// returns noise where the answer should be.
+        fn seen_from(mut self, eye_rel: glam::DVec3, metres_per_display: f64) -> Self {
+            let r = eye_rel.length();
+            let up = if r > 0.0 {
+                (eye_rel / r).as_vec3()
+            } else {
+                glam::Vec3::Y
+            };
+            self.up = [up.x, up.y, up.z];
+            self.alt_m = (r * metres_per_display - self.radius_m as f64) as f32;
+            self.metres_per_display = metres_per_display as f32;
+            self
+        }
+    }
 
     /// A body with NO declared atmosphere: zero optical depth and zero twilight. The shared Rayleigh
     /// model then returns exactly black with a knife-edge terminator — the airless Moon needs no special
@@ -5253,7 +5318,18 @@ mod app {
     /// A body that does not glow — anything below visible incandescence.
     const NO_GLOW: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
 
-    const AIRLESS: Air = [0.0, 0.0, 0.0, crate::atmosphere::SUN_GAIN, 0.0];
+    const AIRLESS: Air = Air {
+        tau: [0.0; 3],
+        gain: crate::atmosphere::SUN_GAIN,
+        twilight: 0.0,
+        scale_height_m: 0.0,
+        radius_m: 0.0,
+        top_m: 0.0,
+        // Never read: with tau = 0 the integral returns before it looks at any of this.
+        up: [0.0, 1.0, 0.0],
+        alt_m: 0.0,
+        metres_per_display: 1.0,
+    };
 
     /// What `camera_follow` is riding. An assembly the engine can point at — today that is anything in
     /// flight; when assemblies carry identity (docs/64) this is where a gun or a ship joins the list.
@@ -5282,13 +5358,19 @@ mod app {
         /// both fall out of the air's own weight), at the one canonical exposure. A world with no
         /// atmosphere yields zeros here and renders with a hard terminator, correctly.
         fn air(&self) -> Air {
-            [
-                self.atm_tau[0] as f32,
-                self.atm_tau[1] as f32,
-                self.atm_tau[2] as f32,
-                crate::atmosphere::SUN_GAIN,
-                self.atm_twilight as f32,
-            ]
+            Air {
+                tau: [
+                    self.air_column.tau[0] as f32,
+                    self.air_column.tau[1] as f32,
+                    self.air_column.tau[2] as f32,
+                ],
+                gain: crate::atmosphere::SUN_GAIN,
+                twilight: self.atm_twilight as f32,
+                scale_height_m: self.air_column.scale_height as f32,
+                radius_m: self.air_column.radius as f32,
+                top_m: self.air_column.top() as f32,
+                ..AIRLESS
+            }
         }
     }
 
@@ -5305,18 +5387,6 @@ mod app {
         }
         let c = crate::blackbody::blackbody_srgb(t);
         [c[0], c[1], c[2], gain as f32]
-    }
-
-    fn twilight_of(radius_m: f64, g: f64, mats: &[materials::Material], tau: [f64; 3]) -> f64 {
-        if tau[2] <= 0.0 {
-            return 0.0;
-        }
-        let h = mats
-            .iter()
-            .find(|m| m.id == "air")
-            .map(|air| crate::atmosphere::scale_height(air, 288.0, g))
-            .unwrap_or(0.0);
-        crate::atmosphere::twilight_half_angle(h, radius_m)
     }
 
     /// Earth's DEFINITIVE surface, handed over by the host once and reused by every draw. The scene
@@ -5402,13 +5472,20 @@ mod app {
             view_proj: view_proj.to_cols_array_2d(),
             model: model.to_cols_array_2d(),
             // .w = the twilight half-angle: how far past the geometric terminator the air is still lit.
-            light_dir: [light.x, light.y, light.z, air[4]],
+            light_dir: [light.x, light.y, light.z, air.twilight],
             tint,
             emissive,
-            atm: [air[0], air[1], air[2], air[3]],
+            atm: [air.tau[0], air.tau[1], air.tau[2], air.gain],
             glow,
             crater: [0.0; 4],
             crater2: [0.0; 4],
+            eye_air: [air.up[0], air.up[1], air.up[2], air.alt_m],
+            air2: [
+                air.scale_height_m,
+                air.radius_m,
+                air.top_m,
+                air.metres_per_display,
+            ],
         };
         queue.write_buffer(&slot.buf, 0, bytemuck::bytes_of(&u));
     }
@@ -5519,7 +5596,7 @@ mod app {
             source: wgpu::ShaderSource::Wgsl(
                 concat!(
                     include_str!("../../../shaders/tonemap.wgsl"),
-                    include_str!("../../../shaders/rayleigh.wgsl"),
+                    include_str!("../../../shaders/atmos.wgsl"),
                     include_str!("../../../shaders/surface_normal.wgsl"),
                     include_str!("../../../shaders/globe.wgsl")
                 )
@@ -5752,6 +5829,10 @@ mod app {
         /// The real sky. Terra's world frame is Earth-FIXED, so the catalogue is rotated by Greenwich
         /// sidereal time each frame — which is what makes the stars wheel overhead, once per sidereal day.
         stars: Option<StarField>,
+        /// **The air between the stars and the eye** (docs/66) — this body's own atmosphere, drawn as
+        /// the light it scatters into each view ray. Not optional and not configurable: it reads
+        /// `air_column`, so a world that declares no air draws nothing here.
+        sky: SkyVeil,
         // docs/43 Phase 5 — the fine, camera-relative ground cap (rebuilt each frame under the camera) + its
         // alpha-blend pipeline, and a reused CPU vertex scratch buffer. Cross-faded with the globe by altitude.
         /// The ground tiers, OUTERMOST first — one mesh and one uniform slot each, all built by the same
@@ -5802,7 +5883,10 @@ mod app {
         mats: Vec<materials::Material>,
         fly: crate::terra::fly_camera::FlyCamera,
         planet_radius: f64,
-        atm_tau: [f64; 3],
+        /// ★ **This body's air, held once** (docs/66) — the optical depth of its whole column, its scale
+        /// height, and the surface it stands on. The sky, the aerial perspective over the ground and
+        /// the blue marble all read THIS, so they cannot disagree about what the atmosphere is.
+        air_column: crate::atmosphere::AirColumn,
         atm_twilight: f64,
         world_name: String,
         // docs/43 Phase 2 — the baked surface rasters (land mask, elevation+bathymetry, land-cover biome) and
@@ -6048,13 +6132,10 @@ mod app {
                 })
                 .collect();
             let earth = crate::planet::earth();
-            let atm_tau = crate::atmosphere::rayleigh_tau(earth.surface_pressure() / 101_325.0);
-            let atm_twilight = twilight_of(
-                earth.radius(),
-                earth.gravity_at(earth.radius()),
-                &mats,
-                atm_tau,
-            );
+            // The body is asked for its own air, rather than the scene deriving one (docs/66).
+            let air_column = crate::atmosphere::AirColumn::of_body(&earth, &mats, AIR_TEMP_K);
+            let atm_twilight =
+                crate::atmosphere::twilight_half_angle(air_column.scale_height, air_column.radius);
             // Default fly camera: orbital over the equator (a world file overrides this in `load_world`).
             let fly = crate::terra::fly_camera::FlyCamera::new(
                 20.0,
@@ -6066,6 +6147,7 @@ mod app {
                 40_000_000.0,
             );
             let matter = MatterField::new(&device, config.format, 200_000);
+            let sky = SkyVeil::new(&device, config.format);
             let flight_env = crate::flight::PlanetAir::of(&mats, "earth", earth_radius_m());
             Ok(Terra {
                 detail: Default::default(),
@@ -6107,6 +6189,7 @@ mod app {
                 globe_pipeline,
                 body_id: "earth".into(),
                 stars: None,
+                sky,
                 segment_gpu,
                 cannon_gpu,
                 cannon_uni,
@@ -6127,7 +6210,7 @@ mod app {
                 fly,
                 planet_radius: earth_radius_m(),
                 atm_twilight,
-                atm_tau,
+                air_column,
                 world_name: String::new(),
                 landmask: None,
                 elevation: None,
@@ -6178,14 +6261,24 @@ mod app {
                 .and_then(|a| a.surface_pressure(self.planet_radius, g_surface))
                 .unwrap_or_else(|| crate::planet::earth().surface_pressure())
                 / 101_325.0;
-            self.atm_tau = crate::atmosphere::rayleigh_tau(p_ratio);
+            // THIS world's column — the pressure it declares (or Earth's, if it declares none) at its
+            // own radius and gravity. One object; the sky and the ground both read it.
+            self.air_column = crate::atmosphere::AirColumn {
+                tau: crate::atmosphere::rayleigh_tau(p_ratio),
+                scale_height: self.mats.iter().find(|m| m.id == "air").map_or(0.0, |a| {
+                    crate::atmosphere::scale_height(a, AIR_TEMP_K, g_surface)
+                }),
+                radius: self.planet_radius,
+            };
             // The flight environment is this body's own matter and air — re-resolve it when the world
             // changes, and never again per frame. (Sean's branch predates this cache and dropped it;
             // without it the flight step deserializes the planet every frame.)
             self.flight_env =
                 crate::flight::PlanetAir::of(&self.mats, &self.body_id, self.planet_radius);
-            self.atm_twilight =
-                twilight_of(self.planet_radius, g_surface, &self.mats, self.atm_tau);
+            self.atm_twilight = crate::atmosphere::twilight_half_angle(
+                self.air_column.scale_height,
+                self.air_column.radius,
+            );
             self.world_name = w.name.clone();
 
             // docs/43 Phase 4 — seed the fly camera from the world's declared camera (default: orbital over 20°N).
@@ -6563,42 +6656,6 @@ mod app {
         pub fn set_appearance_probes(&mut self, side: u32) {
             self.appearance_probes_pinned = side as usize;
             self.segment_built = None;
-        }
-
-        /// **How much of the air column actually lies between the eye and the ground** — the factor the
-        /// surface's in-scattered veil must be scaled by.
-        ///
-        /// `rayleigh_veil` computes the in-scatter for the FULL vertical column, which is right when the
-        /// observer is above the atmosphere and wrong everywhere else: applied unscaled it puts a whole
-        /// sky's worth of haze between a camera standing on the grass and the grass 1 m in front of it.
-        /// Measured by ablation — with the veil disabled the same ground goes from a pale cyan wash
-        /// (rgb ~150,230,190) to real grass (84,195,65) with its material grain visible. It was not the
-        /// texture that was missing; it was drowned.
-        ///
-        /// The column above altitude `h` is `ρ₀·H·e^(−h/H)`, so the fraction lying BELOW the eye — the part
-        /// its downward view actually looks through — is `1 − e^(−h/H)`, using the same barometric scale
-        /// height `atmosphere::AirShell` derives from the air's own molar mass and temperature. Nothing is
-        /// declared here: at 0.3 m altitude it is 3.5e-5 and the ground is its own colour, at one scale
-        /// height 0.63, and from orbit it is 1 and the planet looks exactly as it did.
-        ///
-        /// **FLAGGED IOU (Law V).** This is the VERTICAL column difference, so it omits the horizontal path
-        /// term: from ground level, distant terrain will now be too crisp, because the air along a long
-        /// near-horizontal path is real and this does not count it. The computation it stands in for is the
-        /// segment integral ∫ρ dl from eye to surface point, which for an exponential atmosphere over a
-        /// linearly-varying altitude is `ρ₀·L·(e^(−h₁/H) − e^(−h₂/H))·H/(h₂−h₁)` — cheap, but it needs the
-        /// eye's world position in the shader, which this uniform layout does not carry yet.
-        fn veil_column_fraction(&self) -> f32 {
-            let h = self.fly.alt_m.max(0.0);
-            // The SAME scale height the flight integrates through — asked of the environment that owns
-            // this world's air, not re-derived here (Law II).
-            let scale_h = {
-                use crate::flight::FlightEnvironment;
-                self.flight_env.air_scale_height_m()
-            };
-            if !(scale_h > 0.0) {
-                return 1.0; // an airless world has no veil to scale, and none is added
-            }
-            (1.0 - (-h / scale_h).exp()) as f32
         }
 
         /// **The instant this scene's SKY is drawn for** (Unix seconds) — the one answer to "where are the
@@ -7269,7 +7326,7 @@ mod app {
                 }
             }
 
-            let air = self.air();
+            let air = self.air().seen_from(eye, 1.0 / display_scale());
             if !self.surface_loaded {
                 // Fallback: the Phase-2 grain shell (used until a world's surface rasters build the globe mesh).
                 let shell_spacing = self.planet_radius
@@ -7322,11 +7379,11 @@ mod app {
                         mu_v,
                         mu_s,
                         cos_th,
-                        self.atm_tau,
+                        self.air_column.tau,
                         crate::atmosphere::SUN_GAIN as f64,
                         self.atm_twilight,
                     );
-                    let tr = crate::atmosphere::rayleigh_transmit(mu_v, mu_s, self.atm_tau);
+                    let tr = crate::atmosphere::rayleigh_transmit(mu_v, mu_s, self.air_column.tau);
                     let tint = [
                         m.albedo[0] * tr[0],
                         m.albedo[1] * tr[1],
@@ -7365,12 +7422,12 @@ mod app {
                         view: &view,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: 0.01,
-                                g: 0.01,
-                                b: 0.03,
-                                a: 1.0,
-                            }),
+                            // ★ **Space is BLACK.** This was a declared dark blue (0.01/0.01/0.03) —
+                            // a painted colour with nothing emitting it, and now that the sky is
+                            // derived it was also a floor under every night measurement: the first
+                            // sky rig read 3.9/4.1/9.3 for a "black" sky and that was entirely this.
+                            // What is left when nothing is drawn is nothing (Law V).
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                             store: wgpu::StoreOp::Store,
                         },
                     })],
@@ -7385,10 +7442,31 @@ mod app {
                     timestamp_writes: None,
                     occlusion_query_set: None,
                 });
-                // THE SKY FIRST. Terra's world frame is Earth-FIXED, so the inertial catalogue is turned
-                // by Greenwich sidereal time: the stars wheel overhead once per SIDEREAL day, four minutes
-                // shy of a solar one, which is why they rise earlier each night. Nothing is animated —
-                // the same clock that puts the Sun in the sky puts the stars in it.
+                // **THE AIR FIRST** (docs/66). Not a backdrop and not this scene's idea — the body's
+                // own declared atmosphere, marched along each pixel's view ray by the same integral the
+                // ground spends. It is the background because it is the farthest thing that is MATTER;
+                // the ground draws over it, and the stars are summed INTO it below.
+                //
+                // The altitude handed over is height above SEA LEVEL, the surface the air column stands
+                // on — NOT `fly.alt_m`, which is height above the ground underfoot and would put a
+                // camera on a 4 km plateau inside 4 km of air that is not there.
+                let sky_up = eye.normalize_or_zero().as_vec3();
+                let sky_alt_m = ((eye.length() - r_disp) / display_scale()) as f32;
+                self.sky.draw(
+                    &self.queue,
+                    &mut pass,
+                    view_proj,
+                    sky_up,
+                    sky_alt_m,
+                    sun_light,
+                    &self.air_column,
+                );
+                // THEN THE STARS THROUGH IT. Terra's world frame is Earth-FIXED, so the inertial
+                // catalogue is turned by Greenwich sidereal time: the stars wheel overhead once per
+                // SIDEREAL day, four minutes shy of a solar one, which is why they rise earlier each
+                // night. Nothing is animated — the same clock that puts the Sun in the sky puts the
+                // stars in it. They are drawn AFTER the air and SUM with it, so daylight drowns them
+                // for the reason it really does.
                 if let Some(stars) = self.stars.as_ref() {
                     let gmst = crate::sky::gmst_rad(self.celestial_epoch_s());
                     stars.draw(
@@ -7410,6 +7488,7 @@ mod app {
                         self.config.width as f32,
                         self.config.height as f32,
                         80.0,
+                        Some((sky_up, sky_alt_m, sun_light, &self.air_column)),
                     );
                 }
                 if self.surface_loaded {
@@ -8000,8 +8079,8 @@ mod app {
                     model,
                     sun_light,
                     [1.0, 1.0, 1.0, 1.0],
-                    [anchor.x, anchor.y, anchor.z, self.veil_column_fraction()],
-                    self.air(),
+                    [anchor.x, anchor.y, anchor.z, 0.0],
+                    self.air().seen_from(view.eye, 1.0 / display_scale()),
                     [0.0, 0.0, 0.0, 0.0],
                 );
             }
@@ -8020,8 +8099,8 @@ mod app {
                         model,
                         sun_light,
                         [1.0, 1.0, 1.0, 1.0],
-                        [anchor.x, anchor.y, anchor.z, self.veil_column_fraction()],
-                        self.air(),
+                        [anchor.x, anchor.y, anchor.z, 0.0],
+                        self.air().seen_from(view.eye, 1.0 / display_scale()),
                         [0.0, 0.0, 0.0, 0.0],
                     );
                 }
@@ -8035,8 +8114,8 @@ mod app {
                     model,
                     sun_light,
                     [1.0, 1.0, 1.0, 1.0],
-                    [anchor.x, anchor.y, anchor.z, self.veil_column_fraction()],
-                    self.air(),
+                    [anchor.x, anchor.y, anchor.z, 0.0],
+                    self.air().seen_from(view.eye, 1.0 / display_scale()),
                     glow_of(&crate::planet::body(&self.body_id)),
                 );
             }

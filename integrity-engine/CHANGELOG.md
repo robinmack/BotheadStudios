@@ -9,6 +9,30 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★ **The sky, and it is the air** (docs/66). `atmosphere::air_inscatter` — one marched single-scatter
+  integral through a body's DECLARED atmosphere — replaces the plane-parallel closed form in every render
+  path. The closed form (`rayleigh_veil`) is now its analytic special case, pinned to it under 1% and kept
+  as a test reference. From it, none of them drawn on: a blue zenith and a pale horizon, red sunsets,
+  aerial perspective over distant ground, a glowing limb, and **twilight that emerges from the planet's
+  own shadow** — which retires `twilight_half_angle`'s declared ramp from the ground path.
+  - `render::SkyVeil` draws whatever `AirColumn` it is handed and has no opinion: a body with no declared
+    air draws no sky, with no branch. **The sky is a component of the body, not of the scene** — no scene
+    gained a verb (the docs/65 ratchet is unchanged).
+  - New world `worlds/earth-airless` and a `?world=` parameter on `terra.html`: the same Earth with zero
+    kilograms of air, so a sky that claims to be scattered sunlight can be *shown* to vanish without it.
+  - The star pass now sums with the sky (`tonemap(L_sky + L_star*T)`, per band) instead of punching
+    through it, so daylight drowns stars for the physical reason. The residual exposure mismatch is
+    recorded, not tuned (docs/46 row 43).
+  - **Removed:** `veil_column_fraction` (a flagged stand-in worth 2e-4 at head height, identical for every
+    pixel however distant), `shaders/rayleigh.wgsl`, `shaders/particles.wgsl` (orphaned since July), and
+    the painted `0.01/0.01/0.03` background in both scenes — space is black.
+- **A shader nobody compiles is not a feature.** `laws::compiled_shader_tests` fails the build on any
+  `shaders/*.wgsl` that no `include_str!` names. `sky.wgsl` was one for weeks while every atmosphere test
+  passed; the gate found two more orphans on its first run.
+- **Rig captures are 2K.** One shared `VIEWPORT` in `web/rig/_launch.mjs` (`RIG_W`/`RIG_H` to override)
+  replaces eighteen hardcoded viewport sizes across the fleet, and `scripts/start-render-xorg.sh` now
+  restarts a render X server that is the wrong size instead of capping every screenshot after it.
+
 - **The appearance integral (`terra::appearance`).** A surface footprint's area-weighted material
   MIXTURE and the variance of its slope about the mesh normal — the two moments docs/63 asks for.
   `Appearance::combine` is the law of total variance, so refining a footprint does not change its

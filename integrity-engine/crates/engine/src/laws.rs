@@ -1668,3 +1668,77 @@ mod one_earth_tests {
         );
     }
 }
+
+/// ★★ **A SHADER NOBODY COMPILES IS NOT A FEATURE — it is a claim** (docs/46 row 41, docs/66).
+///
+/// `shaders/sky.wgsl` sat in this repo for weeks describing an honest Rayleigh sky, and it was in no
+/// `include_str!` at all: the scene it was written for was deleted in July, its successor in August,
+/// and Terra never had one. Every test about the atmosphere passed the whole time, because the tests
+/// asked whether the OPTICS were right and nothing asked whether anything ran them. Meanwhile Robin was
+/// looking at a daylight frame of lit grass under a black starfield and asking why the ground seemed to
+/// be rendered "without taking available light into account".
+///
+/// This is that question, asked by a machine, every build. It is the docs/48 pattern — *the law is
+/// built and proven, then wired into one place or none* — turned into a gate.
+#[cfg(test)]
+mod compiled_shader_tests {
+    /// Every `shaders/*.wgsl` is named by at least one `include_str!` in the crate.
+    ///
+    /// ★ VERIFIED BY MAKING IT FAIL, which here meant simply running it: on its first run it caught
+    /// TWO orphans, not one — `rayleigh.wgsl`, which had become one minutes earlier when the ground
+    /// started marching the real integral, and `particles.wgsl`, superseded by `matter.wgsl` and left
+    /// behind since **July**. Both are deleted. Deleting the last consumer of a shader is now a
+    /// decision someone has to make out loud rather than a silence that survives for weeks.
+    ///
+    /// (The reverse direction — an `include_str!` naming a file that is gone — is checked below for
+    /// completeness, but rustc gets there first: removing a shader that is still included fails the
+    /// BUILD. Confirmed by moving `atmos.wgsl` aside and watching the compile go red.)
+    #[test]
+    fn every_shader_is_compiled_by_something() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut src = String::new();
+        super::material_property_tests::collect_rs(&root.join("crates/engine/src"), &mut src);
+
+        let mut orphans = Vec::new();
+        let mut shaders = Vec::new();
+        for entry in std::fs::read_dir(root.join("shaders"))
+            .expect("shaders/ exists")
+            .flatten()
+        {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "wgsl") {
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            shaders.push(name.clone());
+            if !src.contains(&format!("shaders/{name}")) {
+                orphans.push(name);
+            }
+        }
+        assert!(
+            !shaders.is_empty(),
+            "no shaders found — this gate is pointing at the wrong directory, which is worse than \
+             having no gate (verify a gate by making it fail)"
+        );
+        assert!(
+            orphans.is_empty(),
+            "these shaders are compiled by NOTHING: {orphans:?}. A shader in no `include_str!` is a \
+             feature that does not exist while reading as though it does — `sky.wgsl` was one for \
+             weeks (docs/46 row 41). Wire it up or delete it."
+        );
+
+        // The other direction: nothing may `include_str!` a shader that is gone.
+        for (i, _) in src.match_indices("shaders/") {
+            let rest = &src[i..];
+            let end = rest.find(".wgsl").map(|e| e + 5).unwrap_or(0);
+            if end == 0 {
+                continue;
+            }
+            let named = rest[..end].trim_start_matches("shaders/").to_string();
+            assert!(
+                shaders.contains(&named),
+                "an `include_str!` names shaders/{named}, which does not exist"
+            );
+        }
+    }
+}

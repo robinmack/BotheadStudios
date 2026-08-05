@@ -1,6 +1,6 @@
-import { launch, PORT, OUT } from './_launch.mjs';
+import { launch, PORT, OUT, VIEWPORT } from './_launch.mjs';
 const b = await launch();
-const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
+const p = await b.newPage({ viewport: VIEWPORT });
 await p.goto(`http://127.0.0.1:${PORT}/birth.html`, { waitUntil: 'load' });
 for (const t of [5, 10, 20, 35]) {
   await p.waitForTimeout(t === 5 ? 5000 : (t - (t === 10 ? 5 : t === 20 ? 10 : 20)) * 1000);

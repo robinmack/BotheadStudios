@@ -1,10 +1,10 @@
 // Rig: verify the canonical Sim HUD is identical (banner + window frame + universal sim line) across
 // terrain / space / birth, and that the scale bar reads metres on the surface vs km/AU in space.
-import { launch } from './_launch.mjs';
+import { launch, VIEWPORT } from './_launch.mjs';
 const out = process.env.OUT || '/tmp';
 const PORT = process.env.PORT || '5173';
 const browser = await launch();
-const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+const page = await browser.newPage({ viewport: VIEWPORT });
 page.on('console', (m) => { if (m.type() === 'error') console.log('PAGE-ERR', m.text()); });
 
 const grab = async (url, name, waitMs) => {

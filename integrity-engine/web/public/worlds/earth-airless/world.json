@@ -1,0 +1,64 @@
+{
+ "name": "Earth, airless",
+ "type": "planet",
+ "planet": {
+  "rotation_period_s": 86400,
+  "profile": "earth"
+ },
+ "atmosphere": {
+  "profile": "rayleigh",
+  "mass_kg": 0.0,
+  "composition": [
+   [
+    "air",
+    1.0
+   ]
+  ]
+ },
+ "camera": {
+  "mode": "fly",
+  "lat": 20,
+  "lon": 0,
+  "alt_m": 8000000,
+  "look": {
+   "yaw": 0,
+   "pitch": -1.2
+  },
+  "min_alt_m": 2,
+  "max_alt_m": 40000000
+ },
+ "controls": {
+  "keys": [
+   {
+    "code": "KeyW",
+    "action": "forward"
+   },
+   {
+    "code": "KeyS",
+    "action": "back"
+   },
+   {
+    "code": "KeyA",
+    "action": "left"
+   },
+   {
+    "code": "KeyD",
+    "action": "right"
+   },
+   {
+    "code": "KeyR",
+    "action": "up"
+   },
+   {
+    "code": "KeyF",
+    "action": "down"
+   }
+  ]
+ },
+ "time": {
+  "rotation": false,
+  "scale": 1
+ },
+ "body": "earth",
+ "$comment": "THE NEGATIVE CONTROL for the sky (docs/66). Identical to worlds/earth in every respect except that it declares ZERO kilograms of air, which world_def::Atmosphere documents as the airless case. A sky that is genuinely in-scattered sunlight must vanish here and take the soft terminator with it; a sky that is painted will not notice. Load it with terra.html?world=earth-airless."
+}

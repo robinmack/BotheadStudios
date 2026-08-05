@@ -3,6 +3,95 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-05 — Earth got a sky, and it is the air
+
+**What.** Robin, on where a sky belongs: *"Sky must be a component of Earth assembly, no"* — and on
+what should draw it: *"making ray-tracing work in the engine… It doesn't have to be very sophisticated
+ray tracing… Sun is close to a point source."* Both, in one integral. Design: [`docs/66`](docs/66-the-sky-is-the-air.md).
+
+★★ **The closed form was the wrong integral, not an approximate one.** `rayleigh_veil` is the analytic
+solution of ONE geometry — a slab seen from outside, looking down — where the sun path and the view path
+shorten together, which is the only reason it collapses. Stand on the ground and look up and that
+pairing inverts. (The orphaned `sky.wgsl` used it anyway, with `mu_v = ray.y`, which is also why it could
+only ever be a sky for a flat world.) So the law is now the marched integral,
+`atmosphere::air_inscatter`, mirrored line-for-line by `shaders/atmos.wgsl`, and **`rayleigh_veil` is its
+analytic special case** — kept, and used as the reference the march is pinned to (agreement **under 1%**
+in the plane-parallel limit). One law, and the geometry decides which face of it you see.
+
+Everything below falls out of that one integral. None of it is drawn on:
+
+- blue overhead, pale at the horizon — path length, band by band;
+- **red at sunset** — the blue is removed from the SUNLIGHT before it can scatter;
+- **twilight** — the low air sits in the planet's shadow while the air above it does not, which
+  **retires a declared number**: `twilight_half_angle`'s `sqrt(2H/R)` ramp existed because a flat slab
+  has no geometry that could produce twilight;
+- aerial perspective — the same integral, stopped at the surface point;
+- a glowing limb — rays that miss the ground still cross lit air.
+
+**Why it is a component of the body.** `AirColumn::of_body` is the only place a declared mass of air
+becomes optical depth and scale height, and both scenes hold one from the same body. `render::SkyVeil`
+draws what it is handed and has no opinion: hand it a body with no air and it draws nothing, with no
+branch — the Moon's black sky needs no code. **A scene gained no new verb** (the docs/65 ratchet is
+unchanged at 57).
+
+**Verified** — `web/rig/terra_sky.mjs`, 2560x1600 on the 5060 Ti, and **every claim is a difference
+against a frame that must not show the effect**. The control is a new world, `worlds/earth-airless`: the
+same Earth, same ground, same camera, **zero kilograms of air**.
+
+| | sky R/G/B | |
+|---|---|---|
+| noon, horizon | 69.0/121.7/215.2 | B/R **3.12** |
+| sunset | 74.4/80.0/63.6 | B/R **0.85** |
+| night | 2.7/2.9/3.6 | stars only |
+| **airless noon** | **2.7/2.9/3.6** | **stars only** |
+
+The daylit sky is blue and **it is the AIR** (zenith 52/95/185 with air, 2.7/3.0/3.7 with none, and the
+GROUND is still lit in the control — it removes the sky, not the sun); night has no sky; sunset reddens
+with nothing changed but the clock; distant ground is veiled by the air in front of it.
+
+**What the rig caught that I got wrong, twice.** (1) The first "sunset" frame was barely redder than
+noon, because at 53°N in June the sun is up 16½ hours and 90° of hour angle leaves it 20° high. The rig
+now computes the hour angle from `cos H0 = -tan(phi)tan(dec)` — the same relation `solar::day_length_hours`
+uses — rather than my guess. (2) An assertion demanding that the sunset be redder TOWARD the sun failed
+at 1.17 against 1.17, and **the assertion was the thing that was wrong**: in single scatter the reddening
+is set by the SUN's path length, which for a sun on the horizon is the same however you turn your head.
+Only the brightness varies across azimuth, through the phase function. Corrected in place with the
+reasoning, because a test that fails for a physical reason is evidence.
+
+★ **Stars now go out at dawn for the reason they really do.** The first sky frame had them plainly
+visible through blue daylight. The cause was not the air (at zenith it passes ~90% of the blue) — you
+cannot see a star in daylight because **the sky is brighter than it is**, and that is a statement about a
+SUM, which never happened because every pass tone-maps its own output. The star pass now evaluates the
+sky along its own ray with the same chunk and outputs `tonemap(L_sky + L_star*T)`, per band. What is left
+is recorded rather than tuned (**docs/46 row 43**): the star pass carries exposure 80 while everything
+else carries `SUN_GAIN = 22`, and at the daylight zenith the brightest pixel is **+128% above the sky
+mean** where a real one is ~0.01%.
+
+**Retired.** `veil_column_fraction` — the flagged stand-in that scaled a whole-column veil by
+`1 - e^(-h/H)`; at 1.7 m that is 2e-4, identical for every pixel however distant, so the ground came back
+**bit-identical with and without an atmosphere**. And the painted background: both scenes cleared to
+`0.01/0.01/0.03`, a declared dark blue with nothing emitting it, which was also the entire "black" sky
+the first night measurement read. Space is black.
+
+★★ **A shader nobody compiles is not a feature, and now a machine says so.**
+`laws::compiled_shader_tests::every_shader_is_compiled_by_something` is the gate that would have caught
+this in the first place — `sky.wgsl` sat orphaned for weeks while every atmosphere test passed, because
+they all asked whether the optics were right and none asked whether anything ran them (the docs/48
+pattern). It caught **two more orphans on its first run**: `rayleigh.wgsl`, orphaned minutes earlier by
+this change, and `particles.wgsl`, superseded by `matter.wgsl` in **July**. Both deleted.
+
+★ **The screenshot ceiling was mine.** Robin: *"your screen shots are pretty low res… I do want us to be
+able to verify high quality textures."* The render Xorg was configured `Virtual 1280 800` and the rig
+fleet had **eighteen different hardcoded viewports**, the smallest 480x320 — and the rigs that fill the
+public gallery were among the smallest. Now 2K (Robin's call), one shared `VIEWPORT` in
+`web/rig/_launch.mjs` with 43 rigs moved onto it at the same 16:10 aspect, and `start-render-xorg.sh`
+RESTARTS a server that is the wrong size instead of silently handing the next session a cap.
+
+**Owed** (docs/66 §9): a GPU pin for the WGSL mirror — it is a hand-copy, checked by reading, which is
+exactly the confidence level this project has learned not to trust; one exposure; a photographed limb
+(Terra's camera turns to look straight down above ~60 km, so it cannot be aimed at one); and tone-mapping
+ONCE into an HDR target, which is the deep version of the star fix.
+
 ## 2026-08-05 — the colour was never arriving, and Terra has no sky
 
 **What.** Two defects found by chasing one observation of Robin's — *"the engine seems to be rendering

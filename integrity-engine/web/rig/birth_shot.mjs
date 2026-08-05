@@ -11,13 +11,13 @@
 //
 // Captures a time series (pre-impact → strike → aftermath) so we can watch the disk form, not just a
 // single frame. Prints the on-screen #stats (the Sim HUD) at each mark.
-import { launch } from './_launch.mjs';
+import { launch, VIEWPORT } from './_launch.mjs';
 
 const PORT = process.env.PORT || '5173';
 const URL = process.env.URL || `http://127.0.0.1:${PORT}/birth.html`;
 const OUT = process.env.OUT || '/tmp';
 const b = await launch();
-const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
+const p = await b.newPage({ viewport: VIEWPORT });
 p.on('console', (m) => console.log('[page]', m.text()));
 p.on('pageerror', (e) => console.log('[pageerror]', e.message));
 const stat = async () => (await p.locator('#stats').innerText().catch(() => '')).replace(/\s+/g, ' ').trim();

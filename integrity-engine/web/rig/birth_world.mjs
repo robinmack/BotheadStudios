@@ -1,8 +1,8 @@
 // Birth of the Moon must now come from /worlds/birth/world.json (docs/51). Verifies the file is actually
 // FETCHED and ACCEPTED (not silently falling back to the compiled defaults), and that the scene renders.
-import { launch, PORT, OUT } from './_launch.mjs';
+import { launch, PORT, OUT, VIEWPORT } from './_launch.mjs';
 const b = await launch();
-const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
+const p = await b.newPage({ viewport: VIEWPORT });
 const errs = []; const fetched = [];
 p.on('pageerror', e => errs.push(e.message));
 p.on('console', m => { const t = m.text(); if (/rejected|failed/i.test(t)) errs.push(t); });

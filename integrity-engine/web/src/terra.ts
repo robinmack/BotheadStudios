@@ -31,7 +31,16 @@ function sizeCanvas(canvas: HTMLCanvasElement): void {
 
 async function main(): Promise<void> {
   report("info", `build ${__BUILD_ID__}`);
-  const worldUrl = withBase(document.body.getAttribute("data-world") ?? "/worlds/earth/world.json");
+  // Which world this page is. `?world=<name>` overrides the page's own `data-world`, which is what
+  // makes a CONTROL possible: the same page, the same ground, the same camera, a different declared
+  // body — e.g. `?world=earth-airless` to check that a sky which claims to be scattered sunlight
+  // actually disappears when the air does. Restricted to a bare name so the parameter can only ever
+  // select a world that ships with the site.
+  const wanted = new URLSearchParams(location.search).get("world");
+  const named = wanted && /^[a-z0-9-]+$/.test(wanted) ? `/worlds/${wanted}/world.json` : null;
+  const worldUrl = withBase(
+    named ?? document.body.getAttribute("data-world") ?? "/worlds/earth/world.json",
+  );
 
   const canvas = document.getElementById("gpu-canvas") as HTMLCanvasElement | null;
   if (!canvas) {
