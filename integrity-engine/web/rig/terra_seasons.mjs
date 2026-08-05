@@ -17,6 +17,10 @@ const SITES = [
   ['maine', 45.3, -69.0],
   ['ireland', 53.1, -9.45],
   ['serengeti', -2.3, 34.8],
+  // ★ NEGATIVE CONTROL. Barren: sand + granite, no senescent state anywhere in the mixture. Any R:G
+  // trend HERE is the sun's own elevation changing through the year, not the ground — which is exactly
+  // the confound that made an earlier reading of this rig wrong (docs/46 row 41).
+  ['sahara-control', 23.0, 10.0],
 ];
 // Unix seconds: the solstices and the turn between them.
 const DATES = [

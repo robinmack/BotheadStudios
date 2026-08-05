@@ -102,13 +102,21 @@ fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     // why the ground read as a uniform wash from standing height however much relief was under it. The
     // texture array was bound here the whole time and never sampled.
     //
-    // The texture already IS this material's albedo (generated from the cited optical properties), so it
-    // REPLACES `i.col` rather than tinting it — multiplying would square the albedo and darken every
-    // surface. `i.col` remains the fallback where a material has no layer, and the two agree by
-    // construction at distance: the mip chain averages the texture back to the flat albedo, so orbit looks
-    // exactly as it did and grain only appears once the camera is close enough to resolve it.
+    // The texture IS this material's albedo, so multiplying by a second albedo would square it. It used
+    // to REPLACE `i.col` for that reason — and that quietly threw the vertex colour away entirely.
+    //
+    // ★★ WHY THAT MATTERED, measured by mutation 2026-08-04: setting every land vertex to MAGENTA
+    // changed nothing on screen. The ground is a MIXTURE of materials (a woody savanna is 45% tree,
+    // 35% grass, 20% dirt) and it has a SEASON, and both were being computed per vertex and discarded
+    // — the shader drew one material's texture and nothing else. It also means a seasonal measurement
+    // taken from these frames was measuring the sun's elevation, not the leaves (docs/46 row 41).
+    //
+    // So `i.col` now arrives as a RATIO — the mixture's seasonal albedo divided by the dominant
+    // material's own flat albedo — and the texture supplies the DETAIL about that mean. At a uniform
+    // class the ratio is 1 and this is bit-identical to what it replaced; where the class is a mixture
+    // the grain is the dominant material's and the colour is everything standing there.
     let grain = surface_albedo_triplanar(i.wpos + u.emissive.xyz, n, i.mat, GLOBE_TEX_SCALE);
-    let albedo = grain * u.tint.rgb;
+    let albedo = grain * i.col * u.tint.rgb;
     var radiance = albedo * (ndl * SUN_GAIN);
     // **The body's own heat.** A surface hot enough to glow emits regardless of where the Sun is, so this
     // is added on BOTH sides of the terminator — which is the physics: proto-Earth's 1,900 K magma ocean

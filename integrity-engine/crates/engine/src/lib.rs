@@ -7930,11 +7930,25 @@ mod app {
                             ..point
                         }
                     } else {
-                        crate::terra::globe_mesh::SurfaceSample {
-                            albedo: a.albedo,
-                            offset: off,
-                            material: a.material as u32,
-                            rough: a.sigma_rad() as f32,
+                        {
+                            // The appearance integral already averaged the MIXTURE over this
+                            // footprint. Hand it over as a ratio against the dominant material, for
+                            // the same reason the sampler does: the shader multiplies by that
+                            // material's own texture, and two albedos multiplied is an albedo squared.
+                            let base = mats[a.material].albedo;
+                            let r = |i: usize| {
+                                if base[i] > 1e-6 {
+                                    a.albedo[i] / base[i]
+                                } else {
+                                    1.0
+                                }
+                            };
+                            crate::terra::globe_mesh::SurfaceSample {
+                                albedo_ratio: [r(0), r(1), r(2)],
+                                offset: off,
+                                material: a.material as u32,
+                                rough: a.sigma_rad() as f32,
+                            }
                         }
                     }
                 };
