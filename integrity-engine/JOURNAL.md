@@ -3,6 +3,46 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-05 — the colour was never arriving, and Terra has no sky
+
+**What.** Two defects found by chasing one observation of Robin's — *"the engine seems to be rendering
+the color without taking available light into account… Grass shouldn't be apparently brighter than
+everything else at night, right?"*
+
+★★★ **The vertex colour never reached the picture.** `globe.wgsl` computed `albedo = grain * u.tint`,
+where `grain` is the dominant material's triplanar texture; `i.col` appeared in that shader **only
+inside comments**. So the land-cover MIXTURE and the SEASON were computed per vertex and discarded.
+Proved by mutation rather than by reading: every land vertex set to magenta changed nothing on screen.
+After the fix, the same mutation turns the ground magenta.
+
+The fix is not "multiply by the colour" — the texture already IS the material's albedo and multiplying
+two squares it, which is precisely why the value had been dropped. The vertex now carries a **ratio**:
+the mixture's seasonal albedo over the dominant material's flat albedo. `SurfaceSample::albedo` became
+`albedo_ratio`, and the rename made the compiler find all four producers — one of which I would have
+missed.
+
+★★ **This retracted yesterday's headline.** *"Ireland turns"* was reported from an R:G shift across
+Jun–Dec. With the colour discarded, that cannot have been the leaves: it was the sun's own elevation at
+45°N (≈68° in June, 21° in December) reddening through the atmosphere. A **negative control** is now
+part of the rig — the Sahara, which has no senescent material at all — and it is damning: with colour
+now arriving the Sahara shifts **+0.0199** across the year against Ireland's **+0.0150**. A place that
+cannot turn moves more than a place that can. The seasonal signal is real in the material and smaller
+than the lighting confound in the picture.
+
+★★★ **And Terra has no sky.** `shaders/sky.wgsl` is compiled by nothing — absent from every
+`include_str!`. Its header says *"for the terrain scene"*; that scene died in July and its successor
+died on the 3rd. Terra lights the ground correctly and veils it, but the sky region falls through to
+the star field, so a daylight frame near the ground is lit grass under a black starfield. That contrast
+is what read as luminous grass. Measured: the night side IS correctly near-black and identical over
+sand, forest and open ocean.
+
+**Robin's framing for the fix, and it is the design**: *"Sky must be a component of Earth assembly."*
+The atmosphere is matter Earth already declares; the engine should render what that matter does to
+light rather than a scene owning a sky.
+
+**Verified.** 550/550 native, `mod app` clean for wasm32, deployed. Permissions widened 42 → 97 rules;
+blanket `sudo:*` deliberately excluded in favour of the specific host operations that were authorised.
+
 ## 2026-08-04 — Ireland turns, and the Serengeti turns the other way
 
 **What.** The seasons reach the ground. Measured R:G of the ground through the year, on the 5060 Ti:
