@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="description" content="Rig shots from the Integrity engine — newest first." />
+    <title>Integrity · shots</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <style>
+      /* Same palette as the rest of the site, inlined for the same reason: styling must never fail. */
+      :root {
+        --ink: #06080d; --ink-1: #0a0e17; --ink-2: #0e1420;
+        --hair: rgba(143,182,217,.13); --hair-2: rgba(143,182,217,.26);
+        --steel: #8fb6d9; --steel-dim: #5f748e; --text: #b4c3d9; --bright: #eef4fd; --amber: #ffb24c;
+        --shell: min(1400px, 94vw);
+        --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+      }
+      * { box-sizing: border-box; }
+      body { margin:0; background:var(--ink); color:var(--text); font-family:var(--mono); font-size:14px; }
+      a { color: var(--amber); }
+      .wrap { width: var(--shell); margin: 0 auto; }
+      header {
+        border-bottom:1px solid var(--hair-2); padding:16px 0; position:sticky; top:0;
+        background:rgba(6,8,13,.94); backdrop-filter:blur(8px); z-index:5;
+      }
+      header .wrap { display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; }
+      .brand { color:var(--bright); font-weight:700; letter-spacing:.08em; }
+      .count { color:var(--steel-dim); font-size:12px; }
+      header nav { margin-left:auto; display:flex; gap:14px; }
+      header nav a { color:var(--steel); text-decoration:none; font-size:13px; }
+      h1 { font-family:system-ui,sans-serif; color:var(--bright); font-size:22px; margin:28px 0 4px; }
+      .lede { color:var(--steel); margin:0 0 20px; max-width:74ch; }
+      .grid { display:grid; gap:14px; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); padding-bottom:60px; }
+      figure { margin:0; background:var(--ink-1); border:1px solid var(--hair); border-radius:8px; overflow:hidden; cursor:zoom-in; }
+      figure img { display:block; width:100%; height:150px; object-fit:cover; background:var(--ink-2); }
+      figcaption { padding:7px 9px; font-size:11.5px; color:var(--steel); word-break:break-all; line-height:1.45; }
+      figcaption .when { color:var(--steel-dim); display:block; margin-top:2px; }
+      .group { grid-column:1/-1; color:var(--steel-dim); font-size:11px; letter-spacing:.16em;
+               text-transform:uppercase; border-bottom:1px solid var(--hair); padding:14px 0 5px; margin-top:8px; }
+      /* the lightbox */
+      #box { position:fixed; inset:0; background:rgba(4,6,10,.96); display:none; z-index:50;
+             align-items:center; justify-content:center; padding:44px 16px 16px; }
+      #box.on { display:flex; }
+      #box img { max-width:100%; max-height:100%; object-fit:contain; image-rendering:pixelated; }
+      #close { position:fixed; top:10px; right:14px; z-index:51; font:600 14px var(--mono);
+               color:var(--bright); background:rgba(20,24,40,.85); border:1px solid var(--hair-2);
+               border-radius:999px; padding:8px 16px; cursor:pointer; }
+      #close:hover { border-color:var(--amber); color:var(--amber); }
+      #boxcap { position:fixed; bottom:12px; left:0; right:0; text-align:center; color:var(--steel-dim); font-size:12px; }
+      .empty { color:var(--steel-dim); padding:30px 0; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="wrap">
+        <span class="brand">INTEGRITY</span>
+        <span class="count" id="count"></span>
+        <nav>
+          <a href="/">Home</a><a href="/architecture.html">Architecture</a>
+          <a href="/terra.html">Earth</a><a href="/yarr.html">Yarrr!</a>
+        </nav>
+      </div>
+    </header>
+
+    <main class="wrap">
+      <h1>Rig shots</h1>
+      <p class="lede">
+        What the engine actually drew, newest first — the frames the rigs photograph on the GPU. Click a
+        thumbnail to open it full size. Published without rebuilding the site, so these can be refreshed
+        between deployments.
+      </p>
+      <div class="grid" id="grid"><p class="empty">loading…</p></div>
+    </main>
+
+    <button id="close" hidden>✕ close</button>
+    <div id="box"><img id="boximg" alt="" /></div>
+    <div id="boxcap" hidden></div>
+
+    <script type="module">
+      const grid = document.getElementById("grid");
+      const box = document.getElementById("box");
+      const boximg = document.getElementById("boximg");
+      const closeBtn = document.getElementById("close");
+      const boxcap = document.getElementById("boxcap");
+
+      const open = (src, label) => {
+        boximg.src = src;
+        boximg.alt = label;
+        boxcap.textContent = label;
+        box.classList.add("on");
+        closeBtn.hidden = false;
+        boxcap.hidden = false;
+      };
+      const shut = () => {
+        box.classList.remove("on");
+        closeBtn.hidden = true;
+        boxcap.hidden = true;
+        boximg.removeAttribute("src");
+      };
+      closeBtn.addEventListener("click", shut);
+      box.addEventListener("click", shut);
+      // Escape closes it too — a modal you can only leave with the mouse is a trap.
+      addEventListener("keydown", (e) => { if (e.key === "Escape") shut(); });
+
+      const ago = (ms) => {
+        const s = (Date.now() - ms) / 1000;
+        if (s < 90) return "just now";
+        if (s < 5400) return `${Math.round(s / 60)} min ago`;
+        if (s < 172800) return `${Math.round(s / 3600)} h ago`;
+        return `${Math.round(s / 86400)} days ago`;
+      };
+
+      // The manifest is written by `scripts/publish-shots.sh`; the dev server serves one too.
+      // ★ A 200 IS NOT A MANIFEST. Both nginx and the dev server fall back to index.html for a
+      // missing path, so `res.ok` is true and `res.json()` then dies on "<!doctype". Check what
+      // actually arrived — this exact trap has now cost this project three times in one day.
+      const res = await fetch("/shots/manifest.json", { cache: "no-store" }).catch(() => null);
+      const looksJson = res && res.ok && (res.headers.get("content-type") || "").includes("json");
+      if (!looksJson) {
+        grid.innerHTML =
+          '<p class="empty">No manifest published yet — run <code>scripts/publish-shots.sh</code>. ' +
+          '(If you just published, the dev server may need a restart to notice a new folder.)</p>';
+      } else {
+        const shots = await res.json();
+        document.getElementById("count").textContent =
+          `${shots.length} shot${shots.length === 1 ? "" : "s"}`;
+        if (!shots.length) {
+          grid.innerHTML = '<p class="empty">Nothing published yet.</p>';
+        } else {
+          grid.innerHTML = "";
+          let lastGroup = null;
+          for (const s of shots) {
+            // Group by run, so a descent ladder or an A/B reads as one thing.
+            const group = s.group || "shots";
+            if (group !== lastGroup) {
+              const h = document.createElement("div");
+              h.className = "group";
+              h.textContent = group;
+              grid.appendChild(h);
+              lastGroup = group;
+            }
+            const fig = document.createElement("figure");
+            const img = document.createElement("img");
+            img.loading = "lazy";
+            img.src = s.url;
+            img.alt = s.name;
+            const cap = document.createElement("figcaption");
+            cap.textContent = s.name;
+            const when = document.createElement("span");
+            when.className = "when";
+            when.textContent = ago(s.mtime_ms);
+            cap.appendChild(when);
+            fig.append(img, cap);
+            fig.addEventListener("click", () => open(s.url, s.name));
+            grid.appendChild(fig);
+          }
+        }
+      }
+    </script>
+  </body>
+</html>

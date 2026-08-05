@@ -1,29 +1,28 @@
-# Rust
-/target
-**/target
-*.rs.bk
-# NOTE: Cargo.lock IS tracked — this produces a browser app/binary, so a locked,
-# reproducible dependency set is what we want.
 
-# WASM build output
-/web/src/wasm/
-/pkg
-**/pkg
-
-# Node / web
+.DS_Store
+# Editor / OS
+.idea/
+*.log
 node_modules/
+# Node / web
+# NOTE: Cargo.lock IS tracked — this produces a browser app/binary, so a locked,
+npm-debug.log*
+**/pkg
+/pkg
+__pycache__/
+# reproducible dependency set is what we want.
+*.rs.bk
+# Rust
+/shots/
+shots/
+*.swp
+**/target
+/target
+.vscode/
+# WASM build output
 /web/dist/
 /web/node_modules/
-*.log
-npm-debug.log*
-
-# Editor / OS
-.DS_Store
-.idea/
-.vscode/
-*.swp
-web/shots/
-/shots/
-__pycache__/
-shots/
 web/node_modules
+web/public/shots/
+web/shots/
+/web/src/wasm/

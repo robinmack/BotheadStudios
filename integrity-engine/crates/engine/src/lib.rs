@@ -5770,6 +5770,16 @@ mod app {
         cannon_uni: Option<UniformSlot>,
         /// Where the gun stands: (lat, lon, bearing). The scene's whole contribution — placement.
         cannon_at: Option<(f64, f64, f64)>,
+        /// **The plants standing near the eye, as one mesh.** Rebuilt only when the ground under the
+        /// camera has actually moved, the same rule the segment uses: re-derive when re-deriving would
+        /// change something.
+        flora_gpu: Option<GpuMesh>,
+        flora_uni: Option<UniformSlot>,
+        flora_kinds: Vec<crate::terra::flora::Kind>,
+        /// Where the current flora mesh was built for, and how many plants are in it.
+        flora_at: Option<(f64, f64, usize)>,
+        /// Where the flora mesh's vertices are measured FROM (display units).
+        flora_anchor: glam::DVec3,
         segment_verts: Vec<Vertex>,
         /// What the segment's mesh currently HOLDS — the same cache-of-the-view rule the ground tiers use
         /// (`ground_cap::tier_is_current`), on the one mesh instead of a ladder of them. The LIFT term is
@@ -6004,6 +6014,33 @@ mod app {
                     )),
                 )
             };
+            // **The plants the engine knows how to grow.** Their crown footprints are read off the
+            // assemblies themselves, so the density that follows cannot drift from what is drawn.
+            let flora_kinds = {
+                let mk = |txt: &str, foliage: &str| {
+                    let a = crate::assembly::compiled::parse(txt);
+                    crate::terra::flora::Kind::from_assembly(&a, foliage)
+                };
+                vec![
+                    mk(
+                        crate::assembly::compiled::BROADLEAF_TREE_OAK,
+                        "broadleaf_foliage",
+                    ),
+                    mk(
+                        crate::assembly::compiled::CONIFER_TREE_SPRUCE,
+                        "conifer_foliage",
+                    ),
+                    mk(crate::assembly::compiled::GRASS_TUFT, "grass"),
+                ]
+            };
+            let flora_uni = Some(make_space_uniform(
+                &device,
+                &bind_layout,
+                &tex_view,
+                &normal_view,
+                &sampler,
+            ));
+
             let shell_count = 4096; // ~2.8° grain spacing — resolves continents/biomes (Phase 2, grain shell)
             let shell_unis: Vec<UniformSlot> = (0..shell_count)
                 .map(|_| {
@@ -6073,7 +6110,12 @@ mod app {
                 segment_gpu,
                 cannon_gpu,
                 cannon_uni,
+                flora_kinds,
+                flora_uni,
                 cannon_at: None,
+                flora_gpu: None,
+                flora_at: None,
+                flora_anchor: glam::DVec3::ZERO,
                 segment_uni,
                 segment_built: None,
                 surface_loaded: false,
@@ -7059,6 +7101,7 @@ mod app {
             }
 
             let ground_disp = self.ground_disp_at(self.fly.lat, self.fly.lon);
+            self.build_flora();
             // An externally supplied pose is the authority when there is one; otherwise the fly camera.
             // (docs/59 observer/universe, PR #81 — Sean's branch predates it and dropped the whole arm.)
             let view = match self.cam_pose {
@@ -7391,6 +7434,16 @@ mod app {
                             draw(&mut pass, uni, gpu);
                         }
                     }
+                    // **The plants standing near the eye.** Same surface pipeline the ground and the
+                    // gun use — a tree is matter with a shape, not a special kind of thing.
+                    if let (Some(gpu), Some(uni)) =
+                        (self.flora_gpu.as_ref(), self.flora_uni.as_ref())
+                    {
+                        if self.flora_at.is_some_and(|(_, _, n)| n > 0) {
+                            pass.set_pipeline(&self.globe_pipeline);
+                            draw(&mut pass, uni, gpu);
+                        }
+                    }
                 } else {
                     pass.set_pipeline(&self.pipeline);
                     for uni in self.shell_unis.iter() {
@@ -7536,6 +7589,138 @@ mod app {
                 |lat, lon| self.ground_disp_at(lat, lon) / ds,
             );
             resolved * ds
+        }
+
+        /// **Resolve the plants standing near the eye into geometry** — the near half of Law IV.
+        ///
+        /// Robin (2026-08-04): *"These are hues at altitude but must become realistic flora at very low
+        /// altitude."* Above `FLORA_ALT_M` a footprint answers with its mixture's albedo and nothing is
+        /// instantiated; below it the same footprint answers with the plants themselves. **The plants
+        /// were always there** — necessity decides what is RESOLVED, the camera only decides what is
+        /// drawn (Law III/IV), and the scatter is derived from position so looking away cannot move a
+        /// single one.
+        ///
+        /// The scene says nothing about any of this. It named Earth; the land cover says what grows.
+        fn build_flora(&mut self) {
+            /// Above this the plants are smaller than a pixel and the ground's albedo IS the answer.
+            /// Not a style choice: at 300 m a 0.35 m tuft subtends about a thousandth of a radian, well
+            /// under one pixel of a 60-degree frame, so resolving it could not change the picture.
+            const FLORA_ALT_M: f64 = 300.0;
+            /// How much matter may stand at once (Law III: the minimal necessary, not all in sight).
+            const FLORA_BUDGET: usize = 1200;
+
+            let alt = self.fly.alt_m;
+            if alt > FLORA_ALT_M || self.landcover.is_none() || self.flora_kinds.is_empty() {
+                self.flora_at = None;
+                return;
+            }
+            // Rebuild only when the ground under the eye has actually moved — the segment's own rule.
+            let (lat, lon) = (self.fly.lat, self.fly.lon);
+            if let Some((blat, blon, _)) = self.flora_at {
+                let moved_m = ((lat - blat).powi(2) + (lon - blon).powi(2)).sqrt() * 111_320.0;
+                if moved_m < 2.0 {
+                    return;
+                }
+            }
+            // What a viewer at this altitude can actually resolve: the horizon is far, but a tuft is
+            // sub-pixel long before that. Scale the radius with altitude and cap it.
+            let radius_m = (alt * 8.0).clamp(6.0, 120.0);
+            let mats = &self.mats;
+            let biome_mix = &self.biome_mix;
+            let landcover = self.landcover.as_ref();
+            let sited = crate::terra::flora::scatter(
+                lat,
+                lon,
+                radius_m,
+                &self.flora_kinds,
+                mats,
+                |la, lo| {
+                    let class = landcover.map_or(0, |r| r.biome_at(la, lo) as usize);
+                    biome_mix.get(class).cloned().unwrap_or_default()
+                },
+                FLORA_BUDGET,
+            );
+            if sited.is_empty() {
+                self.flora_at = Some((lat, lon, 0));
+                return;
+            }
+            // One mesh for the lot: each plant's own assembly mesh, moved to where it stands. The
+            // vertices are CAMERA-RELATIVE like every other draw in this scene.
+            let ds = display_scale();
+            let r_disp = self.planet_radius * ds;
+            // ★ Vertices are built about a LOCAL ANCHOR — the surface point under the camera — not
+            // about the eye, and not in absolute space. Absolute f32 at Earth's radius has ~0.6 m ULP,
+            // which is larger than the plants; and building about the EYE bakes in whichever eye
+            // happened to be current, so the patch sits wherever the camera was when it was last
+            // rebuilt. The anchor is stored and the per-frame model matrix is `translate(anchor - eye)`,
+            // exactly as the segment does it.
+            let anchor_m = crate::geo::dir_from_lat_lon(lat, lon)
+                * (self.planet_radius + self.ground_disp_at(lat, lon) / ds);
+            let eye = anchor_m * ds;
+            let mut combined = crate::mesher::Mesh {
+                vertices: Vec::new(),
+                indices: Vec::new(),
+            };
+            let meshes: Vec<crate::mesher::Mesh> = self
+                .flora_kinds
+                .iter()
+                .map(|k| {
+                    let txt = match k.assembly_id.as_str() {
+                        "broadleaf-tree-oak" => crate::assembly::compiled::BROADLEAF_TREE_OAK,
+                        "conifer-tree-spruce" => crate::assembly::compiled::CONIFER_TREE_SPRUCE,
+                        _ => crate::assembly::compiled::GRASS_TUFT,
+                    };
+                    crate::assembly::compiled::parse(txt).mesh(mats, 6)
+                })
+                .collect();
+            for s in &sited {
+                let m = &meshes[s.kind];
+                let ground = r_disp + self.ground_disp_at(s.lat_deg, s.lon_deg);
+                let model = crate::assembly::place_on_surface(
+                    s.lat_deg,
+                    s.lon_deg,
+                    s.yaw.to_degrees(),
+                    ground,
+                    ds * s.scale,
+                    eye,
+                )
+                .as_mat4();
+                let base = combined.vertices.len() as u32;
+                for v in &m.vertices {
+                    let p = model.transform_point3(glam::Vec3::from(v.pos));
+                    let n = model
+                        .transform_vector3(glam::Vec3::from(v.nrm))
+                        .normalize_or_zero();
+                    let mut nv = *v;
+                    nv.pos = p.into();
+                    nv.nrm = n.into();
+                    combined.vertices.push(nv);
+                }
+                combined.indices.extend(m.indices.iter().map(|i| i + base));
+            }
+            let gpu = make_dynamic_mesh(
+                &self.device,
+                "terra-flora",
+                combined.vertices.len(),
+                &combined.indices,
+            );
+            self.queue
+                .write_buffer(&gpu.vertex_buf, 0, bytemuck::cast_slice(&combined.vertices));
+            log::info!(
+                "flora: {} plants resolved within {:.0} m at {:.0} m altitude ({} tris)",
+                sited.len(),
+                radius_m,
+                alt,
+                combined.indices.len() / 3
+            );
+            self.flora_gpu = Some(gpu);
+            self.flora_anchor = anchor_m * ds;
+            self.flora_at = Some((lat, lon, sited.len()));
+        }
+
+        /// How many plants are standing right now — a read, for rigs and the HUD.
+        pub fn flora_count(&self) -> u32 {
+            self.flora_at.map_or(0, |(_, _, n)| n as u32)
         }
 
         /// **Build the ONE surface segment** (docs/63) — the collapse of globe + cap into a single mesh.
@@ -7805,6 +7990,27 @@ mod app {
                     self.air(),
                     [0.0, 0.0, 0.0, 0.0],
                 );
+            }
+            // **The plants.** Their vertices are measured from a local anchor, so the per-frame model
+            // matrix carries them to camera-relative space — the same thing the segment does, and for
+            // the same two reasons: f32 has ~0.6 m ULP at Earth's radius, and a mesh built about one
+            // eye is wrong for every other.
+            if let (Some(uni), Some((_, _, n))) = (self.flora_uni.as_ref(), self.flora_at) {
+                if n > 0 {
+                    let model =
+                        glam::DMat4::from_translation(self.flora_anchor - view.eye).as_mat4();
+                    write_space_uniform(
+                        &self.queue,
+                        uni,
+                        view.vp_rel,
+                        model,
+                        sun_light,
+                        [1.0, 1.0, 1.0, 1.0],
+                        [anchor.x, anchor.y, anchor.z, self.veil_column_fraction()],
+                        self.air(),
+                        [0.0, 0.0, 0.0, 0.0],
+                    );
+                }
             }
             if let Some(uni) = self.segment_uni.as_ref() {
                 let model = glam::DMat4::from_translation(built.anchor - view.eye).as_mat4();

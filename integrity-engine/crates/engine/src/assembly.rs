@@ -144,6 +144,20 @@ pub struct Part {
     /// Material id into `data/materials.json`.
     pub material: String,
     pub shape: Shape,
+    /// **Which way this part POINTS**, a unit vector in the assembly's own frame. Default `+X`.
+    ///
+    /// ★ Added 2026-08-04, and it was overdue in two independent places. A cylinder was always built
+    /// along X because the first assembly was a CANNON and a barrel points along X — so the first tree
+    /// came out as a trunk lying flat on the ground, invisible, and the tufts of grass with it. A part
+    /// having a position but no direction is the same gap `docs/46` row 30 names for wood: *"a PART has
+    /// no grain DIRECTION at all, so even a reader of those fields would not know which way the plank
+    /// runs"*. Orthotropic strength needs exactly this vector, and so do rolled steel, composite layup
+    /// and bedded sandstone.
+    ///
+    /// Defaulting to `+X` leaves every existing assembly bit-identical, which is why the cannon's
+    /// thirteen parts did not have to change.
+    #[serde(default = "along_x")]
+    pub along: [f64; 3],
     /// Centre of the part, in the assembly's own frame, metres.
     #[serde(default)]
     pub at_m: [f64; 3],
@@ -170,6 +184,10 @@ pub struct Part {
 /// serde default for [`Part::packing`] — solid unless stated.
 fn one() -> f64 {
     1.0
+}
+
+fn along_x() -> [f64; 3] {
+    [1.0, 0.0, 0.0]
 }
 
 impl Part {
@@ -408,11 +426,21 @@ impl Assembly {
                     col,
                 ),
             };
+            // **Point the part the way it says it points.** The primitives are all built along +X
+            // (the cannon's barrel came first), so this rotates +X onto `along` before placing. A tree
+            // whose trunk runs along +Y was otherwise a stick lying flat on the ground.
+            let along = glam::DVec3::from(p.along).normalize_or(glam::DVec3::X);
+            let rot = glam::DMat3::from_quat(glam::DQuat::from_rotation_arc(glam::DVec3::X, along));
             let base = out.vertices.len() as u32;
             for mut v in part.vertices {
-                v.pos[0] += p.at_m[0] as f32;
-                v.pos[1] += p.at_m[1] as f32;
-                v.pos[2] += p.at_m[2] as f32;
+                let q = rot * glam::DVec3::new(v.pos[0] as f64, v.pos[1] as f64, v.pos[2] as f64);
+                let n = rot * glam::DVec3::new(v.nrm[0] as f64, v.nrm[1] as f64, v.nrm[2] as f64);
+                v.pos = [
+                    (q.x + p.at_m[0]) as f32,
+                    (q.y + p.at_m[1]) as f32,
+                    (q.z + p.at_m[2]) as f32,
+                ];
+                v.nrm = [n.x as f32, n.y as f32, n.z as f32];
                 out.vertices.push(v);
             }
             out.indices
@@ -500,6 +528,14 @@ pub mod compiled {
         include_str!("../../../assets/assemblies/compiled/charge-24pdr-service.json");
     pub const ROUND_SHOT_24PDR: &str =
         include_str!("../../../assets/assemblies/compiled/round-shot-24pdr.json");
+
+    /// **The plants**, so a scene that names Earth gets what grows on it without fetching anything.
+    pub const BROADLEAF_TREE_OAK: &str =
+        include_str!("../../../assets/assemblies/compiled/broadleaf-tree-oak.json");
+    pub const CONIFER_TREE_SPRUCE: &str =
+        include_str!("../../../assets/assemblies/compiled/conifer-tree-spruce.json");
+    pub const GRASS_TUFT: &str =
+        include_str!("../../../assets/assemblies/compiled/grass-tuft.json");
 
     /// Parse a baked assembly. Panics on malformed input, because a compiled asset that does not parse
     /// is a build error wearing a runtime error's clothes.
@@ -612,6 +648,7 @@ mod tests {
             connections: vec![],
             parts: vec![
                 Part {
+                    along: along_x(),
                     name: "breech".into(),
                     material: "gunmetal".into(),
                     shape: Shape::Cylinder {
@@ -622,6 +659,7 @@ mod tests {
                     packing: 1.0,
                 },
                 Part {
+                    along: along_x(),
                     name: "chase".into(),
                     material: "gunmetal".into(),
                     shape: Shape::Tube {
@@ -669,6 +707,7 @@ mod tests {
             connections: vec![],
             parts: vec![
                 Part {
+                    along: along_x(),
                     name: "barrel".into(),
                     material: "gunmetal".into(),
                     shape: Shape::Cylinder {
@@ -679,6 +718,7 @@ mod tests {
                     packing: 1.0,
                 },
                 Part {
+                    along: along_x(),
                     name: "bed".into(),
                     material: "oak".into(),
                     shape: Shape::Slab {
