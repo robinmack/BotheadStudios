@@ -3,6 +3,49 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-04 — Ireland turns, and the Serengeti turns the other way
+
+**What.** The seasons reach the ground. Measured R:G of the ground through the year, on the 5060 Ti:
+
+| site | Jun | Sep | Oct | Dec | |
+|---|---|---|---|---|---|
+| Maine | 0.6886 | 0.6908 | 0.6939 | **0.7005** | reddens → autumn |
+| Ireland | 0.6855 | 0.6879 | 0.6904 | **0.6984** | reddens → autumn |
+| Serengeti | 0.6875 | 0.6901 | 0.6867 | **0.6855** | greens → spring |
+
+**Nothing told the Serengeti to run backwards.** At 2.3°S its December is its growing season, and that
+falls out of the axial tilt through the solar declination — the same declination the terminator is drawn
+with. Hue rather than luminance, because at 45°N the noon sun drops from ~68° to ~21° between June and
+December and brightness is dominated by the sun's own elevation.
+
+**Why it works now.** Three things landed in order: real land cover, mixtures, and a clock.
+
+★ **The land cover was one wrong string.** `bake.py` asked GIBS for a layer that does not exist, GIBS
+answered **HTTP 200 with an XML error body**, and the `except` reported *"GIBS land cover unavailable"*
+before falling back to six invented latitude bands — for months. `landcover.png` is now 18 MEASURED
+MODIS IGBP classes at a 100% exact palette decode. Galway is grassland; it was never boreal conifer, and
+that is precisely why it could not turn.
+
+★★ **A land-cover class is a MIXTURE.** IGBP classes are definitionally mixtures — *woody savanna* is
+30–60% tree over grass — so `Surface::biomes` went from class→material to class→[(material, fraction)],
+with fractions read off the IGBP cover thresholds at the midpoint of each stated range. `aggregate_
+albedo_turned` gives a mixture its season: a mixed forest turns partly and stays partly evergreen.
+
+★★★ **Two guards earned their keep, and one refused to ship a lie.** The palette decode used int16 and
+overflowed — a 255 channel difference squares to 65,025 against int16's 32,767 and wraps negative, so
+the exact-match rate read **1.8% for a raster whose every pixel is an exact legend colour**. The decode
+guard refused it rather than shipping a plausible-looking biome map. And `fetch` had *cached the 460-byte
+XML failure*, re-serving it after the layer name was fixed.
+
+**Verified.** 543/543 native, `mod app` clean for wasm32, rig-watched. Honest about size: the seasonal
+shift is measurable and monotone but visually subtle — broadleaf is 0.45 of that class, and the
+canopy-versus-leaf gap (ledger row 35) flattens it further.
+
+★ **And Robin's question found a real defect**: *"I'm not sure we have a tilted axis yet?"* Half yes.
+`orbit.rs` carries the real 23.439° obliquity, which is why all of the above works; but `lib.rs` builds
+the space band's Earth with its spin axis PERPENDICULAR to its orbit. One body, two axial tilts
+(row 39).
+
 ## 2026-08-03 — a leaf is not a plank: colour derived from measured spectra
 
 **What.** Ireland stopped rendering as cut lumber. `earth.json` mapped land-cover class 3 to `pine` —
