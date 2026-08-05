@@ -112,52 +112,57 @@
         return `${Math.round(s / 86400)} days ago`;
       };
 
-      // The manifest is written by `scripts/publish-shots.sh`; the dev server serves one too.
-      // ★ A 200 IS NOT A MANIFEST. Both nginx and the dev server fall back to index.html for a
-      // missing path, so `res.ok` is true and `res.json()` then dies on "<!doctype". Check what
-      // actually arrived — this exact trap has now cost this project three times in one day.
-      const res = await fetch("/shots/manifest.json", { cache: "no-store" }).catch(() => null);
-      const looksJson = res && res.ok && (res.headers.get("content-type") || "").includes("json");
-      if (!looksJson) {
-        grid.innerHTML =
-          '<p class="empty">No manifest published yet — run <code>scripts/publish-shots.sh</code>. ' +
-          '(If you just published, the dev server may need a restart to notice a new folder.)</p>';
-      } else {
-        const shots = await res.json();
-        document.getElementById("count").textContent =
-          `${shots.length} shot${shots.length === 1 ? "" : "s"}`;
-        if (!shots.length) {
-          grid.innerHTML = '<p class="empty">Nothing published yet.</p>';
+      // Wrapped in an async IIFE, not top-level await: the build target is es2020/chrome87 and
+      // rejects top-level await. The DEV SERVER accepted it happily, so this only failed at
+      // `npm run build` — a page that works in development and cannot ship.
+      (async () => {
+        // The manifest is written by `scripts/publish-shots.sh`; the dev server serves one too.
+        // ★ A 200 IS NOT A MANIFEST. Both nginx and the dev server fall back to index.html for a
+        // missing path, so `res.ok` is true and `res.json()` then dies on "<!doctype". Check what
+        // actually arrived — this exact trap has now cost this project three times in one day.
+        const res = await fetch("/shots/manifest.json", { cache: "no-store" }).catch(() => null);
+        const looksJson = res && res.ok && (res.headers.get("content-type") || "").includes("json");
+        if (!looksJson) {
+          grid.innerHTML =
+            '<p class="empty">No manifest published yet — run <code>scripts/publish-shots.sh</code>. ' +
+            '(If you just published, the dev server may need a restart to notice a new folder.)</p>';
         } else {
-          grid.innerHTML = "";
-          let lastGroup = null;
-          for (const s of shots) {
-            // Group by run, so a descent ladder or an A/B reads as one thing.
-            const group = s.group || "shots";
-            if (group !== lastGroup) {
-              const h = document.createElement("div");
-              h.className = "group";
-              h.textContent = group;
-              grid.appendChild(h);
-              lastGroup = group;
+          const shots = await res.json();
+          document.getElementById("count").textContent =
+            `${shots.length} shot${shots.length === 1 ? "" : "s"}`;
+          if (!shots.length) {
+            grid.innerHTML = '<p class="empty">Nothing published yet.</p>';
+          } else {
+            grid.innerHTML = "";
+            let lastGroup = null;
+            for (const s of shots) {
+              // Group by run, so a descent ladder or an A/B reads as one thing.
+              const group = s.group || "shots";
+              if (group !== lastGroup) {
+                const h = document.createElement("div");
+                h.className = "group";
+                h.textContent = group;
+                grid.appendChild(h);
+                lastGroup = group;
+              }
+              const fig = document.createElement("figure");
+              const img = document.createElement("img");
+              img.loading = "lazy";
+              img.src = s.url;
+              img.alt = s.name;
+              const cap = document.createElement("figcaption");
+              cap.textContent = s.name;
+              const when = document.createElement("span");
+              when.className = "when";
+              when.textContent = ago(s.mtime_ms);
+              cap.appendChild(when);
+              fig.append(img, cap);
+              fig.addEventListener("click", () => open(s.url, s.name));
+              grid.appendChild(fig);
             }
-            const fig = document.createElement("figure");
-            const img = document.createElement("img");
-            img.loading = "lazy";
-            img.src = s.url;
-            img.alt = s.name;
-            const cap = document.createElement("figcaption");
-            cap.textContent = s.name;
-            const when = document.createElement("span");
-            when.className = "when";
-            when.textContent = ago(s.mtime_ms);
-            cap.appendChild(when);
-            fig.append(img, cap);
-            fig.addEventListener("click", () => open(s.url, s.name));
-            grid.appendChild(fig);
           }
         }
-      }
+      })();
     </script>
   </body>
 </html>

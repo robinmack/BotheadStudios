@@ -117,7 +117,14 @@
       /* ── HERO ─────────────────────────────────────────────────────────────── */
       .hero {
         position: relative;
-        min-height: 100svh;
+        /* ★ CAPPED, and the cap is the whole fix. `.hero__head` sits at `margin-top: auto`, i.e. at the
+           BOTTOM of the hero — which reads well when the hero is roughly a laptop screen tall, and
+           badly when it is not: on a 2560x1440 display the top ~60% was empty canvas and the wordmark
+           was shoved into the last third. Robin, on a large monitor: "seems to be covered with a black
+           canvas... I see a hint of it when I refresh" — the hint being the grid and a few bodies.
+           Below 900px nothing changes; above it the hero stops growing and the content stays in view,
+           with the next section peeking in to say the page continues. */
+        min-height: min(100svh, 900px);
         display: flex;
         flex-direction: column;
         overflow: hidden;
@@ -834,6 +841,7 @@
               >Launch the demo <span class="tick" aria-hidden="true">▸</span></a
             >
             <a class="btn" href="./architecture.html">How it is put together</a>
+            <a class="btn" href="./gallery.html">Rig shots</a>
             <nav class="chips" aria-label="scenes">
               <a class="chip" href="./orbit.html">Space</a>
               <a class="chip" href="./birth.html">Birth of the Moon</a>
@@ -1061,7 +1069,8 @@
     <footer>
       <div class="wrap foot">
         <span><b>INTEGRITY</b> &nbsp;·&nbsp; Bothead Studios</span>
-        <span><a href="./architecture.html">Architecture</a></span>
+        <span><a href="./architecture.html">Architecture</a> &nbsp;·&nbsp;
+          <a href="./gallery.html">Rig shots</a></span>
         <span class="foot__stamp" id="build-stamp"></span>
       </div>
     </footer>
