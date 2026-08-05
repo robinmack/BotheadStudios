@@ -50,13 +50,195 @@
     "landcover_url": "/bodies/earth/landcover.png",
     "sea_level_m": 0,
     "biomes": {
-      "0": "water",
-      "1": "grass",
-      "2": "sand",
-      "3": "broadleaf_foliage",
-      "4": "snow",
-      "5": "granite",
-      "6": "conifer_foliage"
-    }
+      "0": [
+        [
+          "water",
+          1.0
+        ]
+      ],
+      "1": [
+        [
+          "conifer_foliage",
+          0.7
+        ],
+        [
+          "dirt",
+          0.3
+        ]
+      ],
+      "2": [
+        [
+          "broadleaf_foliage",
+          0.75
+        ],
+        [
+          "dirt",
+          0.25
+        ]
+      ],
+      "3": [
+        [
+          "conifer_foliage",
+          0.7
+        ],
+        [
+          "dirt",
+          0.3
+        ]
+      ],
+      "4": [
+        [
+          "broadleaf_foliage",
+          0.75
+        ],
+        [
+          "dirt",
+          0.25
+        ]
+      ],
+      "5": [
+        [
+          "conifer_foliage",
+          0.35
+        ],
+        [
+          "broadleaf_foliage",
+          0.35
+        ],
+        [
+          "dirt",
+          0.3
+        ]
+      ],
+      "6": [
+        [
+          "broadleaf_foliage",
+          0.6
+        ],
+        [
+          "dirt",
+          0.4
+        ]
+      ],
+      "7": [
+        [
+          "broadleaf_foliage",
+          0.25
+        ],
+        [
+          "sand",
+          0.4
+        ],
+        [
+          "dirt",
+          0.35
+        ]
+      ],
+      "8": [
+        [
+          "broadleaf_foliage",
+          0.45
+        ],
+        [
+          "grass",
+          0.35
+        ],
+        [
+          "dirt",
+          0.2
+        ]
+      ],
+      "9": [
+        [
+          "grass",
+          0.6
+        ],
+        [
+          "broadleaf_foliage",
+          0.2
+        ],
+        [
+          "dirt",
+          0.2
+        ]
+      ],
+      "10": [
+        [
+          "grass",
+          0.8
+        ],
+        [
+          "dirt",
+          0.2
+        ]
+      ],
+      "11": [
+        [
+          "water",
+          0.5
+        ],
+        [
+          "grass",
+          0.5
+        ]
+      ],
+      "12": [
+        [
+          "grass",
+          0.75
+        ],
+        [
+          "dirt",
+          0.25
+        ]
+      ],
+      "13": [
+        [
+          "concrete",
+          0.7
+        ],
+        [
+          "dirt",
+          0.3
+        ]
+      ],
+      "14": [
+        [
+          "grass",
+          0.5
+        ],
+        [
+          "broadleaf_foliage",
+          0.25
+        ],
+        [
+          "dirt",
+          0.25
+        ]
+      ],
+      "15": [
+        [
+          "snow",
+          1.0
+        ]
+      ],
+      "16": [
+        [
+          "sand",
+          0.6
+        ],
+        [
+          "granite",
+          0.4
+        ]
+      ],
+      "17": [
+        [
+          "dirt",
+          1.0
+        ]
+      ]
+    },
+    "$biomes_note": "MODIS MCD12Q1 IGBP classes (MEASURED, via GIBS) -> MATERIAL MIXTURES. Fractions come from the IGBP class DEFINITIONS, which are stated as canopy-cover thresholds: forests >60% tree, woody savanna 30-60%, savanna 10-30%, open shrubland 10-60%, barren <10% vegetated. Each is taken at the midpoint of its defined range and the remainder is the ground beneath. So these are read off the classification, not chosen by eye. A class is a MIXTURE because IGBP classes are definitionally mixtures - 'woody savanna' and 'cropland/natural vegetation mosaic' are not one substance, and pretending otherwise is what made the Amazon and Siberia the same colour."
   }
 }

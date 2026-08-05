@@ -1074,21 +1074,27 @@ mod biome_material_tests {
             let Some(surface) = body.surface else {
                 continue;
             };
-            for (class, mat_id) in &surface.biomes {
-                if !organic.contains(mat_id.as_str()) {
-                    continue; // water, sand, snow, rock — not a living surface, not this rule's business
+            // A class is a MIXTURE, so every living constituent of it is checked. That matters: a
+            // savanna is mostly grass with some tree, and slipping timber in as the minority
+            // constituent would be exactly as wrong and much harder to see.
+            for (class, mix) in &surface.biomes {
+                for (mat_id, frac) in mix {
+                    if !organic.contains(mat_id.as_str()) {
+                        continue; // water, sand, snow, rock — not living, not this rule's business
+                    }
+                    checked += 1;
+                    let m = &mats[crate::materials::index_of(&mats, mat_id)];
+                    let [r, g, b] = m.albedo;
+                    assert!(
+                        g > r && g > b,
+                        "{file}: land-cover class {class} contains `{mat_id}` at {frac:.2}, whose \
+                         albedo is [{r:.3}, {g:.3}, {b:.3}] — that is not green, so it is not a \
+                         living surface.\n\
+                         A land-cover class shows the OUTSIDE of what grows there: foliage, not the \
+                         timber inside the trunk. Reach for a foliage material (`conifer_foliage`, \
+                         `broadleaf_foliage`, `grass`), not the structural tissue sharing its name."
+                    );
                 }
-                checked += 1;
-                let m = &mats[crate::materials::index_of(&mats, mat_id)];
-                let [r, g, b] = m.albedo;
-                assert!(
-                    g > r && g > b,
-                    "{file}: land-cover class {class} is painted with `{mat_id}`, whose albedo is \
-                     [{r:.3}, {g:.3}, {b:.3}] — that is not green, so it is not a living surface.\n\
-                     A land-cover class shows the OUTSIDE of what grows there: foliage, not the timber \
-                     inside the trunk. Reach for a foliage material (`conifer_foliage`, \
-                     `broadleaf_foliage`, `grass`), not the structural tissue that shares its name."
-                );
             }
         }
         assert!(
@@ -1636,26 +1642,29 @@ mod one_earth_tests {
     /// invisible. Phenology is the change that would not be so kind, because it makes a biome's
     /// material depend on the date — two copies, and one Earth turns while the other does not.
     ///
-    /// So the mapping lives in `Surface::biome_materials` and this counts the implementations rather
+    /// So the mapping lives in `Surface::biome_mixtures` and this counts the implementations rather
     /// than trusting that nobody re-types eight obvious lines.
     #[test]
     fn one_piece_of_code_turns_a_land_cover_class_into_a_material() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
         let mut src = String::new();
         super::material_property_tests::collect_rs(std::path::Path::new(dir), &mut src);
-        // The fallback is the mapping's signature: a class nobody mapped becomes bare rock.
-        let copies = src.matches("unwrap_or(\"granite\")").count();
+        // ★ Count the MAPPING itself, not a material name. The first version of this test counted
+        // `index_of(mats, "granite")` — the fallback — and went red the moment a texture test looked
+        // granite up for unrelated reasons. A guard that fires on a coincidence teaches people to
+        // widen it, which is how a guard dies.
+        let defs = src.matches("pub fn biome_mixtures(").count();
         assert_eq!(
-            copies, 1,
-            "the biome→material fallback appears {copies} times; it must appear ONCE, in \
-             `Surface::biome_materials`. Two scenes each turning a land-cover class into a material \
-             their own way is two Earths waiting to happen (Law II)."
+            defs, 1,
+            "`biome_mixtures` is defined {defs} times; a land-cover class must become materials in \
+             exactly ONE place. Two scenes each doing it their own way is two Earths waiting to \
+             happen (Law II) — it was written twice before, identically, and nothing noticed."
         );
-        // And both scenes must actually go through it, or the count above is one plus a dead copy.
+        let calls = src.matches(".biome_mixtures(").count();
         assert_eq!(
-            src.matches("biome_materials(").count(),
-            3,
-            "expected the definition plus a call from each scene that draws a surface"
+            calls, 2,
+            "expected exactly one call from each scene that draws a surface, found {calls}. Fewer \
+             means a scene builds its biome map some other way; more means somewhere is asking twice."
         );
     }
 }

@@ -198,7 +198,7 @@ impl SurfaceSample {
 /// elevation (Law II). The rasters and biome→material map come from the body definition.
 pub struct SurfaceSampler<'a> {
     mats: &'a [crate::materials::Material],
-    biome_mats: &'a [usize],
+    biome_mix: &'a [Vec<(usize, f32)>],
     landmask: Option<&'a crate::terra::raster::Raster>,
     elevation: Option<&'a crate::terra::raster::Raster>,
     landcover: Option<&'a crate::terra::raster::Raster>,
@@ -225,7 +225,7 @@ impl<'a> SurfaceSampler<'a> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         mats: &'a [crate::materials::Material],
-        biome_mats: &'a [usize],
+        biome_mix: &'a [Vec<(usize, f32)>],
         landmask: Option<&'a crate::terra::raster::Raster>,
         elevation: Option<&'a crate::terra::raster::Raster>,
         landcover: Option<&'a crate::terra::raster::Raster>,
@@ -237,7 +237,7 @@ impl<'a> SurfaceSampler<'a> {
         SurfaceSampler {
             epoch_s: None,
             mats,
-            biome_mats,
+            biome_mix,
             landmask,
             elevation,
             landcover,
@@ -284,9 +284,12 @@ impl<'a> SurfaceSampler<'a> {
             return self.water_idx as u32;
         }
         let biome = self.landcover.map_or(1, |r| r.biome_at(lat, lon) as usize);
-        self.biome_mats
+        // The class's DOMINANT constituent — this answers "which material is here", and the caller
+        // wants one. The full mixture is what `sample` spends on colour.
+        self.biome_mix
             .get(biome)
-            .copied()
+            .and_then(|m| m.iter().max_by(|a, b| a.1.total_cmp(&b.1)))
+            .map(|&(m, _)| m)
             .unwrap_or(self.water_idx) as u32
     }
 
@@ -300,10 +303,18 @@ impl<'a> SurfaceSampler<'a> {
             .unwrap_or_else(|| crate::planet::earth_surface_material(dir) == "granite");
         if is_land {
             let biome = self.landcover.map_or(1, |r| r.biome_at(lat, lon) as usize);
-            let mi = self
-                .biome_mats
+            let fallback = [(self.water_idx, 1.0f32)];
+            let mix: &[(usize, f32)] = self
+                .biome_mix
                 .get(biome)
-                .copied()
+                .map(|v| v.as_slice())
+                .unwrap_or(&fallback);
+            // The class's dominant constituent still names the SurfaceSample's material, which is what
+            // the appearance integral and the contact law key on. The COLOUR is the whole mixture.
+            let mi = mix
+                .iter()
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|&(m, _)| m)
                 .unwrap_or(self.water_idx);
             let e = self.elevation.map_or(0.0, |r| {
                 r.elevation_m_at(lat, lon, self.elev_range[0], self.elev_range[1])
@@ -317,10 +328,12 @@ impl<'a> SurfaceSampler<'a> {
             // frame can show a green tropics and a turned north at the same instant, which is what the
             // real planet looks like from orbit in October.
             let albedo = match self.epoch_s {
-                Some(t) if self.mats[mi].senescent_spectrum.is_some() => {
-                    self.mats[mi].albedo_when_turned(crate::solar::senescence_fraction(lat, t))
-                }
-                _ => self.mats[mi].albedo,
+                Some(t) => crate::materials::aggregate_albedo_turned(
+                    mix,
+                    self.mats,
+                    crate::solar::senescence_fraction(lat, t),
+                ),
+                None => crate::materials::aggregate_albedo(mix, self.mats),
             };
             // Land above sea level; below-sea-level land (Dead Sea etc.) clamps to the shore.
             SurfaceSample::flat(albedo, e.max(0.0) * self.ds * self.exag, mi as u32)
@@ -343,14 +356,14 @@ pub fn build_body_globe(
     ds: f64,
     exag: f64,
     mats: &[crate::materials::Material],
-    biome_mats: &[usize],
+    biome_mix: &[Vec<(usize, f32)>],
     landmask: Option<&crate::terra::raster::Raster>,
     elevation: Option<&crate::terra::raster::Raster>,
     landcover: Option<&crate::terra::raster::Raster>,
     elev_range: [f64; 2],
 ) -> Mesh {
     let sampler = SurfaceSampler::new(
-        mats, biome_mats, landmask, elevation, landcover, elev_range, ds, exag,
+        mats, biome_mix, landmask, elevation, landcover, elev_range, ds, exag,
     );
     build_globe(res, r_disp, |dir| sampler.sample(dir))
 }

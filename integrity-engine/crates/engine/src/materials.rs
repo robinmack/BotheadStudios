@@ -1351,3 +1351,95 @@ mod senescence_tests {
         }
     }
 }
+
+/// **The albedo of a mixture that is part-way through its autumn.**
+///
+/// [`aggregate_albedo`] for matter with a season: each constituent answers
+/// [`Material::albedo_when_turned`] for itself, and the fraction-weighted mean of those answers is the
+/// footprint's colour. So a woody savanna's trees can turn while the grass beneath them does something
+/// different, and a mixed forest goes partly gold and partly evergreen — which is what a mixed forest
+/// does, and what a single material per class could never express.
+///
+/// ★ The weighting is the constituent FRACTION, which for a land-cover class comes from the class's own
+/// definition (IGBP states its classes as canopy-cover thresholds). Nothing here is chosen.
+pub fn aggregate_albedo_turned(
+    composition: &Composition,
+    materials: &[Material],
+    turned: f64,
+) -> [f32; 3] {
+    let total: f32 = composition.iter().map(|&(_, f)| f.max(0.0)).sum();
+    if total <= 0.0 {
+        return [0.0, 0.0, 0.0];
+    }
+    let mut acc = [0.0f32; 3];
+    for &(mi, f) in composition {
+        let w = f.max(0.0) / total;
+        let a = materials[mi].albedo_when_turned(turned);
+        for c in 0..3 {
+            acc[c] += a[c] * w;
+        }
+    }
+    acc
+}
+
+#[cfg(test)]
+mod mixture_season_tests {
+    use super::*;
+
+    /// **A mixed forest turns PARTLY**, because only part of it is deciduous — and that is the whole
+    /// argument for a class being a mixture rather than one material.
+    #[test]
+    fn a_mixed_forest_turns_less_than_a_deciduous_one() {
+        let mats = load();
+        let (broad, conif, dirt) = (
+            index_of(&mats, "broadleaf_foliage"),
+            index_of(&mats, "conifer_foliage"),
+            index_of(&mats, "dirt"),
+        );
+        // IGBP class 4 (deciduous broadleaf) against class 5 (mixed forest), as earth.json states them.
+        let deciduous = [(broad, 0.75), (dirt, 0.25)];
+        let mixed = [(conif, 0.35), (broad, 0.35), (dirt, 0.30)];
+        let lum = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        let d_change = lum(aggregate_albedo_turned(&deciduous, &mats, 1.0))
+            - lum(aggregate_albedo_turned(&deciduous, &mats, 0.0));
+        let m_change = lum(aggregate_albedo_turned(&mixed, &mats, 1.0))
+            - lum(aggregate_albedo_turned(&mixed, &mats, 0.0));
+        assert!(d_change > 0.0, "a deciduous wood brightens in autumn");
+        assert!(
+            m_change > 0.0 && m_change < d_change,
+            "a mixed forest must turn LESS than a pure deciduous one: {m_change:.4} vs {d_change:.4}"
+        );
+    }
+
+    /// **Matter with no season is untouched**, whatever fraction is passed — so barren, ice and open
+    /// water cost nothing and cannot drift.
+    #[test]
+    fn a_mixture_of_seasonless_matter_never_changes() {
+        let mats = load();
+        let barren = [
+            (index_of(&mats, "sand"), 0.6),
+            (index_of(&mats, "granite"), 0.4),
+        ];
+        assert_eq!(
+            aggregate_albedo_turned(&barren, &mats, 1.0),
+            aggregate_albedo(&barren, &mats),
+            "the Sahara has no autumn"
+        );
+    }
+
+    /// At `turned = 0` the seasonal path must reduce EXACTLY to the plain one, or every summer frame
+    /// quietly differs from what the non-seasonal code drew.
+    #[test]
+    fn summer_is_bit_identical_to_the_seasonless_answer() {
+        let mats = load();
+        let savanna = [
+            (index_of(&mats, "grass"), 0.6),
+            (index_of(&mats, "broadleaf_foliage"), 0.2),
+            (index_of(&mats, "dirt"), 0.2),
+        ];
+        assert_eq!(
+            aggregate_albedo_turned(&savanna, &mats, 0.0),
+            aggregate_albedo(&savanna, &mats)
+        );
+    }
+}

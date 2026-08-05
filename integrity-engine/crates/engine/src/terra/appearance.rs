@@ -403,15 +403,24 @@ mod tests {
             texel_km > 15.0,
             "this test describes a COARSE raster; it is now {texel_km:.1} km/texel"
         );
-        let biome_mats: Vec<usize> = (0..=5)
+        // The class's DOMINANT constituent — this test asks how many distinct classes a mesh cell can
+        // distinguish, not what each is made of, so the mixture's largest member stands for it.
+        let n_classes = biomes
+            .keys()
+            .filter_map(|k| k.parse::<usize>().ok())
+            .max()
+            .unwrap_or(0);
+        let biome_mats: Vec<usize> = (0..=n_classes)
             .map(|i| {
-                crate::materials::index_of(
-                    &mats,
-                    biomes
-                        .get(&i.to_string())
-                        .map(String::as_str)
-                        .unwrap_or("granite"),
-                )
+                let id = biomes
+                    .get(&i.to_string())
+                    .and_then(|m| {
+                        m.iter()
+                            .max_by(|a, b| a.1.total_cmp(&b.1))
+                            .map(|(id, _)| id.as_str())
+                    })
+                    .unwrap_or("granite");
+                crate::materials::index_of(&mats, id)
             })
             .collect();
         let (lat, lon) = (39.0, -106.0); // the scale ladder's own site

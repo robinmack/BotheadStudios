@@ -1707,12 +1707,12 @@ mod app {
                     .then(|| crate::terra::raster::Raster::new(w, h, 4, d.to_vec()).ok())
                     .flatten()
             };
-            let biome_mats = def.biome_materials(&self.mats);
+            let biome_mix = def.biome_mixtures(&self.mats);
             let surf = EarthSurface {
                 landmask: mk(landmask, lm_w, lm_h),
                 elevation: mk(elevation, ev_w, ev_h),
                 landcover: mk(landcover, lc_w, lc_h),
-                biome_mats,
+                biome_mix,
                 elev_range: def.elevation_range_m.unwrap_or([-11_000.0, 9_000.0]),
                 relief_exag: def.relief_exaggeration.unwrap_or(1.0),
             };
@@ -1724,7 +1724,7 @@ mod app {
                 1.0 / earth_radius_m(),
                 surf.relief_exag,
                 &self.mats,
-                &surf.biome_mats,
+                &surf.biome_mix,
                 surf.landmask.as_ref(),
                 surf.elevation.as_ref(),
                 surf.landcover.as_ref(),
@@ -4626,7 +4626,7 @@ mod app {
                     {
                         let sampler = crate::terra::globe_mesh::SurfaceSampler::new(
                             &self.mats,
-                            &surf.biome_mats,
+                            &surf.biome_mix,
                             surf.landmask.as_ref(),
                             surf.elevation.as_ref(),
                             surf.landcover.as_ref(),
@@ -5382,7 +5382,7 @@ mod app {
         landmask: Option<crate::terra::raster::Raster>,
         elevation: Option<crate::terra::raster::Raster>,
         landcover: Option<crate::terra::raster::Raster>,
-        biome_mats: Vec<usize>,
+        biome_mix: Vec<Vec<(usize, f32)>>,
         elev_range: [f64; 2],
         relief_exag: f64,
     }
@@ -5801,7 +5801,7 @@ mod app {
         elevation: Option<crate::terra::raster::Raster>,
         landcover: Option<crate::terra::raster::Raster>,
         elev_range: [f64; 2],
-        biome_mats: Vec<usize>, // biome index → index into `mats`
+        biome_mix: Vec<Vec<(usize, f32)>>, // land-cover class → material mixture
         // **Matter in flight — the ENGINE's operation, not a Terra feature** (docs/59). Terra's whole
         // contribution is the button that declares initial conditions and the draw that presents the
         // result; everything between is `flight::Flight` running the same code the ground patch runs.
@@ -6091,7 +6091,7 @@ mod app {
                 elevation: None,
                 landcover: None,
                 elev_range: [-11000.0, 9000.0],
-                biome_mats: Vec::new(),
+                biome_mix: Vec::new(),
             })
         }
 
@@ -6172,7 +6172,7 @@ mod app {
             self.landcover = mk(landcover, lc_w, lc_h);
 
             // Biome index → material index. `biomes` maps a string index → material id in data/materials.json.
-            self.biome_mats.clear();
+            self.biome_mix.clear();
             self.elev_range = [-11000.0, 9000.0];
             self.relief_exag = TERRA_RELIEF_EXAG;
             // Earth's surface belongs to Earth, not to this world file. Prefer the body definition; a
@@ -6192,7 +6192,7 @@ mod app {
                 if let Some(x) = s.relief_exaggeration {
                     self.relief_exag = x.max(0.0);
                 }
-                self.biome_mats = s.biome_materials(&self.mats);
+                self.biome_mix = s.biome_mixtures(&self.mats);
             }
             // **When this scene is set** (docs/65: time is part of the setting). A world that names an
             // epoch gets it; one that does not runs on the wall clock. Robin: *"One earth assembly.
@@ -6657,11 +6657,17 @@ mod app {
                 .landcover
                 .as_ref()
                 .map_or(1, |r| r.biome_at(lat_deg, lon_deg) as usize);
-            let id = self
-                .biome_mats
-                .get(class)
-                .map_or("<unmapped>", |&i| self.mats[i].id.as_str());
-            format!("{class}:{id}")
+            // The whole mixture, so a rig sees what a land-cover class actually IS — "8:broadleaf_
+            // foliage 0.45 + grass 0.35 + dirt 0.20" rather than a single name that hides two thirds
+            // of the ground.
+            let Some(mix) = self.biome_mix.get(class) else {
+                return format!("{class}:<unmapped>");
+            };
+            let parts: Vec<String> = mix
+                .iter()
+                .map(|&(m, f)| format!("{} {:.2}", self.mats[m].id, f))
+                .collect();
+            format!("{class}:{}", parts.join(" + "))
         }
 
         /// **What measured elevation this view needs and does not have** — a JSON `[[z,x,y],…]`, nearest
@@ -6950,7 +6956,13 @@ mod app {
                 .landcover
                 .as_ref()
                 .map_or(1, |r| r.biome_at(lat, lon) as usize);
-            let mi = self.biome_mats.get(biome).copied().unwrap_or(0);
+            // The class's dominant constituent stands for it where ONE material is wanted.
+            let mi = self
+                .biome_mix
+                .get(biome)
+                .and_then(|m| m.iter().max_by(|a, b| a.1.total_cmp(&b.1)))
+                .map(|&(m, _)| m)
+                .unwrap_or(0);
             self.mats.get(mi).map(|m| m.id.clone()).unwrap_or_default()
         }
 
@@ -7237,7 +7249,12 @@ mod app {
                             .landcover
                             .as_ref()
                             .map_or(1, |r| r.biome_at(lat, lon) as usize);
-                        let mi = self.biome_mats.get(biome).copied().unwrap_or(water_idx);
+                        let mi = self
+                            .biome_mix
+                            .get(biome)
+                            .and_then(|m| m.iter().max_by(|a, b| a.1.total_cmp(&b.1)))
+                            .map(|&(m, _)| m)
+                            .unwrap_or(water_idx);
                         let e = self
                             .elevation
                             .as_ref()
@@ -7585,7 +7602,7 @@ mod app {
             };
             let sampler = crate::terra::globe_mesh::SurfaceSampler::new(
                 &self.mats,
-                &self.biome_mats,
+                &self.biome_mix,
                 self.landmask.as_ref(),
                 self.elevation.as_ref(),
                 self.landcover.as_ref(),
