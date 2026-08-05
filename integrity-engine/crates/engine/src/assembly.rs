@@ -1110,3 +1110,144 @@ mod shipped_cannon_tests {
         assert!((scaled.w_axis.truncate() - (up * 2.0 - glam::DVec3::X)).length() < 1e-9);
     }
 }
+
+#[cfg(test)]
+mod plant_tests {
+    use super::*;
+
+    /// **A plant is an assembly like any other** — catalogued matter with a shape, and a mass that
+    /// DERIVES. Nothing about these is plant-specific machinery.
+    ///
+    /// Robin (2026-08-04): *"low-cost models for grasses and trees (low poly for now but reasonably
+    /// faithful to the real thing)… stored as assemblies themselves and added as members of Earth so
+    /// they can be rendered as called for."*
+    #[test]
+    fn a_tree_weighs_what_its_geometry_and_its_wood_say_it_does() {
+        let mats = crate::materials::load();
+        let oak = shipped::load("broadleaf-tree-oak");
+        let spruce = shipped::load("conifer-tree-spruce");
+        let tuft = shipped::load("grass-tuft");
+
+        // A mature oak and a mature spruce are both a few tonnes. These are not asserted constants —
+        // they are what the sourced dimensions and the catalogued woods come to, and the range is the
+        // range real trees of these dimensions occupy.
+        let m_oak = oak
+            .mass_kg(&mats)
+            .expect("the oak's materials are catalogued");
+        let m_spr = spruce
+            .mass_kg(&mats)
+            .expect("the spruce's materials are catalogued");
+        assert!(
+            (3_000.0..12_000.0).contains(&m_oak),
+            "a 20 m oak with a 1.2 m bole should be a few tonnes, got {m_oak:.0} kg"
+        );
+        assert!(
+            (3_000.0..7_000.0).contains(&m_spr),
+            "a 30 m Norway spruce is 3-6 t, got {m_spr:.0} kg. ★ It was 9.5 t when the bole was ONE \
+             cylinder — a constant-radius cylinder is not a trunk. The fix was the taper, not a \
+             smaller radius picked to land on a nicer number."
+        );
+        // A tuft of grass is grams, and it had better not be kilograms.
+        let m_tuft = tuft.mass_kg(&mats).expect("grass is catalogued");
+        assert!(
+            (0.001..0.5).contains(&m_tuft),
+            "a tuft of grass weighs grams, got {m_tuft:.4} kg"
+        );
+    }
+
+    /// **★★ A CROWN IS MOSTLY AIR, and `packing` is what says so.**
+    ///
+    /// The crown's packing is `LAI x leaf thickness / crown depth` — both inputs measured (temperate
+    /// deciduous LAI ~5.5 m²/m², deciduous woody lamina 0.25 ± 0.08 mm). So the leaf mass is a
+    /// CONSEQUENCE of the tree's size rather than a number anybody chose, and this checks it lands
+    /// where a real tree's foliage does: tens to a couple of hundred kilograms, against a bole of
+    /// several tonnes.
+    ///
+    /// Getting this wrong is not subtle. A crown modelled as SOLID foliage would be a 3,000 m³ sphere
+    /// of leaf at 440 kg/m³ — over a thousand tonnes hanging off a six-tonne trunk.
+    #[test]
+    fn a_crown_is_leaves_and_air_not_a_solid_ball_of_leaf() {
+        let mats = crate::materials::load();
+        let oak = shipped::load("broadleaf-tree-oak");
+        let crown = oak
+            .parts
+            .iter()
+            .find(|p| p.name == "crown")
+            .expect("the oak has a crown");
+        let envelope = crown.shape.volume_m3();
+        let leaf_m3 = envelope * crown.packing;
+        let leaf_kg =
+            leaf_m3 * mats[crate::materials::index_of(&mats, &crown.material)].density as f64;
+        assert!(
+            envelope > 2_000.0,
+            "an 18 m crown encloses thousands of cubic metres, got {envelope:.0}"
+        );
+        assert!(
+            (20.0..400.0).contains(&leaf_kg),
+            "a mature oak carries tens to hundreds of kg of leaf, got {leaf_kg:.1} kg from \
+             {envelope:.0} m³ of crown at packing {:.2e}",
+            crown.packing
+        );
+        // The absurdity this guards against, stated numerically.
+        let solid =
+            envelope * mats[crate::materials::index_of(&mats, &crown.material)].density as f64;
+        assert!(
+            solid > 1_000_000.0 && leaf_kg < solid / 1_000.0,
+            "a SOLID crown would be {:.0} t; the packed one is {leaf_kg:.0} kg, three orders down",
+            solid / 1000.0
+        );
+    }
+
+    /// **★★★ ONE PLANT, TWO REPRESENTATIONS — and the far view must agree with the near one.**
+    ///
+    /// Robin (2026-08-04): *"These are hues at altitude but must become realistic flora at very low
+    /// altitude."* That is Law IV exactly — the camera changes representation, never existence — and
+    /// it is only honest if the two answers MATCH. A tree drawn as geometry up close and as an albedo
+    /// from orbit must be the same tree, or the engine has two Earths again, separated by altitude
+    /// instead of by scene.
+    ///
+    /// So: the material a plant's crown is made of is the SAME material its land-cover class contributes
+    /// to the ground's albedo. That is the invariant, and it is what makes the far view a summary of the
+    /// near one rather than a different claim about the same place.
+    #[test]
+    fn the_plant_you_walk_up_to_is_made_of_what_the_ground_looked_like_from_orbit() {
+        let mats = crate::materials::load();
+        let body: crate::terra::world_def::World = serde_json::from_str(
+            &std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/bodies/earth.json"
+            ))
+            .expect("earth.json"),
+        )
+        .expect("earth.json parses");
+        let surface = body.surface.expect("Earth has a surface");
+
+        for (plant, class, why) in [
+            ("broadleaf-tree-oak", "4", "deciduous broadleaf forest"),
+            ("conifer-tree-spruce", "1", "evergreen needleleaf forest"),
+            ("grass-tuft", "10", "grassland"),
+        ] {
+            let a = shipped::load(plant);
+            let foliage: Vec<&str> = a
+                .parts
+                .iter()
+                .map(|p| p.material.as_str())
+                .filter(|m| m.contains("foliage") || *m == "grass")
+                .collect();
+            assert!(!foliage.is_empty(), "{plant} has no foliage at all");
+            let mix = surface
+                .biomes
+                .get(class)
+                .unwrap_or_else(|| panic!("earth.json has no class {class} ({why})"));
+            for f in &foliage {
+                assert!(
+                    mix.iter().any(|(id, _)| id == f),
+                    "{plant} is made of `{f}`, but land-cover class {class} ({why}) — the class it \
+                     grows in — does not contain it. Then the ground seen from orbit and the plant \
+                     seen from a metre away are different matter, and the camera has changed what is \
+                     TRUE rather than how finely it is computed (Law IV)."
+                );
+            }
+        }
+    }
+}
