@@ -72,12 +72,15 @@ pub use render::Drawn;
 pub mod arc; // the out-and-back demo arc: one continuous camera path, surface <-> celestial, pacing derived
 pub mod assembly; // docs/64 - matter with a shape, in a place
 pub mod ballistics; // docs/46 row 33 - a confined gas doing work on a moving boundary
+/// ONE entry point for "two things met — what does the engine do?". Delegates to the laws that already
+/// own each half, so a new scene finds them instead of writing a third path.
+/// What an assembly CONTAINS when it contains more than it could list: a rule that generates, plus the
+/// exceptions the container remembers (docs/67 step 4). A planet holds 10^12 trees and no list of them.
+pub mod containment;
 /// docs/53 — the engine driven by a DEFINITION: builds the world, applies declared matter events through
 /// the shared primitives, and steps. No scene struct, no canvas. This is what re-consumes the systems
 /// deleting terrain orphaned (docs/46 ledger row 15).
 pub mod flight;
-/// ONE entry point for "two things met — what does the engine do?". Delegates to the laws that already
-/// own each half, so a new scene finds them instead of writing a third path.
 /// A placed, stateful thing — an INSTANCE of an assembly type (docs/67 step 2). The type is the
 /// species; this is the individual, and it is where damage, attitude, motion and containment live.
 pub mod instance;

@@ -3,6 +3,44 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-05 — containment: a rule and its exceptions, and the trees that move when you walk
+
+**What.** docs/67 step 4. A planet contains ~10^12 trees and no list of them, so containment is **a RULE
+that answers "what is in this region" plus a set of EXCEPTIONS the container remembers** — and what makes
+that affordable is Robin's scalability law: a pristine oak has nothing worth storing, because the rule
+regenerates its placement and the TYPE answers everything else.
+
+★ **The crux is derived identity.** An exception has to NAME the thing it is an exception to, and the
+rule cannot remember what it generated — remembering is the thing being avoided. So the rule derives each
+instance's id from WHERE IT IS (`InstanceId::derived`), by the same hash that decided it was there. A
+hash rather than a counter, because a counter depends on generation order, which depends on which region
+was asked about, which depends on where the camera went — and then looking at a meadow from the other
+side renames every tree in it.
+
+**Measured, not argued** (six tests): a forest of 2,500+ generated trees costs the container **zero**
+bytes; the same region answers identically however often it is asked, and from a different centre; a
+crushed tree stays crushed while every neighbour stays byte-identical; **a forest ten times larger costs
+exactly the same to remember** (10 damaged = 10 entries, either way); handing back a pristine instance
+FORGETS it rather than storing it, so the invariant is enforced at the door; and a container remembers
+both an absence (its rule keeps generating a felled tree) and an arrival (a bus, which no rule produces).
+
+★★ **And wiring it to the real rule found a real bug, which Robin had asked about explicitly.**
+`flora::scatter` is *not* a pure function of position. Its cells run `-n..=n` about the QUERY CENTRE, and
+the cell size comes from the cover fraction sampled at that centre — so the lattice is anchored to the
+camera. Move and the whole stand regenerates somewhere else. Robin, 2026-08-04: *"so trees don't move to
+different positions when one turns one's head away and turns back."* The module's own doc claims the
+property (*"the answer cannot depend on when or whether anything looked"*) and it is half true: the hash
+is stateless, its inputs are not absolute. Terra only rebuilds after 2 m of movement, which is why it
+reads as stable until it jumps. Recorded as `docs/46` row 47.
+
+The fix is the one containment needs anyway: **index cells in ABSOLUTE coordinates**, which means the
+spacing must come from the KIND's own crown rather than the local cover fraction, with cover modulating
+density by skipping cells instead of resizing the lattice. Then a tree's cell is a fact about the ground
+rather than about the observer — which is Law IV — and its derived id is stable, which is the
+precondition for a bus being able to crush one.
+
+**Verified.** 577/577 native, `mod app` clean for wasm32.
+
 ## 2026-08-05 — Earth, described as an assembly, weighs the same Earth
 
 **What.** docs/67 step 5, the half that can be done without replacing anything: `LayeredBody::as_assembly`
