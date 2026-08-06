@@ -1539,3 +1539,74 @@ mod reach_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod placement_tests {
+    use super::*;
+
+    /// **Reproduce `Terra::build_flora`'s transform natively and look at where a tuft of grass ends up.**
+    ///
+    /// The scene reports 1,200 plants meshed at 43,200 triangles and draws none of them. Everything
+    /// upstream has been checked by reading and found consistent, which is exactly the confidence level
+    /// this repo has learned not to trust — so this does the arithmetic instead.
+    ///
+    /// A tuft 3 m from the anchor should come out ~4.7e-7 display units away from it (3 m at
+    /// 1/6371000 per metre) and ~0.35 m tall in the same units. If it does, the placement is right and
+    /// the fault is downstream, on the GPU side.
+    #[test]
+    fn a_tuft_of_grass_lands_where_the_scene_puts_it() {
+        let mats = crate::materials::load();
+        let tuft = compiled::parse(compiled::GRASS_TUFT);
+        let mesh = tuft.mesh(&mats, 6);
+        assert!(!mesh.vertices.is_empty(), "the tuft has geometry at all");
+
+        // The scene's own numbers.
+        let planet_radius = 6_371_000.0f64;
+        let ds = 1.0 / planet_radius; // display_scale(): a planet radius is 1.0
+        let r_disp = planet_radius * ds;
+        let (lat, lon) = (45.3f64, -69.0f64);
+
+        // The anchor: the surface point under the camera, in display units (ground_disp = 0 here).
+        let anchor = crate::geo::dir_from_lat_lon(lat, lon) * r_disp;
+
+        // A tuft 3 m north of it.
+        let dlat = lat + 3.0 / 111_320.0;
+        let model = place_on_surface(dlat, lon, 0.0, r_disp, ds, anchor);
+
+        let local: Vec<glam::DVec3> = mesh
+            .vertices
+            .iter()
+            .map(|v| {
+                model.transform_point3(glam::DVec3::new(
+                    v.pos[0] as f64,
+                    v.pos[1] as f64,
+                    v.pos[2] as f64,
+                ))
+            })
+            .collect();
+
+        let far = local.iter().map(|p| p.length()).fold(0.0f64, f64::max);
+        let far_m = far / ds;
+        println!(
+            "tuft 3 m away: vertices reach {far:.3e} display units = {far_m:.3} m from the anchor"
+        );
+        assert!(
+            (2.0..5.0).contains(&far_m),
+            "a tuft 3 m away with 0.35 m of blade should sit 3-ish metres from the anchor, not {far_m:.3}"
+        );
+
+        // ★ AND IT MUST STAND UP. Its blades run along the local UP, not flat on the ground — the
+        // failure `Part::along` was added to fix. Measured as height above the tangent plane.
+        let up = crate::geo::dir_from_lat_lon(dlat, lon);
+        let base = up * r_disp - anchor;
+        let height_m = local
+            .iter()
+            .map(|p| (*p - base).dot(up) / ds)
+            .fold(f64::MIN, f64::max);
+        println!("tuft height above its own ground: {height_m:.3} m");
+        assert!(
+            height_m > 0.25,
+            "the tuft stands up (0.35 m of blade), it does not lie flat: {height_m:.3} m"
+        );
+    }
+}

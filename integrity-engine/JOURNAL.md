@@ -3,6 +3,49 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-05 — the flora is drawn and cannot be seen
+
+**What.** Robin asked to see the trees. There are none — at any altitude, at any site — and after a long
+hunt the answer is not "here is the bug" but a bisection clean enough to act on.
+
+**Two real defects found and fixed on the way**, neither of which changed the picture:
+
+★ **The budget was a crater** (`docs/46` row 48). `scatter` ended `sort_by(distance); truncate(budget)`,
+which is a way to bound a count and not a design. Grass at a 0.35 cover fraction is ~31 plants/m², so
+1,200 of them are exhausted inside `sqrt(1200/(31π))` = **3.5 m** — a disc of columns centred under the
+camera. Robin had seen it and said so months of context earlier: *"the columns were clumped in one tiny
+area in center of viewport, suspiciously crater like."* Now spent on the ANGLE a plant subtends.
+★★ And I claimed I had broken it with the morning's lattice change. **I had not**, and the correction is
+arithmetic: cover used to set spacing (`crown/frac`) and now sets occupancy (`crown`, probability
+`frac`); both are a density of `frac/crown`. Identical.
+
+★★ **No oak could ever appear from standing height, at any budget** (row 49). `build_flora` scanned ONE
+disc for every kind, sized `(alt * 8).clamp(6, 120)` — 13.6 m at eye height, while oaks sit 16 m apart.
+A query disc smaller than a lattice's spacing cannot contain a single one of its cells. That number was
+derived from nothing. Each kind now derives its own reach from its density and the budget, which is both
+correct and cheaper, and the mesh went from 43,200 tris (all grass) to 157,920 (a real mixture).
+
+★★★ **And still nothing draws** (row 50). What is confirmed working: `scatter`'s output; the placement
+transform, reproduced NATIVELY — a tuft 3 m out lands at **3.077 m**, standing **0.350 m** tall; the
+uploaded buffer, probed live — 151,647 verts, 473,760 indices, **0.02–251 m** from the anchor; the draw
+call, which logs itself every frame; `Part::along`; and an unfiltered console with no wgpu error at all.
+
+What is eliminated, each probe deployed and photographed: lifting every plant **3 m** (not buried by the
+ground mesh), lifting **200 m** (not a ground-height disagreement at any plausible scale), and drawing
+them with the SEGMENT's own uniform — the one the visible ground uses — which also showed nothing.
+
+**So every model-side cause is eliminated and the picture never moved.** That is the evidence for
+`docs/68`'s seam: the fault is on the renderer's side of the line. Robin, twice, while this was going on:
+*"I feel like you're solving a problem that would be solved more elegantly by a separated, multi-threaded
+ray-casting renderer that could make choices between textures and meshes."* The bisection agrees with her.
+
+★ **A slip worth recording**: I cited `docs/46` rows 48 and 49 in code comments and commit messages
+before writing them. The numbering gate checks uniqueness and contiguity, so it passed — a citation to a
+row that does not exist is invisible to it. Rows added; a gate for dangling citations is not.
+
+**Verified.** 590/590 native, `mod app` clean for wasm32, production redeployed clean (a 1000× scale
+mutation had been live during the hunt).
+
 ## 2026-08-05 — the trees stay put, and a test found two of them wearing one identity
 
 **What.** `flora::scatter`'s lattice is now a fact about the GROUND rather than about the observer
