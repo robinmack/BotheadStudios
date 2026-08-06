@@ -3,6 +3,48 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-06 — the eye and the plants disagree about ground level by sixty metres
+
+**What.** Continuing the hunt for why the flora draws and cannot be seen, after checking the vertex
+layout (`pos`/`nrm`/`col`/`mat`/`rough` at 0/12/24/36/40, 44 bytes — identical from both producers, not
+the bug) and mutating the plants to self-lit magenta at 30× (**zero** flora pixels; the 13 that matched
+were the pink HUD button in the corner).
+
+★★★ **So I printed the one quantity in the chain nobody had ever measured — the model translation
+actually used:**
+
+```
+flora xform: |anchor|=1.000017  |eye|=1.000026  |delta|=9.411e-6  (59.96 m)
+```
+
+The camera is **60 m** above the flora's anchor while `fly.alt_m` says it is **1.7 m** above the ground.
+The transform itself is correct — the first frame after a rebuild reads exactly 1.70 m — so what is
+wrong is that `view.eye` is built from one ground height and `build_flora`'s anchor from another.
+`TERRA_RELIEF_EXAG` is 1.0, so it is not exaggeration. **The plants are placed ~58 m below the surface
+the camera is standing on.**
+
+**This is Law II at the place it hurts most: two answers to "where is the ground here."** Robin predicted
+it while the hunt was running, before the number existed: *"the model needs to own ground level at all
+coordinates and be able to place assemblies there. Almost as if an assembly is aware of its own
+properties and can then own/position other assemblies for the engine and renderer."* That is the fix —
+one owner, the Earth assembly, answering the question once for the camera, the mesh, the flora, and
+anything else placed on it. Today `view_basis`, `ground_disp_at` and the segment mesh each arrive at it
+their own way.
+
+★ **Closure is NOT claimed.** A 200 m lift probe should then have floated the plants into view and did
+not, so either that probe ran against a different camera state or a second cause sits behind this one.
+The 60 m is measured; the explanation is not finished. Recorded as `docs/46` row 50 in exactly those
+terms, because a half-explanation written up as a whole one is how the seasonal claim went wrong in
+August.
+
+**Also today** — `docs/68` step 2, the renderer deciding fidelity: `render::Fidelity` replaced three
+constants inside `build_flora`, the worst of which applied ONE altitude cutoff to every plant when the
+answer varies with size (a 0.35 m tuft is worth resolving to 622 m, a 15 m oak to 26.7 km — a factor of
+forty). And the angular resolution is now DERIVED from the viewport rather than declared at 1 mrad.
+
+**Verified.** 592/592 native, `mod app` clean for wasm32, every probe reverted, production redeployed
+clean.
+
 ## 2026-08-05 — the flora is drawn and cannot be seen
 
 **What.** Robin asked to see the trees. There are none — at any altitude, at any site — and after a long
