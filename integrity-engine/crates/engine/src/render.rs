@@ -905,3 +905,99 @@ mod tests {
         );
     }
 }
+
+/// ★★ **WHAT THE RENDERER CAN RESOLVE, AND WHAT IT CAN AFFORD** (docs/68 step 2).
+///
+/// Robin: *"the renderer should make choices based on quality/fidelity of view vs performance"*, and
+/// *"the renderer is a separate entity from the core engine; perhaps its realm is light."* This is the
+/// first thing moved across that line. It does not yet live in another thread or process — the point of
+/// doing it in place first is that once the model stops deciding fidelity, the extraction is mostly
+/// mechanical (docs/68 §8).
+///
+/// What it replaces were three constants inside `Terra::build_flora`, each deciding a picture from
+/// inside the model: an altitude above which plants stop being drawn, a count, and a scan radius.
+///
+/// ★ **The angular resolution is DERIVED here, not declared.** `ResolutionController` defaults it to
+/// 1 mrad with the comment *"about one pixel across a 60-degree field at ~1000 px"* — which is a
+/// description of a viewport the renderer actually has. One pixel is `fov_y / viewport_height`, so at
+/// 0.9 rad over 1600 px it is **5.6e-4 rad**, and it sharpens when someone opens a bigger window
+/// instead of staying at whatever was typed. Nothing else in the engine is entitled to know this.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Fidelity {
+    /// One pixel, in radians — the angle below which detail cannot change this frame.
+    pub(crate) angular_resolution: f64,
+    /// How many separate things this renderer will draw of one kind at once. A genuine cost bound, and
+    /// the only number here that is not derived — it belongs to the platform, which is precisely why it
+    /// belongs on this side.
+    pub(crate) instance_budget: usize,
+}
+
+impl Fidelity {
+    /// From the viewport this frame was actually projected with.
+    pub(crate) fn of_view(fov_y: f64, viewport_h: f64, instance_budget: usize) -> Fidelity {
+        Fidelity {
+            angular_resolution: (fov_y / viewport_h.max(1.0)).max(1.0e-9),
+            instance_budget,
+        }
+    }
+
+    /// The distance at which something `size_m` across falls below one pixel — so resolving it further
+    /// out cannot change the picture. The same geometry as
+    /// [`crate::resolution::ResolutionController::visible_out_to`], asked of the real viewport.
+    pub(crate) fn resolve_out_to(&self, size_m: f64) -> f64 {
+        size_m.max(0.0) / self.angular_resolution
+    }
+
+    /// Is anything of this size worth resolving from `distance_m`?
+    pub(crate) fn worth_resolving(&self, size_m: f64, distance_m: f64) -> bool {
+        distance_m <= self.resolve_out_to(size_m)
+    }
+}
+
+#[cfg(test)]
+mod fidelity_tests {
+    use super::*;
+
+    /// ★★ **ONE ALTITUDE CUTOFF FOR EVERY PLANT WAS WRONG BY A FACTOR OF FORTY.** `Terra` carried
+    /// `FLORA_ALT_M = 300` and applied it to grass and oaks alike. What decides it is the ANGLE a thing
+    /// subtends, so it is different for every size — and at this frame's real resolution a tuft and a
+    /// tree differ by more than an order of magnitude.
+    #[test]
+    fn what_is_worth_resolving_depends_on_how_big_it_is() {
+        // Terra's own field of view over a 2K rig frame.
+        let f = Fidelity::of_view(0.9, 1600.0, 1200);
+        assert!(
+            (f.angular_resolution - 5.625e-4).abs() < 1e-9,
+            "one pixel is fov/height, got {}",
+            f.angular_resolution
+        );
+        let tuft = f.resolve_out_to(0.35);
+        let oak = f.resolve_out_to(15.0);
+        println!("at one pixel: a 0.35 m tuft to {tuft:.0} m, a 15 m oak to {oak:.0} m");
+        assert!((600.0..700.0).contains(&tuft), "tuft {tuft:.0} m");
+        assert!(
+            oak > 25_000.0,
+            "an oak stays resolvable for kilometres: {oak:.0} m"
+        );
+        assert!(
+            oak > 40.0 * tuft,
+            "the two differ by more than the factor a single constant could ever carry"
+        );
+        assert!(
+            f.worth_resolving(15.0, 5_000.0),
+            "an oak at 5 km is still a pixel"
+        );
+        assert!(!f.worth_resolving(0.35, 5_000.0), "a tuft at 5 km is not");
+    }
+
+    /// **A bigger window resolves more**, because the number is the viewport's rather than a dial's.
+    #[test]
+    fn a_finer_viewport_sees_further() {
+        let small = Fidelity::of_view(0.9, 800.0, 1200);
+        let big = Fidelity::of_view(0.9, 2400.0, 1200);
+        assert!(
+            big.resolve_out_to(0.35) > 2.9 * small.resolve_out_to(0.35),
+            "three times the pixels is three times the reach"
+        );
+    }
+}

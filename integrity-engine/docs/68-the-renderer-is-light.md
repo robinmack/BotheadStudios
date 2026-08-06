@@ -136,8 +136,27 @@ Better order:
 1. **Find why the flora does not draw.** It is a small hunt and it is *evidence about this boundary* —
    whatever is wrong will be either a model concern or a light concern, and knowing which sharpens where
    the seam belongs.
-2. **Move the LOD decisions to the renderer's side of the protocol** (`FLORA_ALT_M`, the budget, the
-   segment's tessellation) *in place*, before any process boundary. If the model stops deciding
-   fidelity, the extraction is mostly mechanical afterwards.
+2. **Move the LOD decisions to the renderer's side of the protocol** *in place*, before any process
+   boundary. If the model stops deciding fidelity, the extraction is mostly mechanical afterwards.
+   ✅ **DONE 2026-08-06 for the flora.** `render::Fidelity` replaced three constants that were inside
+   `Terra::build_flora` deciding a picture from within the model:
+   - `FLORA_ALT_M = 300` — **one altitude cutoff applied to every plant alike.** What decides the
+     question is the ANGLE a thing subtends, which is different for every size: at this frame's real
+     resolution a 0.35 m tuft is worth resolving to **622 m** and a 15 m oak to **26.7 km**. A factor of
+     forty that no single constant could carry.
+   - a 600 m scan cap, which I had picked. Now the distance at which the tallest kind falls below one
+     pixel — 53 km in the shipped scene, with the per-kind reach still doing the real bounding.
+   - the instance budget, which STAYS a number, because it is a genuine platform cost bound — and that
+     is exactly why it belongs on this side rather than in the model.
+
+   ★ **The angular resolution is now DERIVED rather than declared.** `ResolutionController` defaults it
+   to 1 mrad with the comment *"about one pixel across a 60-degree field at ~1000 px"* — a description
+   of a viewport the renderer actually has. `Fidelity::of_view` computes `fov_y / viewport_height`, so
+   it sharpens when the window grows instead of staying at whatever was typed
+   (`render::fidelity_tests::a_finer_viewport_sees_further`). Nothing else in the engine is entitled to
+   know this number.
+
+   Still model-side and owed: the segment's tessellation, and `resolution::ResolutionController`'s own
+   `angular_resolution`, which should be told by the renderer rather than defaulted.
 3. **Then extract**, with the protocol above as the interface, and `render::Drawn` + `Region` as its
    first two message types because they already are.

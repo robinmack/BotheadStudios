@@ -175,6 +175,21 @@ impl ResolutionController {
         (distance.max(0.0) * self.angular_resolution).max(self.min_grain_radius)
     }
 
+    /// ★ **How far away something of size `size_m` stops being worth resolving** — the inverse of
+    /// [`Self::camera_grain_radius`], and the honest form of every "cut it off above N metres" constant.
+    ///
+    /// Beyond `size / angular_resolution` the thing subtends less than the viewing tolerance, so
+    /// resolving it *cannot change the picture* — which is a statement about geometry rather than a
+    /// budget. `Terra` carried a `FLORA_ALT_M = 300` for exactly this and applied it to every plant
+    /// alike; at a 1 mrad tolerance a 0.35 m grass tuft is worth resolving to 350 m and a 15 m oak to
+    /// **15 km**, so one number for both was wrong by a factor of forty (docs/46 row 49, docs/68 §5).
+    pub fn visible_out_to(&self, size_m: f64) -> f64 {
+        if self.angular_resolution <= 0.0 {
+            return f64::INFINITY;
+        }
+        size_m.max(0.0) / self.angular_resolution
+    }
+
     /// **The decision** (docs/49). Existence is the physics'; the camera only chooses HOW to compute it.
     ///   - no active physics                     => `Bulk`
     ///   - active physics, NOT in view           => `Analytic` (cheap math; camera does NOT gate existence)

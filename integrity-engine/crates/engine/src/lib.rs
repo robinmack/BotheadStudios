@@ -7687,15 +7687,34 @@ mod app {
         ///
         /// The scene says nothing about any of this. It named Earth; the land cover says what grows.
         fn build_flora(&mut self) {
-            /// Above this the plants are smaller than a pixel and the ground's albedo IS the answer.
-            /// Not a style choice: at 300 m a 0.35 m tuft subtends about a thousandth of a radian, well
-            /// under one pixel of a 60-degree frame, so resolving it could not change the picture.
-            const FLORA_ALT_M: f64 = 300.0;
-            /// How much matter may stand at once (Law III: the minimal necessary, not all in sight).
-            const FLORA_BUDGET: usize = 1200;
-
+            // ★★ **THE FIDELITY DECISIONS BELONG TO THE RENDERER** (docs/68 step 2). What stood here
+            // were three constants inside the model, each deciding a picture: `FLORA_ALT_M = 300`, a
+            // budget, and a scan radius. The first was the worst — it applied ONE altitude cutoff to
+            // every plant, when what decides the question is the ANGLE a thing subtends. At this
+            // frame's real resolution a 0.35 m tuft is worth resolving to 622 m and a 15 m oak to
+            // 26.7 km: a factor of forty that no single constant could ever carry.
+            //
+            // `Fidelity` derives it from the viewport this frame was actually projected with, so it
+            // sharpens when the window grows instead of staying at whatever was typed. The budget
+            // remains — it is a genuine platform cost bound, and that is exactly why it belongs on the
+            // renderer's side rather than in the model.
+            let fidelity = Fidelity::of_view(
+                crate::terra::fly_camera::DEFAULT_FOV_Y,
+                self.config.height as f64,
+                1200,
+            );
             let alt = self.fly.alt_m;
-            if alt > FLORA_ALT_M || self.landcover.is_none() || self.flora_kinds.is_empty() {
+            // Resolve while ANY kind is still worth resolving from here — the tallest decides, and the
+            // per-kind reach inside `scatter` culls the rest.
+            let tallest = self
+                .flora_kinds
+                .iter()
+                .map(|k| k.height_m)
+                .fold(0.0f64, f64::max);
+            if !fidelity.worth_resolving(tallest, alt)
+                || self.landcover.is_none()
+                || self.flora_kinds.is_empty()
+            {
                 self.flora_at = None;
                 return;
             }
@@ -7707,11 +7726,11 @@ mod app {
                     return;
                 }
             }
-            // What a viewer at this altitude can actually resolve: the horizon is far, but a tuft is
-            // sub-pixel long before that. Scale the radius with altitude and cap it.
-            // A CAP, not the reach. Each kind now derives its own reach from its density and the
-            // budget (docs/46 row 49); this only stops a very sparse kind scanning to the horizon.
-            let radius_m = 600.0;
+            // A CAP, not the reach: each kind derives its own from its density and the budget
+            // (docs/46 row 49). The cap is now the distance at which the TALLEST kind falls below one
+            // pixel — the renderer's answer to "past here, nothing I could draw would change the
+            // frame" — rather than the 600 m that stood here, which was a number I picked.
+            let radius_m = fidelity.resolve_out_to(tallest);
             let mats = &self.mats;
             let biome_mix = &self.biome_mix;
             let landcover = self.landcover.as_ref();
@@ -7729,7 +7748,7 @@ mod app {
                 // spent on angle (docs/46 row 48) — so a 15 m oak at 60 m outbids the 1,201st grass
                 // tuft underfoot instead of being starved out by it.
                 alt.max(0.05),
-                FLORA_BUDGET,
+                fidelity.instance_budget,
             );
             if sited.is_empty() {
                 self.flora_at = Some((lat, lon, 0));
