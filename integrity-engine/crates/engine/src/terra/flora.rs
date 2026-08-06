@@ -149,6 +149,16 @@ pub fn scatter(
         if kind.crown_m2 <= 0.0 {
             continue;
         }
+        // The cover here, used ONLY to size the scan (below). Occupancy is still decided per cell at
+        // each cell's own position, so density follows the ground rather than this one sample.
+        let frac_here = mixture_at(centre_lat, centre_lon)
+            .iter()
+            .find(|&&(m, _)| m == fol)
+            .map(|&(_, f)| f as f64)
+            .unwrap_or(0.0);
+        if frac_here <= 0.0 {
+            continue; // this plant does not grow here at all
+        }
         // ★★ **THE LATTICE IS A FACT ABOUT THE GROUND, NOT ABOUT THE OBSERVER** (docs/46 row 47).
         //
         // Spacing comes from the KIND's own crown and nothing else: at full cover one plant occupies
@@ -174,7 +184,27 @@ pub fn scatter(
         // band does). Neither is worth doing before a rig measures a rebuild in a real scene.
         let cell_m = kind.crown_m2.sqrt();
         let d_lat = cell_m / m_per_deg_lat;
-        let lat_span = radius_m / m_per_deg_lat;
+        // ★★★ **EACH KIND REACHES AS FAR AS IT IS WORTH REACHING** — and one radius for every kind is
+        // why there were no trees at eye level.
+        //
+        // The caller used to hand in a single `(alt * 8).clamp(6, 120)`, which at 1.7 m eye height is
+        // **13.6 m**, while oaks sit `sqrt(crown)` = 16 m apart. A query disc smaller than a lattice's
+        // spacing cannot contain a single one of its cells, so **no oak could ever appear from standing
+        // height, at any budget**. That number was a renderer's fidelity-versus-cost decision (docs/68)
+        // wearing the model's clothes, and it was not derived from anything.
+        //
+        // Derived instead, from two things already known here: a kind's own density (`frac/crown`) and
+        // the budget. The radius at which THIS kind alone would fill the budget is
+        // `sqrt(budget / (π · density))` — beyond that its plants cannot win a slot however big they
+        // look, so scanning further is provably wasted. Dense things get a small disc and sparse things
+        // a large one, which is both correct and *cheaper*: grass reaches ~3.5 m (3.4k cells) and oaks
+        // ~460 m (2.6k cells), against 285k cells for one 32 m disc that still would not have held the
+        // oaks. The angular sort then decides which of them actually get drawn.
+        let density = (frac_here / kind.crown_m2).max(1e-12);
+        let reach_m = (budget as f64 / (std::f64::consts::PI * density))
+            .sqrt()
+            .min(radius_m);
+        let lat_span = reach_m / m_per_deg_lat;
         // ★ Each KIND gets its own lattice, and they are meant to overlap — grass grows under an oak,
         // and their spacings differ by two orders of magnitude. What must never overlap is IDENTITY,
         // so the kind goes into the salt of every hash below (Robin: *"different flora types have
@@ -188,7 +218,7 @@ pub fn scatter(
             let lat_row = cz as f64 * d_lat;
             let m_per_deg_lon = m_per_deg_lat * lat_row.to_radians().cos().abs().max(1e-6);
             let d_lon = cell_m / m_per_deg_lon;
-            let lon_span = radius_m / m_per_deg_lon;
+            let lon_span = reach_m / m_per_deg_lon;
             let cx0 = ((centre_lon - lon_span) / d_lon).floor() as i64;
             let cx1 = ((centre_lon + lon_span) / d_lon).ceil() as i64;
             for cx in cx0..=cx1 {
@@ -200,7 +230,7 @@ pub fn scatter(
                 let lon = (cx as f64 + 0.5 + jx) * d_lon;
                 let dz = (lat - centre_lat) * m_per_deg_lat;
                 let dx = (lon - centre_lon) * m_per_deg_lon;
-                if dx * dx + dz * dz > radius_m * radius_m {
+                if dx * dx + dz * dz > reach_m * reach_m {
                     continue;
                 }
                 // **Cover decides OCCUPANCY.** A cover fraction is the share of ground this plant
@@ -321,14 +351,24 @@ mod tests {
             );
             assert!((p.yaw - q.yaw).abs() < 1e-12 && (p.scale - q.scale).abs() < 1e-12);
         }
-        // And a SMALLER budget must return a prefix of the same answer — the nearest plants, not a
-        // different meadow.
+        // ★ AMENDED 2026-08-05. This demanded that a smaller budget return a PREFIX BY DISTANCE, which
+        // was true when the budget was spent nearest-first and is not now: it is spent on what SUBTENDS
+        // the most, and `scale` varies ±25%, so a slightly larger tuft can outrank a slightly nearer
+        // one. That is the rule working, not failing. What the test was really guarding is that a
+        // tighter budget SELECTS from the same meadow rather than re-rolling it — which is the property
+        // determinism actually promises, and it still holds.
         let few = scatter(53.1, -9.45, 6.0, &k, &mats, mix, 1.7, 20);
         assert_eq!(few.len(), 20);
-        for (p, q) in few.iter().zip(&a) {
+        for p in &few {
+            let same = a
+                .iter()
+                .find(|q| q.id == p.id)
+                .expect("a tighter budget must SELECT from the same meadow, not grow a new one");
             assert!(
-                (p.lat_deg - q.lat_deg).abs() < 1e-12,
-                "a tighter budget must keep the NEAREST plants, not re-roll them"
+                (p.lat_deg - same.lat_deg).abs() < 1e-12
+                    && (p.lon_deg - same.lon_deg).abs() < 1e-12
+                    && (p.scale - same.scale).abs() < 1e-12,
+                "and the plant it kept is the same plant"
             );
         }
     }

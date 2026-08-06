@@ -7709,7 +7709,9 @@ mod app {
             }
             // What a viewer at this altitude can actually resolve: the horizon is far, but a tuft is
             // sub-pixel long before that. Scale the radius with altitude and cap it.
-            let radius_m = (alt * 8.0).clamp(6.0, 120.0);
+            // A CAP, not the reach. Each kind now derives its own reach from its density and the
+            // budget (docs/46 row 49); this only stops a very sparse kind scanning to the horizon.
+            let radius_m = 600.0;
             let mats = &self.mats;
             let biome_mix = &self.biome_mix;
             let landcover = self.landcover.as_ref();
