@@ -7723,6 +7723,10 @@ mod app {
                     let class = landcover.map_or(0, |r| r.biome_at(la, lo) as usize);
                     biome_mix.get(class).cloned().unwrap_or_default()
                 },
+                // The eye's own height is what turns a distance into an ANGLE, and the budget is
+                // spent on angle (docs/46 row 48) — so a 15 m oak at 60 m outbids the 1,201st grass
+                // tuft underfoot instead of being starved out by it.
+                alt.max(0.05),
                 FLORA_BUDGET,
             );
             if sited.is_empty() {

@@ -46,6 +46,17 @@ pub struct Sited {
     pub yaw: f64,
     /// Multiplier on the assembly's own size — real stands are not clones.
     pub scale: f64,
+    /// Horizontal distance from the eye's ground point (m), and this plant's own height — the two
+    /// numbers the budget spends. Kept here because they are free at generation and awkward after.
+    pub dist_m: f64,
+    pub height_m: f64,
+}
+
+/// **How big this plant looks from an eye `eye_m` above the ground** — its own extent over the slant
+/// distance to it. The angle, which is what decides whether resolving it could change the picture.
+fn subtended(s: &Sited, eye_m: f64) -> f64 {
+    let slant = (s.dist_m * s.dist_m + eye_m * eye_m).sqrt().max(1e-6);
+    s.height_m * s.scale / slant
 }
 
 /// A plant the engine knows how to grow: which assembly, what it is made of, how much ground its crown
@@ -57,6 +68,10 @@ pub struct Kind {
     pub foliage: String,
     /// Ground area one plant's crown covers, m². Derived from the assembly's own geometry.
     pub crown_m2: f64,
+    /// ★ **How tall it stands**, m — the assembly's own extent (`Assembly::reach_m`), which is what
+    /// decides how big it looks from anywhere. A grass tuft is 0.35 m and an oak is 15; the budget
+    /// below spends that difference instead of ignoring it.
+    pub height_m: f64,
 }
 
 impl Kind {
@@ -81,6 +96,7 @@ impl Kind {
             assembly_id: a.id.clone(),
             foliage: foliage.to_string(),
             crown_m2: std::f64::consts::PI * widest * widest,
+            height_m: a.reach_m(),
         }
     }
 }
@@ -116,6 +132,8 @@ pub fn scatter(
     kinds: &[Kind],
     mats: &[Material],
     mut mixture_at: impl FnMut(f64, f64) -> Vec<(usize, f32)>,
+    // How high the eye is above the ground here (m) — what turns a distance into an ANGLE.
+    eye_m: f64,
     budget: usize,
 ) -> Vec<Sited> {
     if kinds.is_empty() || radius_m <= 0.0 || budget == 0 {
@@ -199,6 +217,10 @@ pub fn scatter(
                 }
                 out.push(Sited {
                     id: crate::instance::InstanceId::derived(salt(0), (cx, cz), 0),
+                    // Kept from where the scales are already in hand, so the budget below does not have
+                    // to re-derive a metre-per-degree at every comparison.
+                    dist_m: (dx * dx + dz * dz).sqrt(),
+                    height_m: kind.height_m,
                     lat_deg: lat,
                     lon_deg: lon,
                     kind: ki,
@@ -209,16 +231,23 @@ pub fn scatter(
             }
         }
     }
-    // Nearest first, then bound — the plants a viewer can actually resolve (Law III).
-    out.sort_by(|a, b| {
-        let d = |s: &Sited| {
-            let lon_scale = m_per_deg_lat * s.lat_deg.to_radians().cos().abs().max(1e-6);
-            let x = (s.lon_deg - centre_lon) * lon_scale;
-            let z = (s.lat_deg - centre_lat) * m_per_deg_lat;
-            x * x + z * z
-        };
-        d(a).total_cmp(&d(b))
-    });
+    // ★★★ **THE BUDGET IS SPENT ON WHAT IS BIG IN THE VIEW, NOT ON WHAT IS UNDERFOOT.**
+    //
+    // This sorted by DISTANCE and truncated, which is not a rule — it is a way to bound a count, and it
+    // silently decided that the 1,201st grass tuft at 3.5 m mattered more than every oak in the county.
+    // Grass at a 0.35 cover fraction is ~31 plants per m², so a 1,200 budget is exhausted inside
+    // `sqrt(1200/(31π))` ≈ 3.5 m: **a disc of columns centred under the camera**, which is exactly what
+    // Robin reported seeing — *"the columns were clumped in one tiny area in center of viewport,
+    // suspiciously crater like."* A radius-bounded budget drawn on the ground IS a crater.
+    //
+    // What decides whether something is worth resolving is how big it LOOKS: its own extent over its
+    // distance, the angle it subtends. That is the same criterion docs/44 already uses to decide
+    // whether to resolve anything at all, and the same one that turns a plant back into its albedo
+    // above 300 m — so nothing new is being invented, and no per-kind quota has to be written. Grass
+    // wins underfoot because it is underfoot; a 15 m oak wins at 100 m because it is 15 m tall.
+    //
+    // The slant includes the EYE HEIGHT, or a tuft directly below the camera would subtend infinity.
+    out.sort_by(|a, b| subtended(b, eye_m).total_cmp(&subtended(a, eye_m)));
     out.truncate(budget);
     out
 }
@@ -281,8 +310,8 @@ mod tests {
         let (k, mats) = kinds();
         let grass = crate::materials::index_of(&mats, "grass");
         let mix = |_: f64, _: f64| vec![(grass, 0.8f32)];
-        let a = scatter(53.1, -9.45, 6.0, &k, &mats, mix, 200);
-        let b = scatter(53.1, -9.45, 6.0, &k, &mats, mix, 200);
+        let a = scatter(53.1, -9.45, 6.0, &k, &mats, mix, 1.7, 200);
+        let b = scatter(53.1, -9.45, 6.0, &k, &mats, mix, 1.7, 200);
         assert!(!a.is_empty(), "a pasture grows something");
         assert_eq!(a.len(), b.len(), "the same ground grows the same number");
         for (p, q) in a.iter().zip(&b) {
@@ -294,7 +323,7 @@ mod tests {
         }
         // And a SMALLER budget must return a prefix of the same answer — the nearest plants, not a
         // different meadow.
-        let few = scatter(53.1, -9.45, 6.0, &k, &mats, mix, 20);
+        let few = scatter(53.1, -9.45, 6.0, &k, &mats, mix, 1.7, 20);
         assert_eq!(few.len(), 20);
         for (p, q) in few.iter().zip(&a) {
             assert!(
@@ -302,6 +331,47 @@ mod tests {
                 "a tighter budget must keep the NEAREST plants, not re-roll them"
             );
         }
+    }
+
+    /// ★★★ **THE BUDGET IS NOT A CRATER.** Robin, on an earlier render (2026-08-05): *"when I scrolled
+    /// in far enough trees should be visible, the columns were clumped in one tiny area in center of
+    /// viewport, suspiciously crater like."*
+    ///
+    /// That is what a NEAREST-FIRST budget draws. Grass at a 0.35 cover fraction is ~31 plants per m²,
+    /// so 1,200 of them are exhausted inside `sqrt(1200/(31π))` ≈ 3.5 m — a disc of columns centred
+    /// under the camera, with every oak in the county starved out. The rule was never a design; it was
+    /// a way to bound a count.
+    ///
+    /// Spending the budget on what SUBTENDS THE MOST fixes it without a per-kind quota: the oaks are
+    /// present because they are 15 m tall, and the stand reaches far beyond the grass.
+    #[test]
+    fn the_budget_buys_what_can_be_seen_not_what_is_underfoot() {
+        let (kinds, mats) = kinds();
+        let leaf = crate::materials::index_of(&mats, "broadleaf_foliage");
+        let grass = crate::materials::index_of(&mats, "grass");
+        // Maine's mixed forest: 45% broadleaf, 35% grass — the mixture that produced the crater.
+        let mix = move |_: f64, _: f64| vec![(leaf, 0.45f32), (grass, 0.35f32)];
+        let got = scatter(45.3, -69.0, 60.0, &kinds, &mats, mix, 1.7, 1200);
+        assert_eq!(got.len(), 1200, "the budget is spent");
+
+        let trees = got.iter().filter(|s| s.kind == 0).count();
+        assert!(
+            trees > 20,
+            "the oaks are in the picture, not starved out by grass: {trees} of 1200"
+        );
+        // ★ AND THE STAND IS NOT A DISC. Under the old rule everything sat within ~3.5 m; the tallest
+        // things now reach out to where they still subtend something.
+        let far = got.iter().map(|s| s.dist_m).fold(0.0f64, f64::max);
+        assert!(
+            far > 25.0,
+            "the stand reaches out to {far:.1} m, not a crater at the camera's feet"
+        );
+        // The grass is still there, and still underfoot — it wins where it genuinely dominates the view.
+        let near_grass = got.iter().filter(|s| s.kind == 1 && s.dist_m < 3.0).count();
+        assert!(
+            near_grass > 100,
+            "grass underfoot is still resolved: {near_grass}"
+        );
     }
 
     /// ★★★ **THE TREES STAY PUT WHEN YOU WALK** (docs/46 row 47).
@@ -322,7 +392,7 @@ mod tests {
         let leaf = crate::materials::index_of(&mats, "broadleaf_foliage");
         let grass = crate::materials::index_of(&mats, "grass");
         let all = move |_: f64, _: f64| vec![(leaf, 1.0f32), (grass, 0.6f32)];
-        let here = |lat: f64, lon: f64| scatter(lat, lon, 15.0, &kinds, &mats, all, 100_000);
+        let here = |lat: f64, lon: f64| scatter(lat, lon, 15.0, &kinds, &mats, all, 1.7, 100_000);
 
         let a = here(10.0, 20.0);
         // Three centres, each offset by more than Terra's 2 m rebuild threshold.
@@ -361,7 +431,7 @@ mod tests {
         let all = move |_: f64, _: f64| vec![(leaf, 1.0f32), (grass, 1.0f32)];
         // 25 m: wide enough that the OAK lattice (16 m spacing, from its 9 m crown) has cells in it at
         // all, which an 8 m disc does not — the two lattices differ by two orders of magnitude.
-        let out = scatter(10.0, 20.0, 25.0, &kinds, &mats, all, 100_000);
+        let out = scatter(10.0, 20.0, 25.0, &kinds, &mats, all, 1.7, 100_000);
         let by_kind: Vec<usize> = (0..kinds.len())
             .map(|k| out.iter().filter(|s| s.kind == k).count())
             .collect();
@@ -388,7 +458,7 @@ mod tests {
         let sand = crate::materials::index_of(&mats, "sand");
         let granite = crate::materials::index_of(&mats, "granite");
         for mix in [vec![(water, 1.0f32)], vec![(sand, 0.6), (granite, 0.4)]] {
-            let got = scatter(0.0, 0.0, 50.0, &k, &mats, |_, _| mix.clone(), 500);
+            let got = scatter(0.0, 0.0, 50.0, &k, &mats, |_, _| mix.clone(), 1.7, 500);
             assert!(
                 got.is_empty(),
                 "nothing grows here, got {} plants",
@@ -403,7 +473,16 @@ mod tests {
     fn a_stand_does_not_look_stamped() {
         let (k, mats) = kinds();
         let grass = crate::materials::index_of(&mats, "grass");
-        let got = scatter(0.0, 0.0, 3.0, &k, &mats, |_, _| vec![(grass, 0.8f32)], 400);
+        let got = scatter(
+            0.0,
+            0.0,
+            3.0,
+            &k,
+            &mats,
+            |_, _| vec![(grass, 0.8f32)],
+            1.7,
+            400,
+        );
         assert!(got.len() > 50, "expected a crowd, got {}", got.len());
         let yaws: Vec<f64> = got.iter().map(|s| s.yaw).collect();
         let spread = yaws.iter().cloned().fold(f64::MIN, f64::max)
