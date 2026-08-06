@@ -144,10 +144,25 @@ Tillotson EOS, `docs/39`'s JIT particalization (conserving to <1e-12, wired at p
 
 ## 5. What resists, concretely
 
-Three gaps, all of which assemblies need anyway:
+Three gaps, all of which assemblies need anyway — **and a fourth this document did not predict, found
+by attempting it**:
 
-1. **`Shape` has no shell.** `Sphere`, `Cylinder`, `Tube`, `Slab` — nested spheres double-count mass.
-   But `Tube` *is* the cylindrical shell, so this is a missing variant of an idea already present.
+0. ★★ **A part could not say its matter was COMPRESSED.** `mass = envelope × packing × density` reads
+   the catalogue's *surface-condition* density, and a planet is mostly not at the surface: Earth's
+   lower mantle is peridotite at 4500 kg/m³ against a reference near 3300. `packing` cannot express it
+   — it is clamped to 1, because it means VOID.
+   ★ Robin pushed back — *"We know the difference between sand and gravel. Or sand and sandstone."* —
+   and that is the settling argument, in the opposite direction to the one it looks like. Random close
+   packing is ~0.6 for **both** sand and gravel; what differs is grain size. Sand and sandstone are the
+   same grains at nearly the same packing, and one flows while the other holds a cliff, because in
+   sandstone they are cemented. So **packing is a lossy summary of an ASSEMBLY** — resolved by grains
+   with a size and with or without `Connection`s — while **compression is a STATE of a substance**,
+   resolved by the EOS at the local pressure. Different resolved counterparts, therefore different
+   fields. `Part::in_situ_density` (flagged, PREM-measured, with `pressure_at` + Tillotson named as
+   what it defers to), and `Part::packing`'s doc now says what it cannot hold.
+
+1. ✅ **`Shape::Shell`, built 2026-08-05.** `Tube` was already the cylindrical version of it, so this
+   was a missing variant rather than a missing idea. Nested `Sphere`s counted the core five times over.
 2. **A planet's surface is a raster, not parts.** This looks like a difference in kind and is not:
    `docs/63` already argues a raster is a statistical description of the matter that is there,
    integrated over a footprint — a *resolution* of the same object. Planets are simply the first
@@ -177,8 +192,13 @@ of verified physics — `enclosed_mass`, `moment_of_inertia`, `gravity_at`, `pre
 3. **Extent, attitude, momentum on the instance.** `reach_m` exists; the rest is state.
 4. **Containment as a derivable rule + exceptions**, proven on the case that already exists: a planet
    containing its flora. `scatter` is the rule; the exception set is new.
-5. **`Shape::Shell`, and Earth expressed as parts** — with `the_three_scenes_read_one_earth` red until
-   every number matches, then green.
+5. **Earth expressed as parts.** ✅ **HALF DONE 2026-08-05**: `LayeredBody::as_assembly` exists and
+   `an_earth_described_as_an_assembly_weighs_the_same_earth` pins it — mass agrees to better than
+   1e-12 relative, the air part carries exactly the declared atmosphere mass, the shells tile the
+   sphere with no gap or overlap, the centre of mass is the centre, and the assembly reaches ~97 km
+   past the rock because its outermost component is its air. The Moon takes the same call and gets no
+   atmosphere part, with no branch. **What remains is the direction of travel**: this converts, it does
+   not yet REPLACE — nothing reads Earth as an assembly, and the surface rasters are not parts.
 6. **The signal**, bidirectional, replacing the five bespoke spellings.
 7. **The per-assembly solver**, last, because it needs 2–4 to exist.
 

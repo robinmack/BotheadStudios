@@ -67,6 +67,9 @@ impl Kind {
                 crate::assembly::Shape::Cylinder { r, .. } => r,
                 crate::assembly::Shape::Tube { r_outer, .. } => r_outer,
                 crate::assembly::Shape::Slab { x, z, .. } => 0.5 * x.max(z),
+                // No plant is a shell today; if one ever is (a hollow gourd, a shell of leaves) its
+                // crown covers its outer radius.
+                crate::assembly::Shape::Shell { r_outer, .. } => r_outer,
             })
             .fold(0.0f64, f64::max);
         Kind {

@@ -55,6 +55,15 @@ pub enum Shape {
         y: f64,
         z: f64,
     },
+    /// ★ **A hollow SPHERE: a planet's layer.** `Tube` is already this idea for cylinders, and its
+    /// absence was the first concrete thing blocking a planet from being an assembly (docs/67 §5):
+    /// nested `Sphere`s double-count their own interiors, so a core inside a mantle inside a crust
+    /// weighed several Earths. The innermost layer is the degenerate case with `r_inner = 0`, which is
+    /// a solid sphere and needs no separate variant.
+    Shell {
+        r_inner: f64,
+        r_outer: f64,
+    },
 }
 
 impl Shape {
@@ -63,6 +72,14 @@ impl Shape {
     pub fn volume_m3(&self) -> f64 {
         use std::f64::consts::PI;
         match *self {
+            Shape::Shell { r_inner, r_outer } => {
+                let (a, b) = (r_inner.max(0.0), r_outer.max(0.0));
+                if b <= a {
+                    0.0 // an inside-out shell is a broken definition, not negative matter
+                } else {
+                    4.0 / 3.0 * PI * (b * b * b - a * a * a)
+                }
+            }
             Shape::Sphere { r } => {
                 if r <= 0.0 {
                     0.0
@@ -109,6 +126,8 @@ impl Shape {
     pub fn reach_m(&self) -> f64 {
         match *self {
             Shape::Sphere { r } => r.max(0.0),
+            // A shell reaches its OUTER radius: the hollow middle is not where it ends.
+            Shape::Shell { r_outer, .. } => r_outer.max(0.0),
             // Corner of the cylinder: the rim of an end cap.
             Shape::Cylinder { r, length } => r.max(0.0).hypot(0.5 * length.max(0.0)),
             Shape::Tube {
@@ -200,8 +219,44 @@ pub struct Part {
     /// It was added because the alternative was worse: sizing a charge's parts to their SOLID volume
     /// made an 8 lb charge occupy half the chamber it really fills, and chamber volume sets the
     /// pressure a burn reaches.
+    ///
+    /// ★★ **FLAGGED (Law V): packing is a LOSSY SUMMARY OF AN ASSEMBLY, and the things it loses are
+    /// the ones that decide behaviour.** Robin, on being told compression could be folded into it
+    /// (2026-08-05): *"We know the difference between sand and gravel. Or sand and sandstone."*
+    ///
+    /// Random close packing is ~0.6 for **both** sand and gravel — what differs is GRAIN SIZE, which
+    /// this number cannot hold. Sand and sandstone are the same grains at nearly the same packing, and
+    /// one flows while the other holds a cliff, because in sandstone the grains are CEMENTED. So the
+    /// resolved counterpart is not a better fraction: it is the grains themselves, as an assembly, with
+    /// a size and with or without [`Connection`]s between them — and the connection half of that is
+    /// already in this type, since *where an assembly breaks is decided by how it was fastened*.
+    ///
+    /// ★ This is why packing must NOT absorb compression, which is the other reason a part's matter can
+    /// be denser or thinner than its catalogue entry. Compression is not an arrangement at all —
+    /// peridotite at 4500 kg/m³ is not packed differently from peridotite at 3300, it is the same
+    /// grains squeezed — and its resolved counterpart is the EOS at the local pressure, not a geometry.
+    /// One number for two physics would make the engine unable to say which one it was in. See
+    /// [`Part::in_situ_density`].
     #[serde(default = "one")]
     pub packing: f64,
+    /// ★★ **The density this part's matter is actually AT (kg/m³), when it is not the catalogue's
+    /// reference.** `None` — the default and the case for every made object — means the material's own
+    /// density, and every existing assembly is bit-identical.
+    ///
+    /// This is NOT `packing`, and conflating them was the trap. Packing is VOID: a powder charge is
+    /// matter with air between it, so it is bounded by 1 and the substance is unchanged. This is
+    /// COMPRESSION: the same matter squeezed into less space, which runs the other way — Earth's lower
+    /// mantle is peridotite at 4500 kg/m³ against a catalogue reference near 3300, a 36% increase that
+    /// no packing fraction can express. Attempting to make a planet an assembly is what surfaced it
+    /// (docs/67 §5 predicted three obstacles and missed this one).
+    ///
+    /// **FLAGGED (Law V), with its resolved counterpart named and already built**: an in-situ density
+    /// is not a property of a substance, it is a STATE at a pressure, and this engine can compute it —
+    /// `planet::LayeredBody::pressure_at` gives the overburden and `eos.rs` (Tillotson, pinned to Benz
+    /// & Asphaug 1999) gives the response. Earth's values here are PREM, i.e. measured rather than
+    /// invented, which is why they are admissible as a declaration in the meantime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_situ_density: Option<f64>,
 }
 
 /// serde default for [`Part::packing`] — solid unless stated.
@@ -369,8 +424,12 @@ impl Assembly {
             .ok_or_else(|| format!("part '{}' names unknown material '{}'", p.name, p.material))
     }
 
+    /// The density this part's matter is at: its measured in-situ value where one is declared, the
+    /// catalogue's reference otherwise. The material must exist either way — a part that names nothing
+    /// real is an error even when it carries its own density.
     fn density_of(&self, p: &Part, mats: &[Material]) -> Result<f64, String> {
-        Ok(mats[self.index_of(p, mats)?].density as f64)
+        let reference = mats[self.index_of(p, mats)?].density as f64;
+        Ok(p.in_situ_density.filter(|d| *d > 0.0).unwrap_or(reference))
     }
 
     /// **Compute the bulk quantities from the parts** — what the compiler runs once and caches.
@@ -454,6 +513,12 @@ impl Assembly {
             let (col, mat) = (mats[mi].albedo, mi as u32);
             let part = match p.shape {
                 Shape::Sphere { r } => crate::mesher::build_uv_sphere(r as f32, mat, col, 12, 20),
+                // A shell is drawn as its OUTER surface: from outside, a planet's crust is what you
+                // see, and the interior is only visible to something that has cut it open. When that
+                // exists it is the same mesh with the inner surface added, not a different rule.
+                Shape::Shell { r_outer, .. } => {
+                    crate::mesher::build_uv_sphere(r_outer as f32, mat, col, 12, 20)
+                }
                 Shape::Cylinder { r, length } => {
                     crate::mesher::build_tube(r as f32, 0.0, length as f32, segments, mat, col)
                 }
@@ -708,6 +773,7 @@ mod tests {
                     },
                     at_m: [-1.0, 0.0, 0.0],
                     packing: 1.0,
+                    in_situ_density: None,
                 },
                 Part {
                     along: along_x(),
@@ -720,6 +786,7 @@ mod tests {
                     },
                     at_m: [0.5, 0.0, 0.0],
                     packing: 1.0,
+                    in_situ_density: None,
                 },
             ],
         };
@@ -767,6 +834,7 @@ mod tests {
                     },
                     at_m: [0.0; 3],
                     packing: 1.0,
+                    in_situ_density: None,
                 },
                 Part {
                     along: along_x(),
@@ -779,6 +847,7 @@ mod tests {
                     },
                     at_m: [0.0; 3],
                     packing: 1.0,
+                    in_situ_density: None,
                 },
             ],
         };
@@ -1355,6 +1424,7 @@ mod reach_tests {
             along: [1.0, 0.0, 0.0],
             at_m: at,
             packing: 1.0,
+            in_situ_density: None,
         }
     }
 

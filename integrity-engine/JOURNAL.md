@@ -3,6 +3,43 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-05 — Earth, described as an assembly, weighs the same Earth
+
+**What.** docs/67 step 5, the half that can be done without replacing anything: `LayeredBody::as_assembly`
+turns a body into parts, and a test pins the two descriptions against each other. Robin's argument was
+*"a planet is an accretion of debris bound by its own gravitational effects which we've worked hard to
+model"* — this makes it a number instead of a claim.
+
+Measured, same Earth both ways: **mass agrees to better than 1e-12 relative**; the atmosphere part
+carries exactly the declared 5.15e18 kg; the shells tile the sphere with no gap and no overlap; the
+centre of mass is the centre; and the assembly reaches **~97 km past the rock**, because its outermost
+component is its air. The Moon takes the same call, gets no atmosphere part, and ends at its surface —
+no branch anywhere.
+
+★ **`Shape::Shell`.** `Tube` was already the cylindrical version, so this was a missing variant rather
+than a missing idea — and without it nested `Sphere`s counted Earth's core five times over.
+
+★★ **The obstacle docs/67 did not predict, found by attempting it: a part could not say its matter was
+COMPRESSED.** `mass = envelope × packing × density` reads the catalogue's surface-condition density, and
+a planet is mostly not at the surface — Earth's lower mantle is peridotite at 4500 kg/m³ against a
+reference near 3300, a 36% difference no packing fraction can hold, since packing is clamped to 1
+because it means void.
+
+I first proposed folding the two together into one "density ratio" and lifting the clamp. **Robin
+settled it in the opposite direction with six words** — *"We know the difference between sand and
+gravel. Or sand and sandstone."* Random close packing is ~0.6 for BOTH sand and gravel; what differs is
+grain size. Sand and sandstone are the same grains at nearly the same packing, and one flows while the
+other holds a cliff, because in sandstone they are cemented. So **packing is a lossy summary of an
+ASSEMBLY** — resolved by grains with a size, and with or without `Connection`s, which is already in the
+type system — while **compression is a STATE of a substance**, resolved by the EOS at the local
+pressure. Different resolved counterparts, so different fields. Both now say so in their own docs.
+
+**What this is not.** It converts; it does not replace. Nothing reads Earth as an assembly yet, and the
+surface rasters are still not parts. But the claim that a `LayeredBody` is a de-resolved assembly of
+matter is now checked by arithmetic rather than asserted in prose.
+
+**Verified.** 571/571 native, `mod app` clean for wasm32.
+
 ## 2026-08-05 — type versus instance, and the dependency it walked straight into
 
 **What.** docs/67 step 2. `broadleaf-tree-oak.json` is a species; the tree at 53.1°N is an individual.
