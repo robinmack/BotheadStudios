@@ -114,6 +114,19 @@ is being refactored toward is [`docs/33-architecture-realignment.md`](docs/33-ar
     step 5 because it is hard; it is step 5 because two other steps wait on it.**
   - **One implementation, many instances.** If per-assembly collision solvers land, that is the rule —
     per-assembly solver STATE, never per-assembly-type solver CODE. Gate it by counting implementations.
+- ★★★ **THE RENDERER IS A SEPARATE ENTITY AND ITS REALM IS LIGHT** ([`docs/68`](docs/68-the-renderer-is-light.md),
+  Robin 2026-08-05). *"Particle physics cares little about photons."* Engine owns matter and time;
+  renderer owns light and RAY TRACING, and asks the model questions rather than being handed answers.
+  - ★★ **The test for any visual shortcut**, sharper than Law IV's own wording: *"It's OK if what the eye
+    can see is an illusion, as long as when it's interacted with the simulation/physics govern it."* A
+    canopy drawn as a texture is honest because the METEOR DOES NOT CONSULT IT — it meets real matter,
+    the hole is real, and through the hole we draw the trunk that was always there. If anything
+    *interacts* with the illusion, it is a fudge.
+  - **The viewport decides RESOLUTION, and resolution is a request the renderer MAKES of the model, not
+    a decision it makes FOR it.** That dissolves the objection I raised on 2026-08-04 (*"so many
+    simulation choices are made based on viewport"*) — recorded because I argued it the wrong way.
+  - Consequence, not yet acted on: `atmos.wgsl`/`SkyVeil` are renderer work sitting in the engine crate,
+    and `FLORA_ALT_M` + the flora budget are renderer decisions living in the model.
 - ★★ **A SCENE IS CHARACTERS AND SETTING; AN ASSEMBLY IS AN ACTOR; THE ENGINE IS DIRECTOR AND STAGE**
   (`docs/65`, Robin 2026-08-03). *"Setting a scene should never involve changes to the engine."* The
   permitted scene API is tiny and `laws::scene_api_tests` is a RATCHET over it: a new route fails the
