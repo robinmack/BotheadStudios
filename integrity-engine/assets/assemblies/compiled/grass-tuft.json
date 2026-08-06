@@ -1,0 +1,38 @@
+{
+  "id": "grass-tuft",
+  "name": "Grass tuft",
+  "parts": [
+    {
+      "name": "blades",
+      "material": "grass",
+      "shape": {
+        "kind": "cylinder",
+        "r": 0.06,
+        "length": 0.35
+      },
+      "along": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "at_m": [
+        0.0,
+        0.175,
+        0.0
+      ],
+      "packing": 0.00257143
+    }
+  ],
+  "connections": [],
+  "notes": "One tuft of pasture grass — the unit a grassland is made of, and the smallest plant the engine carries. A cylinder 0.35 m tall and 0.12 m across at a packing derived the same way as a tree crown: LAI x blade thickness / height = 3.0 x 0.30 mm / 0.35 m = 2.57e-03. Grassland LAI runs lower than forest (~1-4); the blade is thicker than a broadleaf lamina and is taken at 0.30 mm. ★ At altitude nobody instantiates a tuft — the ground answers with `grass`'s albedo, which is itself a measured spectrum. This exists for the metre or two where you can see individual plants, and it is the SAME matter either way (Law IV: the camera changes representation, never existence).",
+  "derived": {
+    "mass_kg": 0.014250272193496786,
+    "envelope_volume_m3": 0.003958406743523139,
+    "matter_volume_m3": 0.000010178765852497705,
+    "centre_of_mass_m": [
+      0.0,
+      0.175,
+      0.0
+    ]
+  }
+}

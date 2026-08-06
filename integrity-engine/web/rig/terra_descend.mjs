@@ -2,9 +2,9 @@
 // Terra's world declares min_alt_m = 2, so test whether THE definitive Earth — real continents,
 // elevation, biomes — can already be flown down to standing height. If it can, the separate ground
 // world is redundant and the scene should just be this Earth with the camera low.
-import { launch, PORT, OUT } from './_launch.mjs';
+import { launch, PORT, OUT, VIEWPORT } from './_launch.mjs';
 const b = await launch();
-const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
+const p = await b.newPage({ viewport: VIEWPORT });
 const errs = []; p.on('pageerror', e => errs.push(e.message));
 await p.goto(`http://127.0.0.1:${PORT}/terra.html`, { waitUntil: 'load' });
 await p.waitForTimeout(9000);

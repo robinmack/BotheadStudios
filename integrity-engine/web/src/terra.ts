@@ -31,7 +31,16 @@ function sizeCanvas(canvas: HTMLCanvasElement): void {
 
 async function main(): Promise<void> {
   report("info", `build ${__BUILD_ID__}`);
-  const worldUrl = withBase(document.body.getAttribute("data-world") ?? "/worlds/earth/world.json");
+  // Which world this page is. `?world=<name>` overrides the page's own `data-world`, which is what
+  // makes a CONTROL possible: the same page, the same ground, the same camera, a different declared
+  // body — e.g. `?world=earth-airless` to check that a sky which claims to be scattered sunlight
+  // actually disappears when the air does. Restricted to a bare name so the parameter can only ever
+  // select a world that ships with the site.
+  const wanted = new URLSearchParams(location.search).get("world");
+  const named = wanted && /^[a-z0-9-]+$/.test(wanted) ? `/worlds/${wanted}/world.json` : null;
+  const worldUrl = withBase(
+    named ?? document.body.getAttribute("data-world") ?? "/worlds/earth/world.json",
+  );
 
   const canvas = document.getElementById("gpu-canvas") as HTMLCanvasElement | null;
   if (!canvas) {
@@ -252,30 +261,171 @@ async function main(): Promise<void> {
     });
     hud.add("actions", swarm);
 
-    // **Follow a fragment down.** The engine says where its matter IS (`heaviest_fragment` / `fragment`);
-    // this decides where to put a camera because of it and hands the engine a POSE. The engine has no
-    // notion of "following" and does not need one — which is the whole point of feeding it coordinates and
-    // a field of view rather than a mode. Nothing here touches physics; the other 1,199 fragments keep
-    // falling whether or not anyone is watching this one (Law IV).
-    let followId: number | null = null;
-    // **Two camera producers, and the HUD guarantees only one drives.** "Fly" is the manual rig; "Follow
-    // fragment" hands the engine a POSE each frame. The engine has no notion of following and needs none
-    // — that is the point of feeding it coordinates and a field of view rather than a mode. Nothing here
-    // touches physics: the other fragments keep falling whether or not anyone watches this one (Law IV).
-    const stopFollowing = (why: string) => {
-      followId = null;
-      terra.clear_camera_pose();
-      hud.notify(why);
-    };
+    // **The cannon.** The scene's entire contribution is placement: it says a 24-pounder stands at the
+    // point below the camera and points along this bearing. The engine burns the charge, checks the
+    // barrel holds, works out the muzzle velocity and flies the shot through the air — the same flight
+    // path the meteor swarm uses. Nothing here touches physics, and `laws::scene_purity_tests` fails the
+    // build if it ever does.
+    const fire = document.createElement("button");
+    fire.textContent = "Fire cannon";
+    fire.title = "Fire a 24-pounder from the ground below the camera, seaward at 20 degrees elevation";
+    Object.assign(fire.style, {
+      marginLeft: "8px", padding: "8px 14px", borderRadius: "999px", cursor: "pointer",
+      border: "1px solid rgba(255,255,255,0.25)", background: "rgba(20,22,30,0.72)", color: "#eee",
+      font: "600 13px system-ui, sans-serif",
+    });
+    fire.addEventListener("click", () => {
+      // The camera's own heading is where the gun points — you fire where you are looking.
+      const bearing = (terra.camera_bearing?.() ?? 0);
+      const v = terra.fire_cannon(bearing, 20);
+      hud.notify(v > 0
+        ? `cannon fired — ${v.toFixed(0)} m/s at bearing ${bearing.toFixed(0)}\u00b0`
+        : "the gun did not fire — see the console");
+    });
+    hud.add("actions", fire);
+
+    // ★ **A GUN EMPLACEMENT AS SCENE DATA.** `data-cannon="lat,lon,bearing,elevation"` on the page is
+    // the whole of what makes `yarr.html` a different scene from `terra.html`: the SAME Earth, the same
+    // world file, the same struct — one assembly placed on it, and somewhere to stand and watch.
+    //
+    // The camera is DERIVED from the gun rather than stated beside it, so there is one fact here and
+    // not two that can disagree: stand behind the breech along the reverse bearing, a little above,
+    // looking down the barrel's line.
+    // ★★ **MORE THAN ONE SHORE, AND THE SUN DECIDES WHICH ONE YOU ARRIVE AT.**
+    //
+    // Robin, finding the gun standing in the dark: *"It's dark in Galway… let's switch back to Chile.
+    // Probably need a scene button where you can flip to wherever it's daylight of the two."*
+    //
+    // `data-cannon` is a `;`-separated list of `Name@lat,lon,bearing,elevation`; a bare
+    // `lat,lon,bearing,elevation` is still one unnamed site, so the old form keeps working. Which site
+    // is LIT is not computed here — `terra.sun_elevation_deg` answers it, because solar geometry is
+    // the engine's and a page doing its own spherical trig is a second answer to a settled question.
+    // The button moves where you stand. It does not move the sun.
+    const emplacement = document.body.dataset.cannon;
+    if (emplacement) {
+      type Site = { name: string; lat: number; lon: number; bearing: number; elev: number };
+      const sites: Site[] = emplacement.split(";").filter(Boolean).map((chunk, i) => {
+        const at = chunk.indexOf("@");
+        const name = at >= 0 ? chunk.slice(0, at) : `site ${i + 1}`;
+        const [lat, lon, bearing, elev] = chunk.slice(at + 1).split(",").map(Number);
+        return { name, lat, lon, bearing, elev };
+      });
+      // Open on the sunniest one. Ask the engine where the sun is; do not work it out here.
+      let current = 0;
+      for (let i = 1; i < sites.length; i++) {
+        if (terra.sun_elevation_deg(sites[i].lat, sites[i].lon) >
+            terra.sun_elevation_deg(sites[current].lat, sites[current].lon)) current = i;
+      }
+      const site = () => sites[current];
+      let { lat: gLat, lon: gLon, bearing: gBearing } = site();
+      const M_PER_DEG = 111320;
+      // Metres along a compass bearing from the gun, as a (lat, lon) offset.
+      const along = (d: number, bearing: number): [number, number] => {
+        const r = (bearing * Math.PI) / 180;
+        return [
+          gLat + (d * Math.cos(r)) / M_PER_DEG,
+          gLon + (d * Math.sin(r)) / (M_PER_DEG * Math.cos((gLat * Math.PI) / 180)),
+        ];
+      };
+      const standBehind = (back: number, up: number, pitch: number) => {
+        const [la, lo] = along(back, gBearing + 180);
+        terra.place_camera(la, lo, up, (gBearing * Math.PI) / 180, pitch);
+      };
+
+      terra.set_alt_bounds(0.5, 4.0e7);
+
+      // Stand the gun at the current site and take up the watching position behind it. Called on load
+      // and again whenever the site changes, so there is ONE description of "here is the gun, here is
+      // where you watch from" rather than two that can drift apart.
+      const emplaceHere = () => {
+        ({ lat: gLat, lon: gLon, bearing: gBearing } = site());
+        terra.place_camera(gLat, gLon, 3, (gBearing * Math.PI) / 180, -0.1);
+        terra.emplace_cannon(gBearing);
+        const back = 8.5, up = 2.8;
+        standBehind(back, up, -Math.atan((up - 0.7) / back));
+      };
+      // Behind the breech and above it, looking down the barrel out to sea — the view Robin asked for,
+      // where the gun can actually be SEEN.
+      // ★ The pitch is DERIVED from the geometry, not guessed: standing `back` metres behind and
+      // `up` metres above a gun whose barrel sits ~0.7 m off the ground, the line to it is
+      // atan((up - 0.7) / back) below horizontal. A first version used a flat -0.16 and the gun sat on
+      // the bottom edge behind the HUD — the same class of error as every other typed number today.
+      emplaceHere();
+
+      const sunAt = (s: Site) => terra.sun_elevation_deg(s.lat, s.lon);
+      const describe = (s: Site) => {
+        const e = sunAt(s);
+        return `${s.name} (sun ${e >= 0 ? "+" : ""}${e.toFixed(0)}°)`;
+      };
+      if (sites.length > 1) {
+        // **Weigh anchor.** Sail to the next shore — the gun, the camera and the horizon all follow
+        // from the site, so this changes one number and everything else is derived from it again.
+        const sail = document.createElement("button");
+        Object.assign(sail.style, {
+          marginLeft: "8px", padding: "8px 14px", borderRadius: "999px", cursor: "pointer",
+          border: "1px solid rgba(255,255,255,0.25)", background: "rgba(20,22,30,0.72)", color: "#eee",
+          font: "600 13px system-ui, sans-serif",
+        });
+        const label = () => {
+          const next = sites[(current + 1) % sites.length];
+          sail.textContent = `Sail to ${next.name}`;
+          sail.title =
+            `Move the gun to ${describe(next)}. Currently at ${describe(site())}. ` +
+            `The sun is where the sun is — this moves the ship, not the sky.`;
+        };
+        label();
+        sail.addEventListener("click", () => {
+          current = (current + 1) % sites.length;
+          emplaceHere();
+          label();
+          hud.notify(`made landfall at ${describe(site())}`);
+        });
+        hud.add("actions", sail);
+      }
+      hud.notify(`a 24-pounder, loaded and run out at ${describe(site())}. Fire when ready.`);
+
+      // **Fire, then follow the shot out and watch it land.** The scene names a seat on the shot; the
+      // engine keeps the observer in it. This comment used to say the engine "has no notion of
+      // following and does not need one" — it needs one, because it is the thing that knows where its
+      // own matter is, and the alternative was a scene reading coordinates back to do the maths.
+      // ★★ **FIRE, THEN HAND THE CAMERA TO THE FOLLOWER THAT ALREADY EXISTS.**
+      //
+      // Robin, watching: *"cannon seems to shoot to the side?! ... it all looks very weird."* The engine
+      // was innocent — `the_shot_leaves_along_the_barrel_it_was_drawn_with` pins the shot to within
+      // 0.01 degrees of the barrel as drawn, at four sites. The weirdness was a camera I hand-rolled
+      // here: it swung from behind the gun, THROUGH it, to a point downrange while racing 9 -> 909 m
+      // out, so half a second after firing the gun was off-screen and the view was 66 m in the air.
+      //
+      // Selecting "follow" is the whole of what firing does to the camera, so the shot is watched by
+      // the same code that watches a meteor — and as of docs/65 that code is `Terra::camera_follow`,
+      // in the engine, rather than a chase camera this scene wrote for itself.
+      fire.addEventListener("click", () => {
+        emplaceHere();
+        // The shot exists the moment the gun fires, so there is something to ride at once — and if
+        // there is not, the engine says so rather than seating the camera on nothing.
+        hud.selectCamera("follow");
+      });
+    }
+
+    // **Ride the largest surviving fragment down** — and the scene's whole contribution is the SEAT.
+    //
+    // Robin's second camera verb (2026-08-03): *"camera-follow `<assembly>`, `<relative position>`,
+    // `<heading>`."* So this names what to ride, where to sit in its frame, and where to look. It does
+    // not read where the matter is, does not build a basis, does not compute a standoff, and does not
+    // hand the engine a pose every frame.
+    //
+    // ★ What stood here was 43 lines of vector maths run per frame — normalising a velocity, crossing
+    // it with the local up, scaling an offset by the fragment's own radius — plus its own mode state to
+    // decide when to stop. All of it is the engine's job (docs/65), and all of it is now `camera_follow`.
+    // It also carried the bug that follows from a radius-scaled standoff: riding a 7 cm cannonball put
+    // the eye about a metre away and filled the frame with sky. A seat stated in METRES cannot do that.
+    const SEAT = { back: 60, up: 12, side: 0 }; // metres behind, above and beside what we ride
     hud.cameras([
       {
         id: "fly",
         label: "🛩 Fly",
         title: "Drive the camera yourself — the continuous orbit⇄ground fly rig",
-        engage: () => {
-          if (followId !== null) stopFollowing("camera released");
-          else terra.clear_camera_pose();
-        },
+        engage: () => terra.camera_follow("", 0, 0, 0, 0, 0),
         release: () => {},
       },
       {
@@ -283,85 +433,19 @@ async function main(): Promise<void> {
         label: "🎯 Follow fragment",
         title: "Ride the largest surviving fragment down — the one the air takes least of",
         engage: () => {
-          const f = terra.heaviest_fragment();
-          if (f.length === 0) {
-            // Nothing to ride. Say so and hand the wheel straight back, rather than sitting in a mode
-            // that silently does nothing.
+          // The engine says whether there is anything to ride; it refuses rather than pointing the
+          // camera at nothing, so there is no "is it there yet" check to get wrong here.
+          if (!terra.camera_follow("heaviest", SEAT.back, SEAT.up, SEAT.side, 0, 0)) {
             hud.notify("nothing in flight to follow");
             hud.selectCamera("fly");
-            return;
           }
-          followId = f[0];
         },
-        release: () => {
-          followId = null;
-          terra.clear_camera_pose();
-        },
+        release: () => terra.camera_follow("", 0, 0, 0, 0, 0),
       },
     ]);
     (window as unknown as { followFragment?: () => void }).followFragment = () =>
-      hud.selectCamera(followId === null ? "follow" : "fly");
+      hud.selectCamera(terra.camera_is_following() ? "fly" : "follow");
 
-    // The chase pose. Offsets are multiples of the fragment's OWN radius, so the framing is the same
-    // whether it is riding a pebble or a boulder — a declared framing choice (where to stand), not a
-    // physical quantity, and scale-free so it needs no per-scene tuning.
-    //
-    // But it cannot be arbitrarily close: one f32 depth range cannot hold both a metre-wide fragment and
-    // the planet behind it, so the engine floors its near plane at a ten-thousandth of the altitude and
-    // anything nearer is clipped. So the chase also stands back a thousandth of the altitude — 219 m at
-    // 219 km, closing to a few tens of metres near the ground — and the fragment stays visible the whole
-    // way down because the engine draws matter smaller than a pixel AS a pixel. Depth partitioning is what
-    // would let the camera sit right on its shoulder at any altitude.
-    // **Trail RIGHT BEHIND it.** Was 40 back / 12 up / 16 to the SIDE — the side offset put the camera
-    // beside the fragment looking across at it, and 40 radii back made it a speck in its own shot.
-    // Directly behind now, close, with just enough lift to keep it off the horizon line rather than
-    // silhouetted on it.
-    //
-    // The ALTITUDE FLOOR still governs the real standoff and is untouched: `scale` below takes the larger
-    // of the fragment's own radius and `alt·ALT_STANDOFF/CHASE_BACK`, so the eye distance
-    // `CHASE_BACK·scale` can never fall below `alt·ALT_STANDOFF` whatever CHASE_BACK is. That is the f32
-    // depth-range constraint (docs/59: one depth range cannot hold an 80 m fragment AND a 6,371 km
-    // planet). Shrinking CHASE_BACK therefore closes the gap only where the fragment's OWN size
-    // dominates — the low, close, fast part of the descent this camera exists for.
-    // CHASE_SIDE stays 0 — MEASURED, not assumed. The worry was that the ablation trail, which streams
-    // backwards along −v straight into the lens, would obscure the shot. Photographed at peak density
-    // (2.7 km, fragment 2853 K, 7,814 trail parcels at 2616 K, 11,288 items drawn): the fragment reads
-    // bright and clear at frame centre, and the parcels are sparse scattered points rather than a
-    // curtain. A side offset was trialled at 4 radii and is not needed to see the subject.
-    //
-    // What sitting on the axis DOES mean is that the camera flies THROUGH the wake rather than alongside
-    // it — parcels all around instead of a streak beside you. That is a framing preference, not a
-    // visibility problem, and it is left at 0 because nothing measured argues for moving it.
-    const CHASE_BACK = 14, CHASE_UP = 3, CHASE_SIDE = 0;
-    const ALT_STANDOFF = 1 / 1000;
-    const driveFollowCamera = (): boolean => {
-      if (followId === null) return false;
-      const f = terra.fragment(followId);
-      if (f.length === 0) {
-        // The producer ENDS ITSELF here: the fragment it was riding has landed. Route the hand-back
-        // through the HUD rather than calling stopFollowing directly, or the selector goes on showing
-        // "Follow fragment" as the active driver while the fly rig is actually in control.
-        hud.notify("the fragment is down — camera released");
-        hud.selectCamera("fly");
-        return false;
-      }
-      const p = [f[1], f[2], f[3]], v = [f[4], f[5], f[6]], r = Math.max(f[7], 0.05);
-      const norm = (a: number[]) => { const L = Math.hypot(...a) || 1; return a.map((x) => x / L); };
-      const cross = (a: number[], b: number[]) => [
-        a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0],
-      ];
-      const upHat = norm(p);
-      const vHat = norm(v);
-      const sideHat = norm(cross(vHat, upHat));
-      // Stand back by whichever is larger: the fragment's own size, or the altitude's depth-range floor.
-      const scale = Math.max(r, (terra.altitude_m() * ALT_STANDOFF) / CHASE_BACK);
-      const eye = [0, 1, 2].map(
-        (i) => p[i] - vHat[i] * (CHASE_BACK * scale) + upHat[i] * (CHASE_UP * scale) + sideHat[i] * (CHASE_SIDE * scale),
-      );
-      const fwd = norm([0, 1, 2].map((i) => p[i] - eye[i]));
-      terra.set_camera_pose(eye[0], eye[1], eye[2], fwd[0], fwd[1], fwd[2], upHat[0], upHat[1], upHat[2], 0.9);
-      return true;
-    };
     (window as unknown as { launchSwarm?: () => void }).launchSwarm = () => terra.launch_swarm();
 
     const frame = () => {
@@ -370,8 +454,9 @@ async function main(): Promise<void> {
       const right = (active("right") ? 1 : 0) - (active("left") ? 1 : 0);
       const climb = (active("up") ? 1 : 0) - (active("down") ? 1 : 0);
       // Keyboard intents plus the shared pointer scheme; both feed the same mover.
-      // While following, the pose owns the camera; manual controls resume the moment it is released.
-      const following = driveFollowCamera();
+      // While riding an actor the engine owns the camera; manual controls resume the moment it lets go
+      // — and it lets go BY ITSELF when the subject lands, which the scene used to have to notice.
+      const following = terra.camera_is_following();
       const walk = fwd + cam.forward();
       if (!following) {
         if (walk !== 0 || right !== 0) terra.move_tangent(walk, right);
@@ -405,7 +490,7 @@ async function main(): Promise<void> {
                     `ablated <b>${terra.trail_mass_kg().toFixed(1)} kg</b>`,
                 ]
               : []),
-            ...(followId !== null ? [`following fragment <b>#${followId}</b>`] : []),
+            ...(terra.camera_is_following() ? ["following a fragment"] : []),
           ],
           timeScale: 1,
           fps: Math.round(fps),

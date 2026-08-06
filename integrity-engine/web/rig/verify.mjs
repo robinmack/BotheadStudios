@@ -1,8 +1,8 @@
-import { launch } from './_launch.mjs';
+import { launch, VIEWPORT } from './_launch.mjs';
 const PORT = process.env.PORT || '5173';
 const out = process.env.OUT || '/tmp';
 const browser = await launch();
-const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+const page = await browser.newPage({ viewport: VIEWPORT });
 await page.goto(`http://127.0.0.1:${PORT}/birth.html`, { waitUntil: 'load' });
 await page.waitForTimeout(4000);
 await page.screenshot({ path: `${out}/v1-blue.png` });   // pre-impact: the blue marble check

@@ -1,19 +1,26 @@
-// Honest Rayleigh-scattered SKY for the terrain scene. NOT a painted gradient: every pixel's colour is
-// the single-scatter sky radiance along its view ray, computed from the SAME Chandrasekhar slab law as
-// the space-band blue marble (atmosphere::rayleigh_veil). Deep blue overhead (short air path → the
-// λ⁻⁴ blue dominates), pale/whiter toward the horizon (long slant path saturates every band), brighter
-// toward the sun (the phase function's forward lobe — it falls out, never faked). Remove the declared
-// atmosphere (τ → 0) and the sky goes black, exactly like the airless Moon.
+// **Earth's air, drawn where nothing else is** — the sky (docs/66).
 //
-// HONESTY FLAGS (identical to the space band's): SINGLE scatter only — no multiple scattering, no
-// Mie/aerosol haze, no ozone. Flat-slab slant path (no Chapman function). Night side (sun below the
-// horizon) is genuinely black — no twilight, no starlight fill.
+// Robin, on where a sky belongs (2026-08-04): *"Sky must be a component of Earth assembly."* So there
+// is nothing about "sky" in here beyond geometry: every pixel is the light single-scattered into its
+// view ray by the DECLARED air of the body the camera is at, computed by the shared `atmos.wgsl` chunk
+// — the same function, at the same exposure, that the ground and the blue marble spend. Remove the
+// atmosphere from the body definition and this pass draws exactly nothing, with no branch to add.
+//
+// It is a full-screen ray cast, which is the honest shape for it: a sky IS light scattered along a
+// ray, and the same march is what will answer terrain self-shadowing (docs/63's amendment). Drawn
+// AFTER the star field and BEFORE the ground: the stars are behind the air, the ground is in front.
+//
+// ★ FLAGGED: the stars behind it are dimmed by the MEAN of the three bands' transmittance, not each by
+// its own, because a scalar alpha is what a single-source blend can carry. The first-order effect —
+// stars extinguished near the horizon and washed out in daylight — is right; their reddening is not.
+// Per-band would need dual-source blending, which core WebGPU does not have.
 
 struct SkyU {
     inv_view_proj : mat4x4<f32>, // clip → world, to reconstruct the per-pixel view ray
-    sun_dir       : vec4<f32>,   // xyz = direction TO the sun (world, normalized) — the terrain's light
-    tau           : vec4<f32>,   // xyz = Rayleigh optical depth per band (R/G/B), w = sun gain
-    camera_pos    : vec4<f32>,   // xyz = eye (world)
+    up            : vec4<f32>,   // xyz = the eye's local zenith (unit, world); w = eye altitude (m)
+    sun           : vec4<f32>,   // xyz = direction TO the sun (unit, world); w = the shared exposure
+    air           : vec4<f32>,   // xyz = the column's optical depth per band; w = scale height (m)
+    body          : vec4<f32>,   // x = surface radius (m), y = column top (m), zw unused
 };
 
 @group(0) @binding(0) var<uniform> u : SkyU;
@@ -37,11 +44,6 @@ fn vs_main(@builtin(vertex_index) vi : u32) -> VOut {
     return o;
 }
 
-// The SAME first-order Chandrasekhar slab single-scatter as atmosphere::rayleigh_veil (Rust), mirrored
-// verbatim: L = F·P(Θ)/(4(μᵥ+μₛ))·μₛ·(1 − e^{−τ(1/μᵥ+1/μₛ)}), Rayleigh phase P(Θ) = ¾(1+cos²Θ).
-// μᵥ is the view cosine from the zenith (short path overhead, long path at the horizon); μₛ the sun's.
-
-
 @fragment
 fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     // Reconstruct the world-space view ray for this pixel by unprojecting near and far clip points.
@@ -49,12 +51,20 @@ fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     let far  = u.inv_view_proj * vec4<f32>(i.ndc, 1.0, 1.0);
     let rd = normalize(far.xyz / far.w - near.xyz / near.w);
 
-    let sun = normalize(u.sun_dir.xyz);
-    let mu_v = rd.y;            // cosine from the zenith: 1 overhead, →0 at the horizon (long air path)
-    let mu_s = sun.y;           // the sun's elevation cosine
-    let cos_theta = dot(rd, sun); // forward-scatter angle: brightens toward the sun via the phase lobe
+    var air : AirColumn;
+    air.tau = u.air.xyz;
+    air.scale_height = u.air.w;
+    air.radius = u.body.x;
+    air.top = u.body.y;
+    air.sun_gain = u.sun.w;
 
-    let radiance = rayleigh_veil(mu_v, mu_s, cos_theta, u.tau.xyz, u.tau.w, u.sun_dir.w);
-    let mapped = tonemap(radiance); // the shared display law — compresses brightness, keeps hue
-    return vec4<f32>(mapped, 1.0);
+    // All the geometry the integral needs, as cosines about the EYE's own zenith.
+    let up = normalize(u.up.xyz);
+    let sun = normalize(u.sun.xyz);
+    let s = air_inscatter(air, u.up.w, dot(up, rd), dot(up, sun), dot(rd, sun), NO_LIMIT);
+
+    let mapped = tonemap(s.inscatter); // the shared display law — compresses brightness, keeps hue
+    // Alpha carries what the air HID, so the pass adds its own light and dims what is behind it.
+    let veiled = 1.0 - (s.transmit.r + s.transmit.g + s.transmit.b) / 3.0;
+    return vec4<f32>(mapped, veiled);
 }

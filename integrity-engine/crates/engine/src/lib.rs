@@ -66,18 +66,24 @@ mod planet;
 /// their helpers). Lifted out of `#[cfg(wasm32)] mod app`: all three scenes use these identically, so
 /// they were never scene code, and living there kept them out of every native build.
 mod render;
+pub mod solar; // the engine's time signal: what the sky is doing at a place, from tilt + orbit
 /// What the engine is holding, as it must be drawn — the one physics→picture mapping (docs/50).
 pub use render::Drawn;
 pub mod arc; // the out-and-back demo arc: one continuous camera path, surface <-> celestial, pacing derived
+pub mod assembly; // docs/64 - matter with a shape, in a place
+pub mod ballistics; // docs/46 row 33 - a confined gas doing work on a moving boundary
+/// ONE entry point for "two things met — what does the engine do?". Delegates to the laws that already
+/// own each half, so a new scene finds them instead of writing a third path.
+/// What an assembly CONTAINS when it contains more than it could list: a rule that generates, plus the
+/// exceptions the container remembers (docs/67 step 4). A planet holds 10^12 trees and no list of them.
+pub mod containment;
 /// docs/53 — the engine driven by a DEFINITION: builds the world, applies declared matter events through
 /// the shared primitives, and steps. No scene struct, no canvas. This is what re-consumes the systems
 /// deleting terrain orphaned (docs/46 ledger row 15).
 pub mod flight;
-/// docs/55 — the ground scene, rebuilt from a DEFINITION. Browser-only (it owns a canvas surface).
-#[cfg(target_arch = "wasm32")]
-pub mod ground_scene;
-/// ONE entry point for "two things met — what does the engine do?". Delegates to the laws that already
-/// own each half, so a new scene finds them instead of writing a third path.
+/// A placed, stateful thing — an INSTANCE of an assembly type (docs/67 step 2). The type is the
+/// species; this is the individual, and it is where damage, attitude, motion and containment live.
+pub mod instance;
 pub mod interaction;
 mod intercept; // the launch-window solve: release time chosen so the site rotates under the impact
 mod isotropy;
@@ -90,6 +96,7 @@ pub mod matter;
 mod mesher;
 mod neighbors;
 mod orbit;
+pub mod oxidation; // docs/46 row 31 - rapid oxidation: fires, charges, one reaction
 pub mod recohere; // docs/61 — the batch downward rung: a settled particle field re-coheres to ground
 pub mod refine; // docs/62, the upward rung: the celestial field initializes the local patch, conserved
 pub mod resolution; // docs/44 — resolution by necessity: the quasi-static admission test
@@ -110,8 +117,6 @@ pub mod world;
 
 #[cfg(target_arch = "wasm32")]
 pub use app::OrbitDemo;
-#[cfg(target_arch = "wasm32")]
-pub use ground_scene::Ground; // terrain `Engine` deleted 2026-07-21 (docs/50) — the first scene, superseded
 
 /// World metres spanned by ONE screen pixel at the focal plane (distance `dist_m` from the eye),
 /// for a perspective camera with vertical field of view `fov_y` (radians) rendered into a viewport
@@ -284,7 +289,7 @@ mod one_earth_tests {
         // The GROUND: the shipped ground world's host planet is the same body.
         let gjson = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../web/public/worlds/ground/world.json"
+            "/../../assets/worlds/ground-patch.json"
         ))
         .expect("shipped ground world");
         let sim = crate::simulation::Simulation::from_json(&gjson, crate::materials::load())
@@ -918,6 +923,15 @@ mod app {
         /// x = bowl depth as a fraction of the surface radius. Derived from the EXCAVATED MASS actually
         /// lifted above the pristine surface, never authored — see `gpu_crater_depth_frac`.
         crater2: [f32; 4],
+        /// **Where the EYE stands in this body's air** (docs/66): xyz = its local zenith as seen from
+        /// the body's centre (unit), w = its altitude above the body's SEA LEVEL in metres. Computed in
+        /// f64 on the CPU, because a camera 2 m up is 3e-7 of Earth's radius and f32 cannot hold that
+        /// against 1.0 — which is why the altitude is passed rather than reconstructed in the shader.
+        eye_air: [f32; 4],
+        /// The column's shape: x = scale height (m), y = surface radius (m), z = where the column stops
+        /// (m above the surface), w = metres per display unit. The shader's positions are display units
+        /// and the integral is metres; this is the one place they meet.
+        air2: [f32; 4],
     }
 
     /// Byte offset of `SpaceUniforms::crater` — 2 mat4 (128) + 5 vec4 (80). The globe patches just these
@@ -976,6 +990,10 @@ mod app {
         /// The giant impact's DECLARED initial conditions (docs/51). Defaults to the values that were
         /// Rust constants, so the scene is unchanged until a world file says otherwise.
         impact_def: crate::terra::world_def::ImpactDef,
+        /// **When this scene is set**, Unix seconds — `None` is now. A world may declare it; the
+        /// birth-of-the-Moon scene is proto-Earth while Terra is this afternoon, and both draw the
+        /// same Earth (docs/65: time is part of the setting, not part of the body).
+        scene_epoch: Option<f64>,
         surface: wgpu::Surface<'static>,
         device: wgpu::Device,
         queue: wgpu::Queue,
@@ -1071,6 +1089,9 @@ mod app {
         interior_uni: UniformSlot,
         sun_uni: UniformSlot,
         atm_tau: [f64; 3],
+        /// The same air object Terra holds, from the same body (docs/66) — so one planet cannot have
+        /// two atmospheres depending on which scene is looking at it.
+        air_column: crate::atmosphere::AirColumn,
         atm_twilight: f64,
         interior_tint: [f32; 4],
         interior_glow: [f32; 4],
@@ -1373,9 +1394,11 @@ mod app {
                 make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
             // Rayleigh optical depths from the EMERGENT surface pressure (planet::earth's declared
             // atmosphere mass) — the blue marble is derived from the air, never painted (docs/26).
-            let atm_tau = crate::atmosphere::rayleigh_tau(
-                crate::planet::earth().surface_pressure() / 101_325.0,
-            );
+            // ★ Asked of the BODY, the same way Terra asks (docs/66), so the two scenes cannot end up
+            // drawing two different atmospheres for one planet.
+            let air_column =
+                crate::atmosphere::AirColumn::of_body(&crate::planet::earth(), &mats, AIR_TEMP_K);
+            let atm_tau = air_column.tau;
             let atm_twilight = {
                 let e = crate::planet::earth();
                 let h = mats
@@ -1537,6 +1560,7 @@ mod app {
                 "orbit demo ready: Sun+Earth+{num_moons} moon(s), sun-lit, {ORBIT_TIME_SCALE:.0}x time"
             );
             Ok(OrbitDemo {
+                scene_epoch: None,
                 impact_def: Default::default(),
                 surface,
                 device,
@@ -1572,6 +1596,7 @@ mod app {
                 interior_uni,
                 sun_uni,
                 atm_tau,
+                air_column,
                 atm_twilight,
                 stars: None,
                 impactor_uni,
@@ -1667,13 +1692,19 @@ mod app {
         /// This scene's air — Earth's, from Earth's own definition, at the shared exposure. Identical to
         /// `Terra::air()` by construction: one body, one atmosphere.
         fn air(&self) -> Air {
-            [
-                self.atm_tau[0] as f32,
-                self.atm_tau[1] as f32,
-                self.atm_tau[2] as f32,
-                crate::atmosphere::SUN_GAIN,
-                self.atm_twilight as f32,
-            ]
+            Air {
+                tau: [
+                    self.atm_tau[0] as f32,
+                    self.atm_tau[1] as f32,
+                    self.atm_tau[2] as f32,
+                ],
+                gain: crate::atmosphere::SUN_GAIN,
+                twilight: self.atm_twilight as f32,
+                scale_height_m: self.air_column.scale_height as f32,
+                radius_m: self.air_column.radius as f32,
+                top_m: self.air_column.top() as f32,
+                ..AIRLESS
+            }
         }
 
         /// Hand the scene the DEFINITIVE Earth's surface rasters (the host fetches whatever
@@ -1703,29 +1734,12 @@ mod app {
                     .then(|| crate::terra::raster::Raster::new(w, h, 4, d.to_vec()).ok())
                     .flatten()
             };
-            let biome_mats = {
-                let max_idx = def
-                    .biomes
-                    .keys()
-                    .filter_map(|k| k.parse::<usize>().ok())
-                    .max()
-                    .unwrap_or(0);
-                (0..=max_idx)
-                    .map(|i| {
-                        let id = def
-                            .biomes
-                            .get(&i.to_string())
-                            .map(String::as_str)
-                            .unwrap_or("granite");
-                        materials::index_of(&self.mats, id)
-                    })
-                    .collect::<Vec<_>>()
-            };
+            let biome_mix = def.biome_mixtures(&self.mats);
             let surf = EarthSurface {
                 landmask: mk(landmask, lm_w, lm_h),
                 elevation: mk(elevation, ev_w, ev_h),
                 landcover: mk(landcover, lc_w, lc_h),
-                biome_mats,
+                biome_mix,
                 elev_range: def.elevation_range_m.unwrap_or([-11_000.0, 9_000.0]),
                 relief_exag: def.relief_exaggeration.unwrap_or(1.0),
             };
@@ -1737,7 +1751,7 @@ mod app {
                 1.0 / earth_radius_m(),
                 surf.relief_exag,
                 &self.mats,
-                &surf.biome_mats,
+                &surf.biome_mix,
                 surf.landmask.as_ref(),
                 surf.elevation.as_ref(),
                 surf.landcover.as_ref(),
@@ -1755,6 +1769,10 @@ mod app {
         pub fn load_world(&mut self, world_json: &str) -> Result<(), JsValue> {
             use crate::terra::world_def::{BodyDef, World};
             let w = World::parse(world_json).map_err(|e| JsValue::from_str(&e))?;
+            // **When this scene is set** — a world may name its epoch (docs/65: time is part of the
+            // setting). The birth-of-the-Moon scene is proto-Earth; Terra is this afternoon. Same
+            // Earth, different dates.
+            self.scene_epoch = w.time.as_ref().and_then(|t| t.epoch);
             let defs = w
                 .bodies
                 .as_ref()
@@ -2235,6 +2253,12 @@ mod app {
         /// Put the camera's frame of reference on Earth (origin re-centres on the planet).
         /// Choosing a focus also snaps any pan offset back to zero: the button's promise is
         /// "frame THIS body", and a leftover offset would frame something else.
+        /// This scene's clock: its declared epoch, or now.
+        fn scene_epoch_s(&self) -> f64 {
+            self.scene_epoch
+                .unwrap_or_else(crate::orbit::unix_now_seconds)
+        }
+
         pub fn focus_earth(&mut self) {
             self.focus = 1;
             self.camera.pan = Vec3::ZERO;
@@ -4503,7 +4527,10 @@ mod app {
                     earth_light,
                     [1.0, 1.0, 1.0, pretty_fade],
                     [eye_disp.x as f32, eye_disp.y as f32, eye_disp.z as f32, 0.0],
-                    self.air(),
+                    // The globe's model matrix carries a −eye translation, so its centre sits at `spos`
+                    // in camera-relative display units and the eye is at −`spos` from that centre.
+                    self.air()
+                        .seen_from(-spos.as_dvec3(), 1.0 / display_scale()),
                     // The heat of whichever body this scene actually PLACED. Only the WHOLE-BODY birth impact
                     // goes back in time: it targets proto-Earth, a magma ocean, which glows rather than being
                     // lit. A CAP impact (docs/39) resolves modern Earth — cool rock whose bulk stays a solid
@@ -4629,14 +4656,19 @@ mod app {
                     {
                         let sampler = crate::terra::globe_mesh::SurfaceSampler::new(
                             &self.mats,
-                            &surf.biome_mats,
+                            &surf.biome_mix,
                             surf.landmask.as_ref(),
                             surf.elevation.as_ref(),
                             surf.landcover.as_ref(),
                             surf.elev_range,
                             ds,
                             surf.relief_exag,
-                        );
+                        )
+                        // THIS SCENE'S clock — its declared epoch if the world names one, else now.
+                        // A scene showing proto-Earth and a scene showing this afternoon are ONE Earth
+                        // at two times, which is a scene's own business (docs/65). What "one Earth"
+                        // forbids is two answers to *what Earth is made of*, not two dates.
+                        .at_epoch(self.scene_epoch_s());
                         // The spin's oblate figure as a radial factor — first-order identical to
                         // the globe draw's affine scale about the spin axis (the mesh's y), so the
                         // cap sits on the same flattened surface the globe draws.
@@ -4699,7 +4731,7 @@ mod app {
                         // thing entirely from the globe/cap hand-off.
                         [1.0, 1.0, 1.0, pretty_fade],
                         [eye_disp.x as f32, eye_disp.y as f32, eye_disp.z as f32, 0.0],
-                        self.air(),
+                        self.air().seen_from(eye_w - focus, 1.0 / ds),
                         glow_of(&crate::planet::body("earth")),
                     );
                     corridor_cap = true;
@@ -4959,12 +4991,12 @@ mod app {
                         view: &view,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: 0.01,
-                                g: 0.01,
-                                b: 0.03,
-                                a: 1.0,
-                            }),
+                            // ★ **Space is BLACK.** This was a declared dark blue (0.01/0.01/0.03) —
+                            // a painted colour with nothing emitting it, and now that the sky is
+                            // derived it was also a floor under every night measurement: the first
+                            // sky rig read 3.9/4.1/9.3 for a "black" sky and that was entirely this.
+                            // What is left when nothing is drawn is nothing (Law V).
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                             store: wgpu::StoreOp::Store,
                         },
                     })],
@@ -5000,6 +5032,8 @@ mod app {
                         self.config.width as f32,
                         self.config.height as f32,
                         80.0,
+                        // The space band's camera floats between bodies, inside nobody's atmosphere.
+                        None,
                     );
                 }
                 pass.set_pipeline(&self.pipeline);
@@ -5240,10 +5274,49 @@ mod app {
         UniformSlot { buf, bind }
     }
 
-    /// A body's AIR, as the shaders want it: `[tau_r, tau_g, tau_b, exposure, twilight_half_angle]`.
-    /// One value carries the whole atmosphere so that adding a property does not mean a new argument at
-    /// every draw call — `write_space_uniform` unpacks it into the two uniform slots that hold it.
-    type Air = [f32; 5];
+    /// **A body's AIR, and where the eye stands in it** — everything the one scattering integral needs
+    /// (docs/66). One value carries the whole atmosphere so that adding a property does not mean a new
+    /// argument at every draw call; `write_space_uniform` unpacks it into the uniform slots that hold it.
+    ///
+    /// It grew the eye's stance when the ground stopped spending a closed form and started marching the
+    /// real integral: an in-scatter along the eye→surface ray needs to know where the ray STARTS.
+    #[derive(Clone, Copy, Debug)]
+    struct Air {
+        tau: [f32; 3],
+        /// The one exposure every view of this world shares.
+        gain: f32,
+        /// The declared-ramp terminator softener the CLOSED FORM needs. The march does not: it gets
+        /// twilight from the planet's own shadow. Kept for `space.wgsl`, which still spends the closed
+        /// form on bodies drawn as flat-lit shells.
+        twilight: f32,
+        scale_height_m: f32,
+        radius_m: f32,
+        top_m: f32,
+        /// The eye's local zenith from THIS body's centre (unit), and its altitude above this body's
+        /// sea level (m). Both computed in f64 — see `Air::seen_from`.
+        up: [f32; 3],
+        alt_m: f32,
+        metres_per_display: f32,
+    }
+
+    impl Air {
+        /// This air as seen from an eye `eye_rel` from the body's CENTRE, in display units. The altitude
+        /// is formed in f64 and handed over as a metre count, never reconstructed from two near-equal
+        /// f32 radii — a camera at head height is 3e-7 of Earth's radius, and that subtraction in f32
+        /// returns noise where the answer should be.
+        fn seen_from(mut self, eye_rel: glam::DVec3, metres_per_display: f64) -> Self {
+            let r = eye_rel.length();
+            let up = if r > 0.0 {
+                (eye_rel / r).as_vec3()
+            } else {
+                glam::Vec3::Y
+            };
+            self.up = [up.x, up.y, up.z];
+            self.alt_m = (r * metres_per_display - self.radius_m as f64) as f32;
+            self.metres_per_display = metres_per_display as f32;
+            self
+        }
+    }
 
     /// A body with NO declared atmosphere: zero optical depth and zero twilight. The shared Rayleigh
     /// model then returns exactly black with a knife-edge terminator — the airless Moon needs no special
@@ -5251,7 +5324,39 @@ mod app {
     /// A body that does not glow — anything below visible incandescence.
     const NO_GLOW: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
 
-    const AIRLESS: Air = [0.0, 0.0, 0.0, crate::atmosphere::SUN_GAIN, 0.0];
+    const AIRLESS: Air = Air {
+        tau: [0.0; 3],
+        gain: crate::atmosphere::SUN_GAIN,
+        twilight: 0.0,
+        scale_height_m: 0.0,
+        radius_m: 0.0,
+        top_m: 0.0,
+        // Never read: with tau = 0 the integral returns before it looks at any of this.
+        up: [0.0, 1.0, 0.0],
+        alt_m: 0.0,
+        metres_per_display: 1.0,
+    };
+
+    /// What `camera_follow` is riding. An assembly the engine can point at — today that is anything in
+    /// flight; when assemblies carry identity (docs/64) this is where a gun or a ship joins the list.
+    #[derive(Clone, Copy, PartialEq)]
+    enum RideSubject {
+        /// Whichever body in flight is heaviest right now — survives a fragmenting subject.
+        Heaviest,
+        /// One body, by the engine's own id.
+        Body(u64),
+    }
+
+    /// A seat on a moving actor: which actor, where you sit in ITS frame, and where you look.
+    #[derive(Clone, Copy)]
+    struct Ride {
+        subject: RideSubject,
+        back_m: f64,
+        up_m: f64,
+        side_m: f64,
+        yaw: f64,
+        pitch: f64,
+    }
 
     impl Terra {
         /// This world's air, as the shared Rayleigh model wants it: the optical depth derived from the
@@ -5259,13 +5364,19 @@ mod app {
         /// both fall out of the air's own weight), at the one canonical exposure. A world with no
         /// atmosphere yields zeros here and renders with a hard terminator, correctly.
         fn air(&self) -> Air {
-            [
-                self.atm_tau[0] as f32,
-                self.atm_tau[1] as f32,
-                self.atm_tau[2] as f32,
-                crate::atmosphere::SUN_GAIN,
-                self.atm_twilight as f32,
-            ]
+            Air {
+                tau: [
+                    self.air_column.tau[0] as f32,
+                    self.air_column.tau[1] as f32,
+                    self.air_column.tau[2] as f32,
+                ],
+                gain: crate::atmosphere::SUN_GAIN,
+                twilight: self.atm_twilight as f32,
+                scale_height_m: self.air_column.scale_height as f32,
+                radius_m: self.air_column.radius as f32,
+                top_m: self.air_column.top() as f32,
+                ..AIRLESS
+            }
         }
     }
 
@@ -5282,18 +5393,6 @@ mod app {
         }
         let c = crate::blackbody::blackbody_srgb(t);
         [c[0], c[1], c[2], gain as f32]
-    }
-
-    fn twilight_of(radius_m: f64, g: f64, mats: &[materials::Material], tau: [f64; 3]) -> f64 {
-        if tau[2] <= 0.0 {
-            return 0.0;
-        }
-        let h = mats
-            .iter()
-            .find(|m| m.id == "air")
-            .map(|air| crate::atmosphere::scale_height(air, 288.0, g))
-            .unwrap_or(0.0);
-        crate::atmosphere::twilight_half_angle(h, radius_m)
     }
 
     /// Earth's DEFINITIVE surface, handed over by the host once and reused by every draw. The scene
@@ -5359,7 +5458,7 @@ mod app {
         landmask: Option<crate::terra::raster::Raster>,
         elevation: Option<crate::terra::raster::Raster>,
         landcover: Option<crate::terra::raster::Raster>,
-        biome_mats: Vec<usize>,
+        biome_mix: Vec<Vec<(usize, f32)>>,
         elev_range: [f64; 2],
         relief_exag: f64,
     }
@@ -5379,13 +5478,20 @@ mod app {
             view_proj: view_proj.to_cols_array_2d(),
             model: model.to_cols_array_2d(),
             // .w = the twilight half-angle: how far past the geometric terminator the air is still lit.
-            light_dir: [light.x, light.y, light.z, air[4]],
+            light_dir: [light.x, light.y, light.z, air.twilight],
             tint,
             emissive,
-            atm: [air[0], air[1], air[2], air[3]],
+            atm: [air.tau[0], air.tau[1], air.tau[2], air.gain],
             glow,
             crater: [0.0; 4],
             crater2: [0.0; 4],
+            eye_air: [air.up[0], air.up[1], air.up[2], air.alt_m],
+            air2: [
+                air.scale_height_m,
+                air.radius_m,
+                air.top_m,
+                air.metres_per_display,
+            ],
         };
         queue.write_buffer(&slot.buf, 0, bytemuck::bytes_of(&u));
     }
@@ -5496,7 +5602,7 @@ mod app {
             source: wgpu::ShaderSource::Wgsl(
                 concat!(
                     include_str!("../../../shaders/tonemap.wgsl"),
-                    include_str!("../../../shaders/rayleigh.wgsl"),
+                    include_str!("../../../shaders/atmos.wgsl"),
                     include_str!("../../../shaders/surface_normal.wgsl"),
                     include_str!("../../../shaders/globe.wgsl")
                 )
@@ -5729,6 +5835,10 @@ mod app {
         /// The real sky. Terra's world frame is Earth-FIXED, so the catalogue is rotated by Greenwich
         /// sidereal time each frame — which is what makes the stars wheel overhead, once per sidereal day.
         stars: Option<StarField>,
+        /// **The air between the stars and the eye** (docs/66) — this body's own atmosphere, drawn as
+        /// the light it scatters into each view ray. Not optional and not configurable: it reads
+        /// `air_column`, so a world that declares no air draws nothing here.
+        sky: SkyVeil,
         // docs/43 Phase 5 — the fine, camera-relative ground cap (rebuilt each frame under the camera) + its
         // alpha-blend pipeline, and a reused CPU vertex scratch buffer. Cross-faded with the globe by altitude.
         /// The ground tiers, OUTERMOST first — one mesh and one uniform slot each, all built by the same
@@ -5740,6 +5850,23 @@ mod app {
         /// can be compared on the same frame before either is deleted.
         segment_gpu: Option<GpuMesh>,
         segment_uni: Option<UniformSlot>,
+        /// **The cannon, as geometry derived from its assembly** — built once from
+        /// `Assembly::mesh`, so the picture and the mass come from the same statement of what is there.
+        /// `None` until the gun is emplaced.
+        cannon_gpu: Option<GpuMesh>,
+        cannon_uni: Option<UniformSlot>,
+        /// Where the gun stands: (lat, lon, bearing). The scene's whole contribution — placement.
+        cannon_at: Option<(f64, f64, f64)>,
+        /// **The plants standing near the eye, as one mesh.** Rebuilt only when the ground under the
+        /// camera has actually moved, the same rule the segment uses: re-derive when re-deriving would
+        /// change something.
+        flora_gpu: Option<GpuMesh>,
+        flora_uni: Option<UniformSlot>,
+        flora_kinds: Vec<crate::terra::flora::Kind>,
+        /// Where the current flora mesh was built for, and how many plants are in it.
+        flora_at: Option<(f64, f64, usize)>,
+        /// Where the flora mesh's vertices are measured FROM (display units).
+        flora_anchor: glam::DVec3,
         segment_verts: Vec<Vertex>,
         /// What the segment's mesh currently HOLDS — the same cache-of-the-view rule the ground tiers use
         /// (`ground_cap::tier_is_current`), on the one mesh instead of a ladder of them. The LIFT term is
@@ -5762,7 +5889,10 @@ mod app {
         mats: Vec<materials::Material>,
         fly: crate::terra::fly_camera::FlyCamera,
         planet_radius: f64,
-        atm_tau: [f64; 3],
+        /// ★ **This body's air, held once** (docs/66) — the optical depth of its whole column, its scale
+        /// height, and the surface it stands on. The sky, the aerial perspective over the ground and
+        /// the blue marble all read THIS, so they cannot disagree about what the atmosphere is.
+        air_column: crate::atmosphere::AirColumn,
         atm_twilight: f64,
         world_name: String,
         // docs/43 Phase 2 — the baked surface rasters (land mask, elevation+bathymetry, land-cover biome) and
@@ -5771,11 +5901,13 @@ mod app {
         elevation: Option<crate::terra::raster::Raster>,
         landcover: Option<crate::terra::raster::Raster>,
         elev_range: [f64; 2],
-        biome_mats: Vec<usize>, // biome index → index into `mats`
+        biome_mix: Vec<Vec<(usize, f32)>>, // land-cover class → material mixture
         // **Matter in flight — the ENGINE's operation, not a Terra feature** (docs/59). Terra's whole
         // contribution is the button that declares initial conditions and the draw that presents the
         // result; everything between is `flight::Flight` running the same code the ground patch runs.
         flight: crate::flight::Flight,
+        /// Shots fired from this scene's cannon — a counter for the HUD and the rig, not physics.
+        cannon_shots: u32,
         /// Wall-clock stamp of the last frame, so the flight advances in real seconds.
         last_frame_s: f64,
         /// The scene-agnostic renderer for whatever the engine is holding (`render::MatterField`).
@@ -5785,6 +5917,11 @@ mod app {
         /// set it is the authority for this frame: `fly` is synced from it so the HUD, the ground cap and
         /// the LOD blend all still read one altitude, and `None` hands control back to the fly camera.
         cam_pose: Option<([f64; 3], [f64; 3], [f64; 3], f64, f64)>, // eye, forward, up, fov_y, alt_m
+        /// Where the eye actually WAS last frame, metres from the planet centre — the start of
+        /// the shell's swept resolve, so a fast camera cannot tunnel through the surface skin.
+        last_eye_m: Option<glam::DVec3>,
+        /// What the camera is riding, if anything (`camera_follow`).
+        ride: Option<Ride>,
         /// Rig knobs for PRICING the ground ladder: how many tiers to build, and how many octaves of
         /// generated relief each vertex may sum. Both cost frame time and both buy detail, and the only way
         /// to know the exchange rate is to move one at a time (gpu-perf §5).
@@ -5811,89 +5948,7 @@ mod app {
         /// The placed body's own matter and air, resolved ONCE. `planet::body()` deserializes its JSON on
         /// every call, and the flight step was calling it every frame — rebuilding the planet, in full,
         /// to ask what gravity is.
-        flight_env: PlanetAir,
-    }
-
-    /// **A planet as a world to fly through** — the whole of what Terra contributes to entry physics:
-    /// gravity is this body's own layered mass, the air is its emergent hydrostatic column, and hard
-    /// matter is its surface. A flat ground patch answers the same three questions from a heightfield
-    /// (`simulation::GroundAir`), and the flight physics between them is the same code.
-    struct PlanetAir {
-        matter: crate::planet::LayeredBody,
-        air: crate::atmosphere::AirShell,
-        radius_m: f64,
-    }
-
-    impl PlanetAir {
-        /// Resolve a placed body's matter and its emergent air once, so the flight step does not have to
-        /// rebuild the planet to ask what gravity is.
-        fn of(mats: &[materials::Material], body_id: &str, radius_m: f64) -> Self {
-            let matter = crate::planet::body(body_id);
-            let air = match mats.iter().find(|m| m.id == "air") {
-                Some(a) => crate::atmosphere::AirShell::new(
-                    matter.surface_pressure(),
-                    a,
-                    288.0,
-                    matter.gravity_at(matter.radius()),
-                ),
-                None => crate::atmosphere::AirShell {
-                    rho_surface: 0.0,
-                    scale_height_m: 0.0,
-                    ambient_temp_k: 288.0,
-                },
-            };
-            PlanetAir {
-                matter,
-                air,
-                radius_m,
-            }
-        }
-    }
-
-    impl crate::flight::FlightEnvironment for PlanetAir {
-        fn gravity_at(&self, pos: glam::DVec3) -> glam::DVec3 {
-            // Gauss's law over the body's REAL differentiated mass profile — not a declared surface g.
-            self.matter.acceleration_at(pos, glam::DVec3::ZERO)
-        }
-        fn air_at(&self, pos: glam::DVec3) -> Option<(f64, f64)> {
-            if !self.air.exists() {
-                return None; // an airless body: real vacuum, and its bodies fly ballistically
-            }
-            Some((
-                self.air.density_at(pos.length() - self.radius_m),
-                self.air.ambient_temp_k,
-            ))
-        }
-        fn arrival(
-            &self,
-            body: &crate::flight::FlyingBody,
-            from: glam::DVec3,
-            to: glam::DVec3,
-            _dt: f64,
-        ) -> Option<crate::flight::Met> {
-            if to.length() > self.radius_m {
-                return None;
-            }
-            // **The site is where the trajectory CROSSED the surface.** This used to return `to`, the
-            // post-step sample, which at orbital entry speed is kilometres inside the planet — the same
-            // defect the ground patch had, and worse here because the speeds are higher.
-            //
-            // The sphere is analytic, so the crossing can be resolved as finely as the loop allows; the
-            // tolerance that would matter is the elevation raster's, and this coarse shell does not carry
-            // one. (docs/46: the raster is 19.55 km/pixel, so a metre of site precision is already far
-            // below the surface this radius stands in for.)
-            let at = crate::flight::surface_crossing(from, to, |p| p.length() <= self.radius_m);
-            // A planet is immovable: the reduced mass is the arriving body's own.
-            let (energy_j, momentum) = crate::flight::delivered(body, glam::DVec3::ZERO, None);
-            Some(crate::flight::Met {
-                at,
-                energy_j,
-                momentum,
-            })
-        }
-        fn air_scale_height_m(&self) -> f64 {
-            self.air.scale_height_m
-        }
+        flight_env: crate::flight::PlanetAir,
     }
 
     #[wasm_bindgen]
@@ -6027,6 +6082,55 @@ mod app {
                 &normal_view,
                 &sampler,
             ));
+            // **The cannon's geometry, DERIVED from its assembly** (docs/64). There is no cannon model
+            // in this repo: the barrel is a tube because `naval-24pdr-gun.json` says it is a tube, and
+            // each part wears its own material's colour and texture layer. Built here for the same
+            // reason the segment is — this is where the bind layout and the material views are in
+            // scope. Robin: the picture *"should be a product of the assembly and the engine"*.
+            let (cannon_gpu, cannon_uni) = {
+                let a =
+                    crate::assembly::compiled::parse(crate::assembly::compiled::NAVAL_24PDR_GUN);
+                let m = a.mesh(&mats, 20);
+                let gpu = make_dynamic_mesh(&device, "terra-cannon", m.vertices.len(), &m.indices);
+                queue.write_buffer(&gpu.vertex_buf, 0, bytemuck::cast_slice(&m.vertices));
+                (
+                    Some(gpu),
+                    Some(make_space_uniform(
+                        &device,
+                        &bind_layout,
+                        &tex_view,
+                        &normal_view,
+                        &sampler,
+                    )),
+                )
+            };
+            // **The plants the engine knows how to grow.** Their crown footprints are read off the
+            // assemblies themselves, so the density that follows cannot drift from what is drawn.
+            let flora_kinds = {
+                let mk = |txt: &str, foliage: &str| {
+                    let a = crate::assembly::compiled::parse(txt);
+                    crate::terra::flora::Kind::from_assembly(&a, foliage)
+                };
+                vec![
+                    mk(
+                        crate::assembly::compiled::BROADLEAF_TREE_OAK,
+                        "broadleaf_foliage",
+                    ),
+                    mk(
+                        crate::assembly::compiled::CONIFER_TREE_SPRUCE,
+                        "conifer_foliage",
+                    ),
+                    mk(crate::assembly::compiled::GRASS_TUFT, "grass"),
+                ]
+            };
+            let flora_uni = Some(make_space_uniform(
+                &device,
+                &bind_layout,
+                &tex_view,
+                &normal_view,
+                &sampler,
+            ));
+
             let shell_count = 4096; // ~2.8° grain spacing — resolves continents/biomes (Phase 2, grain shell)
             let shell_unis: Vec<UniformSlot> = (0..shell_count)
                 .map(|_| {
@@ -6034,13 +6138,10 @@ mod app {
                 })
                 .collect();
             let earth = crate::planet::earth();
-            let atm_tau = crate::atmosphere::rayleigh_tau(earth.surface_pressure() / 101_325.0);
-            let atm_twilight = twilight_of(
-                earth.radius(),
-                earth.gravity_at(earth.radius()),
-                &mats,
-                atm_tau,
-            );
+            // The body is asked for its own air, rather than the scene deriving one (docs/66).
+            let air_column = crate::atmosphere::AirColumn::of_body(&earth, &mats, AIR_TEMP_K);
+            let atm_twilight =
+                crate::atmosphere::twilight_half_angle(air_column.scale_height, air_column.radius);
             // Default fly camera: orbital over the equator (a world file overrides this in `load_world`).
             let fly = crate::terra::fly_camera::FlyCamera::new(
                 20.0,
@@ -6052,10 +6153,12 @@ mod app {
                 40_000_000.0,
             );
             let matter = MatterField::new(&device, config.format, 200_000);
-            let flight_env = PlanetAir::of(&mats, "earth", earth_radius_m());
+            let sky = SkyVeil::new(&device, config.format);
+            let flight_env = crate::flight::PlanetAir::of(&mats, "earth", earth_radius_m());
             Ok(Terra {
                 detail: Default::default(),
                 flight: crate::flight::Flight::default(),
+                cannon_shots: 0,
                 last_frame_s: 0.0,
                 matter,
                 flight_env,
@@ -6075,6 +6178,8 @@ mod app {
                 appearance_budget: crate::resolution::WorkBudget::new(4, 110.0),
                 appearance_probes_pinned: 0,
                 cam_pose: None,
+                last_eye_m: None,
+                ride: None,
                 draw_matter: 2,
                 drawn_buf: Vec::new(),
                 inst_buf: Vec::new(),
@@ -6090,7 +6195,16 @@ mod app {
                 globe_pipeline,
                 body_id: "earth".into(),
                 stars: None,
+                sky,
                 segment_gpu,
+                cannon_gpu,
+                cannon_uni,
+                flora_kinds,
+                flora_uni,
+                cannon_at: None,
+                flora_gpu: None,
+                flora_at: None,
+                flora_anchor: glam::DVec3::ZERO,
                 segment_uni,
                 segment_built: None,
                 surface_loaded: false,
@@ -6102,13 +6216,13 @@ mod app {
                 fly,
                 planet_radius: earth_radius_m(),
                 atm_twilight,
-                atm_tau,
+                air_column,
                 world_name: String::new(),
                 landmask: None,
                 elevation: None,
                 landcover: None,
                 elev_range: [-11000.0, 9000.0],
-                biome_mats: Vec::new(),
+                biome_mix: Vec::new(),
             })
         }
 
@@ -6153,13 +6267,24 @@ mod app {
                 .and_then(|a| a.surface_pressure(self.planet_radius, g_surface))
                 .unwrap_or_else(|| crate::planet::earth().surface_pressure())
                 / 101_325.0;
-            self.atm_tau = crate::atmosphere::rayleigh_tau(p_ratio);
+            // THIS world's column — the pressure it declares (or Earth's, if it declares none) at its
+            // own radius and gravity. One object; the sky and the ground both read it.
+            self.air_column = crate::atmosphere::AirColumn {
+                tau: crate::atmosphere::rayleigh_tau(p_ratio),
+                scale_height: self.mats.iter().find(|m| m.id == "air").map_or(0.0, |a| {
+                    crate::atmosphere::scale_height(a, AIR_TEMP_K, g_surface)
+                }),
+                radius: self.planet_radius,
+            };
             // The flight environment is this body's own matter and air — re-resolve it when the world
             // changes, and never again per frame. (Sean's branch predates this cache and dropped it;
             // without it the flight step deserializes the planet every frame.)
-            self.flight_env = PlanetAir::of(&self.mats, &self.body_id, self.planet_radius);
-            self.atm_twilight =
-                twilight_of(self.planet_radius, g_surface, &self.mats, self.atm_tau);
+            self.flight_env =
+                crate::flight::PlanetAir::of(&self.mats, &self.body_id, self.planet_radius);
+            self.atm_twilight = crate::atmosphere::twilight_half_angle(
+                self.air_column.scale_height,
+                self.air_column.radius,
+            );
             self.world_name = w.name.clone();
 
             // docs/43 Phase 4 — seed the fly camera from the world's declared camera (default: orbital over 20°N).
@@ -6188,7 +6313,7 @@ mod app {
             self.landcover = mk(landcover, lc_w, lc_h);
 
             // Biome index → material index. `biomes` maps a string index → material id in data/materials.json.
-            self.biome_mats.clear();
+            self.biome_mix.clear();
             self.elev_range = [-11000.0, 9000.0];
             self.relief_exag = TERRA_RELIEF_EXAG;
             // Earth's surface belongs to Earth, not to this world file. Prefer the body definition; a
@@ -6208,23 +6333,15 @@ mod app {
                 if let Some(x) = s.relief_exaggeration {
                     self.relief_exag = x.max(0.0);
                 }
-                let max_idx = s
-                    .biomes
-                    .keys()
-                    .filter_map(|k| k.parse::<usize>().ok())
-                    .max()
-                    .unwrap_or(0);
-                self.biome_mats = (0..=max_idx)
-                    .map(|i| {
-                        let mat_id = s
-                            .biomes
-                            .get(&i.to_string())
-                            .map(String::as_str)
-                            .unwrap_or("granite");
-                        materials::index_of(&self.mats, mat_id)
-                    })
-                    .collect();
+                self.biome_mix = s.biome_mixtures(&self.mats);
             }
+            // **When this scene is set** (docs/65: time is part of the setting). A world that names an
+            // epoch gets it; one that does not runs on the wall clock. Robin: *"One earth assembly.
+            // Each scene can show different times, geological epochs, etc."*
+            if let Some(t) = w.time.as_ref().and_then(|t| t.epoch) {
+                self.epoch_s = Some(t);
+            }
+
             // A new world is a different surface, so the cached segment is about the old one. The cache
             // is keyed on the CAMERA (`tier_is_current`), which cannot see that the planet underneath it
             // changed — so anything that moves the surface has to say so here.
@@ -6275,6 +6392,115 @@ mod app {
         /// The same, with the fragment COUNT given — the resolution the disruption is divided at (docs/44),
         /// which is a declaration a caller is allowed to make. Exposed so a rig can vary the workload and
         /// measure what actually costs frame time instead of guessing.
+        /// **Emplace the gun at the point below the camera.**
+        ///
+        /// Placement only — WHICH assembly, WHERE, and WHICH WAY. The geometry was built from the
+        /// assembly in `new()` (where the bind layout and material textures are in scope, the same
+        /// reason the segment's are), so this sets a coordinate and nothing else.
+        pub fn emplace_cannon(&mut self, bearing_deg: f64) {
+            self.cannon_at = Some((self.fly.lat, self.fly.lon, bearing_deg));
+            log::info!(
+                "cannon emplaced at lat {:.3} lon {:.3}, bearing {bearing_deg:.0}",
+                self.fly.lat,
+                self.fly.lon
+            );
+        }
+
+        /// The compass bearing the camera is looking along — so a gun points where you are looking.
+        /// Reads the fly camera's yaw; it computes nothing.
+        pub fn camera_bearing(&self) -> f64 {
+            self.fly.yaw.to_degrees().rem_euclid(360.0)
+        }
+
+        /// **Fire a 24-pounder from the point below the camera, out along the given bearing.**
+        ///
+        /// ★ This is the whole of the scene's contribution, and it is deliberately nothing but
+        /// placement: WHICH assemblies are present (the three compiled ones), WHERE the gun stands (the
+        /// surface point under the camera), and WHICH WAY it points. `ballistics::fire_gun` derives the
+        /// burn, the chamber pressure, the containment check and the muzzle velocity from those
+        /// assemblies and the material catalogue; `flight::Flight` then carries the shot through the
+        /// air exactly as it carries a meteor. **Nothing here computes a force, and
+        /// `laws::scene_purity_tests` fails the build if it ever does.**
+        ///
+        /// Returns the muzzle velocity in m/s, or 0 if the gun did not fire (a burst or a squib, which
+        /// the engine decides and the scene merely reports).
+        pub fn fire_cannon(&mut self, bearing_deg: f64, elevation_deg: f64) -> f64 {
+            use crate::assembly::compiled;
+            let gun = compiled::parse(compiled::NAVAL_24PDR_GUN);
+            let charge = compiled::parse(compiled::CHARGE_24PDR_SERVICE);
+            let shot = compiled::parse(compiled::ROUND_SHOT_24PDR);
+            if self.cannon_at.is_none() {
+                self.emplace_cannon(bearing_deg);
+            }
+            // ★ A gun fires along ITS OWN bearing, not the camera's. The rig caught this: emplaced
+            // facing 240, the shot left on 208, because the button passed whichever way the camera
+            // happened to be looking. Where a gun points is a property of the gun.
+            let (glat, glon, bearing_deg) =
+                self.cannon_at
+                    .unwrap_or((self.fly.lat, self.fly.lon, bearing_deg));
+            let e = crate::ballistics::Emplacement {
+                lat_deg: glat,
+                lon_deg: glon,
+                // The gun's BASE is on the ground; how high its muzzle sits above that is the
+                // assembly's business and `fire_gun` derives it.
+                height_m: 0.0,
+                bearing_deg,
+                elevation_deg,
+            };
+            match crate::ballistics::fire_gun(
+                &gun,
+                &charge,
+                &shot,
+                &e,
+                self.planet_radius,
+                &self.mats,
+            ) {
+                Ok((fired, Some(body), ejecta)) => {
+                    // ★ **The muzzle's products go into the air, and the engine decided all of it.**
+                    // Robin: *"smoke and flash should emerge naturally from the detonation/shape of
+                    // barrel/velocity/amount of material, not the scene."* `fire_gun` returned WHERE
+                    // the barrel ends, HOW FAST the gas leaves, HOW MUCH there is and HOW HOT it is;
+                    // this hands that to the same door an ablating meteor's vapour goes through. The
+                    // flash needs no separate effect — the products leave far above the temperature at
+                    // which `emission::incandescence` makes matter glow.
+                    if let Some(x) = ejecta {
+                        // A muzzle blast is a CLOUD. Same mass, held more finely — a resolution
+                        // choice, not a physical one (Law IV). The cone is the gas expanding as it
+                        // leaves the bore's confinement.
+                        self.flight
+                            .shed_cloud(x.mass_kg, x.material, x.pos, x.vel, x.temp_k, 0.55, 160);
+                    }
+                    self.flight.introduce(body);
+                    self.cannon_shots += 1;
+                    log::info!(
+                        "cannon: {:?} at {:.0} m/s, peak {:.0} MPa, recoil {:.2} m/s, ejecting {:.2} kg gas + {:.2} kg smoke at {:.0} K, from lat {:.2} lon {:.2} bearing {bearing_deg:.0}",
+                        fired.outcome, fired.muzzle_ms, fired.peak_pressure_pa / 1.0e6,
+                        fired.recoil_ms, fired.gas_kg, fired.residue_kg, fired.flame_k,
+                        self.fly.lat, self.fly.lon
+                    );
+                    fired.muzzle_ms
+                }
+                Ok((fired, None, _)) => {
+                    log::warn!(
+                        "cannon: {:?} — peak {:.0} MPa against a wall good for {:.0} MPa",
+                        fired.outcome,
+                        fired.peak_pressure_pa / 1.0e6,
+                        fired.peak_hoop_pa / 1.0e6
+                    );
+                    0.0
+                }
+                Err(e) => {
+                    log::error!("cannon: {e}");
+                    0.0
+                }
+            }
+        }
+
+        /// How many shots this gun has fired — for the HUD and for a rig to assert against.
+        pub fn cannon_shots(&self) -> u32 {
+            self.cannon_shots
+        }
+
         pub fn launch_swarm_n(&mut self, count: usize) {
             let iron = materials::index_of(&self.mats, "iron");
             // Where the swarm is headed: the point on the surface under the camera. THE shared conversion
@@ -6438,42 +6664,6 @@ mod app {
             self.segment_built = None;
         }
 
-        /// **How much of the air column actually lies between the eye and the ground** — the factor the
-        /// surface's in-scattered veil must be scaled by.
-        ///
-        /// `rayleigh_veil` computes the in-scatter for the FULL vertical column, which is right when the
-        /// observer is above the atmosphere and wrong everywhere else: applied unscaled it puts a whole
-        /// sky's worth of haze between a camera standing on the grass and the grass 1 m in front of it.
-        /// Measured by ablation — with the veil disabled the same ground goes from a pale cyan wash
-        /// (rgb ~150,230,190) to real grass (84,195,65) with its material grain visible. It was not the
-        /// texture that was missing; it was drowned.
-        ///
-        /// The column above altitude `h` is `ρ₀·H·e^(−h/H)`, so the fraction lying BELOW the eye — the part
-        /// its downward view actually looks through — is `1 − e^(−h/H)`, using the same barometric scale
-        /// height `atmosphere::AirShell` derives from the air's own molar mass and temperature. Nothing is
-        /// declared here: at 0.3 m altitude it is 3.5e-5 and the ground is its own colour, at one scale
-        /// height 0.63, and from orbit it is 1 and the planet looks exactly as it did.
-        ///
-        /// **FLAGGED IOU (Law V).** This is the VERTICAL column difference, so it omits the horizontal path
-        /// term: from ground level, distant terrain will now be too crisp, because the air along a long
-        /// near-horizontal path is real and this does not count it. The computation it stands in for is the
-        /// segment integral ∫ρ dl from eye to surface point, which for an exponential atmosphere over a
-        /// linearly-varying altitude is `ρ₀·L·(e^(−h₁/H) − e^(−h₂/H))·H/(h₂−h₁)` — cheap, but it needs the
-        /// eye's world position in the shader, which this uniform layout does not carry yet.
-        fn veil_column_fraction(&self) -> f32 {
-            let h = self.fly.alt_m.max(0.0);
-            // The SAME scale height the flight integrates through — asked of the environment that owns
-            // this world's air, not re-derived here (Law II).
-            let scale_h = {
-                use crate::flight::FlightEnvironment;
-                self.flight_env.air_scale_height_m()
-            };
-            if !(scale_h > 0.0) {
-                return 1.0; // an airless world has no veil to scale, and none is added
-            }
-            (1.0 - (-h / scale_h).exp()) as f32
-        }
-
         /// **The instant this scene's SKY is drawn for** (Unix seconds) — the one answer to "where are the
         /// Sun and the stars", used by both the terminator and the star field so they cannot disagree.
         ///
@@ -6517,7 +6707,13 @@ mod app {
         /// sidereal/solar day distinction.
         pub fn set_epoch_sun_over_lon(&mut self, lon_deg: f64) -> f64 {
             let t =
-                crate::orbit::epoch_for_sub_solar_lon(lon_deg, crate::orbit::unix_now_seconds());
+                // ★ Solve near the epoch ALREADY PINNED, if there is one — not always near now.
+                // Otherwise this silently threw away a date: a rig asking for "October, sun overhead"
+                // got "today, sun overhead", and a seasons run reported the same season on four
+                // different dates because the second call overwrote the first. Pinning a date and then
+                // pinning the daylight are not in conflict; they are latitude and longitude of the
+                // same instant.
+                crate::orbit::epoch_for_sub_solar_lon(lon_deg, self.celestial_epoch_s());
             self.epoch_s = Some(t);
             t
         }
@@ -6528,6 +6724,55 @@ mod app {
             let d = crate::orbit::solar_direction_earth_fixed(self.celestial_epoch_s());
             let (lat, lon) = crate::geo::lat_lon_from_dir(d);
             vec![lat, lon]
+        }
+
+        /// **How high the Sun stands above the horizon at this coordinate, in degrees** — negative
+        /// when it is below, i.e. when it is night there.
+        ///
+        /// Robin (2026-08-03), looking at the gun on the Irish coast after dark: *"It's dark in
+        /// Galway… let's switch back to Chile. Probably need a scene button where you can flip to
+        /// wherever it's daylight of the two."* A scene needs to know which of its sites is lit, and
+        /// the scene must not work that out for itself — solar geometry is the engine's, and a page
+        /// doing its own spherical trig is a second answer to a question already answered here.
+        ///
+        /// It is `asin(up · sun)`: the local up from [`geo::tangent_frame`] against the solar
+        /// direction the sky is already drawn with. No new physics — two existing primitives, dotted.
+        pub fn sun_elevation_deg(&self, lat_deg: f64, lon_deg: f64) -> f64 {
+            let sun = crate::orbit::solar_direction_earth_fixed(self.celestial_epoch_s());
+            let (up, _, _) = crate::geo::tangent_frame(lat_deg, lon_deg);
+            up.dot(sun).clamp(-1.0, 1.0).asin().to_degrees()
+        }
+
+        /// **How far through its autumn this latitude is**, 0..1 — a read, for rigs and HUDs, of the
+        /// same `solar::senescence_fraction` the surface itself spends.
+        pub fn senescence_at(&self, lat_deg: f64) -> f64 {
+            crate::solar::senescence_fraction(lat_deg, self.celestial_epoch_s())
+        }
+
+        /// **Which land-cover class and which material the surface has at this coordinate** — the
+        /// engine's own answer, as `"<class>:<material id>"`.
+        ///
+        /// A read, not a control: it changes nothing and decides nothing. It exists so a rig can check
+        /// the PICTURE against the DATA instead of inferring one from the other. That distinction has
+        /// already cost real time here — a frame the colour of cut lumber was read as a lighting fault
+        /// for a whole session, and the thing that settled it was asking the engine what material it
+        /// thought it was standing on (`docs/46` row 28).
+        pub fn surface_material_at(&self, lat_deg: f64, lon_deg: f64) -> String {
+            let class = self
+                .landcover
+                .as_ref()
+                .map_or(1, |r| r.biome_at(lat_deg, lon_deg) as usize);
+            // The whole mixture, so a rig sees what a land-cover class actually IS — "8:broadleaf_
+            // foliage 0.45 + grass 0.35 + dirt 0.20" rather than a single name that hides two thirds
+            // of the ground.
+            let Some(mix) = self.biome_mix.get(class) else {
+                return format!("{class}:<unmapped>");
+            };
+            let parts: Vec<String> = mix
+                .iter()
+                .map(|&(m, f)| format!("{} {:.2}", self.mats[m].id, f))
+                .collect();
+            format!("{class}:{}", parts.join(" + "))
         }
 
         /// **What measured elevation this view needs and does not have** — a JSON `[[z,x,y],…]`, nearest
@@ -6669,12 +6914,91 @@ mod app {
         // maps input to these; the camera itself blends orbit⇄ground by altitude (see `terra::fly_camera`).
 
         /// Set the camera outright (lat/lon degrees, altitude metres, look yaw/pitch radians).
-        pub fn set_fly(&mut self, lat: f64, lon: f64, alt_m: f64, yaw: f64, pitch: f64) {
+        /// **PLACE THE CAMERA** — `<position, heading>`, the first of the two verbs a scene gets.
+        ///
+        /// Robin (2026-08-03): *"place camera `<position, heading>` and camera-follow `<assembly>,
+        /// `<relative position>`, `<heading>`."* This is a statement about where the observer STANDS,
+        /// in the body's own frame, which is the frame a scene naturally knows things in ("the gun is
+        /// at Galway; stand behind it"). Nothing about a camera MODEL crosses the boundary.
+        ///
+        /// It replaces `set_fly`, whose name was itself the problem: "fly" is a camera model, and a
+        /// scene that names a camera model is a scene that has one.
+        ///
+        /// ★ **This is a request, not a placement.** The camera is matter (docs/46 row 36), so the eye
+        /// ends up where the contact law allows — ask for a seat inside a mountain and you get one on
+        /// its slope. Read [`Terra::altitude_m`] afterwards for where it actually is.
+        pub fn place_camera(&mut self, lat: f64, lon: f64, alt_m: f64, yaw: f64, pitch: f64) {
+            self.ride = None; // a scene that names a place has stopped following something
             self.fly.lat = lat;
             self.fly.lon = lon;
             self.fly.alt_m = alt_m.clamp(self.fly.min_alt, self.fly.max_alt);
             self.fly.yaw = yaw;
             self.fly.pitch = pitch;
+        }
+
+        /// **CAMERA-FOLLOW** — `<assembly>, <relative position>, <heading>`, the second verb.
+        ///
+        /// `subject` names what to ride: `"heaviest"` for the largest thing in flight, or a body's id
+        /// as a decimal string. `back_m`/`up_m`/`side_m` are an offset **in the subject's own frame**
+        /// (behind where it is going, above it, beside it); `yaw`/`pitch` are the heading **relative to
+        /// that frame**, so `0,0` looks where the subject is going and `yaw = π` looks back down the
+        /// trajectory. Pass an empty subject to let go.
+        ///
+        /// ★★ **This deletes the scene's own chase camera**, which was 43 lines of vector maths run
+        /// every frame — normalising a velocity, crossing it with the local up to build a basis, and
+        /// scaling a standoff by the subject's radius. The engine knows where its own matter is; a
+        /// scene reading that back to compute a camera position is the wrong side of docs/65. It also
+        /// had the bug that follows from the standoff heuristic: riding a 7 cm cannonball put the eye
+        /// a metre away and filled the frame with sky.
+        pub fn camera_follow(
+            &mut self,
+            subject: &str,
+            back_m: f64,
+            up_m: f64,
+            side_m: f64,
+            yaw: f64,
+            pitch: f64,
+        ) -> bool {
+            let subject = subject.trim();
+            if subject.is_empty() || subject.eq_ignore_ascii_case("none") {
+                self.ride = None;
+                return false;
+            }
+            let which = if subject.eq_ignore_ascii_case("heaviest") {
+                RideSubject::Heaviest
+            } else {
+                match subject.parse::<u64>() {
+                    Ok(id) => RideSubject::Body(id),
+                    Err(_) => {
+                        log::warn!("camera_follow: no subject named '{subject}'");
+                        return false;
+                    }
+                }
+            };
+            // Refuse to ride something that is not there, rather than silently pointing at nothing.
+            let exists = match which {
+                RideSubject::Heaviest => self.flight.heaviest().is_some(),
+                RideSubject::Body(id) => self.flight.body(id).is_some(),
+            };
+            if !exists {
+                self.ride = None;
+                return false;
+            }
+            self.ride = Some(Ride {
+                subject: which,
+                back_m,
+                up_m,
+                side_m,
+                yaw,
+                pitch,
+            });
+            true
+        }
+
+        /// Is the camera riding something? Goes false on its own when the subject lands or is culled,
+        /// so a scene does not have to watch for that.
+        pub fn camera_is_following(&self) -> bool {
+            self.ride.is_some()
         }
 
         /// WASD: move across the surface. `forward`/`right` are −1/0/+1 intents; the step scales with altitude
@@ -6737,7 +7061,13 @@ mod app {
                 .landcover
                 .as_ref()
                 .map_or(1, |r| r.biome_at(lat, lon) as usize);
-            let mi = self.biome_mats.get(biome).copied().unwrap_or(0);
+            // The class's dominant constituent stands for it where ONE material is wanted.
+            let mi = self
+                .biome_mix
+                .get(biome)
+                .and_then(|m| m.iter().max_by(|a, b| a.1.total_cmp(&b.1)))
+                .map(|&(m, _)| m)
+                .unwrap_or(0);
             self.mats.get(mi).map(|m| m.id.clone()).unwrap_or_default()
         }
 
@@ -6757,7 +7087,84 @@ mod app {
                                                                // view·projection, the f64 eye, and the tangent frame). The terrain height under the camera
                                                                // keeps "altitude" above the local ground (not sea level).
             let aspect = self.config.width as f64 / self.config.height.max(1) as f64;
+
+            // ★★ **THE CAMERA IS MATTER, and this is where that becomes true for Terra.**
+            //
+            // The eye the fly camera WANTS is resolved against the surface by the same contact law a
+            // grain obeys, and where it ends up is where it is. Nothing below gets a say: the resolved
+            // position is fed back into the camera itself, so the HUD's altitude, the LOD's idea of how
+            // close the ground is, and the picture all read one position.
+            //
+            // What this replaces: `alt_m.clamp(min_alt, ..)` stacked on a ground height that was the
+            // MAX over a 22 km neighbourhood. Two fudges, and neither could slide — a clamp only ever
+            // pushes the eye straight UP, so a camera driven into a steep face popped through it.
+            // **Riding an actor** (`camera_follow`): the engine knows where its own matter is, so it
+            // seats the observer itself rather than handing coordinates out for a scene to do maths on.
+            // The ride ENDS ITSELF when its subject lands or is culled — a scene should not have to
+            // watch for that, and the old scene-side version had to.
+            if let Some(ride) = self.ride {
+                let body = match ride.subject {
+                    RideSubject::Heaviest => self.flight.heaviest(),
+                    RideSubject::Body(id) => self.flight.body(id),
+                };
+                match body {
+                    Some(b) => {
+                        let ds = display_scale();
+                        let (eye_m, look, up) = crate::terra::fly_camera::ride_pose(
+                            b.pos,
+                            b.vel,
+                            ride.back_m,
+                            ride.up_m,
+                            ride.side_m,
+                            ride.yaw,
+                            ride.pitch,
+                        );
+                        // The camera is matter wherever it is — a seat behind a shot is still a seat
+                        // that cannot be inside a hillside.
+                        let eye = self.camera_shell_resolve(eye_m * ds);
+                        self.last_eye_m = Some(eye / ds);
+                        let (la, lo) =
+                            crate::geo::lat_lon_from_dir((eye / ds).normalize_or(glam::DVec3::Y));
+                        self.fly.lat = la;
+                        self.fly.lon = lo;
+                        self.fly.alt_m = ((eye / ds).length()
+                            - self.planet_radius
+                            - self.ground_disp_at(la, lo) / ds)
+                            .max(0.0);
+                        self.cam_pose = Some((
+                            eye.to_array(),
+                            look.to_array(),
+                            up.to_array(),
+                            0.9,
+                            self.fly.alt_m,
+                        ));
+                    }
+                    None => {
+                        self.ride = None;
+                        self.cam_pose = None;
+                    }
+                }
+            }
+
+            if self.cam_pose.is_none() {
+                let ds = display_scale();
+                let ground0 = self.ground_disp_at(self.fly.lat, self.fly.lon);
+                let (desired, _, _) = self.fly.view_basis(r_disp, ds, ground0);
+                let resolved = self.camera_shell_resolve(desired);
+                let m = resolved / ds;
+                if (resolved - desired).length() > 0.0 {
+                    let (la, lo) = crate::geo::lat_lon_from_dir(m.normalize_or(glam::DVec3::Y));
+                    self.fly.lat = la;
+                    self.fly.lon = lo;
+                    self.fly.alt_m =
+                        (m.length() - self.planet_radius - self.ground_disp_at(la, lo) / ds)
+                            .max(0.0);
+                }
+                self.last_eye_m = Some(m);
+            }
+
             let ground_disp = self.ground_disp_at(self.fly.lat, self.fly.lon);
+            self.build_flora();
             // An externally supplied pose is the authority when there is one; otherwise the fly camera.
             // (docs/59 observer/universe, PR #81 — Sean's branch predates it and dropped the whole arm.)
             let view = match self.cam_pose {
@@ -6925,7 +7332,7 @@ mod app {
                 }
             }
 
-            let air = self.air();
+            let air = self.air().seen_from(eye, 1.0 / display_scale());
             if !self.surface_loaded {
                 // Fallback: the Phase-2 grain shell (used until a world's surface rasters build the globe mesh).
                 let shell_spacing = self.planet_radius
@@ -6948,7 +7355,12 @@ mod app {
                             .landcover
                             .as_ref()
                             .map_or(1, |r| r.biome_at(lat, lon) as usize);
-                        let mi = self.biome_mats.get(biome).copied().unwrap_or(water_idx);
+                        let mi = self
+                            .biome_mix
+                            .get(biome)
+                            .and_then(|m| m.iter().max_by(|a, b| a.1.total_cmp(&b.1)))
+                            .map(|&(m, _)| m)
+                            .unwrap_or(water_idx);
                         let e = self
                             .elevation
                             .as_ref()
@@ -6973,11 +7385,11 @@ mod app {
                         mu_v,
                         mu_s,
                         cos_th,
-                        self.atm_tau,
+                        self.air_column.tau,
                         crate::atmosphere::SUN_GAIN as f64,
                         self.atm_twilight,
                     );
-                    let tr = crate::atmosphere::rayleigh_transmit(mu_v, mu_s, self.atm_tau);
+                    let tr = crate::atmosphere::rayleigh_transmit(mu_v, mu_s, self.air_column.tau);
                     let tint = [
                         m.albedo[0] * tr[0],
                         m.albedo[1] * tr[1],
@@ -7016,12 +7428,12 @@ mod app {
                         view: &view,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: 0.01,
-                                g: 0.01,
-                                b: 0.03,
-                                a: 1.0,
-                            }),
+                            // ★ **Space is BLACK.** This was a declared dark blue (0.01/0.01/0.03) —
+                            // a painted colour with nothing emitting it, and now that the sky is
+                            // derived it was also a floor under every night measurement: the first
+                            // sky rig read 3.9/4.1/9.3 for a "black" sky and that was entirely this.
+                            // What is left when nothing is drawn is nothing (Law V).
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                             store: wgpu::StoreOp::Store,
                         },
                     })],
@@ -7036,10 +7448,31 @@ mod app {
                     timestamp_writes: None,
                     occlusion_query_set: None,
                 });
-                // THE SKY FIRST. Terra's world frame is Earth-FIXED, so the inertial catalogue is turned
-                // by Greenwich sidereal time: the stars wheel overhead once per SIDEREAL day, four minutes
-                // shy of a solar one, which is why they rise earlier each night. Nothing is animated —
-                // the same clock that puts the Sun in the sky puts the stars in it.
+                // **THE AIR FIRST** (docs/66). Not a backdrop and not this scene's idea — the body's
+                // own declared atmosphere, marched along each pixel's view ray by the same integral the
+                // ground spends. It is the background because it is the farthest thing that is MATTER;
+                // the ground draws over it, and the stars are summed INTO it below.
+                //
+                // The altitude handed over is height above SEA LEVEL, the surface the air column stands
+                // on — NOT `fly.alt_m`, which is height above the ground underfoot and would put a
+                // camera on a 4 km plateau inside 4 km of air that is not there.
+                let sky_up = eye.normalize_or_zero().as_vec3();
+                let sky_alt_m = ((eye.length() - r_disp) / display_scale()) as f32;
+                self.sky.draw(
+                    &self.queue,
+                    &mut pass,
+                    view_proj,
+                    sky_up,
+                    sky_alt_m,
+                    sun_light,
+                    &self.air_column,
+                );
+                // THEN THE STARS THROUGH IT. Terra's world frame is Earth-FIXED, so the inertial
+                // catalogue is turned by Greenwich sidereal time: the stars wheel overhead once per
+                // SIDEREAL day, four minutes shy of a solar one, which is why they rise earlier each
+                // night. Nothing is animated — the same clock that puts the Sun in the sky puts the
+                // stars in it. They are drawn AFTER the air and SUM with it, so daylight drowns them
+                // for the reason it really does.
                 if let Some(stars) = self.stars.as_ref() {
                     let gmst = crate::sky::gmst_rad(self.celestial_epoch_s());
                     stars.draw(
@@ -7061,6 +7494,7 @@ mod app {
                         self.config.width as f32,
                         self.config.height as f32,
                         80.0,
+                        Some((sky_up, sky_alt_m, sun_light, &self.air_column)),
                     );
                 }
                 if self.surface_loaded {
@@ -7073,6 +7507,27 @@ mod app {
                     {
                         pass.set_pipeline(&self.globe_pipeline);
                         draw(&mut pass, uni, gpu);
+                    }
+                    // **The cannon**, standing where it was emplaced. Its geometry came from its
+                    // assembly and its uniform was written in `build_segment` beside the surface it
+                    // stands on; this only draws it.
+                    if let (Some(gpu), Some(uni)) =
+                        (self.cannon_gpu.as_ref(), self.cannon_uni.as_ref())
+                    {
+                        if self.cannon_at.is_some() {
+                            pass.set_pipeline(&self.globe_pipeline);
+                            draw(&mut pass, uni, gpu);
+                        }
+                    }
+                    // **The plants standing near the eye.** Same surface pipeline the ground and the
+                    // gun use — a tree is matter with a shape, not a special kind of thing.
+                    if let (Some(gpu), Some(uni)) =
+                        (self.flora_gpu.as_ref(), self.flora_uni.as_ref())
+                    {
+                        if self.flora_at.is_some_and(|(_, _, n)| n > 0) {
+                            pass.set_pipeline(&self.globe_pipeline);
+                            draw(&mut pass, uni, gpu);
+                        }
                     }
                 } else {
                     pass.set_pipeline(&self.pipeline);
@@ -7106,42 +7561,276 @@ mod app {
         /// integrated into the same mesh (ocean cells sit at exactly sea level with the water material), so there
         /// is no separate ocean shell and no coast z-fighting. `EXAG` exaggerates relief so it reads on a radius-1
         /// globe (Everest is only ~0.05% of Earth's radius); the true ratio returns with the ground LOD (Phase 5).
-        /// Terrain height (display units, above the sea-level sphere) as a clearance floor for the fly camera at a
-        /// lat/lon. The fly camera adds this to `r_disp` so "altitude" means height above the local ground, not
-        /// sea level — otherwise the ×30 exaggerated mountains would swallow the eye at low altitude.
+        /// **THE ground height at a coordinate** (metres above sea level), and the size of the finest
+        /// datum that answered — measured elevation where a streamed tile covers, the shipped raster
+        /// otherwise, blended exactly as the mesh blends them.
         ///
-        /// It returns the MAX over a small neighbourhood (roughly the coarse mesh cell), not a point sample, so
-        /// the eye clears the terrain *envelope* around it and can never end up inside a neighbouring exaggerated
-        /// peak (the camera must never pass through solid ground). Ocean → 0 (the flat sea surface). The proper
-        /// per-triangle collision against the real-ratio ground surface arrives with the ground LOD (Phase 5).
+        /// ★★ This is an ASSOCIATED function taking its inputs rather than a method, so the segment
+        /// builder — which already holds `&self` pieces split across a mutable borrow — calls the SAME
+        /// code the camera and the cannon call. That is the whole point of it existing.
         ///
-        /// NOTE (architecture): this is a HEIGHTFIELD floor — single-valued along the radial. It cannot represent
-        /// caves (void below the surface) or arches (solid above void). Those need a VOLUMETRIC "is this point in
-        /// solid matter?" test against the material field (voxel/SDF/particle), which is where camera collision
-        /// must move once terrain is a real matter field (docs/39/42). Kept as a heightfield only as a stand-in.
+        /// **It replaces three different answers to one question** (Law II), found 2026-08-03:
+        ///   1. a closure inside `build_segment`, raster blended with streamed tiles — what the mesh
+        ///      draws, i.e. the surface you can actually see;
+        ///   2. `ground_disp_at`, raster only with NO tiles and a 3×3 **max over ±0.2° (~22 km)** — a
+        ///      "clearance envelope" that held the eye above the highest peak within 22 kilometres;
+        ///   3. and (2) again, used to stand the cannon, so **the gun floated above its own ground**
+        ///      whenever a hill stood anywhere within 22 km. That was a real bug and it shipped.
+        ///
+        /// The envelope existed to stop the camera flying into a mountain. That is a CONTACT problem
+        /// and it now has a contact answer (`camera_shell_resolve`): the camera is matter, it rests
+        /// against the surface and slides along it. Inflating the ground to fake a collision is exactly
+        /// the clamp fudge Law V forbids — and it could only ever push the eye straight up.
+        fn ground_elev_m(
+            elevation: Option<&crate::terra::raster::Raster>,
+            tiles: &crate::terra::tiles::TileStore,
+            elev_lo: f64,
+            elev_hi: f64,
+            raster_step_m: f64,
+            lat: f64,
+            lon: f64,
+        ) -> (f64, f64) {
+            let e_raster = elevation.map_or(0.0, |r| r.elevation_m_at(lat, lon, elev_lo, elev_hi));
+            match tiles.elevation_m_at(lat, lon) {
+                Some((e_tile, w)) => {
+                    let base = match tiles.pixel_ground_m(lat) {
+                        Some(px_m) if px_m > 0.0 && raster_step_m > 0.0 => {
+                            raster_step_m * (px_m / raster_step_m).powf(w)
+                        }
+                        _ => raster_step_m,
+                    };
+                    ((e_raster + w * (e_tile - e_raster)).max(0.0), base)
+                }
+                None => (e_raster.max(0.0), raster_step_m),
+            }
+        }
+
+        /// The pixel size of the shipped elevation raster on the ground, metres — the coarsest datum.
+        fn raster_step_m(&self) -> f64 {
+            self.elevation.as_ref().map_or(90.0, |r| {
+                2.0 * std::f64::consts::PI * self.planet_radius / r.w.max(1) as f64
+            })
+        }
+
+        /// [`ground_elev_m`] for callers that hold a plain `&self`, in DISPLAY units above the
+        /// sea-level sphere (so relief exaggeration is applied, as the mesh applies it).
         fn ground_disp_at(&self, lat: f64, lon: f64) -> f64 {
-            let Some(elev) = self.elevation.as_ref() else {
-                return 0.0;
-            };
-            let land = self.landmask.as_ref();
-            // ±0.2° (~22 km) 3×3 max = the local terrain envelope: enough to clear any terrain the camera could
-            // reach before the floor rises (forced-up look-ahead), without floating far above a plain that merely
-            // has a distant peak. The whole visible ground cap at low altitude fits inside this radius.
-            let mut peak = 0.0f64;
-            for dlat in [-0.2, 0.0, 0.2] {
-                for dlon in [-0.2, 0.0, 0.2] {
-                    let (la, lo) = (lat + dlat, lon + dlon);
-                    let is_land = land.map(|r| r.land_at(la, lo)).unwrap_or(false);
-                    if !is_land {
-                        continue;
-                    }
-                    let e = elev
-                        .elevation_m_at(la, lo, self.elev_range[0], self.elev_range[1])
-                        .max(0.0);
-                    peak = peak.max(e);
+            let is_land = self
+                .landmask
+                .as_ref()
+                .map(|r| r.land_at(lat, lon))
+                .unwrap_or(false);
+            if !is_land {
+                return 0.0; // the sea surface is at sea level, and it is flat
+            }
+            let (e, _) = Self::ground_elev_m(
+                self.elevation.as_ref(),
+                &self.tiles,
+                self.elev_range[0],
+                self.elev_range[1],
+                self.raster_step_m(),
+                lat,
+                lon,
+            );
+            e * display_scale() * self.relief_exag
+        }
+
+        /// **The camera is MATTER** — a tiny transparent shell obeying the SAME contact law as a grain
+        /// (`granular::sweep_shell_resolve`), not a geometric clamp.
+        ///
+        /// Robin, canonical: *"If the camera isn't material, it can subvert our rules. Let's place a
+        /// tiny cube of matter around the camera (transparent) so the camera can't pierce through our
+        /// skin."* And, deciding it belongs here rather than in a scene (2026-08-03): *"Camera must
+        /// exist in the engine, but can be directed by the scene"*, because **"the engine does a lot of
+        /// calculation based on what can be seen, so it must know everything about the camera all the
+        /// time."** A camera the scene owns is a camera the engine's own resolution decisions trail by
+        /// a frame.
+        ///
+        /// The law was already built and had exactly ONE consumer — the Ground scene, which is being
+        /// deleted. Terra used `alt_m.clamp(min_alt, ..)` plus a 22 km max-filtered ground: two fudges
+        /// stacked, and neither can slide. This makes Terra a second consumer of the one law, on the
+        /// sphere.
+        ///
+        /// ★ **A tangent plane is exact at shell scale.** The shell is 0.35 m; over one metre of
+        /// tangent offset a 6371 km sphere departs from its own tangent plane by `x²/2R` ≈ **8e-8 m**,
+        /// which is eleven million times smaller than the shell. So presenting the sphere to the
+        /// heightfield primitive as a local y-up plane is a coordinate change, not an approximation
+        /// anybody has to defend.
+        ///
+        /// CONTACT, not excavation: nudging the eye into a hillside must not blast a crater. (Ram it in
+        /// at real speed and the same energy gate a meteor obeys would honestly dig — that is the rule
+        /// being universal, not a bug.)
+        fn camera_shell_resolve(&self, desired_disp: glam::DVec3) -> glam::DVec3 {
+            let ds = display_scale();
+            if ds <= 0.0 {
+                return desired_disp;
+            }
+            // The physics is in METRES — the shell is 0.35 m, and a display unit is an Earth radius.
+            let to_m = desired_disp / ds;
+            let resolved = crate::granular::sweep_shell_on_sphere(
+                self.last_eye_m.unwrap_or(to_m),
+                to_m,
+                self.planet_radius,
+                |lat, lon| self.ground_disp_at(lat, lon) / ds,
+            );
+            resolved * ds
+        }
+
+        /// **Resolve the plants standing near the eye into geometry** — the near half of Law IV.
+        ///
+        /// Robin (2026-08-04): *"These are hues at altitude but must become realistic flora at very low
+        /// altitude."* Above `FLORA_ALT_M` a footprint answers with its mixture's albedo and nothing is
+        /// instantiated; below it the same footprint answers with the plants themselves. **The plants
+        /// were always there** — necessity decides what is RESOLVED, the camera only decides what is
+        /// drawn (Law III/IV), and the scatter is derived from position so looking away cannot move a
+        /// single one.
+        ///
+        /// The scene says nothing about any of this. It named Earth; the land cover says what grows.
+        fn build_flora(&mut self) {
+            // ★★ **THE FIDELITY DECISIONS BELONG TO THE RENDERER** (docs/68 step 2). What stood here
+            // were three constants inside the model, each deciding a picture: `FLORA_ALT_M = 300`, a
+            // budget, and a scan radius. The first was the worst — it applied ONE altitude cutoff to
+            // every plant, when what decides the question is the ANGLE a thing subtends. At this
+            // frame's real resolution a 0.35 m tuft is worth resolving to 622 m and a 15 m oak to
+            // 26.7 km: a factor of forty that no single constant could ever carry.
+            //
+            // `Fidelity` derives it from the viewport this frame was actually projected with, so it
+            // sharpens when the window grows instead of staying at whatever was typed. The budget
+            // remains — it is a genuine platform cost bound, and that is exactly why it belongs on the
+            // renderer's side rather than in the model.
+            let fidelity = Fidelity::of_view(
+                crate::terra::fly_camera::DEFAULT_FOV_Y,
+                self.config.height as f64,
+                1200,
+            );
+            let alt = self.fly.alt_m;
+            // Resolve while ANY kind is still worth resolving from here — the tallest decides, and the
+            // per-kind reach inside `scatter` culls the rest.
+            let tallest = self
+                .flora_kinds
+                .iter()
+                .map(|k| k.height_m)
+                .fold(0.0f64, f64::max);
+            if !fidelity.worth_resolving(tallest, alt)
+                || self.landcover.is_none()
+                || self.flora_kinds.is_empty()
+            {
+                self.flora_at = None;
+                return;
+            }
+            // Rebuild only when the ground under the eye has actually moved — the segment's own rule.
+            let (lat, lon) = (self.fly.lat, self.fly.lon);
+            if let Some((blat, blon, _)) = self.flora_at {
+                let moved_m = ((lat - blat).powi(2) + (lon - blon).powi(2)).sqrt() * 111_320.0;
+                if moved_m < 2.0 {
+                    return;
                 }
             }
-            peak * display_scale() * self.relief_exag
+            // A CAP, not the reach: each kind derives its own from its density and the budget
+            // (docs/46 row 49). The cap is now the distance at which the TALLEST kind falls below one
+            // pixel — the renderer's answer to "past here, nothing I could draw would change the
+            // frame" — rather than the 600 m that stood here, which was a number I picked.
+            let radius_m = fidelity.resolve_out_to(tallest);
+            let mats = &self.mats;
+            let biome_mix = &self.biome_mix;
+            let landcover = self.landcover.as_ref();
+            let sited = crate::terra::flora::scatter(
+                lat,
+                lon,
+                radius_m,
+                &self.flora_kinds,
+                mats,
+                |la, lo| {
+                    let class = landcover.map_or(0, |r| r.biome_at(la, lo) as usize);
+                    biome_mix.get(class).cloned().unwrap_or_default()
+                },
+                // The eye's own height is what turns a distance into an ANGLE, and the budget is
+                // spent on angle (docs/46 row 48) — so a 15 m oak at 60 m outbids the 1,201st grass
+                // tuft underfoot instead of being starved out by it.
+                alt.max(0.05),
+                fidelity.instance_budget,
+            );
+            if sited.is_empty() {
+                self.flora_at = Some((lat, lon, 0));
+                return;
+            }
+            // One mesh for the lot: each plant's own assembly mesh, moved to where it stands. The
+            // vertices are CAMERA-RELATIVE like every other draw in this scene.
+            let ds = display_scale();
+            let r_disp = self.planet_radius * ds;
+            // ★ Vertices are built about a LOCAL ANCHOR — the surface point under the camera — not
+            // about the eye, and not in absolute space. Absolute f32 at Earth's radius has ~0.6 m ULP,
+            // which is larger than the plants; and building about the EYE bakes in whichever eye
+            // happened to be current, so the patch sits wherever the camera was when it was last
+            // rebuilt. The anchor is stored and the per-frame model matrix is `translate(anchor - eye)`,
+            // exactly as the segment does it.
+            let anchor_m = crate::geo::dir_from_lat_lon(lat, lon)
+                * (self.planet_radius + self.ground_disp_at(lat, lon) / ds);
+            let eye = anchor_m * ds;
+            let mut combined = crate::mesher::Mesh {
+                vertices: Vec::new(),
+                indices: Vec::new(),
+            };
+            let meshes: Vec<crate::mesher::Mesh> = self
+                .flora_kinds
+                .iter()
+                .map(|k| {
+                    let txt = match k.assembly_id.as_str() {
+                        "broadleaf-tree-oak" => crate::assembly::compiled::BROADLEAF_TREE_OAK,
+                        "conifer-tree-spruce" => crate::assembly::compiled::CONIFER_TREE_SPRUCE,
+                        _ => crate::assembly::compiled::GRASS_TUFT,
+                    };
+                    crate::assembly::compiled::parse(txt).mesh(mats, 6)
+                })
+                .collect();
+            for s in &sited {
+                let m = &meshes[s.kind];
+                let ground = r_disp + self.ground_disp_at(s.lat_deg, s.lon_deg);
+                let model = crate::assembly::place_on_surface(
+                    s.lat_deg,
+                    s.lon_deg,
+                    s.yaw.to_degrees(),
+                    ground,
+                    ds * s.scale,
+                    eye,
+                )
+                .as_mat4();
+                let base = combined.vertices.len() as u32;
+                for v in &m.vertices {
+                    let p = model.transform_point3(glam::Vec3::from(v.pos));
+                    let n = model
+                        .transform_vector3(glam::Vec3::from(v.nrm))
+                        .normalize_or_zero();
+                    let mut nv = *v;
+                    nv.pos = p.into();
+                    nv.nrm = n.into();
+                    combined.vertices.push(nv);
+                }
+                combined.indices.extend(m.indices.iter().map(|i| i + base));
+            }
+            let gpu = make_dynamic_mesh(
+                &self.device,
+                "terra-flora",
+                combined.vertices.len(),
+                &combined.indices,
+            );
+            self.queue
+                .write_buffer(&gpu.vertex_buf, 0, bytemuck::cast_slice(&combined.vertices));
+            log::info!(
+                "flora: {} plants resolved within {:.0} m at {:.0} m altitude ({} tris)",
+                sited.len(),
+                radius_m,
+                alt,
+                combined.indices.len() / 3
+            );
+            self.flora_gpu = Some(gpu);
+            self.flora_anchor = anchor_m * ds;
+            self.flora_at = Some((lat, lon, sited.len()));
+        }
+
+        /// How many plants are standing right now — a read, for rigs and the HUD.
+        pub fn flora_count(&self) -> u32 {
+            self.flora_at.map_or(0, |(_, _, n)| n as u32)
         }
 
         /// **Build the ONE surface segment** (docs/63) — the collapse of globe + cap into a single mesh.
@@ -7174,9 +7863,7 @@ mod app {
             let detail = &self.detail;
             let planet_radius = self.planet_radius;
             let octave_budget = self.cap_octave_budget;
-            let raster_step_m = self.elevation.as_ref().map_or(90.0, |r| {
-                2.0 * std::f64::consts::PI * self.planet_radius / r.w.max(1) as f64
-            });
+            let raster_step_m = self.raster_step_m();
             // How steep this ground measures, as a fraction of what the material can hold — from the
             // TILES where they cover (a metres-long baseline, so the ratio means what its name says) and
             // from the raster otherwise. Same rule as the cap's, sampled once for the segment.
@@ -7210,14 +7897,16 @@ mod app {
             };
             let sampler = crate::terra::globe_mesh::SurfaceSampler::new(
                 &self.mats,
-                &self.biome_mats,
+                &self.biome_mix,
                 self.landmask.as_ref(),
                 self.elevation.as_ref(),
                 self.landcover.as_ref(),
                 self.elev_range,
                 ds,
                 exag,
-            );
+            )
+            // The clock the sky is drawn with, so the leaves and the light agree about the date.
+            .at_epoch(self.celestial_epoch_s());
             // A cache of the view, the same rule the tiers use: re-derive only when re-deriving would
             // change something. Anchored to the surface point under the camera, so the eye moving is
             // carried by the model matrix and touches no vertex.
@@ -7245,20 +7934,7 @@ mod app {
                 // a probe that read only the raster would report a smooth bilinear ramp and the
                 // integral would conclude, wrongly, that the ground is flat.
                 let ground_m = |lat: f64, lon: f64| -> (f64, f64) {
-                    let e_raster =
-                        elevation.map_or(0.0, |r| r.elevation_m_at(lat, lon, elev_lo, elev_hi));
-                    match tiles.elevation_m_at(lat, lon) {
-                        Some((e_tile, w)) => {
-                            let base = match tiles.pixel_ground_m(lat) {
-                                Some(px_m) if px_m > 0.0 && raster_step_m > 0.0 => {
-                                    raster_step_m * (px_m / raster_step_m).powf(w)
-                                }
-                                _ => raster_step_m,
-                            };
-                            ((e_raster + w * (e_tile - e_raster)).max(0.0), base)
-                        }
-                        None => (e_raster.max(0.0), raster_step_m),
-                    }
+                    Self::ground_elev_m(elevation, tiles, elev_lo, elev_hi, raster_step_m, lat, lon)
                 };
                 let mut scratch = crate::terra::appearance::Moments::new();
                 // What this machine can afford this rebuild — measured, not declared. See
@@ -7364,11 +8040,25 @@ mod app {
                             ..point
                         }
                     } else {
-                        crate::terra::globe_mesh::SurfaceSample {
-                            albedo: a.albedo,
-                            offset: off,
-                            material: a.material as u32,
-                            rough: a.sigma_rad() as f32,
+                        {
+                            // The appearance integral already averaged the MIXTURE over this
+                            // footprint. Hand it over as a ratio against the dominant material, for
+                            // the same reason the sampler does: the shader multiplies by that
+                            // material's own texture, and two albedos multiplied is an albedo squared.
+                            let base = mats[a.material].albedo;
+                            let r = |i: usize| {
+                                if base[i] > 1e-6 {
+                                    a.albedo[i] / base[i]
+                                } else {
+                                    1.0
+                                }
+                            };
+                            crate::terra::globe_mesh::SurfaceSample {
+                                albedo_ratio: [r(0), r(1), r(2)],
+                                offset: off,
+                                material: a.material as u32,
+                                rough: a.sigma_rad() as f32,
+                            }
                         }
                     }
                 };
@@ -7398,6 +8088,54 @@ mod app {
                 }
                 self.segment_built = Some(built);
             }
+            // **Stand the cannon on the surface.** Placement only — the assembly supplied the shape
+            // and `assembly::place_on_surface` supplies the transform. The scene names a coordinate and
+            // a bearing; it does not build a basis, which is how it built a MIRRORED one.
+            if let (Some(uni), Some((glat, glon, bearing))) =
+                (self.cannon_uni.as_ref(), self.cannon_at)
+            {
+                let model = crate::assembly::place_on_surface(
+                    glat,
+                    glon,
+                    bearing,
+                    r_disp + self.ground_disp_at(glat, glon),
+                    ds,
+                    view.eye,
+                )
+                .as_mat4();
+                write_space_uniform(
+                    &self.queue,
+                    uni,
+                    view.vp_rel,
+                    model,
+                    sun_light,
+                    [1.0, 1.0, 1.0, 1.0],
+                    [anchor.x, anchor.y, anchor.z, 0.0],
+                    self.air().seen_from(view.eye, 1.0 / display_scale()),
+                    [0.0, 0.0, 0.0, 0.0],
+                );
+            }
+            // **The plants.** Their vertices are measured from a local anchor, so the per-frame model
+            // matrix carries them to camera-relative space — the same thing the segment does, and for
+            // the same two reasons: f32 has ~0.6 m ULP at Earth's radius, and a mesh built about one
+            // eye is wrong for every other.
+            if let (Some(uni), Some((_, _, n))) = (self.flora_uni.as_ref(), self.flora_at) {
+                if n > 0 {
+                    let model =
+                        glam::DMat4::from_translation(self.flora_anchor - view.eye).as_mat4();
+                    write_space_uniform(
+                        &self.queue,
+                        uni,
+                        view.vp_rel,
+                        model,
+                        sun_light,
+                        [1.0, 1.0, 1.0, 1.0],
+                        [anchor.x, anchor.y, anchor.z, 0.0],
+                        self.air().seen_from(view.eye, 1.0 / display_scale()),
+                        [0.0, 0.0, 0.0, 0.0],
+                    );
+                }
+            }
             if let Some(uni) = self.segment_uni.as_ref() {
                 let model = glam::DMat4::from_translation(built.anchor - view.eye).as_mat4();
                 write_space_uniform(
@@ -7407,8 +8145,8 @@ mod app {
                     model,
                     sun_light,
                     [1.0, 1.0, 1.0, 1.0],
-                    [anchor.x, anchor.y, anchor.z, self.veil_column_fraction()],
-                    self.air(),
+                    [anchor.x, anchor.y, anchor.z, 0.0],
+                    self.air().seen_from(view.eye, 1.0 / display_scale()),
                     glow_of(&crate::planet::body(&self.body_id)),
                 );
             }

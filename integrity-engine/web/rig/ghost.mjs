@@ -1,8 +1,8 @@
-import { launch } from './_launch.mjs';
+import { launch, VIEWPORT } from './_launch.mjs';
 const PORT = process.env.PORT || '5173';
 const out = process.env.OUT || '/tmp';
 const browser = await launch();
-const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+const page = await browser.newPage({ viewport: VIEWPORT });
 // The sim readout lives in #stats (bottom bar), not #hud (top banner).
 const readout = async () => {
   const s = await page.locator('#stats').innerText().catch(() => '');

@@ -1,6 +1,6 @@
-import { launch, PORT, OUT } from './_launch.mjs';
+import { launch, PORT, OUT, VIEWPORT } from './_launch.mjs';
 const b = await launch();
-const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
+const p = await b.newPage({ viewport: VIEWPORT });
 p.on('pageerror', e => console.log('[PAGEERROR]', e.message));
 p.on('console', m => console.log('[' + m.type() + ']', m.text().slice(0, 200)));
 p.on('requestfailed', r => console.log('[REQFAIL]', r.url(), r.failure()?.errorText));

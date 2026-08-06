@@ -1,10 +1,10 @@
 // Rig-watch for the in-browser GPU SPH deformable-Earth impact (docs/33 stage 4c.4). Loads the space scene,
 // triggers demo.start_gpu_impact() (the GPU stepper takes over), and screenshots the evolving particle field.
-import { launch } from './_launch.mjs';
+import { launch, VIEWPORT } from './_launch.mjs';
 const out = process.env.OUT || '/tmp';
 const PORT = process.env.PORT || '5173';
 const b = await launch();
-const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
+const p = await b.newPage({ viewport: VIEWPORT });
 p.on('console', (m) => console.log('PAGE:', m.text()));
 p.on('pageerror', (e) => console.log('PAGEERR:', e.message));
 await p.goto(`http://127.0.0.1:${PORT}/orbit.html`, { waitUntil: 'load' });

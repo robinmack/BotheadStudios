@@ -20,7 +20,7 @@ await p.evaluate(() => {
     const a = performance.now(); orig(); const bb = performance.now();
     window.__r.push([Math.floor((bb - last)), Math.floor(bb - a)]); last = bb;
   };
-  window.__terra.set_fly(10, 0, 700000, 0, -0.55);
+  window.__terra.place_camera(10, 0, 700000, 0, -0.55);
 });
 const sample = async (label) => {
   await p.evaluate(() => { window.__r.length = 0; });

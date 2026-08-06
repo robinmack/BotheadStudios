@@ -2,11 +2,11 @@
 // Aggregate. Load the orbit scene, let the orbit settle, click "Drop Moon(s)", and watch: the moon
 // should de-orbit, fall straight in, and RESOLVE as an SPH particle field — the HUD flips to
 // "GPU impact · disk N M☾ (…)" exactly as birth does. Same machine, no Earth/Moon-specific path.
-import { launch } from './_launch.mjs';
+import { launch, VIEWPORT } from './_launch.mjs';
 const out = process.env.OUT || '/tmp';
 const PORT = process.env.PORT || '5173';
 const b = await launch();
-const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
+const p = await b.newPage({ viewport: VIEWPORT });
 const stat = async () => (await p.locator('#stats').innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
 
 const PAGE = process.env.PAGE || 'orbit.html';

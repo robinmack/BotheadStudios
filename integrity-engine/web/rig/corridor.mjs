@@ -25,7 +25,7 @@
 // arrives in daylight, then keeps that lit set.
 //
 // Run:  npx vite --port 7299 &   then   PORT=7299 node rig/mac_corridor.mjs
-import { launch } from './_launch.mjs';
+import { launch, VIEWPORT } from './_launch.mjs';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { decodePng } from './_png.mjs';
 
@@ -37,7 +37,7 @@ mkdirSync(OUT, { recursive: true });
 // ★ Was a bare `chromium.launch({ headless: false })`, which CLAUDE.md rule 4b forbids outright and
 // which is what pinned this rig to one machine's adapter. `_launch.mjs` is the one place the flags live.
 const b = await launch();
-const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
+const p = await b.newPage({ viewport: VIEWPORT });
 const errs = [];
 p.on('pageerror', e => errs.push(String(e.message).split('\n')[0].slice(0, 200)));
 p.on('console', m => { const t = m.text(); if (m.type() === 'error' || /parsing WGSL|ShaderModule|is invalid|CreateRenderPipeline/i.test(t)) errs.push(t.slice(0, 200)); });

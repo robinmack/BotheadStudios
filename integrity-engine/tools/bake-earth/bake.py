@@ -20,6 +20,7 @@ Outputs (equirectangular, -180..180 lon / +90..-90 lat, row 0 = north):
 """
 import json
 import os
+import sys
 import urllib.request
 
 import numpy as np
@@ -27,7 +28,10 @@ from PIL import Image, ImageDraw
 
 W, H = 2048, 1024
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.normpath(os.path.join(HERE, "../../web/public/worlds/earth"))
+# Earth's rasters belong to the BODY, not to a world that happens to place a camera on it — they moved
+# to bodies/earth when Earth became the one shared Earth. This path still said worlds/earth, so a rebake
+# would have written a full set of rasters into a directory nothing reads and reported success.
+OUT = os.path.normpath(os.path.join(HERE, "../../web/public/bodies/earth"))
 TMP = os.environ.get("BAKE_TMP", "/tmp/bake-earth")
 ELEV_LO, ELEV_HI = -11000.0, 9000.0  # metres; must match world.json.surface.elevation_range_m
 os.makedirs(OUT, exist_ok=True)
@@ -35,6 +39,12 @@ os.makedirs(TMP, exist_ok=True)
 
 
 def fetch(url, path, desc):
+    # ★ A cached FAILURE is worse than no cache. GIBS answers a bad layer with HTTP 200 and a ~460-byte
+    # XML error, which `fetch` duly saved and then re-served on every later run — so a corrected layer
+    # name still produced the old error until somebody thought to clear /tmp. Anything that small is not
+    # a raster; re-fetch it.
+    if os.path.exists(path) and os.path.getsize(path) < 2048:
+        os.remove(path)
     if os.path.exists(path) and os.path.getsize(path) > 0:
         print(f"  cached {desc} ({os.path.getsize(path) / 1e6:.1f} MB)")
         return path
@@ -95,34 +105,112 @@ def bake_elevation():
     return small
 
 
+# **The IGBP land-cover classes, and the colour GIBS paints each one.**
+#
+# Decoded 2026-08-04 from the layer's own legend (gibs.earthdata.nasa.gov/legends/
+# MODIS_IGBP_Land_Cover_Type_H.png) and cross-checked against the raster: the fetched image contains
+# exactly 18 distinct colours and every one matches a legend swatch, so the decode is complete rather
+# than a best guess. Index is the standard IGBP class number; 0 is water, 254 unclassified.
+IGBP_COLOURS = {
+    (134, 202, 227): (0, "water"),
+    (33, 138, 33): (1, "evergreen needleleaf forest"),
+    (49, 204, 49): (2, "evergreen broadleaf forest"),
+    (152, 204, 49): (3, "deciduous needleleaf forest"),
+    (150, 250, 150): (4, "deciduous broadleaf forest"),
+    (141, 186, 141): (5, "mixed forest"),
+    (186, 141, 141): (6, "closed shrubland"),
+    (245, 222, 179): (7, "open shrubland"),
+    (218, 235, 157): (8, "woody savanna"),
+    (255, 213, 0): (9, "savanna"),
+    (240, 185, 103): (10, "grassland"),
+    (71, 131, 181): (11, "permanent wetland"),
+    (250, 239, 115): (12, "cropland"),
+    (255, 0, 0): (13, "urban"),
+    (153, 147, 86): (14, "cropland/natural mosaic"),
+    (255, 255, 255): (15, "permanent snow and ice"),
+    (191, 191, 189): (16, "barren"),
+    (100, 100, 100): (17, "unclassified"),
+}
+
+
+def igbp_from_rgb(im):
+    """Map the legend's colours back to class indices — nearest swatch, so JPEG-ish edges still land.
+
+    Returns (classes, exact_fraction). A LOW exact fraction means the decode is guessing, and the
+    caller refuses the raster rather than shipping a plausible-looking invention.
+    """
+    # ★ int32, NOT int16. A channel difference of 255 squares to 65,025, which overflows int16's
+    # 32,767 and silently wraps NEGATIVE — so the nearest-colour search returned nonsense and the
+    # exact-match rate read 1.8% for a raster whose every pixel is an exact legend colour. The guard
+    # below caught it (it refused the decode), which is the only reason this was found rather than
+    # shipped. Same family as the i32 lattice overflow docs/63 records.
+    a = np.asarray(im.convert("RGB")).astype(np.int32)
+    keys = np.array(list(IGBP_COLOURS.keys()), dtype=np.int32)
+    vals = np.array([v[0] for v in IGBP_COLOURS.values()], dtype=np.uint8)
+    flat = a.reshape(-1, 3)
+    d = ((flat[:, None, :] - keys[None, :, :]) ** 2).sum(axis=2)
+    nearest = d.argmin(axis=1)
+    exact = float((d.min(axis=1) == 0).mean())
+    return vals[nearest].reshape(a.shape[:2]), exact
+
+
 def bake_landcover(land, elev):
     print("[3/3] land cover / biomes")
     # Real land cover (NASA MODIS via GIBS) if the endpoint cooperates; else a flagged derived model.
     source = "derived"
     try:
         url = ("https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?service=WMS&request=GetMap"
-               "&version=1.1.1&layers=MODIS_Terra_Land_Cover_Type_Yearly&srs=EPSG:4326"
+               # ★ THE LAYER NAME WAS WRONG, and that is why this silently fell back to invented
+               # latitude bands for months. GIBS answers `LayerNotDefined` with an HTTP **200** and an
+               # XML body, so `fetch` saw a successful download and only the PIL open failed — which the
+               # except clause swallowed as "GIBS unavailable". Verified 2026-08-04 against
+               # GetCapabilities: the real name is below, and a 1024x512 request returns a genuine
+               # 18-colour IGBP raster (17 classes + water).
+               "&version=1.1.1&layers=MODIS_Combined_L3_IGBP_Land_Cover_Type_Annual&srs=EPSG:4326"
                f"&bbox=-180,-90,180,90&width={W}&height={H}&format=image/png&TIME=2020-01-01")
         p = fetch(url, f"{TMP}/modis_landcover.png", "MODIS land cover (GIBS)")
+        # ★ GIBS answers an unknown layer with HTTP 200 and an XML BODY, so a download that "worked" is
+        # no evidence at all. Look at what arrived.
+        head = open(p, "rb").read(8)
+        if head[:4] == b"<?xm":
+            raise RuntimeError("GIBS returned an XML error, not an image — check the layer name")
         im = Image.open(p).convert("RGB")
-        if im.size == (W, H) and np.asarray(im).std() > 5:  # a real image, not an error tile
-            source = "MODIS MCD12Q1 (GIBS)"
-            # (mapping MODIS IGBP classes → our 6 biomes would go here once verified)
+        if im.size != (W, H):
+            raise RuntimeError(f"GIBS returned {im.size}, expected {(W, H)}")
+        classes, exact = igbp_from_rgb(im)
+        print(f"  decoded {len(np.unique(classes))} IGBP classes; {exact * 100:.1f}% exact colour hits")
+        if exact < 0.98:
+            # The palette decode is the one place a wrong answer would look completely plausible, so
+            # it refuses rather than guesses. A biome map nobody can trust is worse than a flagged one.
+            raise RuntimeError(f"only {exact * 100:.1f}% of pixels matched a legend colour exactly")
+        Image.fromarray(classes, "L").save(f"{OUT}/landcover.png")
+        source = "MODIS MCD12Q1 IGBP via GIBS — MEASURED"
+        print(f"  landcover.png written (source: {source})")
+        return
     except Exception as e:
         print(f"  GIBS land cover unavailable ({e}); using derived climate approximation")
 
     if source == "derived":
         # DERIVED biome approximation (FLAGGED — not measured land cover): from latitude + elevation + coast.
-        # 0 water · 1 grass · 2 sand(desert) · 3 pine(forest) · 4 snow/ice · 5 granite(bare rock/high mtn).
+        # 0 water · 1 grass · 2 sand(desert) · 3 BROADLEAF forest · 4 snow/ice · 5 bare rock
+        # · 6 NEEDLELEAF forest.
+        #
+        # ★ 3 and 6 used to be one class. One "forest" covered both the tropics and the boreal band, so
+        # the Amazon and Siberia were the same material — and since the map pointed that class at pine
+        # TIMBER, both were drawn the colour of cut lumber. Splitting it costs one line and lets the
+        # catalogue's two foliage substances each have a consumer; leaving it merged would have shipped
+        # one of them wired to nothing, which is the pattern docs/48 exists to name.
+        # It is still an INVENTED cover — latitude bands, not a measurement — and that is what the
+        # ESA WorldCover work replaces (docs/46 row 28). This makes the invention less wrong, not right.
         lats = 90.0 - (np.arange(H) + 0.5) / H * 180.0
         latg = np.repeat(lats[:, None], W, axis=1)
         biome = np.zeros((H, W), np.uint8)  # ocean
         L = land
         alat = np.abs(latg)
         biome[L] = 1  # default land = grassland
-        biome[L & (alat < 23)] = 3  # tropics → forest
+        biome[L & (alat < 23)] = 3  # tropics → broadleaf forest
         biome[L & (alat >= 15) & (alat < 33) & (elev < 1500)] = 2  # subtropical desert bands
-        biome[L & (alat >= 45) & (alat < 66)] = 3  # boreal → forest
+        biome[L & (alat >= 45) & (alat < 66)] = 6  # boreal → needleleaf forest
         biome[L & (elev > 3000)] = 5  # high mountains → bare rock
         biome[L & ((alat >= 66) | (elev > 4500))] = 4  # polar / very high → snow/ice
         Image.fromarray(biome, "L").save(f"{OUT}/landcover.png")
@@ -140,7 +228,31 @@ def bake_landcover(land, elev):
     print(f"  landcover.png written (source: {source})")
 
 
+def read_baked_inputs():
+    """Recover `land` and `elev` from the rasters already shipped, so the land cover can be rebaked
+    without re-downloading a 450 MB DEM.
+
+    This exists so there is still exactly ONE implementation of the biome rule: the alternative was a
+    second script that derives biomes its own way, and two answers to one question is the thing this
+    engine is built not to do. It reverses `bake_elevation`'s own packing, so if that changes this
+    breaks loudly rather than silently decoding the old format.
+    """
+    land = np.asarray(Image.open(f"{OUT}/landmask.png").convert("L")) > 127
+    rgb = np.asarray(Image.open(f"{OUT}/elevation.png").convert("RGB")).astype(np.uint16)
+    v16 = (rgb[..., 0] << 8) | rgb[..., 1]
+    elev = ELEV_LO + v16.astype(np.float32) / 65535.0 * (ELEV_HI - ELEV_LO)
+    if land.shape != (H, W):
+        raise SystemExit(f"landmask is {land.shape}, expected {(H, W)} — rebake from source instead")
+    return land, elev
+
+
 def main():
+    if "--landcover-only" in sys.argv:
+        print("[landcover only] reusing the shipped landmask + elevation")
+        land, elev = read_baked_inputs()
+        bake_landcover(land, elev)
+        print(f"done → {OUT}")
+        return
     land = bake_landmask()
     elev = bake_elevation()
     bake_landcover(land, elev)

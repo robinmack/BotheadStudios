@@ -4,10 +4,10 @@
 // meteor is only visible against a dark sky — so the night side is where it SHOULD show. An earlier
 // screenshot found black, but at 481 km with 0 kg ablated: still above the atmosphere, nothing to glow
 // yet. This rides the descent and photographs it AT the thresholds rather than guessing when.
-import { launch, PORT } from './_launch.mjs';
+import { launch, PORT, VIEWPORT } from './_launch.mjs';
 
 const b = await launch();
-const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
+const p = await b.newPage({ viewport: VIEWPORT });
 p.on('pageerror', (e) => console.log('ERR', e.message));
 await p.goto(`http://127.0.0.1:${PORT}/terra.html`, { waitUntil: 'load' });
 await p.waitForFunction(() => !!window.__terra, null, { timeout: 60000 });

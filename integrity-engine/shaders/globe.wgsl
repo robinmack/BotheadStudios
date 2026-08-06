@@ -24,6 +24,13 @@ struct U {
     // w == 0 ⇒ no crater and the vertex is untouched, so an unstruck globe costs nothing.
     crater    : vec4<f32>,
     crater2   : vec4<f32>,
+    // ★ WHERE THE EYE STANDS IN THIS BODY'S AIR (docs/66): xyz = its local zenith from the body's
+    // centre (unit), w = its altitude above SEA LEVEL in metres. Formed in f64 on the CPU — a camera at
+    // head height is 3e-7 of Earth's radius, and reconstructing that from two f32 radii returns noise.
+    eye_air   : vec4<f32>,
+    // The column's shape: x = scale height (m), y = surface radius (m), z = where the column stops
+    // (m above the surface), w = metres per display unit.
+    air2      : vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u : U;
 // The material texture arrays (docs/12): albedo for reference, NORMAL for relief lighting. Terra bakes
@@ -102,13 +109,21 @@ fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     // why the ground read as a uniform wash from standing height however much relief was under it. The
     // texture array was bound here the whole time and never sampled.
     //
-    // The texture already IS this material's albedo (generated from the cited optical properties), so it
-    // REPLACES `i.col` rather than tinting it — multiplying would square the albedo and darken every
-    // surface. `i.col` remains the fallback where a material has no layer, and the two agree by
-    // construction at distance: the mip chain averages the texture back to the flat albedo, so orbit looks
-    // exactly as it did and grain only appears once the camera is close enough to resolve it.
+    // The texture IS this material's albedo, so multiplying by a second albedo would square it. It used
+    // to REPLACE `i.col` for that reason — and that quietly threw the vertex colour away entirely.
+    //
+    // ★★ WHY THAT MATTERED, measured by mutation 2026-08-04: setting every land vertex to MAGENTA
+    // changed nothing on screen. The ground is a MIXTURE of materials (a woody savanna is 45% tree,
+    // 35% grass, 20% dirt) and it has a SEASON, and both were being computed per vertex and discarded
+    // — the shader drew one material's texture and nothing else. It also means a seasonal measurement
+    // taken from these frames was measuring the sun's elevation, not the leaves (docs/46 row 41).
+    //
+    // So `i.col` now arrives as a RATIO — the mixture's seasonal albedo divided by the dominant
+    // material's own flat albedo — and the texture supplies the DETAIL about that mean. At a uniform
+    // class the ratio is 1 and this is bit-identical to what it replaced; where the class is a mixture
+    // the grain is the dominant material's and the colour is everything standing there.
     let grain = surface_albedo_triplanar(i.wpos + u.emissive.xyz, n, i.mat, GLOBE_TEX_SCALE);
-    let albedo = grain * u.tint.rgb;
+    let albedo = grain * i.col * u.tint.rgb;
     var radiance = albedo * (ndl * SUN_GAIN);
     // **The body's own heat.** A surface hot enough to glow emits regardless of where the Sun is, so this
     // is added on BOTH sides of the terminator — which is the physics: proto-Earth's 1,900 K magma ocean
@@ -116,23 +131,34 @@ fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     // day/night line at all. The colour is Planck's for that temperature and the gain is Stefan-Boltzmann's;
     // neither is chosen, and a cold planet sends zero here and pays nothing.
     radiance += u.glow.rgb * (u.glow.w * SUN_GAIN);
-    // **The atmosphere — Earth's own air, from the ONE Rayleigh model (the shared chunk).** For a point
-    // on the globe the local zenith IS its surface normal, so the sky's own angles apply unchanged:
-    // mu_v = n·view, mu_s = n·sun, phase = view·sun. What this replaces was a Fresnel rim that could
-    // not soften the terminator or redden a sunset, because a rim highlight is not scattering.
+    // ★★ **THE AIR BETWEEN THE EYE AND THIS POINT — the same integral the sky spends** (docs/66).
     //
-    // There is no "atmosphere strength" dial any more: the brightness is whatever the declared air's
-    // optical depth scatters at the shared exposure. A body with no declared atmosphere carries tau = 0
-    // and gets exactly nothing — the airless case needs no branch.
-    // **Only the air that is actually between the eye and this point** (`emissive.w`). `rayleigh_veil`
-    // computes the FULL vertical column's in-scatter, which is right from orbit and wrong on the ground:
-    // unscaled it puts a whole sky of haze between a camera standing on grass and the grass in front of
-    // it, and measured by ablation that is what turned real green ground (rgb 84,195,65, material grain
-    // visible) into a pale cyan wash. The fraction of the column lying below the eye is 1 - e^(-h/H) on
-    // the engine's own barometric profile — 3.5e-5 at 0.3 m altitude, 0.63 at one scale height, 1 from
-    // orbit, so the planet from space is untouched and the ground gets its own colour back.
-    radiance += u.emissive.w
-        * rayleigh_veil(dot(n, view), dot(n, l), dot(view, l), u.atm.xyz, u.atm.w, u.light_dir.w);
+    // What stood here was the plane-parallel CLOSED FORM scaled by "the fraction of the column below
+    // the eye". That fraction was an openly-flagged stand-in, and the sky rig measured what it was
+    // worth: at 1.7 m altitude it is 2e-4, so the ground came out BIT-IDENTICAL with and without an
+    // atmosphere. Correct for a camera on the grass, and wrong for everything else — no aerial
+    // perspective over a mountain thirty kilometres off, and no sunset light on the ground while the
+    // sky above it was orange.
+    //
+    // Marching from the eye to THIS FRAGMENT is the computation that stand-in named. It ends where the
+    // ground is, so two metres of air is two metres of air; it lengthens with distance on its own; and
+    // it is the same function, at the same exposure, that `sky.wgsl` runs for the pixel next to this
+    // one — so the ground and the sky above the horizon cannot draw two different atmospheres.
+    var air : AirColumn;
+    air.tau = u.atm.xyz;
+    air.scale_height = u.air2.x;
+    air.radius = u.air2.y;
+    air.top = u.air2.z;
+    air.sun_gain = u.atm.w;
+    // All the geometry as cosines about the EYE's zenith, and the path length in metres. `i.wpos` is
+    // camera-relative (eye at the origin), so its length IS the distance to this fragment.
+    let up = normalize(u.eye_air.xyz);
+    let to_frag = normalize(i.wpos);
+    let t_end = length(i.wpos) * u.air2.w;
+    let veil = air_inscatter(air, u.eye_air.w, dot(up, to_frag), dot(up, l), dot(to_frag, l), t_end);
+    // The ground's own light is dimmed by the air in front of it, and the air's own glow is added —
+    // one call gives both, and the reddening of a distant ridge is the same physics as the sunset.
+    radiance = radiance * veil.transmit + veil.inscatter;
     let mapped = tonemap(radiance); // the shared display law — compresses brightness, keeps hue
     // Alpha = tint.a: 1.0 for the opaque globe, the cross-fade factor for the ground cap.
     return vec4<f32>(mapped, u.tint.a);

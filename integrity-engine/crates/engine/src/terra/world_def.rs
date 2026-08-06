@@ -489,9 +489,54 @@ pub struct Surface {
     pub landcover_url: Option<String>,
     #[serde(default)]
     pub sea_level_m: f64,
-    /// biome index (as a string key) → material id in `data/materials.json`.
+    /// **Land-cover class → the MIXTURE of materials that stands there**, each with its fraction.
+    ///
+    /// A mixture rather than one material, because the classes are definitionally mixtures: MODIS
+    /// IGBP's *woody savanna* is 30–60% tree cover over grass, and *cropland/natural vegetation
+    /// mosaic* says so in its name. Collapsing those to a single substance is what made the Amazon
+    /// and Siberia the same colour, and it left `terra::appearance` — an integral built to average a
+    /// mixture over a footprint — with nothing to average.
     #[serde(default)]
-    pub biomes: HashMap<String, String>,
+    pub biomes: HashMap<String, Vec<(String, f32)>>,
+}
+
+impl Surface {
+    /// **THE land-cover class → material MIXTURE mapping. One implementation, for every scene.**
+    ///
+    /// Robin's rule, stated as an acceptance test (2026-08-03): *"Because the scene just calls out
+    /// which assemblies to include, we should be able to get enhanced renders of earth in ALL scenes…
+    /// If not, we have a serious flaw in how we implement scene/assembly/engine."*
+    ///
+    /// ★★ This existed TWICE — character-for-character the same logic, once inside `Terra::load_world`
+    /// and once inside `OrbitDemo::load_earth_surface`. Nothing had diverged, and that is exactly what
+    /// made it dangerous: when the foliage materials landed the change was in the DATA
+    /// (`assets/bodies/earth.json`), so both copies picked it up and the duplication stayed invisible.
+    /// A change to the LOGIC would not be so kind — and phenology is precisely that change, since a
+    /// biome's material will come to depend on the date. Two copies, and one Earth turns while the
+    /// other does not.
+    ///
+    /// The index is dense from 0 to the highest class the raster can hold, because a land-cover raster
+    /// stores a class number and the lookup is by that number. A class nobody mapped falls back to
+    /// `granite` — bare rock, the honest "I do not know what grows here", never a plausible guess.
+    pub fn biome_mixtures(&self, mats: &[crate::materials::Material]) -> Vec<Vec<(usize, f32)>> {
+        let max_idx = self
+            .biomes
+            .keys()
+            .filter_map(|k| k.parse::<usize>().ok())
+            .max()
+            .unwrap_or(0);
+        (0..=max_idx)
+            .map(|i| match self.biomes.get(&i.to_string()) {
+                Some(mix) => mix
+                    .iter()
+                    .map(|(id, f)| (crate::materials::index_of(mats, id), *f))
+                    .collect(),
+                // A class nobody mapped becomes bare rock — the honest "I do not know what grows
+                // here", never a plausible guess.
+                None => vec![(crate::materials::index_of(mats, "granite"), 1.0)],
+            })
+            .collect()
+    }
 }
 
 /// A world's atmosphere, DECLARED AS MATTER — its mass and what it is made of.
@@ -577,6 +622,23 @@ pub struct TimeDef {
     pub rotation: bool,
     #[serde(default = "one")]
     pub scale: f64,
+    /// **WHEN this scene is set**, Unix seconds. `None` means "now".
+    ///
+    /// Robin (2026-08-04), correcting me on exactly this: *"One earth assembly. Each scene can show
+    /// different times, geological epochs, etc."*
+    ///
+    /// ★★ That distinction is the whole point and I had it wrong. **One Earth** means one definition
+    /// of what Earth IS — its materials, its surface, its biome map, the laws it obeys. It does NOT
+    /// mean every scene shows the same instant. The birth-of-the-Moon scene is proto-Earth; Terra is
+    /// this afternoon. That is ONE Earth at two times, not two Earths — and time is part of the
+    /// SETTING, which is a scene's own business (docs/65).
+    ///
+    /// I had reasoned that a scene without a clock would draw a green July Earth beside Terra's amber
+    /// October one and that this was a one-Earth violation. It is not. Two Earths would be two
+    /// different answers to *what is Earth made of*; this is one answer evaluated at two dates, which
+    /// is what a planet does.
+    #[serde(default)]
+    pub epoch: Option<f64>,
 }
 fn one() -> f64 {
     1.0
@@ -844,7 +906,7 @@ mod tests {
             "planet":{"radius_m":6371000,"mass_kg":5.972e24,"profile":"earth"},
             "surface":{"landmask_url":"landmask.png","elevation_url":"elevation.png",
                 "elevation_range_m":[-11000,9000],"landcover_url":"landcover.png","sea_level_m":0,
-                "biomes":{"0":"water","1":"grass","2":"sand"}},
+                "biomes":{"0":[["water",1.0]],"1":[["grass",1.0]],"2":[["sand",1.0]]}},
             "atmosphere":{"profile":"rayleigh","mass_kg":5.15e18,"composition":[["air",1.0]]},
             "camera":{"mode":"fly","lat":20,"lon":0,"alt_m":8000000,"look":{"yaw":0,"pitch":-1.2},
                 "min_alt_m":2,"max_alt_m":40000000},
@@ -855,7 +917,7 @@ mod tests {
         assert_eq!(w.planet.as_ref().unwrap().profile.as_deref(), Some("earth"));
         let s = w.surface.unwrap();
         assert_eq!(s.elevation_range_m, Some([-11000.0, 9000.0]));
-        assert_eq!(s.biomes.get("1").map(String::as_str), Some("grass"));
+        assert_eq!(s.biomes.get("1").map(|m| m[0].0.as_str()), Some("grass"));
         assert_eq!(w.camera.unwrap().mode.as_deref(), Some("fly"));
     }
 

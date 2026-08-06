@@ -1159,7 +1159,7 @@ mod tests {
         // And the SHIPPED ground world carries no private column: it inherits this same derivation.
         let shipped = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../web/public/worlds/ground/world.json"
+            "/../../assets/worlds/ground-patch.json"
         ))
         .expect("shipped ground world");
         assert!(

@@ -10,7 +10,7 @@ p.on('pageerror', e => console.log('PAGEERR:', e.message));
 await p.goto(`http://127.0.0.1:${PORT}/terra.html`, { waitUntil: 'load' });
 await p.waitForFunction(() => !!window.__terra, null, { timeout: 60000 });
 await p.waitForTimeout(3000);
-await p.evaluate(() => window.__terra.set_fly(10, 0, 700000, 0, -0.55));
+await p.evaluate(() => window.__terra.place_camera(10, 0, 700000, 0, -0.55));
 await p.evaluate(() => {
   window.__log = []; let last = performance.now(); const t0 = last;
   const tick = () => {

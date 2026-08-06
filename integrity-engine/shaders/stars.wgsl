@@ -17,6 +17,19 @@ struct StarU {
     cam_pos   : vec4<f32>, // xyz = eye in DISPLAY units — where to hang the billboards
     cam_pc    : vec4<f32>, // xyz = eye in PARSECS from Sol, in the catalogue's frame; w = viewport aspect
     params    : vec4<f32>, // x = billboard distance, y = PSF width (px), z = viewport height (px), w = exposure
+    // ★ THE AIR IN FRONT OF THE STARS (docs/66). An observer standing inside an atmosphere does not see
+    // stars in daylight — not because the air absorbs them (at zenith it passes ~90% of the blue) but
+    // because the SKY IS BRIGHTER THAN THEY ARE. That is a statement about a SUM, and this engine tone-
+    // maps each pass separately, so the sum never happened and the sky could only ever dim the stars by
+    // its own transmittance. Daylight left them plainly visible; the first sky rig photographed exactly
+    // that. So the star pass evaluates the sky along its own ray and outputs `tonemap(L_sky + L_star·T)`,
+    // which IS the sum, and the stars go out at dawn for the reason they really do.
+    // A scene with no air passes tau = 0 here: `air_inscatter` returns nothing, and this is bit-identical
+    // to what it replaced.
+    up        : vec4<f32>, // xyz = the eye's local zenith (unit); w = its altitude above sea level (m)
+    sun       : vec4<f32>, // xyz = direction TO the sun (unit); w = the shared exposure
+    air       : vec4<f32>, // xyz = the column's optical depth per band; w = its scale height (m)
+    body      : vec4<f32>, // x = surface radius (m), y = column top (m)
 };
 @group(0) @binding(0) var<uniform> u : StarU;
 
@@ -25,6 +38,8 @@ struct VOut {
     @location(0) offset : vec2<f32>, // position within the PSF, in units of its width
     @location(1) color : vec3<f32>,
     @location(2) peak : f32,
+    // Where this star is, as a world direction from the eye — what the sky along its ray is computed for.
+    @location(3) wdir : vec3<f32>,
 };
 
 @vertex
@@ -51,7 +66,8 @@ fn vs_main(
     let dir = rel / dist_pc;
     // Flux at 10 pc, carried to the real distance.
     let flux = luminosity * 100.0 / (dist_pc * dist_pc);
-    let world = u.cam_pos.xyz + (u.spin * vec4<f32>(dir, 0.0)).xyz * u.params.x;
+    let wdir = (u.spin * vec4<f32>(dir, 0.0)).xyz;
+    let world = u.cam_pos.xyz + wdir * u.params.x;
     var clip = u.view_proj * vec4<f32>(world, 1.0);
     // Expand by a fixed number of PIXELS: multiplying by clip.w cancels the perspective divide, so the
     // PSF stays the same size on screen however far away the sphere is placed.
@@ -80,6 +96,7 @@ fn vs_main(
     o.offset = corner;
     o.color = color;
     o.peak = flux * u.params.w; // measured flux, at the scene's exposure
+    o.wdir = wdir;
     return o;
 }
 
@@ -93,9 +110,24 @@ fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     if (v < 0.004) {
         discard; // below what the display can show — do not pay for it
     }
-    let c = i.color * v;
-    // The shared display law. A very bright star still clips in its strongest channel, but it keeps its
-    // colour on the way there — Rigel stays blue-white and Betelgeuse stays orange instead of both
-    // washing out, which is the whole reason the catalogue carries a colour index.
-    return vec4<f32>(tonemap(c), 1.0);
+    // The star's own light, and then THE AIR BETWEEN IT AND THE EYE. Both halves come out of the one
+    // scattering integral: `transmit` is what survives the column (per band, so a low star reddens as
+    // well as dims), and `inscatter` is the sky the star has to compete with.
+    var air : AirColumn;
+    air.tau = u.air.xyz;
+    air.scale_height = u.air.w;
+    air.radius = u.body.x;
+    air.top = u.body.y;
+    air.sun_gain = u.sun.w;
+    let up = normalize(u.up.xyz);
+    let sun = normalize(u.sun.xyz);
+    let rd = normalize(i.wdir);
+    let sky = air_inscatter(air, u.up.w, dot(up, rd), dot(up, sun), dot(rd, sun), NO_LIMIT);
+
+    let c = i.color * v * sky.transmit;
+    // The shared display law, applied to the SUM. A very bright star still clips in its strongest
+    // channel, but it keeps its colour on the way there — Rigel stays blue-white and Betelgeuse stays
+    // orange instead of both washing out, which is the whole reason the catalogue carries a colour
+    // index. Against a bright sky the sum is dominated by the sky and the star simply is not there.
+    return vec4<f32>(tonemap(c + sky.inscatter), 1.0);
 }

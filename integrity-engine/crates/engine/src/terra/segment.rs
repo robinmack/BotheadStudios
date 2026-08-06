@@ -161,7 +161,7 @@ pub fn fill_segment(
         let p = dir * (r_disp + s.offset);
         let r = p - origin;
         pos.push(Vec3::new(r.x as f32, r.y as f32, r.z as f32));
-        cols.push(s.albedo);
+        cols.push(s.albedo_ratio);
         mats.push(s.material);
         roughs.push(s.rough);
         dirs.push(dir);

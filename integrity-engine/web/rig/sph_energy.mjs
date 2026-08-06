@@ -1,10 +1,10 @@
 // Measure GPU-impact energy conservation + disk/escape over time (docs/35 diagnosis). Triggers the GPU impact
 // on orbit.html and logs total energy drift, remnant radius, bound-disk mass, escaped mass, moon candidate.
-import { launch } from './_launch.mjs';
+import { launch, VIEWPORT } from './_launch.mjs';
 const PORT = process.env.PORT || '5173';
 const OUT = process.env.OUT || '/tmp';
 const b = await launch();
-const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
+const p = await b.newPage({ viewport: VIEWPORT });
 p.on('pageerror', (e) => console.log('PAGEERR:', e.message));
 await p.goto(`http://127.0.0.1:${PORT}/orbit.html`, { waitUntil: 'load' });
 await p.waitForTimeout(1500);

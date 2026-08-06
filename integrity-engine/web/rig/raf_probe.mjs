@@ -1,11 +1,11 @@
 // Is the PAGE's rAF throttled, or is the ENGINE's callback slow? Runs an independent, empty rAF loop
 // alongside the app and measures its own rate. Empty loop slow too => the page is being paced by the
 // browser. Empty loop fast while HUD is slow => the app's own callback is the cost.
-import { launch } from './_launch.mjs';
+import { launch, VIEWPORT } from './_launch.mjs';
 const PORT = process.env.PORT || '5173';
 const b = await launch();
 for (const scene of ['terra.html', 'birth.html']) {
-  const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
+  const p = await b.newPage({ viewport: VIEWPORT });
   await p.goto(`http://127.0.0.1:${PORT}/${scene}`, { waitUntil: 'load' });
   await p.waitForTimeout(6000);
   const r = await p.evaluate(() => new Promise((res) => {

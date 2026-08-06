@@ -478,6 +478,12 @@ pub fn terrain_contact_resolve(
     }
 }
 
+/// **The camera's matter shell, half-extent in metres.** One value: the sweep and the settle below
+/// both spend it, and a second copy is how two answers to one question begin. It is >= the ground
+/// scene's near clip (0.2 m), which is what actually kills "seeing under the skin" — if the shell
+/// cannot enter matter and the near plane sits inside the shell, the frustum cannot cross the surface.
+pub const SHELL_HALF_M: f64 = 0.35;
+
 /// Sweep the camera's matter shell along the FIXED segment `from → to`, resolving each sample against
 /// the surface via [`terrain_contact_resolve`] and CARRYING the accumulated correction, so the
 /// resolved position is `to` plus whatever the contacts pushed it by. `surface` returns the bilinear
@@ -494,9 +500,7 @@ pub fn sweep_shell_resolve(
     to: DVec3,
     mut surface: impl FnMut(glam::Vec3) -> (f32, f32, f32),
 ) -> DVec3 {
-    /// ≥ the ground scene's near clip (0.2 m) so the near plane can never cross the surface the shell
-    /// rests on.
-    const SHELL_HALF: f64 = 0.35;
+    const SHELL_HALF: f64 = SHELL_HALF_M;
     /// Per-sample projection cap - solver relaxation rate, the same role it plays for grains.
     const MAX_CORR: f64 = 0.5;
 
@@ -524,6 +528,220 @@ pub fn sweep_shell_resolve(
         }
     }
     to + corr
+}
+
+/// **The same shell, on a SPHERE** — the camera as matter on a planet.
+///
+/// [`sweep_shell_resolve`] resolves a y-up heightfield, which is what a local patch of ground is. A
+/// planet is the same surface wrapped, so this is a coordinate change and not a second law: it builds
+/// the tangent frame under the eye, presents the sphere to that primitive as a local plane, and maps
+/// the answer back. `ground_m(lat, lon)` returns the surface height above the sea-level sphere, in
+/// metres — whatever the caller draws.
+///
+/// ★ **A tangent plane is EXACT at shell scale, and the number says so.** The shell is 0.35 m; over one
+/// metre of tangent offset a 6371 km sphere departs from its own tangent plane by `x²/2R ≈ 7.8e-8 m` —
+/// eleven million times smaller than the shell, and `a_tangent_plane_is_exact_at_shell_scale` pins it.
+/// So nothing here is an approximation somebody has to defend.
+///
+/// Robin (2026-08-03), on where the camera belongs: *"Camera must exist in the engine, but can be
+/// directed by the scene"*, because *"the engine does a lot of calculation based on what can be seen,
+/// so it must know everything about the camera all the time."*
+pub fn sweep_shell_on_sphere(
+    from_m: DVec3,
+    to_m: DVec3,
+    planet_radius_m: f64,
+    ground_m: impl Fn(f64, f64) -> f64,
+) -> DVec3 {
+    let r = to_m.length();
+    if r <= 0.0 || planet_radius_m <= 0.0 {
+        return to_m;
+    }
+    let dir = to_m / r;
+    let (lat0, lon0) = crate::geo::lat_lon_from_dir(dir);
+    let surf0 = planet_radius_m + ground_m(lat0, lon0);
+    // Far above the tallest thing on any body, the shell provably cannot touch anything, so the sweep
+    // is pure cost. This is not a threshold on WHETHER the law applies — it is the altitude at which
+    // its answer is already known to be `to_m`.
+    if r - surf0 > 20_000.0 {
+        return to_m;
+    }
+    let (up, north, east) = crate::geo::tangent_frame(lat0, lon0);
+    let origin = dir * surf0;
+    let local = |w: DVec3| {
+        let d = w - origin;
+        DVec3::new(d.dot(east), d.dot(up), d.dot(north))
+    };
+    let world = |l: DVec3| origin + east * l.x + up * l.y + north * l.z;
+    // Ground height in the local frame, and its slope by central difference over a step comfortably
+    // inside the shell.
+    let h_local = |x: f64, z: f64| {
+        let w = world(DVec3::new(x, 0.0, z));
+        let (la, lo) = crate::geo::lat_lon_from_dir(w.normalize_or(dir));
+        planet_radius_m + ground_m(la, lo) - surf0
+    };
+    const D: f64 = 0.25; // metres — the finite-difference step for the slope
+    let surface = |sample: glam::Vec3| {
+        let (x, z) = (sample.x as f64, sample.z as f64);
+        let h = h_local(x, z);
+        let dhdx = (h_local(x + D, z) - h_local(x - D, z)) / (2.0 * D);
+        let dhdz = (h_local(x, z + D) - h_local(x, z - D)) / (2.0 * D);
+        (h as f32, dhdx as f32, dhdz as f32)
+    };
+    let mut resolved = sweep_shell_resolve(local(from_m), local(to_m), surface);
+
+    // ★★ **THEN SETTLE, because a sweep is a RATE and a constraint is a FACT.**
+    //
+    // `sweep_shell_resolve` caps each sample's correction at `MAX_CORR` — a relaxation rate, which is
+    // exactly right for the smooth metres-per-frame motion it was written for, and which cannot
+    // recover from a deep overlap: 24 samples at half a metre each is ~12 m of authority. That is not
+    // a bug in it. But a SCENE teleports the camera (`set_fly` to a new coordinate is a jump, not a
+    // move), and arriving 900 m inside a plateau is a state the constraint must still satisfy —
+    // measured, before this loop existed: the eye came to rest 895 m INSIDE the ground.
+    //
+    // So the same contact is applied again at the destination until it stops finding overlap. This is
+    // finishing the constraint, not clamping: every correction is the contact law's own `dpos`, along
+    // the surface normal, so a teleport onto a slope still SLIDES rather than popping up the radial.
+    for _ in 0..64 {
+        let (h, dhdx, dhdz) = surface(glam::Vec3::new(
+            resolved.x as f32,
+            resolved.y as f32,
+            resolved.z as f32,
+        ));
+        let hit = terrain_contact_resolve(
+            resolved,
+            DVec3::ZERO,
+            h as f64,
+            dhdx as f64,
+            dhdz as f64,
+            SHELL_HALF_M,
+            0.0,
+            f64::INFINITY, // no rate limit: satisfy the constraint rather than approach it
+            f64::INFINITY,
+        );
+        if !hit.hit || hit.dpos.length() < 1.0e-4 {
+            break;
+        }
+        resolved += hit.dpos;
+    }
+    world(resolved)
+}
+
+#[cfg(test)]
+mod camera_shell_tests {
+    use super::*;
+
+    /// **The eye cannot end up inside the ground** — the whole point of the camera being matter.
+    ///
+    /// A camera driven at a 1500 m plateau from above must come to rest ON it, not in it. The clamp
+    /// this replaces would also have passed that; what it could NOT do is the next test.
+    #[test]
+    fn a_camera_driven_into_a_plateau_rests_on_top_of_it() {
+        let r = 6.371e6;
+        let ground = |lat: f64, _lon: f64| if lat > 10.0 { 1500.0 } else { 0.0 };
+        let dir = crate::geo::dir_from_lat_lon(20.0, 0.0);
+        // Asked for a point 900 m BELOW the plateau surface.
+        let desired = dir * (r + 600.0);
+        let from = dir * (r + 3000.0);
+        let out = sweep_shell_on_sphere(from, desired, r, ground);
+        let alt = out.length() - r - 1500.0;
+        assert!(
+            alt >= 0.0,
+            "the eye is {alt:.2} m INSIDE the plateau — the shell did not resolve"
+        );
+        assert!(
+            alt < 2.0,
+            "the eye rests {alt:.2} m above the plateau; the shell is 0.35 m, so it should be close"
+        );
+    }
+
+    /// **★ THE ONE A CLAMP CANNOT DO: the shell SLIDES.**
+    ///
+    /// A clamp only ever pushes the eye straight UP along the radial, so a camera driven into a steep
+    /// face pops through it or climbs it vertically. Real contact resolves along the surface NORMAL,
+    /// which on a slope has a horizontal component — the eye slides. This measures that horizontal
+    /// component, and it is what makes the camera matter rather than a special case.
+    #[test]
+    fn the_shell_slides_along_a_slope_instead_of_popping_straight_up() {
+        let r = 6.371e6;
+        // A ramp climbing north: 1 m of rise per ~1 m of ground, i.e. a 45° face.
+        let m_per_deg = r * std::f64::consts::PI / 180.0;
+        let ground = move |lat: f64, _lon: f64| (lat * m_per_deg).max(0.0);
+        let dir = crate::geo::dir_from_lat_lon(0.001, 0.0);
+        let g0 = ground(0.001, 0.0);
+        let desired = dir * (r + g0 - 1.0); // one metre into the face
+        let out = sweep_shell_on_sphere(dir * (r + g0 + 5.0), desired, r, ground);
+        // Decompose the correction in the tangent frame under the DESIRED point.
+        let (up, north, _east) = crate::geo::tangent_frame(0.001, 0.0);
+        let corr = out - desired;
+        let along = corr.dot(north).abs();
+        assert!(
+            corr.dot(up) > 0.0,
+            "contact must push the eye OUT of the ground, got {:.3} m along up",
+            corr.dot(up)
+        );
+        assert!(
+            along > 0.05,
+            "the eye moved {along:.3} m along the slope — a clamp gives exactly 0, so this is the \
+             measurement that separates contact from a clamp"
+        );
+    }
+
+    /// **Open sky is untouched.** A camera nowhere near the ground must get back precisely what it
+    /// asked for — the law is not allowed to nudge a spacecraft.
+    #[test]
+    fn the_shell_does_nothing_where_there_is_nothing_to_touch() {
+        let r = 6.371e6;
+        let ground = |_: f64, _: f64| 0.0;
+        for alt in [100.0, 5_000.0, 400_000.0, 7.8e10] {
+            let dir = crate::geo::dir_from_lat_lon(45.0, -100.0);
+            let want = dir * (r + alt);
+            let got = sweep_shell_on_sphere(want, want, r, ground);
+            assert!(
+                (got - want).length() < 1e-6,
+                "at {alt} m the shell moved the eye by {:.3e} m; empty space must be exact",
+                (got - want).length()
+            );
+        }
+    }
+
+    /// **The tangent-plane claim, measured rather than asserted in a comment.**
+    ///
+    /// The sphere version presents a planet to a heightfield primitive. That is honest only because a
+    /// tangent plane and the sphere agree to `x²/2R` over the shell's own scale. This computes the
+    /// departure directly so the number in the doc comment cannot rot.
+    #[test]
+    fn a_tangent_plane_is_exact_at_shell_scale() {
+        let r = 6.371e6;
+        let (up, north, _east) = crate::geo::tangent_frame(0.0, 0.0);
+        let origin = up * r;
+        // ★ Measured at 10 m and up, NOT at the shell's own 0.35 m — and the reason matters. The
+        // departure there is ~1e-8 m against a radius of 6.4e6 m, a ratio of 1.6e-15, which is about
+        // seven times f64's epsilon: the subtraction keeps roughly one significant digit. Asking the
+        // test to confirm 9.6e-9 to 1% is asking arithmetic for precision it does not have (it came
+        // back 1.02e-8, and the first version of this test duly failed on floating-point noise).
+        // So the LAW is verified where it can be measured, and the shell-scale value follows from it.
+        for x in [10.0, 100.0, 1000.0] {
+            let on_plane = origin + north * x;
+            let departure = on_plane.length() - r; // how far the plane sits above the sphere
+            let predicted = x * x / (2.0 * r);
+            assert!(
+                (departure - predicted).abs() < predicted * 0.01,
+                "at {x} m: departure {departure:.3e} m vs predicted {predicted:.3e} m"
+            );
+        }
+        // The headline, from the law just confirmed: at one metre the plane and the sphere differ by
+        // ~8e-8 m, some four million times finer than the shell that rides on it.
+        let at_one_m = 1.0 / (2.0 * r);
+        assert!(
+            at_one_m < 1e-7,
+            "tangent departure at 1 m is {at_one_m:.3e} m"
+        );
+        assert!(
+            SHELL_HALF_M / at_one_m > 1.0e6,
+            "the shell dwarfs the curvature by {:.0e}",
+            SHELL_HALF_M / at_one_m
+        );
+    }
 }
 
 /// **The heightfield's slope quantum** (metres). An integer voxel heightfield can represent a column

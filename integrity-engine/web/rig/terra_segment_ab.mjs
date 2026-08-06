@@ -25,7 +25,7 @@ for (const alt of [1.0e7, 4.0e5, 8.0e3, 3.0e2]) {
   for (const mode of [0, 1]) {
     await p.evaluate(({ mode, alt, LAT, LON }) => {
       window.__terra.set_surface_mode(mode);
-      window.__terra.set_fly(LAT, LON, alt, 0.6, -0.45);
+      window.__terra.place_camera(LAT, LON, alt, 0.6, -0.45);
       window.__r.length = 0;
     }, { mode, alt, LAT, LON });
     await p.waitForTimeout(2500);

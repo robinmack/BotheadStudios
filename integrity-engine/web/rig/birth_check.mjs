@@ -1,9 +1,9 @@
 // Quick visual confirm that birth.html still lofts a proto-lunar disk after the space-band ejecta change.
-import { launch } from './_launch.mjs';
+import { launch, VIEWPORT } from './_launch.mjs';
 const out = process.env.OUT || '/tmp';
 const PORT = process.env.PORT || '5173';
 const b = await launch();
-const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
+const p = await b.newPage({ viewport: VIEWPORT });
 const stat = async () => (await p.locator('#stats').innerText().catch(()=> '')).replace(/\s+/g,' ').trim();
 await p.goto(`http://127.0.0.1:${PORT}/birth.html`, { waitUntil: 'load' });
 const marks = [3000, 4000, 5000, 6000, 8000];

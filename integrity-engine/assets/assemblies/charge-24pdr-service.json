@@ -1,0 +1,67 @@
+{
+ "id": "charge-24pdr-service",
+ "name": "24-pounder service charge",
+ "notes": "A separate assembly SO THE GUN CAN BE RELOADED (Robin): the charge is consumed and ceases to exist, the shot is transferred out, the gun persists. A service charge for a 24-pounder was about a third of the shot's weight — 8 lb of powder to 24 lb of ball — here 3.629 kg. ★ The powder is THREE PARTS, not one material: black powder is a mechanical mixture of potassium nitrate, charcoal and sulfur at 75/15/10, and its bulk properties DERIVE from them (see `materials::mixture_tests`). Modelling it as one substance would have meant inventing a specific heat, which is exactly what was backed out on 2026-08-02. The wad is what holds the ball against the charge and is the reason a gun could be fired downhill. ★★ The powder parts carry a PACKING FRACTION, which is the honest form of a thing the catalogue already half-said. Their SHAPES are the envelope — the space the charge fills in the chamber, 3629 cm3 — and `packing` 0.511 says how much of that envelope is substance. Mass is envelope x packing x density, so it comes out right while the chamber volume ALSO comes out right, and the gap between the two is the ~49% void of corned powder. That matters rather than being cosmetic: chamber volume sets the pressure the burn reaches. ★ The packing is DERIVED, not typed: it is the poured bulk density of corned powder (1000 kg/m3) over the mixture's own true density (1957 kg/m3, volume-weighted from the three constituents exactly as `materials::mixture_tests` computes it). A first version of this file sized the parts to their SOLID volume and under-stated the chamber by half.",
+ "parts": [
+  {
+   "name": "saltpetre",
+   "material": "potassium_nitrate",
+   "shape": {
+    "kind": "cylinder",
+    "r": 0.0739,
+    "length": 0.14717
+   },
+   "at_m": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "packing": 0.51107
+  },
+  {
+   "name": "charcoal",
+   "material": "charcoal",
+   "shape": {
+    "kind": "cylinder",
+    "r": 0.0739,
+    "length": 0.04434
+   },
+   "at_m": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "packing": 0.51107
+  },
+  {
+   "name": "brimstone",
+   "material": "sulfur",
+   "shape": {
+    "kind": "cylinder",
+    "r": 0.0739,
+    "length": 0.019992
+   },
+   "at_m": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "packing": 0.51107
+  },
+  {
+   "name": "wad",
+   "material": "oak",
+   "shape": {
+    "kind": "cylinder",
+    "r": 0.0739,
+    "length": 0.03
+   },
+   "at_m": [
+    0.1,
+    0.0,
+    0.0
+   ],
+   "packing": 1.0
+  }
+ ]
+}

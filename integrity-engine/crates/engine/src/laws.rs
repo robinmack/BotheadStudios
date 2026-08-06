@@ -105,7 +105,7 @@ mod tests {
         );
     }
 
-    fn collect_json(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    pub(super) fn collect_json(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
@@ -197,7 +197,7 @@ mod single_source_tests {
     /// `#[cfg(test)]`, which in a file with an early test module discarded almost everything after it —
     /// `lib.rs` was 98% invisible to its own conformance check. Prose may name a number freely; a test
     /// asserting a value against a published reference is the opposite of a hidden duplicate.
-    fn strip(text: &str) -> String {
+    pub(super) fn strip(text: &str) -> String {
         let mut out = String::with_capacity(text.len());
         let mut skipping = false;
         let mut depth = 0i32;
@@ -464,9 +464,43 @@ pub(crate) const DEFINITION_OWNED: &[(&str, &str)] = &[
 /// state by hand is a scene dictating its own physics.
 pub(crate) const COLLISION_PRIMITIVES: &[&str] = &["swept_first_contact", "contact_velocity"];
 
+/// **Every engine physics primitive a SCENE must never call, paired with the module that owns it.**
+///
+/// Robin, having stated the rule repeatedly and then watched it broken anyway (2026-08-03): *"scenes
+/// specify assemblies present, their positions, and starting velocities. They must NEVER introduce
+/// physics"*, and — decisively — ***"laws without enforcement are vanity projects."***
+///
+/// ★ The boundary is not "a scene may not mention physics". A scene legitimately asks the engine to
+/// STEP (`flight.step(&env, ..)`, `sim.step(dt)`) and reads back what happened. What it may never do is
+/// compute a force, an acceleration, a contact or an atmosphere ITSELF — because then the answer to a
+/// physical question depends on which scene asked it.
+///
+/// Every entry is a failure that actually happened here:
+///   * `swept_first_contact`, `contact_velocity` — `OrbitDemo` ran its own swept-CCD loop, twice.
+///   * `drag_accel` — a cannon's trajectory integrator took a drag COEFFICIENT as an argument, putting
+///     the caller in charge of how hard the air pushes back. Deleted in favour of `flight::Flight`,
+///     which already flies meteors through the same air and integrates quadratic drag in closed form.
+///   * `AirShell::new` — building a world's atmosphere is deciding what its air IS. `PlanetAir` did
+///     exactly that from inside `mod app` until it was moved into `flight`, where it belongs.
+///   * `atmospheric_step`, `contact_accel`, `contact_force` — drag/heating/ablation, and the granular
+///     contact law.
+///
+/// The paired module is checked too: if the owner does not call it either, the entry guards nothing and
+/// the test says so rather than passing quietly.
+pub(crate) const SCENE_FORBIDDEN_PHYSICS: &[(&str, &str)] = &[
+    ("swept_first_contact", "interaction.rs"),
+    ("contact_velocity", "interaction.rs"),
+    ("drag_accel", "atmosphere.rs"),
+    ("atmospheric_step", "flight.rs"),
+    ("AirShell::new", "flight.rs"),
+    ("contact_accel", "granular.rs"),
+    ("contact_force", "granular.rs"),
+    ("surface_crossing", "flight.rs"),
+];
+
 /// The scene-facing modules: they own a canvas, a camera and a set of declared bodies, and nothing else.
 /// A scene describes objects, trajectories and user controls; the engine does the physics.
-pub(crate) const SCENE_MODULES: &[&str] = &["lib.rs", "ground_scene.rs"];
+pub(crate) const SCENE_MODULES: &[&str] = &["lib.rs"];
 
 #[cfg(test)]
 mod scene_purity_tests {
@@ -515,6 +549,56 @@ mod scene_purity_tests {
                 owner.contains(&format!("{prim}(")),
                 "the collision owner `interaction` must actually call `{prim}` — otherwise this test \
                  guards nothing"
+            );
+        }
+    }
+
+    /// **A SCENE MUST NEVER INTRODUCE PHYSICS** — the general form, and the one with teeth.
+    ///
+    /// Robin: *"scenes specify assemblies present, their positions, and starting velocities. They must
+    /// NEVER introduce physics"*, and *"laws without enforcement are vanity projects."*
+    ///
+    /// The sibling test above guards collision detection specifically. This guards the rest: drag, the
+    /// atmospheric response, the contact law, the surface crossing. Both halves matter, because the way
+    /// this rule actually breaks is never by someone re-implementing collisions — it is by a new module
+    /// reaching for whichever primitive its own job happens to need.
+    ///
+    /// ★ Verified by making it fail, in both directions: inserting `drag_accel(` or `AirShell::new(`
+    /// into a scene module turns it red, and an entry whose named owner does not call it is reported as
+    /// guarding nothing.
+    #[test]
+    fn a_scene_never_introduces_physics() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        let strip = |text: &str| -> String {
+            text.lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        for &scene in super::SCENE_MODULES {
+            let path = format!("{dir}/{scene}");
+            let text =
+                std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("{scene} must exist"));
+            let code = strip(&text);
+            for &(prim, owner) in super::SCENE_FORBIDDEN_PHYSICS {
+                assert!(
+                    !code.contains(&format!("{prim}(")),
+                    "{scene} calls `{prim}(` — that is PHYSICS, and it belongs to `{owner}`.\n\
+                     A scene specifies which assemblies are present, where they are and how fast they \
+                     are going. It asks the engine to step them; it never computes a force, an \
+                     acceleration, a contact or an atmosphere itself."
+                );
+            }
+        }
+        // Each entry must be REAL: if the named owner does not call it either, the line guards nothing.
+        for &(prim, owner) in super::SCENE_FORBIDDEN_PHYSICS {
+            let path = format!("{dir}/{owner}");
+            let text =
+                std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("{owner} must exist"));
+            assert!(
+                text.contains(&format!("{prim}(")),
+                "`{prim}` is declared as owned by `{owner}`, which does not call it — so this entry \
+                 forbids something nobody does, and guards nothing."
             );
         }
     }
@@ -800,7 +884,11 @@ mod material_property_tests {
     ///   * a numeric property nothing reads and nobody declared -> FAIL (data added with no consumer)
     ///   * a declared property that IS now read -> FAIL (wire it, then delete the entry)
     ///
-    /// Only NUMBERS are enforced. `grain`, `notes`, `source` and `conductivity_note` are prose — they
+    /// `reaction` is scanned too, added when the first energetic substances were catalogued — a new
+    /// block of sourced numbers is exactly the case this guard exists for, and leaving it unscanned
+    /// would have made the oxidation data invisible to the very check written to catch invisible data.
+    ///
+    /// Only NUMBERS are enforced. `grain`, `notes`, `source`, `equation` and `conductivity_note` are prose — they
     /// document the data rather than being physical quantities, so nothing is expected to consume them.
     /// The `tillotson` block is excluded too: it is read wholesale as a struct and its fields are named
     /// `A`, `B`, `a`, `b`, `alpha`, so scanning source for them would match everything and prove nothing.
@@ -810,7 +898,7 @@ mod material_property_tests {
             .expect("data/materials.json parses");
         let mut props: std::collections::BTreeMap<String, usize> = Default::default();
         for m in json["materials"].as_array().expect("a materials array") {
-            for block in ["mechanical", "optical", "thermal"] {
+            for block in ["mechanical", "optical", "thermal", "reaction"] {
                 let Some(map) = m.get(block).and_then(|b| b.as_object()) else {
                     continue;
                 };
@@ -867,8 +955,16 @@ mod material_property_tests {
     }
 
     /// Word-boundary search, so `cohesion` does not match `cohesion_ceiling` and `a` does not match
-    /// every word in the tree. Comments count as readers deliberately: a property named only in a
-    /// comment is at least VISIBLE to the next person, which is the thing being enforced.
+    /// every word in the tree.
+    ///
+    /// ★ **Comments do NOT count as readers, and the first version of this guard had that backwards.**
+    /// It counted them deliberately, on the reasoning that a property named in a comment is at least
+    /// VISIBLE. The flaw showed up the moment a test explained WHY `ductility` is unread: naming it in
+    /// prose marked it as read and the guard reported the debt paid. **A guard that a comment about the
+    /// gap can satisfy is a guard about prose, not about code.** Source is stripped of comments and of
+    /// `#[cfg(test)]` blocks (`single_source_tests::strip`, reused rather than rewritten) before
+    /// scanning, so only production code counts — which is the correct bar anyway: a property read only
+    /// by its own test is not consumed by the engine.
     fn reads_identifier(blob: &str, ident: &str) -> bool {
         let bytes = blob.as_bytes();
         let mut from = 0;
@@ -889,7 +985,7 @@ mod material_property_tests {
         b.is_ascii_alphanumeric() || b == b'_'
     }
 
-    fn collect_rs(dir: &std::path::Path, out: &mut String) {
+    pub(super) fn collect_rs(dir: &std::path::Path, out: &mut String) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
@@ -905,10 +1001,744 @@ mod material_property_tests {
                     continue;
                 }
                 if let Ok(t) = std::fs::read_to_string(&p) {
-                    out.push_str(&t);
+                    out.push_str(&super::single_source_tests::strip(&t));
                     out.push('\n');
                 }
             }
+        }
+    }
+}
+
+/// **What a body's surface SHOWS is the outside of the thing standing there, not its structure.**
+///
+/// Robin (2026-08-03), on a picture of the Irish coast that came back the colour of a plank:
+/// *"Pine Timber is always the wrong choice for flora though, we should look for 'pine needles' or
+/// 'pine leaves', same with other biomes."*
+///
+/// A land-cover class says *"this footprint is forest"*. What a forest presents to anything looking at
+/// it is the CANOPY — foliage. Timber is the trunk: barely visible from any distance, and a different
+/// substance with a different colour, density and thermal response. `assets/bodies/earth.json` mapped
+/// class 3 straight to `pine`, the catalogue's pine TIMBER (albedo [0.68, 0.48, 0.21], a brown), so
+/// every forest on Earth — the Amazon, the Congo, Ireland — was drawn as cut lumber, and a bronze
+/// cannon standing on it nearly vanished into ground the same colour as itself.
+///
+/// ★ **The criterion is physical, not a list of approved names.** Living vegetation is green because
+/// chlorophyll absorbs the red and the blue and leaves the green: a material standing for a vegetated
+/// surface must have its green channel above both others. A name-based rule would have to be extended
+/// by hand for every new material; this one is a property of the matter and extends itself.
+#[cfg(test)]
+mod biome_material_tests {
+    /// Every body definition on disk, since a rule that only checks Earth is a rule about Earth.
+    fn body_definitions() -> Vec<(String, crate::terra::world_def::World)> {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/bodies");
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(dir)
+            .expect("assets/bodies exists")
+            .flatten()
+        {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "json") {
+                let name = p.file_name().unwrap().to_string_lossy().to_string();
+                let text = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{name}: {e}"));
+                let body: crate::terra::world_def::World = serde_json::from_str(&text)
+                    .unwrap_or_else(|e| panic!("{name} parses as a body definition: {e}"));
+                out.push((name, body));
+            }
+        }
+        assert!(
+            !out.is_empty(),
+            "no body definitions found — this guards nothing"
+        );
+        out
+    }
+
+    #[test]
+    fn a_biome_never_paints_the_ground_with_the_inside_of_a_plant() {
+        let mats = crate::materials::load();
+        let json: serde_json::Value = serde_json::from_str(crate::materials::MATERIALS_JSON)
+            .expect("data/materials.json parses");
+        let organic: std::collections::BTreeSet<&str> = json["materials"]
+            .as_array()
+            .expect("a materials array")
+            .iter()
+            .filter(|m| m.get("category").and_then(|c| c.as_str()) == Some("organic"))
+            .filter_map(|m| m.get("id").and_then(|i| i.as_str()))
+            .collect();
+        assert!(
+            organic.contains("pine") && organic.contains("oak"),
+            "the woods must be catalogued as organic or this check cannot see the failure it exists for"
+        );
+
+        let mut checked = 0;
+        for (file, body) in body_definitions() {
+            let Some(surface) = body.surface else {
+                continue;
+            };
+            // A class is a MIXTURE, so every living constituent of it is checked. That matters: a
+            // savanna is mostly grass with some tree, and slipping timber in as the minority
+            // constituent would be exactly as wrong and much harder to see.
+            for (class, mix) in &surface.biomes {
+                for (mat_id, frac) in mix {
+                    if !organic.contains(mat_id.as_str()) {
+                        continue; // water, sand, snow, rock — not living, not this rule's business
+                    }
+                    checked += 1;
+                    let m = &mats[crate::materials::index_of(&mats, mat_id)];
+                    let [r, g, b] = m.albedo;
+                    assert!(
+                        g > r && g > b,
+                        "{file}: land-cover class {class} contains `{mat_id}` at {frac:.2}, whose \
+                         albedo is [{r:.3}, {g:.3}, {b:.3}] — that is not green, so it is not a \
+                         living surface.\n\
+                         A land-cover class shows the OUTSIDE of what grows there: foliage, not the \
+                         timber inside the trunk. Reach for a foliage material (`conifer_foliage`, \
+                         `broadleaf_foliage`, `grass`), not the structural tissue sharing its name."
+                    );
+                }
+            }
+        }
+        assert!(
+            checked >= 2,
+            "no body maps a land-cover class to an organic material — this guard is vacuous"
+        );
+    }
+
+    /// **And the guard must be able to fail**, which is only knowable by checking that the material
+    /// it was written to reject is still in the catalogue and still fails the criterion.
+    ///
+    /// Verified by mutation on 2026-08-03: putting `pine` back on class 3 turns
+    /// `a_biome_never_paints_the_ground_with_the_inside_of_a_plant` red with the albedo printed. This
+    /// test is what keeps that true after somebody edits the wood entry — a guard whose trigger has
+    /// quietly stopped triggering passes forever and teaches you to trust it.
+    #[test]
+    fn the_material_this_guard_rejects_is_still_rejectable() {
+        let mats = crate::materials::load();
+        for wood in ["pine", "oak"] {
+            let [r, g, b] = mats[crate::materials::index_of(&mats, wood)].albedo;
+            assert!(
+                !(g > r && g > b),
+                "`{wood}` now reads green ([{r:.3}, {g:.3}, {b:.3}]), so the biome guard would ACCEPT \
+                 timber as a vegetated surface and the rule it enforces has silently switched off"
+            );
+        }
+    }
+}
+
+/// **The complete set of engine calls a SCENE is allowed to make.**
+///
+/// Robin (2026-08-03): *"Setting a scene should never involve changes to the engine… I'm tired of
+/// scenes adding/accessing custom engine routes."* `docs/65` states the model: the scene sets the
+/// characters and the setting, the assemblies are the actors, the engine is the director and the stage.
+///
+/// Four verbs and nothing else:
+///   * **place**  — which assemblies are present, where, how fast: `load_world`
+///   * **observe** — where the watcher is: `set_camera_pose`, `clear_camera_pose`, `camera_state`, `resize`
+///   * **step**   — let time pass, draw what is: `advance`, `render`
+///   * **signal** — tell the universe something happened at a point: ★ DOES NOT EXIST YET
+///
+/// `add_tile`/`tiles_wanted` are here as the pattern worth copying: the ENGINE decides what data it
+/// needs and the host merely performs the I/O. The decision never leaves the engine.
+pub(crate) const SCENE_API_ALLOWED: &[&str] = &[
+    "add_tile",
+    "advance",
+    "camera_follow",
+    "camera_is_following",
+    "camera_state",
+    "clear_camera_pose",
+    "load_world",
+    "place_camera",
+    "render",
+    "resize",
+    "set_camera_pose",
+    "tiles_wanted",
+];
+
+/// **Every engine route a scene calls that it should not — declared, so the list can only shrink.**
+///
+/// Measured 2026-08-03: 79 distinct engine methods are called from `web/src/*.ts`, of which nine are
+/// legitimate. The rest are here. They fall into four kinds, and naming the kind is how each one gets
+/// paid off:
+///
+///   1. **An assembly's name in the engine's API** — `fire_cannon`, `emplace_cannon`, `brake_moon`,
+///      `drop_moon`, `reset_moon`, `throw_meteor`, `launch_swarm`, `moon_perigee_km`. These are five
+///      different spellings of ONE missing verb, `signal`. Robin's decomposition of the gun is the
+///      template (`docs/65` §2): the scene says *apply heat, here*; the engine asks the GUN assembly
+///      where its charge sits; combustion, pressure and launch follow as consequences nobody named.
+///   2. **A second answer to a question the engine already answers** — `set_fly`, `set_orbit`,
+///      `pan_view`, `drag_look`, `walk`, `move_tangent`, `pan_tangent`, `zoom_alt`, `aim_screen`,
+///      `set_alt_bounds`. Three scene structs, three camera models. `set_camera_pose` is the general
+///      one and is already allowed; the rest collapse into it.
+///   3. **Reads** — `altitude_m`, `latitude`, `longitude`, `world_name`, `particle_count`,
+///      `sun_elevation_deg`, `surface_material`, and the counters. These change nothing and decide
+///      nothing, so they do not break the model; but forty accessors is still forty pieces of API where
+///      one `state` query would do.
+///   4. **Scene-specific loading** — `load_earth_surface`, `load_impact_world`, `load_site_world`.
+///      `load_world` is the general form and is allowed.
+///
+/// ★ The entry to fix FIRST is the missing `signal`, because kind 1 cannot be paid off without it.
+pub(crate) const SCENE_API_DEBT: &[&str] = &[
+    "altitude_m",
+    "arc_available",
+    "arc_label",
+    "arc_press",
+    "arc_stop",
+    "brake_moon",
+    "contact_distance_km",
+    "debris_extent_km",
+    "disk_stats_json",
+    "drag_look",
+    "drawn_count",
+    "drop_moon",
+    "drop_window_impact_s",
+    "drop_window_s",
+    "earth_binding_energy_j",
+    "earth_day_hours",
+    "emplace_cannon",
+    "enter_geologic_time",
+    "fire_cannon",
+    "flight_count",
+    "focus_earth",
+    "focus_label",
+    "focus_moon",
+    "gpu_disk_stats_json",
+    "ground_biome",
+    "has_impacted",
+    "impact_countdown_s",
+    "impact_energy_j",
+    "latitude",
+    "launch_swarm",
+    "load_earth_surface",
+    "load_impact_world",
+    "load_site_world",
+    "load_star_catalog",
+    "longitude",
+    "meters_per_pixel",
+    "moon_binding_energy_j",
+    "moon_distance_km",
+    "moon_perigee_km",
+    "moon_speed_kms",
+    "move_tangent",
+    "nudge_aftermath_rate",
+    "pan_tangent",
+    "pan_view",
+    "reset_moon",
+    "set_alt_bounds",
+    "set_orbit",
+    "set_time_scale",
+    "sim_since_impact_s",
+    "site_status",
+    "start_gpu_impact",
+    "sun_elevation_deg",
+    "tile_count",
+    "time_scale_value",
+    "trail_mass_kg",
+    "world_name",
+    "zoom_alt",
+];
+
+#[cfg(test)]
+mod scene_api_tests {
+    /// Every call a scene makes on the engine handle, with the file it was made from.
+    fn scene_calls() -> Vec<(String, String)> {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/src");
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(dir).expect("web/src exists").flatten() {
+            let p = e.path();
+            if p.extension().is_none_or(|x| x != "ts") {
+                continue;
+            }
+            let name = p.file_name().unwrap().to_string_lossy().to_string();
+            let Ok(src) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            // The handles a scene host holds the engine object by. Comments are stripped first so a
+            // method NAMED in prose does not count as a call — the same mistake `laws` already made
+            // once, when a comment mentioning a property counted as a consumer of it.
+            let code = super::single_source_tests::strip(&src);
+            for handle in ["terra", "demo", "g", "engine"] {
+                let needle = format!("{handle}.");
+                let mut rest = code.as_str();
+                while let Some(i) = rest.find(&needle) {
+                    let after = &rest[i + needle.len()..];
+                    let m: String = after
+                        .chars()
+                        .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_')
+                        .collect();
+                    // Only a CALL counts; `terra.foo` as a property read is not an API call.
+                    if !m.is_empty() && after[m.len()..].starts_with('(') {
+                        out.push((name.clone(), m));
+                    }
+                    rest = &rest[i + needle.len()..];
+                }
+            }
+        }
+        assert!(
+            !out.is_empty(),
+            "no scene calls found — this guard scans nothing"
+        );
+        out
+    }
+
+    /// **A scene may not grow a new engine route.** The ratchet, in both directions.
+    ///
+    /// Robin (2026-08-03): *"Somehow we need to codify this with tests, etc to ensure this vision is
+    /// preserved always."* So:
+    ///   * a call that is neither ALLOWED nor declared debt -> FAIL — somebody added a custom route
+    ///   * a declared entry nothing calls any more -> FAIL — delete it; the list must stay TRUE
+    ///
+    /// The second half is what stops this becoming a stale list that quietly forgives everything. It is
+    /// the same shape as `UNWIRED_MATERIAL_PROPERTIES`, which works for the same reason.
+    #[test]
+    fn a_scene_calls_only_the_general_engine_api() {
+        let calls = scene_calls();
+        let allowed: std::collections::BTreeSet<&str> =
+            super::SCENE_API_ALLOWED.iter().copied().collect();
+        let debt: std::collections::BTreeSet<&str> =
+            super::SCENE_API_DEBT.iter().copied().collect();
+
+        let mut fresh: std::collections::BTreeMap<String, String> = Default::default();
+        for (file, m) in &calls {
+            if !allowed.contains(m.as_str()) && !debt.contains(m.as_str()) {
+                fresh.insert(m.clone(), file.clone());
+            }
+        }
+        assert!(
+            fresh.is_empty(),
+            "a scene grew {} NEW engine route(s):\n{}\n\n\
+             docs/65: a scene names which assemblies are present, where they are, how fast they are \
+             going, and where the watcher stands. It does not get a method of its own.\n\
+             If the engine genuinely lacks a capability, say so and build it GENERAL — the way \
+             `oxidation::apply_heat` replaced `fire_gun` — rather than adding a route shaped like this \
+             one scene. If you are certain it belongs, add it to SCENE_API_ALLOWED and defend that in \
+             review; adding it to SCENE_API_DEBT is an admission, not a fix.",
+            fresh.len(),
+            fresh
+                .iter()
+                .map(|(m, f)| format!("  {m}  (called from {f})"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+
+        // The other direction: debt that is no longer owed must be struck off, or the list stops
+        // describing the code and starts excusing it.
+        let called: std::collections::BTreeSet<&str> =
+            calls.iter().map(|(_, m)| m.as_str()).collect();
+        let paid: Vec<&&str> = super::SCENE_API_DEBT
+            .iter()
+            .filter(|d| !called.contains(**d))
+            .collect();
+        assert!(
+            paid.is_empty(),
+            "SCENE_API_DEBT lists {} route(s) no scene calls any more: {:?}\n\
+             Delete them from the list. A debt register that is not true is not a register.",
+            paid.len(),
+            paid
+        );
+    }
+
+    /// **The allowed list must stay small, and it must stay general.**
+    ///
+    /// A whitelist defends nothing if the way to pass is to widen it. This pins the size, and pins that
+    /// no permitted call names a specific thing in the universe — the failure the whole document is
+    /// about is an assembly's name appearing in the engine's public surface.
+    #[test]
+    fn the_permitted_engine_api_names_no_particular_thing() {
+        assert!(
+            super::SCENE_API_ALLOWED.len() <= 12,
+            "the permitted scene API has grown to {} calls. docs/65 says four verbs: place, observe, \
+             step, signal. Widening the whitelist is how a whitelist stops being one.",
+            super::SCENE_API_ALLOWED.len()
+        );
+        // Nouns from the universe. An engine that knows what a cannon is has stopped being an engine.
+        const THINGS: &[&str] = &[
+            "cannon", "moon", "earth", "meteor", "swarm", "gun", "shot", "ship", "tree", "impact",
+        ];
+        for call in super::SCENE_API_ALLOWED {
+            for thing in THINGS {
+                assert!(
+                    !call.contains(thing),
+                    "`{call}` is in the permitted scene API and names `{thing}`. The engine knows \
+                     about matter, heat, contact, time and light; it must not know what a {thing} is."
+                );
+            }
+        }
+    }
+}
+
+/// **Worlds that name a real place and then INVENT its ground** — declared, so the list can only shrink.
+///
+/// Robin, on finding the Ground scene still shipping (2026-08-03): *"It should be destroyed with fire.
+/// It is so wrong… a cube of terrain with no planet to support it, anathema to the engine."* And then
+/// the question that produced this guard: *"Since the scene defined by 'Ground' does not qualify at all
+/// under the new model where we add assemblies to the engine, is there something that we can do to
+/// guard against such merges in future?"*
+///
+/// ★★ **The honest answer is that the guard must be on the PROPERTY, not the file or the merge.** The
+/// history shows why: the terrain `Engine` was deleted (docs/50), and then the same idea was REBUILT
+/// under a different name as `ground_scene.rs` (PR #53). A tombstone naming `Engine` would have caught
+/// nothing, because nothing named `Engine` came back. And a merge-specific check would catch nothing
+/// either — `git log --diff-filter=A` shows the scene was added once and never resurrected.
+///
+/// So the sin is stated as a property instead, and it is exactly docs/63 item 1: **a world that names a
+/// real body and a real coordinate, and then declares its own surface relief.** That is a real place
+/// with imaginary ground. It is checkable, it fires on a fork's own CI before the work ever reaches
+/// this repo (AGENTS.md §2), and it catches a rebuild under any name.
+///
+/// Each entry is `(file, why it is still here)`. **The list may shrink and must never grow.**
+pub(crate) const WORLDS_THAT_INVENT_THEIR_GROUND: &[(&str, &str)] = &[
+    (
+        "ground-zero/world.json",
+        "the Ground Zero scene, still shipping — found BY this guard on the day it was written, which \
+         is the argument for property guards over tombstones. Same sin as the deleted Ground scene: \
+         it names earth and a lat/lon, then declares size_voxels/amplitude/octaves. Its surface must \
+         come from the body's measured elevation (terra::tiles), as Terra's does.",
+    ),
+    (
+        "ground-patch.json",
+        "NOT SHIPPED — an engine test fixture (assets/worlds/), kept when the Ground scene was deleted \
+         because three native tests use it to prove a ground patch still BUILDS from a definition. It \
+         is the specimen this guard exists to reject, retained deliberately so the capability outlives \
+         the diorama. If it ever moves under web/public it is a scene again and must be fixed first.",
+    ),
+];
+
+#[cfg(test)]
+mod world_surface_tests {
+    /// **A world may say WHERE it is. It may not then invent what is there.**
+    ///
+    /// Naming a body and a coordinate is a scene doing its job (docs/65: characters and setting).
+    /// Declaring the relief at that coordinate is the scene answering a question the body already
+    /// answers — one question, two answers, and the second one is fiction.
+    ///
+    /// Verified by making it fail: adding an `octaves` block to a world that names a planet turns this
+    /// red and prints the file.
+    #[test]
+    fn a_world_that_names_a_real_place_does_not_invent_its_ground() {
+        // What a world INVENTS: procedural relief dials, which describe a surface rather than locate one.
+        const INVENTS: &[&str] = &[
+            "\"octaves\"",
+            "\"amplitude_m\"",
+            "\"size_voxels\"",
+            "\"base_top_m\"",
+        ];
+        // What a world may honestly declare: where on which body it sits.
+        const LOCATES: &[&str] = &["\"planet\"", "\"body\"", "\"lat\""];
+
+        let mut files = Vec::new();
+        for root in ["../../web/public/worlds", "../../assets/worlds"] {
+            super::tests::collect_json(std::path::Path::new(root), &mut files);
+        }
+        assert!(
+            !files.is_empty(),
+            "no world files found — this guard scans nothing"
+        );
+
+        let declared: std::collections::BTreeSet<&str> = super::WORLDS_THAT_INVENT_THEIR_GROUND
+            .iter()
+            .map(|(f, _)| *f)
+            .collect();
+
+        let mut fresh = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for f in &files {
+            let text = std::fs::read_to_string(f).expect("readable world file");
+            let locates = LOCATES.iter().any(|k| text.contains(k));
+            let invents: Vec<&str> = INVENTS
+                .iter()
+                .copied()
+                .filter(|k| text.contains(k))
+                .collect();
+            if !locates || invents.is_empty() {
+                continue;
+            }
+            // Match a declared entry by suffix, so the list does not encode a directory layout.
+            let path = f.to_string_lossy().replace('\\', "/");
+            match declared.iter().find(|d| path.ends_with(**d)) {
+                Some(d) => {
+                    seen.insert(*d);
+                }
+                None => fresh.push(format!("  {path}  declares {invents:?}")),
+            }
+        }
+        assert!(
+            fresh.is_empty(),
+            "a world names a real place and then invents the ground there:\n{}\n\n\
+             docs/63 item 1: that is a real place with IMAGINARY ground, and it is the exact shape of \
+             the Ground scene Robin had destroyed — a cube of relief on a coordinate that has measured \
+             elevation available. A world says WHERE; the body says WHAT IS THERE.",
+            fresh.join("\n")
+        );
+        // The other direction: an entry that no longer describes anything must be struck off, or the
+        // register stops being true and starts being an excuse.
+        let stale: Vec<&str> = declared
+            .iter()
+            .copied()
+            .filter(|d| !seen.contains(d))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "WORLDS_THAT_INVENT_THEIR_GROUND lists {} file(s) that no longer do: {stale:?}\n\
+             Delete them from the list — a register that is not true is not a register.",
+            stale.len()
+        );
+    }
+}
+
+/// **Everything the engine exports to the browser, and what each one IS.**
+///
+/// A new entry appearing means the engine grew a new surface for content to attach to — which docs/65
+/// forbids: *"Setting a scene should never involve changes to the engine."* This is the census that
+/// would have caught `ground_scene.rs` on the day it landed, not because of its NAME (the deleted
+/// terrain scene was called `Engine`; nothing named `Engine` ever came back) but because it was a third
+/// exported struct owning a canvas and a render loop.
+///
+/// `GpuProbe` is here and is NOT a scene — it owns no canvas and draws nothing, it is a compute-only
+/// diagnostic. It is listed because the check is "what does the engine export", which is the question
+/// that has teeth; calling it a scene to make a test pass would be the test lying about the code.
+pub(crate) const WASM_EXPORTED_STRUCTS: &[(&str, &str)] = &[
+    (
+        "GpuProbe",
+        "compute-only diagnostic, no canvas — not a scene",
+    ),
+    (
+        "OrbitDemo",
+        "SCENE: the space band (docs/27 giant impact); owns gpu_sph",
+    ),
+    (
+        "Terra",
+        "SCENE: worlds-as-data planet (docs/43); owns terra::",
+    ),
+];
+
+#[cfg(test)]
+mod scene_struct_tests {
+    /// **No new scene struct.** Adding one is an engine edit to add content (docs/46 row 14).
+    #[test]
+    fn adding_a_scene_does_not_mean_editing_the_engine() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        let mut found = std::collections::BTreeSet::new();
+        let mut src = String::new();
+        super::material_property_tests::collect_rs(std::path::Path::new(dir), &mut src);
+        for text in [src] {
+            // A scene struct is one exported to the browser that owns a canvas surface.
+            for (i, line) in text.lines().enumerate() {
+                if !line.contains("pub struct ") {
+                    continue;
+                }
+                let before = text
+                    .lines()
+                    .skip(i.saturating_sub(3))
+                    .take(3)
+                    .collect::<String>();
+                if !before.contains("#[wasm_bindgen]") {
+                    continue;
+                }
+                if let Some(name) = line
+                    .split("pub struct ")
+                    .nth(1)
+                    .and_then(|r| r.split(|c: char| !c.is_alphanumeric() && c != '_').next())
+                {
+                    if !name.is_empty() {
+                        found.insert(name.to_string());
+                    }
+                }
+            }
+        }
+        let allowed: std::collections::BTreeSet<&str> = super::WASM_EXPORTED_STRUCTS
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
+        let fresh: Vec<&String> = found
+            .iter()
+            .filter(|f| !allowed.contains(f.as_str()))
+            .collect();
+        assert!(
+            fresh.is_empty(),
+            "the engine exports {fresh:?} to the browser, which the register does not know about.\n\
+             docs/65: a scene names which assemblies are present, where they are and where the watcher \
+             stands. It does not get a struct of its own inside the engine — that is docs/46 row 14, \
+             and it is how the Ground scene came to exist after its predecessor was deleted."
+        );
+        let stale: Vec<&str> = super::WASM_EXPORTED_STRUCTS
+            .iter()
+            .map(|(n, _)| *n)
+            .filter(|n| !found.contains(*n))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "the register lists {stale:?}, which the engine no longer exports — strike them off. \
+             (`Ground` was struck off here when its scene was deleted.)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod one_earth_tests {
+    /// **Every scene that draws Earth draws the SAME Earth.**
+    ///
+    /// Robin, stating it as a requirement rather than a hope (2026-08-03): *"Because the scene just
+    /// calls out which assemblies to include, we should be able to get enhanced renders of earth in ALL
+    /// scenes from this work today. If not, we have a serious flaw in how we implement
+    /// scene/assembly/engine."* And, when it was called a prediction: *"Not a prediction, a confident
+    /// assertion of the rules I've decreed (and a way to ensure they are being met)."*
+    ///
+    /// This is the way. Earth's SURFACE — its rasters, its elevation range, its relief exaggeration and
+    /// its biome map — belongs to `assets/bodies/earth.json` and to nothing else. A world file that
+    /// grows its own `surface` for a body the engine already defines is a SECOND Earth, free to drift
+    /// from the first, which is what docs/63 exists to end.
+    #[test]
+    fn a_worlds_body_is_the_only_place_its_surface_is_described() {
+        let bodies = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/bodies");
+        let defined: std::collections::BTreeSet<String> = std::fs::read_dir(bodies)
+            .expect("assets/bodies exists")
+            .flatten()
+            .filter_map(|e| {
+                let p = e.path();
+                (p.extension()? == "json").then(|| p.file_stem()?.to_str().map(str::to_string))?
+            })
+            .collect();
+        assert!(defined.contains("earth"), "earth must be a defined body");
+
+        let mut files = Vec::new();
+        super::tests::collect_json(
+            std::path::Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../web/public/worlds"
+            )),
+            &mut files,
+        );
+        assert!(
+            !files.is_empty(),
+            "no world files — this guard scans nothing"
+        );
+
+        for f in &files {
+            let text = std::fs::read_to_string(f).expect("readable world");
+            let w: serde_json::Value = match serde_json::from_str(&text) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let Some(body) = w.get("body").and_then(|b| b.as_str()) else {
+                continue;
+            };
+            if !defined.contains(body) {
+                continue; // a body the engine has no definition for may still describe itself
+            }
+            assert!(
+                w.get("surface").is_none(),
+                "{}: names body `{body}`, which the engine defines, AND carries its own `surface`.\n\
+                 That is a second {body}, free to drift from the first. A world says WHICH body and \
+                 WHERE on it; assets/bodies/{body}.json says what its surface IS.",
+                f.display()
+            );
+        }
+    }
+
+    /// **The biome map is applied by ONE piece of code.**
+    ///
+    /// It was written twice — identically — inside `Terra::load_world` and
+    /// `OrbitDemo::load_earth_surface`. Nothing had diverged, and that is what made it dangerous: the
+    /// foliage change landed in the DATA, so both copies picked it up and the duplication stayed
+    /// invisible. Phenology is the change that would not be so kind, because it makes a biome's
+    /// material depend on the date — two copies, and one Earth turns while the other does not.
+    ///
+    /// So the mapping lives in `Surface::biome_mixtures` and this counts the implementations rather
+    /// than trusting that nobody re-types eight obvious lines.
+    #[test]
+    fn one_piece_of_code_turns_a_land_cover_class_into_a_material() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        let mut src = String::new();
+        super::material_property_tests::collect_rs(std::path::Path::new(dir), &mut src);
+        // ★ Count the MAPPING itself, not a material name. The first version of this test counted
+        // `index_of(mats, "granite")` — the fallback — and went red the moment a texture test looked
+        // granite up for unrelated reasons. A guard that fires on a coincidence teaches people to
+        // widen it, which is how a guard dies.
+        let defs = src.matches("pub fn biome_mixtures(").count();
+        assert_eq!(
+            defs, 1,
+            "`biome_mixtures` is defined {defs} times; a land-cover class must become materials in \
+             exactly ONE place. Two scenes each doing it their own way is two Earths waiting to \
+             happen (Law II) — it was written twice before, identically, and nothing noticed."
+        );
+        let calls = src.matches(".biome_mixtures(").count();
+        assert_eq!(
+            calls, 2,
+            "expected exactly one call from each scene that draws a surface, found {calls}. Fewer \
+             means a scene builds its biome map some other way; more means somewhere is asking twice."
+        );
+    }
+}
+
+/// ★★ **A SHADER NOBODY COMPILES IS NOT A FEATURE — it is a claim** (docs/46 row 41, docs/66).
+///
+/// `shaders/sky.wgsl` sat in this repo for weeks describing an honest Rayleigh sky, and it was in no
+/// `include_str!` at all: the scene it was written for was deleted in July, its successor in August,
+/// and Terra never had one. Every test about the atmosphere passed the whole time, because the tests
+/// asked whether the OPTICS were right and nothing asked whether anything ran them. Meanwhile Robin was
+/// looking at a daylight frame of lit grass under a black starfield and asking why the ground seemed to
+/// be rendered "without taking available light into account".
+///
+/// This is that question, asked by a machine, every build. It is the docs/48 pattern — *the law is
+/// built and proven, then wired into one place or none* — turned into a gate.
+#[cfg(test)]
+mod compiled_shader_tests {
+    /// Every `shaders/*.wgsl` is named by at least one `include_str!` in the crate.
+    ///
+    /// ★ VERIFIED BY MAKING IT FAIL, which here meant simply running it: on its first run it caught
+    /// TWO orphans, not one — `rayleigh.wgsl`, which had become one minutes earlier when the ground
+    /// started marching the real integral, and `particles.wgsl`, superseded by `matter.wgsl` and left
+    /// behind since **July**. Both are deleted. Deleting the last consumer of a shader is now a
+    /// decision someone has to make out loud rather than a silence that survives for weeks.
+    ///
+    /// (The reverse direction — an `include_str!` naming a file that is gone — is checked below for
+    /// completeness, but rustc gets there first: removing a shader that is still included fails the
+    /// BUILD. Confirmed by moving `atmos.wgsl` aside and watching the compile go red.)
+    #[test]
+    fn every_shader_is_compiled_by_something() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut src = String::new();
+        super::material_property_tests::collect_rs(&root.join("crates/engine/src"), &mut src);
+
+        let mut orphans = Vec::new();
+        let mut shaders = Vec::new();
+        for entry in std::fs::read_dir(root.join("shaders"))
+            .expect("shaders/ exists")
+            .flatten()
+        {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "wgsl") {
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            shaders.push(name.clone());
+            if !src.contains(&format!("shaders/{name}")) {
+                orphans.push(name);
+            }
+        }
+        assert!(
+            !shaders.is_empty(),
+            "no shaders found — this gate is pointing at the wrong directory, which is worse than \
+             having no gate (verify a gate by making it fail)"
+        );
+        assert!(
+            orphans.is_empty(),
+            "these shaders are compiled by NOTHING: {orphans:?}. A shader in no `include_str!` is a \
+             feature that does not exist while reading as though it does — `sky.wgsl` was one for \
+             weeks (docs/46 row 41). Wire it up or delete it."
+        );
+
+        // The other direction: nothing may `include_str!` a shader that is gone.
+        for (i, _) in src.match_indices("shaders/") {
+            let rest = &src[i..];
+            let end = rest.find(".wgsl").map(|e| e + 5).unwrap_or(0);
+            if end == 0 {
+                continue;
+            }
+            let named = rest[..end].trim_start_matches("shaders/").to_string();
+            assert!(
+                shaders.contains(&named),
+                "an `include_str!` names shaders/{named}, which does not exist"
+            );
         }
     }
 }

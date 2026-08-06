@@ -7,7 +7,7 @@ const p = await b.newPage({ viewport: { width: 1000, height: 800 } });
 p.on('pageerror', e => console.log('PAGEERR:', e.message));
 await p.goto(`http://127.0.0.1:${PORT}/terra.html`, { waitUntil: 'load' });
 await p.waitForTimeout(3500);
-const setFly = (lat, lon, alt, yaw, pitch) => p.evaluate(([a,b,c,d,e]) => window.__terra?.set_fly(a,b,c,d,e), [lat,lon,alt,yaw,pitch]);
+const setFly = (lat, lon, alt, yaw, pitch) => p.evaluate(([a,b,c,d,e]) => window.__terra?.place_camera(a,b,c,d,e), [lat,lon,alt,yaw,pitch]);
 const shot = async (tag) => { await p.waitForTimeout(250); await p.screenshot({ path: `${out}/depth-${tag}.png` }); console.log('shot', tag); };
 
 const LAT = 21, LON = 31; // sub-solar: nadir fully lit

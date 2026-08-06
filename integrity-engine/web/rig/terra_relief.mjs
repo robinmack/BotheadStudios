@@ -1,9 +1,9 @@
 // Does Terra actually SHOW hills/valleys? The raster is ~20 km/pixel, so relief is only expressible at
 // altitudes where a pixel is smaller than the view. Shoot a ladder of altitudes to find where it appears
 // and where it runs out.
-import { launch, PORT, OUT } from './_launch.mjs';
+import { launch, PORT, OUT, VIEWPORT } from './_launch.mjs';
 const b = await launch();
-const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
+const p = await b.newPage({ viewport: VIEWPORT });
 await p.goto(`http://127.0.0.1:${PORT}/terra.html`, { waitUntil: 'load' });
 await p.waitForTimeout(9000);
 const hud = async () => (await p.locator('#stats').innerText().catch(()=>'')).replace(/\s+/g,' ').trim();

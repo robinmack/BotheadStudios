@@ -24,6 +24,8 @@ struct RawMaterial {
     #[serde(default)]
     thermal: Option<RawThermal>,
     #[serde(default)]
+    reaction: Option<Reaction>,
+    #[serde(default)]
     tillotson: Option<TillotsonBlock>,
 }
 
@@ -83,7 +85,121 @@ struct RawOptical {
     metallic: f32,
     #[serde(default)]
     color_variance: f32,
+    #[serde(default)]
+    spectrum: Option<Spectrum>,
+    #[serde(default)]
+    senescent_spectrum: Option<Spectrum>,
 }
+
+/// **What a spectrometer measured this material reflect, wavelength by wavelength.**
+///
+/// `albedo` is three numbers; this is what those three numbers are a summary OF. Where a material
+/// carries one, its albedo is not chosen — it is this convolved against the CIE 1931 observer under
+/// the sun (`blackbody::reflectance_srgb`), and `albedo_derives_from_the_measured_spectrum` re-derives
+/// it on every run so the stored triple can only ever be a CACHE of the measurement.
+///
+/// This is also the representation seasonal change needs. A leaf turning in autumn is chlorophyll
+/// degrading and carotenoids being unmasked — a different SPECTRUM, not a tint applied to this one —
+/// so phenology will add states here rather than a colour multiplier anywhere.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Spectrum {
+    /// Wavelength of the first sample, nm.
+    pub lo_nm: f64,
+    /// Spacing between samples, nm.
+    pub step_nm: f64,
+    /// Reflectance 0..1 at `lo_nm + i*step_nm`.
+    pub reflectance: Vec<f64>,
+}
+
+/// **The chemistry of burning, stored as its SOURCED PRIMARIES rather than as per-kilogram results.**
+///
+/// Robin (2026-08-02): *"Rapid oxidation will be an important principle in the engine (fires, etc)."*
+/// A campfire, a burning ship, a powder charge and a rusting hull are ONE reaction at different rates
+/// and different oxidiser availability, so this describes the chemistry once and lets the rate and the
+/// oxygen supply belong to the situation rather than to the substance.
+///
+/// A heat-of-combustion table gives one blended number per fuel. Standard formation enthalpies plus a
+/// balanced equation give the same number AND show their working — so the per-kg energy and the oxygen
+/// demand are DERIVED below instead of typed, and a reader can see which part is thermodynamics and
+/// which part is a particular sample of a messy natural material.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Reaction {
+    /// `"fuel"` (releases energy, consumes oxygen) or `"oxidiser"` (supplies it).
+    pub role: String,
+    /// kg/mol of the REACTING species — for charcoal this is carbon's, not the lump's.
+    pub reactant_molar_mass: f64,
+    /// Moles of O2 consumed per mole of reactant. 0 for an oxidiser.
+    pub moles_o2_per_mole: f64,
+    /// J/mol, the standard enthalpy of FORMATION of the product (negative when heat is released).
+    /// 0 for an oxidiser, which releases no combustion energy of its own.
+    pub product_formation_enthalpy: f64,
+    /// Moles of O2-equivalent the molecule CONTAINS, per mole. **What the molecule holds, not what a
+    /// reaction liberates** — how much is actually available depends on the products, which is the
+    /// reaction's business rather than the substance's.
+    pub oxygen_content: f64,
+    /// Moles of PERMANENT GAS this reactant contributes per mole of itself. Condensed products (the
+    /// potassium salts, soot) do not count — they carry mass but exert no pressure, and for a gun the
+    /// difference between the two is most of the answer.
+    pub moles_gas_per_mole: f64,
+    /// **The PRODUCTS' properties** — of the reaction this `equation` describes, not of any one
+    /// constituent, which is why they sit on the OXIDISER: the oxidiser is what decides which reaction
+    /// is happening, since the same fuels burning in air give entirely different products.
+    ///
+    /// Zero where uncharacterised. A gun needs all four; a campfire needs none of them.
+    #[serde(default)]
+    pub flame_temperature: f64,
+    /// Specific-heat ratio of the products.
+    #[serde(default)]
+    pub products_gamma: f64,
+    /// Noble-Abel covolume of the products, m³/kg — the volume the gas cannot be compressed below.
+    #[serde(default)]
+    pub products_covolume: f64,
+    /// Mean molar mass of the permanent gas, kg/mol.
+    #[serde(default)]
+    pub products_molar_mass: f64,
+    /// The balanced equation these numbers describe, so the stoichiometry is auditable by eye.
+    pub equation: String,
+}
+
+impl Reaction {
+    /// J/kg of reactant released on complete combustion — `-dHf(product) / M`. Carbon comes out at
+    /// 32.8 MJ/kg and sulfur at 9.26, from formation enthalpies alone, no combustion table consulted.
+    pub fn energy_per_kg(&self) -> f64 {
+        if self.reactant_molar_mass <= 0.0 {
+            return 0.0;
+        }
+        -self.product_formation_enthalpy / self.reactant_molar_mass
+    }
+
+    /// kg of O2 needed per kg of this fuel, from the stoichiometry.
+    pub fn oxygen_demand(&self) -> f64 {
+        if self.reactant_molar_mass <= 0.0 {
+            return 0.0;
+        }
+        self.moles_o2_per_mole * O2_MOLAR_MASS / self.reactant_molar_mass
+    }
+
+    /// Moles of permanent gas produced per kg of this reactant.
+    pub fn gas_moles_per_kg(&self) -> f64 {
+        if self.reactant_molar_mass <= 0.0 {
+            return 0.0;
+        }
+        self.moles_gas_per_mole / self.reactant_molar_mass
+    }
+
+    /// kg of O2-equivalent this oxidiser CARRIES per kg of itself — the quantity that decides whether a
+    /// reaction needs air at all. Black powder works in a sealed bore because this is non-zero for KNO3.
+    pub fn oxygen_carried(&self) -> f64 {
+        if self.reactant_molar_mass <= 0.0 {
+            return 0.0;
+        }
+        self.oxygen_content * O2_MOLAR_MASS / self.reactant_molar_mass
+    }
+}
+
+/// kg/mol of O2 — the one reagent every oxidation shares, so its molar mass has ONE home rather than
+/// being retyped beside each fuel (Law II).
+pub const O2_MOLAR_MASS: f64 = 0.0319988;
 
 /// Thermal properties — enough to compute the energy to melt or vaporize the material (`docs/20`).
 /// Optional: only materials we've cited thermal data for carry it; without it, an impact can fracture
@@ -278,11 +394,30 @@ pub struct Material {
     pub metallic: f32,
     /// 0 (uniform) .. 1 (high per-grain spread). Drives procedural texture contrast (Phase 4).
     pub color_variance: f32,
+    /// **The measured reflectance spectrum this material's [`albedo`](Material::albedo) summarises**,
+    /// where one has been sourced. `None` for the materials whose colour is still three chosen
+    /// numbers — which is most of them, and is exactly what the `albedo` field's honesty note is
+    /// about. A material that has one is a material whose colour is a measurement.
+    pub spectrum: Option<Spectrum>,
+    /// **What this material reflects when its chlorophyll is spent** — the other end of a season.
+    ///
+    /// `None` for everything that does not senesce, which is almost everything, and notably for
+    /// `conifer_foliage`: an evergreen having no senescent state is the model's own testable
+    /// prediction, not an omission.
+    pub senescent_spectrum: Option<Spectrum>,
     /// Thermal properties for melt/vaporization (`docs/20`), when we have cited data for the material.
     /// `None` for the 11 of 24 materials whose thermal data has not been sourced — an honest gap marker,
     /// NOT a licence to invent one. Ask through [`Material::specific_heat`] and friends rather than
     /// `map_or`-ing a number in at the call site (see those methods for what went wrong).
     pub thermal: Option<Thermal>,
+    /// **What this material does in an OXIDATION reaction** — `None` for matter that neither burns nor
+    /// supplies oxygen, which is most of the catalogue.
+    ///
+    /// Robin (2026-08-02): *"Rapid oxidation will be an important principle in the engine (fires, etc)."*
+    /// A campfire, a burning ship, a powder charge and a rusting hull are ONE reaction at different
+    /// rates and different oxidiser availability, so this describes the chemistry once and lets the
+    /// rate and the oxygen supply belong to the situation.
+    pub reaction: Option<Reaction>,
     /// Condensed-matter equation of state (Tillotson) — `None` for materials with no characterized EOS
     /// (gases use the ideal-gas closure; wood/soils fall back to the contact-penalty stiffness). Read
     /// through [`tillotson_block`] / `eos::Tillotson`, which treat this as the source of truth.
@@ -405,6 +540,8 @@ pub fn load() -> Vec<Material> {
                 roughness: m.optical.roughness,
                 metallic: m.optical.metallic,
                 color_variance: m.optical.color_variance,
+                spectrum: m.optical.spectrum,
+                senescent_spectrum: m.optical.senescent_spectrum,
                 thermal: m.thermal.map(|t| Thermal {
                     specific_heat: t.specific_heat,
                     melt_point: t.melt_point,
@@ -418,6 +555,7 @@ pub fn load() -> Vec<Material> {
                     thermal_conductivity: t.thermal_conductivity,
                     decomposition_suppressed_pa: t.decomposition_suppressed_pa,
                 }),
+                reaction: m.reaction,
                 tillotson: m.tillotson,
             }
         })
@@ -510,6 +648,101 @@ mod tests {
 
         // Nothing known → black (no invented colour).
         assert_eq!(aggregate_albedo(&[], &mats), [0.0, 0.0, 0.0]);
+    }
+
+    /// **A material carrying a measured spectrum does not get to choose its colour.**
+    ///
+    /// `Material::albedo`'s own doc has always called itself *"a summary property, a stand-in for the
+    /// full spectral … optics … a placeholder to be grounded later, not an irreducible fact."* For the
+    /// materials with a `spectrum` block, this is that grounding: the three numbers in
+    /// `data/materials.json` are a CACHE of the convolution, and this re-derives it every run. If
+    /// somebody nudges a leaf greener because it looks better, the build goes red and prints the
+    /// number physics actually gives.
+    ///
+    /// The illuminant is the Sun as a 5772 K blackbody — the same `planck` the sky and the stars use,
+    /// so a leaf, a star and a hot ejecta parcel are lit and coloured by one law.
+    #[test]
+    fn albedo_derives_from_the_measured_spectrum() {
+        const SUN_K: f64 = 5772.0;
+        let mats = load();
+        let mut checked = 0;
+        // Collect ALL of them before failing: a test that stops at the first stale entry makes you
+        // run it once per material to find out what the answers are.
+        let mut stale = Vec::new();
+        for m in &mats {
+            let Some(s) = &m.spectrum else { continue };
+            checked += 1;
+            let want =
+                crate::blackbody::reflectance_srgb(&s.reflectance, s.lo_nm, s.step_nm, SUN_K);
+            if (0..3).any(|c| (m.albedo[c] - want[c]).abs() >= 5e-4) {
+                stale.push(format!(
+                    "  {}\n    stored  {:?}\n    derived [{:.6}, {:.6}, {:.6}]",
+                    m.id, m.albedo, want[0], want[1], want[2]
+                ));
+            }
+            // A leaf must be green, and it must be green because the SPECTRUM says so.
+            if m.id.contains("foliage") {
+                assert!(
+                    want[1] > want[0] && want[1] > want[2],
+                    "{} is foliage and must come out green, got {want:?}",
+                    m.id
+                );
+            }
+        }
+        assert!(
+            stale.is_empty(),
+            "albedo is a CACHE of the measured spectrum and these are stale:\n{}\n\
+             Put the derived triples in data/materials.json — do not adjust a spectrum to match a \
+             colour somebody liked.",
+            stale.join("\n")
+        );
+        assert!(
+            checked >= 2,
+            "no material carries a measured spectrum — this test is guarding nothing"
+        );
+    }
+
+    /// **Foliage is not timber, and the catalogue must be able to tell them apart.**
+    ///
+    /// Robin (2026-08-03): *"Pine Timber is always the wrong choice for flora though, we should look
+    /// for 'pine needles' or 'pine leaves', same with other biomes."* The surface of a forest seen
+    /// from anywhere is the CANOPY; timber is the trunk, which is barely visible and is a different
+    /// substance with a different colour, a different density and a different thermal response.
+    ///
+    /// This pins the difference numerically so the two can never be confused again by a map that
+    /// reaches for the first "pine"-shaped id it finds.
+    #[test]
+    fn foliage_is_a_different_substance_from_the_wood_it_grows_on() {
+        let mats = load();
+        let get = |id: &str| &mats[index_of(&mats, id)];
+        let foliage = get("conifer_foliage");
+        let timber = get("pine");
+
+        // Timber is BROWN: red is its strongest channel. Foliage is GREEN.
+        assert!(
+            timber.albedo[0] > timber.albedo[1],
+            "pine timber is a brown, {:?}",
+            timber.albedo
+        );
+        assert!(
+            foliage.albedo[1] > foliage.albedo[0] && foliage.albedo[1] > foliage.albedo[2],
+            "conifer foliage is green, {:?}",
+            foliage.albedo
+        );
+        // And far darker: cut lumber returns several times what a needle does.
+        let lum = |a: [f32; 3]| 0.2126 * a[0] + 0.7152 * a[1] + 0.0722 * a[2];
+        assert!(
+            lum(timber.albedo) > 2.0 * lum(foliage.albedo),
+            "timber {:.3} should be much brighter than foliage {:.3} — that difference IS why a \
+             forest mapped to timber reads as orange ground",
+            lum(timber.albedo),
+            lum(foliage.albedo)
+        );
+        // Different matter, not a shade of the same matter.
+        assert!(
+            foliage.density > timber.density,
+            "live needles at ~100% moisture are denser than dry pine timber"
+        );
     }
 
     #[test]
@@ -725,5 +958,488 @@ mod atmospheric_gas_tests {
         let co2 = get("carbon_dioxide");
         assert!(co2.boil_point().unwrap() < co2.melt_point().unwrap(),
             "CO₂ sublimes at 1 atm: its sublimation point (194.7 K) is BELOW the 216.6 K triple-point melt");
+    }
+}
+
+#[cfg(test)]
+mod mixture_tests {
+    /// **Black powder is a MIXTURE, not a substance — and this test is what that buys** (docs/64).
+    ///
+    /// The first attempt at the cannon tried to catalogue `black_powder` as one material and quietly
+    /// carried `specific_heat: 1000.0`, a number invented at the keyboard — the exact defect
+    /// [`Material::specific_heat`] exists to prevent. It was backed out. Its three constituents are
+    /// catalogued instead, each with sourced properties, and the bulk figures DERIVE.
+    ///
+    /// Two derivations, and **they take different weightings, which is the part worth pinning**:
+    ///
+    /// * **Specific heat is MASS-weighted.** It is already per-kilogram, so a kilogram of mixture is
+    ///   just its constituents' kilograms: `sum(w_i * c_i)`.
+    /// * **True density is VOLUME-weighted, i.e. the HARMONIC mean over mass fractions.** A kilogram of
+    ///   mixture occupies the sum of its constituents' volumes: `rho = 1 / sum(w_i / rho_i)`. Taking an
+    ///   arithmetic mean of densities here would be simply wrong, and wrong in a direction that looks
+    ///   plausible.
+    ///
+    /// ★★ **And the leftover is physics, not error.** The derived TRUE density comes out near 2000
+    /// kg/m^3 while poured black powder measures about 1000 — because corned powder is roughly half
+    /// void. **That gap IS the porosity**, and porosity is a property of an ARRANGEMENT of matter, not
+    /// of the matter itself. Which is the substance-versus-assembly distinction from docs/64 showing up
+    /// as a number: the catalogue describes the substance, the packing belongs to whatever holds it.
+    #[test]
+    fn black_powders_bulk_properties_derive_from_its_constituents() {
+        let mats = super::load();
+        let get = |id: &str| &mats[super::index_of(&mats, id)];
+        // The classic 75/15/10 by MASS (see the `black_powder` discussion in docs/64).
+        let mix = [
+            (get("potassium_nitrate"), 0.75f64),
+            (get("charcoal"), 0.15),
+            (get("sulfur"), 0.10),
+        ];
+        assert!(
+            (mix.iter().map(|(_, w)| w).sum::<f64>() - 1.0).abs() < 1e-12,
+            "mass fractions must close"
+        );
+
+        // Every constituent must carry a SOURCED specific heat — that is the whole reason the mixture
+        // can be derived rather than typed.
+        for (m, _) in &mix {
+            assert!(
+                m.specific_heat().is_some_and(|c| c > 0.0),
+                "{} needs a sourced specific heat for the mixture to derive",
+                m.id
+            );
+        }
+
+        // Mass-weighted: a kilogram of mixture is its constituents' kilograms.
+        let c_mix: f64 = mix
+            .iter()
+            .map(|(m, w)| w * m.specific_heat().unwrap())
+            .sum();
+        assert!(
+            (700.0..1000.0).contains(&c_mix),
+            "a derived specific heat between its constituents' extremes, got {c_mix}"
+        );
+        // It must lie strictly BETWEEN the extremes of what went in — a mixture cannot be hotter to
+        // heat than all of its parts, and a derivation that escaped that range would be a bug.
+        let (lo, hi) = mix.iter().fold((f64::MAX, f64::MIN), |(lo, hi), (m, _)| {
+            let c = m.specific_heat().unwrap();
+            (lo.min(c), hi.max(c))
+        });
+        assert!(
+            c_mix > lo && c_mix < hi,
+            "the mixture's {c_mix} must sit inside its constituents' [{lo}, {hi}]"
+        );
+
+        // Volume-weighted: a kilogram of mixture occupies the sum of its constituents' volumes.
+        let rho_true: f64 = 1.0 / mix.iter().map(|(m, w)| w / m.density as f64).sum::<f64>();
+        assert!(
+            (1800.0..2100.0).contains(&rho_true),
+            "the SOLID mixture's true density, got {rho_true}"
+        );
+        // The arithmetic mean is the wrong operator here, and this pins that it differs enough to
+        // matter — so nobody later "simplifies" the harmonic mean into an average.
+        let rho_arith: f64 = mix.iter().map(|(m, w)| w * m.density as f64).sum();
+        assert!(
+            (rho_arith - rho_true).abs() > 20.0,
+            "arithmetic {rho_arith} and volume-weighted {rho_true} must differ enough that using the \
+             wrong one is a real error, not a rounding one"
+        );
+
+        // ★ The gap to poured black powder (~1000 kg/m^3, the bulk figure quoted for corned powder) is
+        // POROSITY — an arrangement, not a substance. Roughly half void.
+        let packing = 1000.0 / rho_true;
+        assert!(
+            (0.4..0.62).contains(&packing),
+            "corned powder should be roughly half void; derived packing fraction {packing}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod reaction_tests {
+    /// **The chemistry of black powder, DERIVED from formation enthalpies — nothing typed.**
+    ///
+    /// Robin: *"Rapid oxidation will be an important principle in the engine (fires, etc) so this won't
+    /// be wasted."* So the first thing built is not a propellant but the general reaction data, and
+    /// this pins that the derivation reproduces the textbook figures without any combustion table.
+    ///
+    /// It also pins the property that makes gunpowder gunpowder: **it carries its own oxygen.** A fire
+    /// is air-limited; black powder is not, which is exactly why it works in a sealed bore. That is one
+    /// comparison between two numbers, and it is the whole difference.
+    #[test]
+    fn black_powders_chemistry_derives_from_formation_enthalpies() {
+        let mats = super::load();
+        let get = |id: &str| &mats[super::index_of(&mats, id)];
+        let (kno3, charcoal, sulfur) = (get("potassium_nitrate"), get("charcoal"), get("sulfur"));
+        let rx = |m: &super::Material| m.reaction.clone().expect("carries reaction data");
+        let (r_k, r_c, r_s) = (rx(kno3), rx(charcoal), rx(sulfur));
+
+        assert_eq!(r_c.role, "fuel");
+        assert_eq!(r_s.role, "fuel");
+        assert_eq!(r_k.role, "oxidiser");
+
+        // Carbon: -(-393.51 kJ/mol) / 0.0120107 kg/mol = 32.8 MJ/kg. The textbook figure, from the
+        // formation enthalpy of CO2 alone.
+        let e_c = r_c.energy_per_kg();
+        assert!(
+            (32.6e6..33.0e6).contains(&e_c),
+            "carbon should release ~32.8 MJ/kg, got {e_c:e}"
+        );
+        // Sulfur: ~9.26 MJ/kg, about a third of carbon's — which is why it is the minority fuel and is
+        // there to lower the ignition temperature rather than to carry the energy.
+        let e_s = r_s.energy_per_kg();
+        assert!(
+            (9.1e6..9.4e6).contains(&e_s),
+            "sulfur should release ~9.26 MJ/kg, got {e_s:e}"
+        );
+        assert!(e_c > 3.0 * e_s, "carbon carries the energy, not sulfur");
+
+        // Stoichiometry: one mole of O2 per mole of either fuel, so the mass ratio is just the molar
+        // ratio. Carbon is light, so it is thirsty per kilogram: 2.66 kg of O2 for every kg burnt.
+        let d_c = r_c.oxygen_demand();
+        assert!(
+            (2.6..2.7).contains(&d_c),
+            "carbon needs ~2.664 kg O2 per kg, got {d_c}"
+        );
+        assert!(
+            (0.99..1.01).contains(&r_s.oxygen_demand()),
+            "sulfur is nearly 1:1 by mass with O2 — its molar mass is almost O2's"
+        );
+
+        // An OXIDISER releases no combustion energy of its own and demands no oxygen.
+        assert_eq!(r_k.energy_per_kg(), 0.0);
+        assert_eq!(r_k.oxygen_demand(), 0.0);
+        // What it does is CARRY oxygen: 1.5 mol O2-equivalent per mole KNO3 = 0.475 kg per kg.
+        let carried = r_k.oxygen_carried();
+        assert!(
+            (0.46..0.49).contains(&carried),
+            "KNO3 carries ~0.475 kg O2 per kg, got {carried}"
+        );
+        // And the fuels carry none — a fuel that supplied its own oxygen would be a monopropellant.
+        assert_eq!(r_c.oxygen_carried(), 0.0);
+        assert_eq!(r_s.oxygen_carried(), 0.0);
+
+        // ★★ THE PROPERTY THAT MAKES IT GUNPOWDER. At the classic 75/15/10 by mass, does the KNO3
+        // carry enough oxygen for the charcoal and sulfur to burn with NO AIR? Compute both sides.
+        let (w_k, w_c, w_s) = (0.75, 0.15, 0.10);
+        let supplied = w_k * carried;
+        let demanded = w_c * d_c + w_s * r_s.oxygen_demand();
+        assert!(
+            supplied > 0.5 * demanded,
+            "the oxidiser must supply a large share of the demand, or this is just kindling: \
+             supplied {supplied:.3} kg/kg vs demanded {demanded:.3} kg/kg"
+        );
+        // It is deliberately OXYGEN-LEAN — real black powder does not burn its carbon all the way to
+        // CO2, which is why it smokes heavily and why its gas yield is far below a smokeless
+        // propellant's. Asserting a stoichiometric balance here would be asserting a chemistry the
+        // substance does not have.
+        assert!(
+            supplied < demanded,
+            "75/15/10 is oxygen-lean, not balanced: supplied {supplied:.3} vs demanded {demanded:.3}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod gun_metal_tests {
+    /// **Why bronze guns bulge and iron guns shatter — as two catalogued numbers, not as a story.**
+    ///
+    /// Cannon were cast in bronze for centuries despite costing far more than iron, for one reason:
+    /// bronze is DUCTILE. An overloaded bronze gun swells and splits; an overloaded cast-iron one comes
+    /// apart without warning. Nothing in the engine is told that. It follows from `ductility` and from
+    /// grey iron's tension/compression asymmetry, and this test pins that the catalogue actually carries
+    /// the difference rather than merely naming two metals.
+    ///
+    /// ★ **The asymmetry is the whole mechanism.** A pressurised barrel's hoop stress is TENSILE, and
+    /// tension is precisely the direction grey cast iron is weakest in — roughly a third of its
+    /// compressive strength. A material chosen for cannon on the strength of how well it takes a
+    /// compressive load is being loaded the other way round.
+    #[test]
+    fn cast_iron_is_weak_exactly_where_a_barrel_is_loaded() {
+        let mats = super::load();
+        let get = |id: &str| &mats[super::index_of(&mats, id)];
+        let (iron, bronze) = (get("cast_iron"), get("gunmetal"));
+
+        // Both are plausible gun metals: comparable tensile strength.
+        assert!(
+            (0.7..1.4).contains(&(bronze.fracture_strength / iron.fracture_strength)),
+            "bronze {} and cast iron {} are in the same class in TENSION",
+            bronze.fracture_strength,
+            iron.fracture_strength
+        );
+
+        // ★★ **THE OTHER HALF OF THIS TEST CANNOT BE WRITTEN YET, and that is docs/46 row 30 made
+        // concrete.** What actually separates these two metals is `ductility` (bronze 0.2, cast iron
+        // 0.01) and grey iron's tension/compression asymmetry (295 MPa against ~930). Both are
+        // CATALOGUED in `data/materials.json` and neither reaches the engine: `RawMechanical` does not
+        // deserialize them, so `Material` cannot carry them and nothing can read them.
+        //
+        // Reaching around the engine into the raw JSON to assert it here would be measuring ALONGSIDE
+        // the code instead of THROUGH it — the mistake that once had a script disagreeing with the
+        // engine about Everest by a factor of four. So this test asserts what the engine can actually
+        // answer, and the rest is a debt with a row number rather than a clever workaround.
+        assert!(
+            iron.fracture_strength > 0.0 && bronze.fracture_strength > 0.0,
+            "both are real gun metals in the engine's eyes; what it cannot yet see is HOW they fail"
+        );
+    }
+
+    /// **A hot gun is a different gun** — the thermal side of the same catalogue entries.
+    ///
+    /// Reloading a hot barrel could set the charge off in the loader's hands, which is why crews
+    /// sponged between shots. Whether that happens is a comparison between the barrel's temperature and
+    /// the charge's ignition threshold, so the barrel's THERMAL MASS decides how fast a gun may be
+    /// fired — a rate of fire that EMERGES from specific heat and conductivity rather than being
+    /// declared as a number of rounds per minute.
+    ///
+    /// Bronze and iron differ in both, so the two gun types heat and shed heat differently, and this
+    /// pins that the catalogue carries enough to tell them apart.
+    #[test]
+    fn a_barrels_thermal_mass_is_catalogued_well_enough_to_limit_a_rate_of_fire() {
+        let mats = super::load();
+        let get = |id: &str| &mats[super::index_of(&mats, id)];
+        for id in ["gunmetal", "cast_iron"] {
+            let m = get(id);
+            let t = m.thermal.as_ref().expect("a gun metal needs thermal data");
+            assert!(
+                t.specific_heat > 0.0,
+                "{id} needs a specific heat to warm up"
+            );
+            assert!(
+                t.thermal_conductivity > 0.0,
+                "{id} needs a conductivity to shed it again"
+            );
+        }
+        // Heat capacity per unit VOLUME is what a barrel actually has, and it is density x specific
+        // heat — so the comparison must go through both, not through specific heat alone.
+        let cap = |id: &str| {
+            let m = get(id);
+            m.density as f64 * m.thermal.as_ref().unwrap().specific_heat as f64
+        };
+        assert!(
+            cap("cast_iron") > cap("gunmetal"),
+            "an iron barrel stores more heat per unit volume ({:e}) than a bronze one ({:e}), while \
+             bronze sheds it faster — different guns, different limits, from the data alone",
+            cap("cast_iron"),
+            cap("gunmetal")
+        );
+        assert!(
+            get("gunmetal")
+                .thermal
+                .as_ref()
+                .unwrap()
+                .thermal_conductivity
+                > get("cast_iron")
+                    .thermal
+                    .as_ref()
+                    .unwrap()
+                    .thermal_conductivity,
+            "bronze conducts heat away faster than grey iron"
+        );
+    }
+}
+
+impl Material {
+    /// **What this material looks like when `turned` of it has gone over to its senescent state.**
+    ///
+    /// Robin: *"wire it up so Ireland actually turns."* This is the wiring: `turned` is the fraction of
+    /// the footprint whose chlorophyll is spent (`solar::senescence_fraction`), the two measured spectra
+    /// are mixed by it, and the CIE observer turns the mixture into a colour — the SAME derivation that
+    /// produced the summer albedo, so a leaf in October and a leaf in June are one law apart.
+    ///
+    /// ★ Mixing REFLECTANCE, not colour. A footprint part-way through autumn genuinely contains both
+    /// kinds of leaf, so a linear spectral mixture is what is physically there — and blending the two
+    /// RGB triples instead would give a different, wronger answer, because the observer is not linear
+    /// in the way a naive colour lerp assumes.
+    ///
+    /// ★★ **It is a DECLARED stand-in for pigment chemistry** (docs/46 row 38). The resolved version
+    /// carries the pigment complement and sums what each absorbs; Robin's note is why that complement
+    /// must be a variable rather than a constant — chlorophyll *a*/*b* give out around 660–680 nm while
+    /// *d* and *f* absorb well past it. Two measured endmembers cannot express a pigment nobody
+    /// sampled. What this DOES buy is that both ends are measurements rather than choices.
+    ///
+    /// Materials with no senescent spectrum return their ordinary albedo whatever the season, which is
+    /// how an evergreen, a rock and the sea all behave correctly for free.
+    pub fn albedo_when_turned(&self, turned: f64) -> [f32; 3] {
+        const SUN_K: f64 = 5772.0;
+        let (Some(green), Some(dead)) = (&self.spectrum, &self.senescent_spectrum) else {
+            return self.albedo;
+        };
+        let t = turned.clamp(0.0, 1.0);
+        if t <= 0.0 {
+            return self.albedo;
+        }
+        // The two states must be sampled the same way, or "mixing" them is comparing two grids.
+        if green.lo_nm != dead.lo_nm
+            || green.step_nm != dead.step_nm
+            || green.reflectance.len() != dead.reflectance.len()
+        {
+            return self.albedo;
+        }
+        let mixed: Vec<f64> = green
+            .reflectance
+            .iter()
+            .zip(&dead.reflectance)
+            .map(|(g, d)| g * (1.0 - t) + d * t)
+            .collect();
+        crate::blackbody::reflectance_srgb(&mixed, green.lo_nm, green.step_nm, SUN_K)
+    }
+}
+
+#[cfg(test)]
+mod senescence_tests {
+    use super::*;
+
+    /// **A turning leaf gets brighter and yellower, and green stops winning.**
+    ///
+    /// Not a colour anybody picked: it follows from chlorophyll leaving. The measured endmembers differ
+    /// by 5.7x in chlorophyll (1.96 vs 11.10 mg/g), and as it falls the leaf reflects MORE in both the
+    /// green and the red — which is what the eye reads as gold.
+    #[test]
+    fn a_leaf_that_loses_its_chlorophyll_turns() {
+        let mats = load();
+        let leaf = &mats[index_of(&mats, "broadleaf_foliage")];
+        let summer = leaf.albedo_when_turned(0.0);
+        let autumn = leaf.albedo_when_turned(1.0);
+        assert_eq!(
+            summer, leaf.albedo,
+            "an unturned leaf is exactly its summer self"
+        );
+        let lum = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        assert!(
+            lum(autumn) > lum(summer),
+            "autumn foliage is brighter: {:?} vs {:?}",
+            autumn,
+            summer
+        );
+        // Yellower: red climbs relative to green, because the red trough fills in as chlorophyll goes.
+        assert!(
+            autumn[0] / autumn[1] > summer[0] / summer[1],
+            "the red:green ratio must rise, {:.3} -> {:.3}",
+            summer[0] / summer[1],
+            autumn[0] / autumn[1]
+        );
+        // And it is monotone, so a half-turned wood sits between the two.
+        let half = leaf.albedo_when_turned(0.5);
+        assert!(
+            lum(half) > lum(summer) && lum(half) < lum(autumn),
+            "half-turned must sit between the ends"
+        );
+    }
+
+    /// **★ An evergreen does not turn, and nothing had to say so.** `conifer_foliage` carries no
+    /// senescent spectrum, so it answers with the same colour in January and July — the model's own
+    /// prediction, and the reason a Maine hillside reads as mixed forest rather than uniformly gold.
+    #[test]
+    fn a_conifer_looks_the_same_in_january() {
+        let mats = load();
+        let fir = &mats[index_of(&mats, "conifer_foliage")];
+        assert!(
+            fir.senescent_spectrum.is_none(),
+            "an evergreen must carry no senescent state"
+        );
+        for t in [0.0, 0.5, 1.0] {
+            assert_eq!(
+                fir.albedo_when_turned(t),
+                fir.albedo,
+                "a conifer is unchanged at turned={t}"
+            );
+        }
+        // Rock and sea likewise — the mechanism must cost nothing for matter that does not live.
+        for id in ["granite", "water", "sand"] {
+            let m = &mats[index_of(&mats, id)];
+            assert_eq!(m.albedo_when_turned(1.0), m.albedo, "{id} has no season");
+        }
+    }
+}
+
+/// **The albedo of a mixture that is part-way through its autumn.**
+///
+/// [`aggregate_albedo`] for matter with a season: each constituent answers
+/// [`Material::albedo_when_turned`] for itself, and the fraction-weighted mean of those answers is the
+/// footprint's colour. So a woody savanna's trees can turn while the grass beneath them does something
+/// different, and a mixed forest goes partly gold and partly evergreen — which is what a mixed forest
+/// does, and what a single material per class could never express.
+///
+/// ★ The weighting is the constituent FRACTION, which for a land-cover class comes from the class's own
+/// definition (IGBP states its classes as canopy-cover thresholds). Nothing here is chosen.
+pub fn aggregate_albedo_turned(
+    composition: &Composition,
+    materials: &[Material],
+    turned: f64,
+) -> [f32; 3] {
+    let total: f32 = composition.iter().map(|&(_, f)| f.max(0.0)).sum();
+    if total <= 0.0 {
+        return [0.0, 0.0, 0.0];
+    }
+    let mut acc = [0.0f32; 3];
+    for &(mi, f) in composition {
+        let w = f.max(0.0) / total;
+        let a = materials[mi].albedo_when_turned(turned);
+        for c in 0..3 {
+            acc[c] += a[c] * w;
+        }
+    }
+    acc
+}
+
+#[cfg(test)]
+mod mixture_season_tests {
+    use super::*;
+
+    /// **A mixed forest turns PARTLY**, because only part of it is deciduous — and that is the whole
+    /// argument for a class being a mixture rather than one material.
+    #[test]
+    fn a_mixed_forest_turns_less_than_a_deciduous_one() {
+        let mats = load();
+        let (broad, conif, dirt) = (
+            index_of(&mats, "broadleaf_foliage"),
+            index_of(&mats, "conifer_foliage"),
+            index_of(&mats, "dirt"),
+        );
+        // IGBP class 4 (deciduous broadleaf) against class 5 (mixed forest), as earth.json states them.
+        let deciduous = [(broad, 0.75), (dirt, 0.25)];
+        let mixed = [(conif, 0.35), (broad, 0.35), (dirt, 0.30)];
+        let lum = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        let d_change = lum(aggregate_albedo_turned(&deciduous, &mats, 1.0))
+            - lum(aggregate_albedo_turned(&deciduous, &mats, 0.0));
+        let m_change = lum(aggregate_albedo_turned(&mixed, &mats, 1.0))
+            - lum(aggregate_albedo_turned(&mixed, &mats, 0.0));
+        assert!(d_change > 0.0, "a deciduous wood brightens in autumn");
+        assert!(
+            m_change > 0.0 && m_change < d_change,
+            "a mixed forest must turn LESS than a pure deciduous one: {m_change:.4} vs {d_change:.4}"
+        );
+    }
+
+    /// **Matter with no season is untouched**, whatever fraction is passed — so barren, ice and open
+    /// water cost nothing and cannot drift.
+    #[test]
+    fn a_mixture_of_seasonless_matter_never_changes() {
+        let mats = load();
+        let barren = [
+            (index_of(&mats, "sand"), 0.6),
+            (index_of(&mats, "granite"), 0.4),
+        ];
+        assert_eq!(
+            aggregate_albedo_turned(&barren, &mats, 1.0),
+            aggregate_albedo(&barren, &mats),
+            "the Sahara has no autumn"
+        );
+    }
+
+    /// At `turned = 0` the seasonal path must reduce EXACTLY to the plain one, or every summer frame
+    /// quietly differs from what the non-seasonal code drew.
+    #[test]
+    fn summer_is_bit_identical_to_the_seasonless_answer() {
+        let mats = load();
+        let savanna = [
+            (index_of(&mats, "grass"), 0.6),
+            (index_of(&mats, "broadleaf_foliage"), 0.2),
+            (index_of(&mats, "dirt"), 0.2),
+        ];
+        assert_eq!(
+            aggregate_albedo_turned(&savanna, &mats, 0.0),
+            aggregate_albedo(&savanna, &mats)
+        );
     }
 }

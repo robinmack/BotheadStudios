@@ -3,6 +3,599 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-06 — the eye and the plants disagree about ground level by sixty metres
+
+**What.** Continuing the hunt for why the flora draws and cannot be seen, after checking the vertex
+layout (`pos`/`nrm`/`col`/`mat`/`rough` at 0/12/24/36/40, 44 bytes — identical from both producers, not
+the bug) and mutating the plants to self-lit magenta at 30× (**zero** flora pixels; the 13 that matched
+were the pink HUD button in the corner).
+
+★★★ **So I printed the one quantity in the chain nobody had ever measured — the model translation
+actually used:**
+
+```
+flora xform: |anchor|=1.000017  |eye|=1.000026  |delta|=9.411e-6  (59.96 m)
+```
+
+The camera is **60 m** above the flora's anchor while `fly.alt_m` says it is **1.7 m** above the ground.
+The transform itself is correct — the first frame after a rebuild reads exactly 1.70 m — so what is
+wrong is that `view.eye` is built from one ground height and `build_flora`'s anchor from another.
+`TERRA_RELIEF_EXAG` is 1.0, so it is not exaggeration. **The plants are placed ~58 m below the surface
+the camera is standing on.**
+
+**This is Law II at the place it hurts most: two answers to "where is the ground here."** Robin predicted
+it while the hunt was running, before the number existed: *"the model needs to own ground level at all
+coordinates and be able to place assemblies there. Almost as if an assembly is aware of its own
+properties and can then own/position other assemblies for the engine and renderer."* That is the fix —
+one owner, the Earth assembly, answering the question once for the camera, the mesh, the flora, and
+anything else placed on it. Today `view_basis`, `ground_disp_at` and the segment mesh each arrive at it
+their own way.
+
+★ **Closure is NOT claimed.** A 200 m lift probe should then have floated the plants into view and did
+not, so either that probe ran against a different camera state or a second cause sits behind this one.
+The 60 m is measured; the explanation is not finished. Recorded as `docs/46` row 50 in exactly those
+terms, because a half-explanation written up as a whole one is how the seasonal claim went wrong in
+August.
+
+**Also today** — `docs/68` step 2, the renderer deciding fidelity: `render::Fidelity` replaced three
+constants inside `build_flora`, the worst of which applied ONE altitude cutoff to every plant when the
+answer varies with size (a 0.35 m tuft is worth resolving to 622 m, a 15 m oak to 26.7 km — a factor of
+forty). And the angular resolution is now DERIVED from the viewport rather than declared at 1 mrad.
+
+**Verified.** 592/592 native, `mod app` clean for wasm32, every probe reverted, production redeployed
+clean.
+
+## 2026-08-05 — the flora is drawn and cannot be seen
+
+**What.** Robin asked to see the trees. There are none — at any altitude, at any site — and after a long
+hunt the answer is not "here is the bug" but a bisection clean enough to act on.
+
+**Two real defects found and fixed on the way**, neither of which changed the picture:
+
+★ **The budget was a crater** (`docs/46` row 48). `scatter` ended `sort_by(distance); truncate(budget)`,
+which is a way to bound a count and not a design. Grass at a 0.35 cover fraction is ~31 plants/m², so
+1,200 of them are exhausted inside `sqrt(1200/(31π))` = **3.5 m** — a disc of columns centred under the
+camera. Robin had seen it and said so months of context earlier: *"the columns were clumped in one tiny
+area in center of viewport, suspiciously crater like."* Now spent on the ANGLE a plant subtends.
+★★ And I claimed I had broken it with the morning's lattice change. **I had not**, and the correction is
+arithmetic: cover used to set spacing (`crown/frac`) and now sets occupancy (`crown`, probability
+`frac`); both are a density of `frac/crown`. Identical.
+
+★★ **No oak could ever appear from standing height, at any budget** (row 49). `build_flora` scanned ONE
+disc for every kind, sized `(alt * 8).clamp(6, 120)` — 13.6 m at eye height, while oaks sit 16 m apart.
+A query disc smaller than a lattice's spacing cannot contain a single one of its cells. That number was
+derived from nothing. Each kind now derives its own reach from its density and the budget, which is both
+correct and cheaper, and the mesh went from 43,200 tris (all grass) to 157,920 (a real mixture).
+
+★★★ **And still nothing draws** (row 50). What is confirmed working: `scatter`'s output; the placement
+transform, reproduced NATIVELY — a tuft 3 m out lands at **3.077 m**, standing **0.350 m** tall; the
+uploaded buffer, probed live — 151,647 verts, 473,760 indices, **0.02–251 m** from the anchor; the draw
+call, which logs itself every frame; `Part::along`; and an unfiltered console with no wgpu error at all.
+
+What is eliminated, each probe deployed and photographed: lifting every plant **3 m** (not buried by the
+ground mesh), lifting **200 m** (not a ground-height disagreement at any plausible scale), and drawing
+them with the SEGMENT's own uniform — the one the visible ground uses — which also showed nothing.
+
+**So every model-side cause is eliminated and the picture never moved.** That is the evidence for
+`docs/68`'s seam: the fault is on the renderer's side of the line. Robin, twice, while this was going on:
+*"I feel like you're solving a problem that would be solved more elegantly by a separated, multi-threaded
+ray-casting renderer that could make choices between textures and meshes."* The bisection agrees with her.
+
+★ **A slip worth recording**: I cited `docs/46` rows 48 and 49 in code comments and commit messages
+before writing them. The numbering gate checks uniqueness and contiguity, so it passed — a citation to a
+row that does not exist is invisible to it. Rows added; a gate for dangling citations is not.
+
+**Verified.** 590/590 native, `mod app` clean for wasm32, production redeployed clean (a 1000× scale
+mutation had been live during the hunt).
+
+## 2026-08-05 — the trees stay put, and a test found two of them wearing one identity
+
+**What.** `flora::scatter`'s lattice is now a fact about the GROUND rather than about the observer
+(`docs/46` row 47, closed). Spacing comes from the kind's own crown, cells are indexed from a global
+origin, and each row's east-west spacing comes from the ROW INDEX rather than from the camera. Cover no
+longer resizes the lattice — it decides OCCUPANCY cell by cell, which is what a cover fraction means,
+and which also makes density follow the cover at each plant's own position instead of the one sampled at
+the query centre.
+
+Two tests: the same ground asked from three centres 4–9 m apart returns the same plants, with the same
+ids, positions, yaw and scale; and two species sharing ground never share an identity. Robin: *"different
+flora types have different spacing, so lattices will overlap"* — they must, since grass grows under an
+oak, so the lattices are independent by design and the kind goes into every hash.
+
+★★ **And a test looking for something else found an ID COLLISION.** `InstanceId::derived` combined its
+inputs as `(x·A) ^ (z·B) ^ (salt·C) ^ (index·D)` — which is not a hash, it is four numbers laid on top of
+each other — and cells (−3, 1) and (3, −1) came back with one identity. **A collision means damaging one
+tree damages another**, so a bus crushing a tree in front of you splinters one behind you. Now mixed
+sequentially (FNV, then a splitmix64 avalanche) and pinned by
+`a_wood_of_cells_never_repeats_an_identity`, which walks 640,000 cells across four salts.
+
+★ **The view cone, and the line it draws.** Robin: *"let's try to scope to what is visible… if trees
+overlap the region behind, there's no need to spend compute on them."* Right, and it lands exactly on
+**Law IV**: the camera changes REPRESENTATION, never EXISTENCE. So `Region` now carries an optional
+facing, and the distinction is in the type — **a renderer asks a cone, physics asks the ball.** The
+hidden tree still stands in the way of the bus. `looking_narrows_what_is_described_and_changes_nothing_about_it`
+asserts a cone returns a strict subset, identical in identity and position, which is what caught the
+collision.
+
+★★★ **Damage has a resolution too.** Robin: *"if that bus crushes 30 trees, we know it. Until it's
+visible we don't have to worry about which way they fell or how they splintered."* That is Law III
+applied to consequences instead of to matter: "this trunk is 40% gone" is the cheap true statement and it
+answers mass, extent, whether the tree still stands and what the bus lost. Which way it fell is a finer
+description of the same event. The constraint that keeps it honest is docs/63's convergence invariant
+generalised — **resolving further must not change the coarse answer** — so splintering must conserve the
+mass the integrity fraction already spent. Written into `Damage`'s own doc, with the resolved counterpart
+named: per-part fracture through `Connection`s and `fracture_strength`, producing `damage::Fragment`s,
+all of which exist.
+
+**And Robin's steer on where the effort goes:** *"I'm more concerned with getting things right in the
+first brush then optimizing."* The measured cost of the absolute lattice (~220k cells for grass over a
+25 m disc, 1.7× the old one) is recorded in place with two honest ways down, and neither is being taken
+until a rig measures a rebuild in a real scene.
+
+**Verified.** 581/581 native, `mod app` clean for wasm32.
+
+## 2026-08-05 — containment: a rule and its exceptions, and the trees that move when you walk
+
+**What.** docs/67 step 4. A planet contains ~10^12 trees and no list of them, so containment is **a RULE
+that answers "what is in this region" plus a set of EXCEPTIONS the container remembers** — and what makes
+that affordable is Robin's scalability law: a pristine oak has nothing worth storing, because the rule
+regenerates its placement and the TYPE answers everything else.
+
+★ **The crux is derived identity.** An exception has to NAME the thing it is an exception to, and the
+rule cannot remember what it generated — remembering is the thing being avoided. So the rule derives each
+instance's id from WHERE IT IS (`InstanceId::derived`), by the same hash that decided it was there. A
+hash rather than a counter, because a counter depends on generation order, which depends on which region
+was asked about, which depends on where the camera went — and then looking at a meadow from the other
+side renames every tree in it.
+
+**Measured, not argued** (six tests): a forest of 2,500+ generated trees costs the container **zero**
+bytes; the same region answers identically however often it is asked, and from a different centre; a
+crushed tree stays crushed while every neighbour stays byte-identical; **a forest ten times larger costs
+exactly the same to remember** (10 damaged = 10 entries, either way); handing back a pristine instance
+FORGETS it rather than storing it, so the invariant is enforced at the door; and a container remembers
+both an absence (its rule keeps generating a felled tree) and an arrival (a bus, which no rule produces).
+
+★★ **And wiring it to the real rule found a real bug, which Robin had asked about explicitly.**
+`flora::scatter` is *not* a pure function of position. Its cells run `-n..=n` about the QUERY CENTRE, and
+the cell size comes from the cover fraction sampled at that centre — so the lattice is anchored to the
+camera. Move and the whole stand regenerates somewhere else. Robin, 2026-08-04: *"so trees don't move to
+different positions when one turns one's head away and turns back."* The module's own doc claims the
+property (*"the answer cannot depend on when or whether anything looked"*) and it is half true: the hash
+is stateless, its inputs are not absolute. Terra only rebuilds after 2 m of movement, which is why it
+reads as stable until it jumps. Recorded as `docs/46` row 47.
+
+The fix is the one containment needs anyway: **index cells in ABSOLUTE coordinates**, which means the
+spacing must come from the KIND's own crown rather than the local cover fraction, with cover modulating
+density by skipping cells instead of resizing the lattice. Then a tree's cell is a fact about the ground
+rather than about the observer — which is Law IV — and its derived id is stable, which is the
+precondition for a bus being able to crush one.
+
+**Verified.** 577/577 native, `mod app` clean for wasm32.
+
+## 2026-08-05 — Earth, described as an assembly, weighs the same Earth
+
+**What.** docs/67 step 5, the half that can be done without replacing anything: `LayeredBody::as_assembly`
+turns a body into parts, and a test pins the two descriptions against each other. Robin's argument was
+*"a planet is an accretion of debris bound by its own gravitational effects which we've worked hard to
+model"* — this makes it a number instead of a claim.
+
+Measured, same Earth both ways: **mass agrees to better than 1e-12 relative**; the atmosphere part
+carries exactly the declared 5.15e18 kg; the shells tile the sphere with no gap and no overlap; the
+centre of mass is the centre; and the assembly reaches **~97 km past the rock**, because its outermost
+component is its air. The Moon takes the same call, gets no atmosphere part, and ends at its surface —
+no branch anywhere.
+
+★ **`Shape::Shell`.** `Tube` was already the cylindrical version, so this was a missing variant rather
+than a missing idea — and without it nested `Sphere`s counted Earth's core five times over.
+
+★★ **The obstacle docs/67 did not predict, found by attempting it: a part could not say its matter was
+COMPRESSED.** `mass = envelope × packing × density` reads the catalogue's surface-condition density, and
+a planet is mostly not at the surface — Earth's lower mantle is peridotite at 4500 kg/m³ against a
+reference near 3300, a 36% difference no packing fraction can hold, since packing is clamped to 1
+because it means void.
+
+I first proposed folding the two together into one "density ratio" and lifting the clamp. **Robin
+settled it in the opposite direction with six words** — *"We know the difference between sand and
+gravel. Or sand and sandstone."* Random close packing is ~0.6 for BOTH sand and gravel; what differs is
+grain size. Sand and sandstone are the same grains at nearly the same packing, and one flows while the
+other holds a cliff, because in sandstone they are cemented. So **packing is a lossy summary of an
+ASSEMBLY** — resolved by grains with a size, and with or without `Connection`s, which is already in the
+type system — while **compression is a STATE of a substance**, resolved by the EOS at the local
+pressure. Different resolved counterparts, so different fields. Both now say so in their own docs.
+
+**What this is not.** It converts; it does not replace. Nothing reads Earth as an assembly yet, and the
+surface rasters are still not parts. But the claim that a `LayeredBody` is a de-resolved assembly of
+matter is now checked by arithmetic rather than asserted in prose.
+
+**Verified.** 571/571 native, `mod app` clean for wasm32.
+
+## 2026-08-05 — type versus instance, and the dependency it walked straight into
+
+**What.** docs/67 step 2. `broadleaf-tree-oak.json` is a species; the tree at 53.1°N is an individual.
+Until today the engine had only the first, so **damage had nowhere to live** — `terra::flora::Sited`
+carried lat/lon/kind/yaw/scale and no state at all, and a bus cannot crush a tree that has no state to
+be crushed in.
+
+★★ **The design constraint that shaped it: this must not become a FIFTH "thing at a place".** Four
+already exist and each is a view for one consumer — `orbit::Body` (pos/vel/mass, for the integrator),
+`accretion::Body` (+rho/radius/ang_mom/thermal, for clumping), `interaction::BodyState`
+(+radius/strength/air, for contact), `render::Drawn` (for drawing). None says which assembly it is an
+instance OF, none has an attitude, none carries damage, none knows what contains it. So `Instance` is
+**the thing they are projections of**: it holds only STATE — identity, placement (position + attitude,
+*in a container's frame*), motion, thermal energy, damage — and everything definitional is asked of the
+TYPE. `Instance::body_state` lives in the same file so a view cannot quietly disagree with the instance.
+
+Mass is deliberately not a field, though Robin's property list names it: ten thousand oaks would carry
+ten thousand copies of one oak's mass. It is derived from the type and reduced by this individual's own
+damage, through the same envelope × packing × density the definition uses — so half of every part is
+half the mass, with **no damage-to-mass curve anywhere**. Same for extent, temperature and strength.
+
+**Verified** (five tests): two instances of one oak share every definitional number and nothing else;
+tearing the crown off one reduces its mass AND its reach while leaving the other pristine and **the
+species untouched**; a gun placed in a ship's frame goes where the ship puts it when the ship turns,
+with no change to the gun; the collision projection reports what the instance says; and the same joules
+in a half-burnt tree is a higher temperature than in a whole one, because there is less matter to heat.
+
+★★ **AND IT HAS NO CONSUMER — filed as `docs/46` row 46 by its author, on the day it was written.**
+"The law is built and proven, then wired into one place or none" is this repo's most repeated failure
+(docs/48), and the only defence is naming each instance of it out loud rather than intending to wire it
+later. The reason here is a real dependency and the migration order predicted it: the obvious first
+consumer is Terra's cannon, whose `cannon_at` is `(lat, lon, bearing)` — a GEOGRAPHIC placement, which
+becomes a `Placement` only when the gun can be *within Earth*, and that needs Earth to be an assembly
+with an id. **Step 5.** Robin, on being told: *"Agreed, this is part of why Earth must be an assembly."*
+
+The second candidate fails for the other predicted reason: `flora::Sited` is regenerated from a position
+hash every rebuild, so an instance placed there would not survive a frame — the derivable-rule-plus-
+exceptions problem, step 4.
+
+**Verified.** 568/568 native, `mod app` clean for wasm32.
+
+## 2026-08-05 — a planet is not an assembly, and the docs said it was
+
+**What.** Asked whether the Earth assembly contains plant assemblies, I answered that Earth is a
+`planet::LayeredBody`. Robin: *"WHAT? Everything we've done is supposedly building an assembly of earth,
+and you blithely inform me it is a LayeredBody? … A layered body is either a bad assessment or the last
+couple of days work with Claude are a lie."*
+
+**The assessment was right and the DOCUMENTATION was the lie.** `assets/bodies/earth.json` carries
+`layers`, `atmosphere_mass_kg` and `surface` — no `parts`. `assembly::Assembly` describes **six**
+objects: cannon, charge, shot, oak, spruce, grass tuft. Every planet is the other format. Meanwhile
+`docs/65` §4 was titled *"Where it stands, honestly"*, counted 79 scene-called methods and three scene
+structs, and **never said that no planet is an assembly** — and the architecture page shipped to
+integrity.bothead.net said *"adding a species, a vehicle or a planet is adding an assembly"* in the
+present tense. Two days of work were described in assembly language on top of that silence. All three
+are corrected; the violation is `docs/46` row 45.
+
+★★ **Robin's argument for why it is ONE thing, not two, and the engine already proves it both ways:**
+*"A planet is an accretion of debris bound by its own gravitational effects which we've worked hard to
+model."* The round trip is built and tested — `HydroBody::particalize(&LayeredBody, n)` turns layers into
+particles, `accretion::sample_layers(...)` reads layers back out of particles. So a `LayeredBody` is not
+a different KIND of object: it is a **de-resolved summary of an assembly of matter**, exactly the
+relationship `Derived` already has to `Assembly::parts`. The split is lineage — layers came from the
+giant impact, assemblies from the cannon — not principle, and it is the same shape as row 1
+(`Aggregate` vs the voxel `World`), which was closed by unifying rather than justifying.
+
+★ It is also the **fifth** arrival of the substance-versus-assembly distinction. Row 35 counted four and
+said it *"wants to be a first-class idea rather than a lesson relearned."*
+
+**Built today, small and load-bearing:** `Shape::reach_m` / `Part::reach_m` / `Assembly::reach_m` — an
+assembly ends at the outermost boundary of its outermost component. Not "where its air ends", which was
+my first wording and which Robin corrected: naming the rule after air teaches the engine a special case,
+when the identical question is asked by a tree's canopy, a ship's mast and a cannon's muzzle. It has a
+consumer immediately: `ballistics::fire` was taking a gun's lowest matter from `equivalent_radius_m`, the
+radius of a sphere of the same VOLUME, which for a barrel is off by more than six times.
+
+**Designed, not built:** [`docs/67`](docs/67-everything-is-an-assembly.md) — the unified model. Robin's
+seven assembly properties, the eight I think are missing (extent-before-detail; containment as a
+DERIVABLE rule plus exceptions, because a planet holds 10^12 trees and cannot list them; type versus
+instance, since damage has nowhere to live today; runtime re-parenting; per-actor cadence; a
+bidirectional signal; cross-resolution agreement; temperature and frame), the per-assembly collision
+engine with its one hard rule — **one implementation, many instances** — and a migration order whose
+guard rail already exists: `one_earth_tests::the_three_scenes_read_one_earth` asserts digit-identity
+across three scenes reading Earth, so any migration that moves a number fails.
+
+**Verified.** 563/563 native, `mod app` clean for wasm32. The correction to the architecture page is
+deployed, because a diagram that quietly runs ahead of its engine is how a model stops being checkable.
+
+## 2026-08-05 — Earth got a sky, and it is the air
+
+**What.** Robin, on where a sky belongs: *"Sky must be a component of Earth assembly, no"* — and on
+what should draw it: *"making ray-tracing work in the engine… It doesn't have to be very sophisticated
+ray tracing… Sun is close to a point source."* Both, in one integral. Design: [`docs/66`](docs/66-the-sky-is-the-air.md).
+
+★★ **The closed form was the wrong integral, not an approximate one.** `rayleigh_veil` is the analytic
+solution of ONE geometry — a slab seen from outside, looking down — where the sun path and the view path
+shorten together, which is the only reason it collapses. Stand on the ground and look up and that
+pairing inverts. (The orphaned `sky.wgsl` used it anyway, with `mu_v = ray.y`, which is also why it could
+only ever be a sky for a flat world.) So the law is now the marched integral,
+`atmosphere::air_inscatter`, mirrored line-for-line by `shaders/atmos.wgsl`, and **`rayleigh_veil` is its
+analytic special case** — kept, and used as the reference the march is pinned to (agreement **under 1%**
+in the plane-parallel limit). One law, and the geometry decides which face of it you see.
+
+Everything below falls out of that one integral. None of it is drawn on:
+
+- blue overhead, pale at the horizon — path length, band by band;
+- **red at sunset** — the blue is removed from the SUNLIGHT before it can scatter;
+- **twilight** — the low air sits in the planet's shadow while the air above it does not, which
+  **retires a declared number**: `twilight_half_angle`'s `sqrt(2H/R)` ramp existed because a flat slab
+  has no geometry that could produce twilight;
+- aerial perspective — the same integral, stopped at the surface point;
+- a glowing limb — rays that miss the ground still cross lit air.
+
+**Why it is a component of the body.** `AirColumn::of_body` is the only place a declared mass of air
+becomes optical depth and scale height, and both scenes hold one from the same body. `render::SkyVeil`
+draws what it is handed and has no opinion: hand it a body with no air and it draws nothing, with no
+branch — the Moon's black sky needs no code. **A scene gained no new verb** (the docs/65 ratchet is
+unchanged at 57).
+
+**Verified** — `web/rig/terra_sky.mjs`, 2560x1600 on the 5060 Ti, and **every claim is a difference
+against a frame that must not show the effect**. The control is a new world, `worlds/earth-airless`: the
+same Earth, same ground, same camera, **zero kilograms of air**.
+
+| | sky R/G/B | |
+|---|---|---|
+| noon, horizon | 69.0/121.7/215.2 | B/R **3.12** |
+| sunset | 74.4/80.0/63.6 | B/R **0.85** |
+| night | 2.7/2.9/3.6 | stars only |
+| **airless noon** | **2.7/2.9/3.6** | **stars only** |
+
+The daylit sky is blue and **it is the AIR** (zenith 52/95/185 with air, 2.7/3.0/3.7 with none, and the
+GROUND is still lit in the control — it removes the sky, not the sun); night has no sky; sunset reddens
+with nothing changed but the clock; distant ground is veiled by the air in front of it.
+
+**What the rig caught that I got wrong, twice.** (1) The first "sunset" frame was barely redder than
+noon, because at 53°N in June the sun is up 16½ hours and 90° of hour angle leaves it 20° high. The rig
+now computes the hour angle from `cos H0 = -tan(phi)tan(dec)` — the same relation `solar::day_length_hours`
+uses — rather than my guess. (2) An assertion demanding that the sunset be redder TOWARD the sun failed
+at 1.17 against 1.17, and **the assertion was the thing that was wrong**: in single scatter the reddening
+is set by the SUN's path length, which for a sun on the horizon is the same however you turn your head.
+Only the brightness varies across azimuth, through the phase function. Corrected in place with the
+reasoning, because a test that fails for a physical reason is evidence.
+
+★ **Stars now go out at dawn for the reason they really do.** The first sky frame had them plainly
+visible through blue daylight. The cause was not the air (at zenith it passes ~90% of the blue) — you
+cannot see a star in daylight because **the sky is brighter than it is**, and that is a statement about a
+SUM, which never happened because every pass tone-maps its own output. The star pass now evaluates the
+sky along its own ray with the same chunk and outputs `tonemap(L_sky + L_star*T)`, per band. What is left
+is recorded rather than tuned (**docs/46 row 43**): the star pass carries exposure 80 while everything
+else carries `SUN_GAIN = 22`, and at the daylight zenith the brightest pixel is **+128% above the sky
+mean** where a real one is ~0.01%.
+
+**Retired.** `veil_column_fraction` — the flagged stand-in that scaled a whole-column veil by
+`1 - e^(-h/H)`; at 1.7 m that is 2e-4, identical for every pixel however distant, so the ground came back
+**bit-identical with and without an atmosphere**. And the painted background: both scenes cleared to
+`0.01/0.01/0.03`, a declared dark blue with nothing emitting it, which was also the entire "black" sky
+the first night measurement read. Space is black.
+
+★★ **A shader nobody compiles is not a feature, and now a machine says so.**
+`laws::compiled_shader_tests::every_shader_is_compiled_by_something` is the gate that would have caught
+this in the first place — `sky.wgsl` sat orphaned for weeks while every atmosphere test passed, because
+they all asked whether the optics were right and none asked whether anything ran them (the docs/48
+pattern). It caught **two more orphans on its first run**: `rayleigh.wgsl`, orphaned minutes earlier by
+this change, and `particles.wgsl`, superseded by `matter.wgsl` in **July**. Both deleted.
+
+★ **The screenshot ceiling was mine.** Robin: *"your screen shots are pretty low res… I do want us to be
+able to verify high quality textures."* The render Xorg was configured `Virtual 1280 800` and the rig
+fleet had **eighteen different hardcoded viewports**, the smallest 480x320 — and the rigs that fill the
+public gallery were among the smallest. Now 2K (Robin's call), one shared `VIEWPORT` in
+`web/rig/_launch.mjs` with 43 rigs moved onto it at the same 16:10 aspect, and `start-render-xorg.sh`
+RESTARTS a server that is the wrong size instead of silently handing the next session a cap.
+
+**Owed** (docs/66 §9): a GPU pin for the WGSL mirror — it is a hand-copy, checked by reading, which is
+exactly the confidence level this project has learned not to trust; one exposure; a photographed limb
+(Terra's camera turns to look straight down above ~60 km, so it cannot be aimed at one); and tone-mapping
+ONCE into an HDR target, which is the deep version of the star fix.
+
+## 2026-08-05 — the colour was never arriving, and Terra has no sky
+
+**What.** Two defects found by chasing one observation of Robin's — *"the engine seems to be rendering
+the color without taking available light into account… Grass shouldn't be apparently brighter than
+everything else at night, right?"*
+
+★★★ **The vertex colour never reached the picture.** `globe.wgsl` computed `albedo = grain * u.tint`,
+where `grain` is the dominant material's triplanar texture; `i.col` appeared in that shader **only
+inside comments**. So the land-cover MIXTURE and the SEASON were computed per vertex and discarded.
+Proved by mutation rather than by reading: every land vertex set to magenta changed nothing on screen.
+After the fix, the same mutation turns the ground magenta.
+
+The fix is not "multiply by the colour" — the texture already IS the material's albedo and multiplying
+two squares it, which is precisely why the value had been dropped. The vertex now carries a **ratio**:
+the mixture's seasonal albedo over the dominant material's flat albedo. `SurfaceSample::albedo` became
+`albedo_ratio`, and the rename made the compiler find all four producers — one of which I would have
+missed.
+
+★★ **This retracted yesterday's headline.** *"Ireland turns"* was reported from an R:G shift across
+Jun–Dec. With the colour discarded, that cannot have been the leaves: it was the sun's own elevation at
+45°N (≈68° in June, 21° in December) reddening through the atmosphere. A **negative control** is now
+part of the rig — the Sahara, which has no senescent material at all — and it is damning: with colour
+now arriving the Sahara shifts **+0.0199** across the year against Ireland's **+0.0150**. A place that
+cannot turn moves more than a place that can. The seasonal signal is real in the material and smaller
+than the lighting confound in the picture.
+
+★★★ **And Terra has no sky.** `shaders/sky.wgsl` is compiled by nothing — absent from every
+`include_str!`. Its header says *"for the terrain scene"*; that scene died in July and its successor
+died on the 3rd. Terra lights the ground correctly and veils it, but the sky region falls through to
+the star field, so a daylight frame near the ground is lit grass under a black starfield. That contrast
+is what read as luminous grass. Measured: the night side IS correctly near-black and identical over
+sand, forest and open ocean.
+
+**Robin's framing for the fix, and it is the design**: *"Sky must be a component of Earth assembly."*
+The atmosphere is matter Earth already declares; the engine should render what that matter does to
+light rather than a scene owning a sky.
+
+**Verified.** 550/550 native, `mod app` clean for wasm32, deployed. Permissions widened 42 → 97 rules;
+blanket `sudo:*` deliberately excluded in favour of the specific host operations that were authorised.
+
+## 2026-08-04 — Ireland turns, and the Serengeti turns the other way
+
+**What.** The seasons reach the ground. Measured R:G of the ground through the year, on the 5060 Ti:
+
+| site | Jun | Sep | Oct | Dec | |
+|---|---|---|---|---|---|
+| Maine | 0.6886 | 0.6908 | 0.6939 | **0.7005** | reddens → autumn |
+| Ireland | 0.6855 | 0.6879 | 0.6904 | **0.6984** | reddens → autumn |
+| Serengeti | 0.6875 | 0.6901 | 0.6867 | **0.6855** | greens → spring |
+
+**Nothing told the Serengeti to run backwards.** At 2.3°S its December is its growing season, and that
+falls out of the axial tilt through the solar declination — the same declination the terminator is drawn
+with. Hue rather than luminance, because at 45°N the noon sun drops from ~68° to ~21° between June and
+December and brightness is dominated by the sun's own elevation.
+
+**Why it works now.** Three things landed in order: real land cover, mixtures, and a clock.
+
+★ **The land cover was one wrong string.** `bake.py` asked GIBS for a layer that does not exist, GIBS
+answered **HTTP 200 with an XML error body**, and the `except` reported *"GIBS land cover unavailable"*
+before falling back to six invented latitude bands — for months. `landcover.png` is now 18 MEASURED
+MODIS IGBP classes at a 100% exact palette decode. Galway is grassland; it was never boreal conifer, and
+that is precisely why it could not turn.
+
+★★ **A land-cover class is a MIXTURE.** IGBP classes are definitionally mixtures — *woody savanna* is
+30–60% tree over grass — so `Surface::biomes` went from class→material to class→[(material, fraction)],
+with fractions read off the IGBP cover thresholds at the midpoint of each stated range. `aggregate_
+albedo_turned` gives a mixture its season: a mixed forest turns partly and stays partly evergreen.
+
+★★★ **Two guards earned their keep, and one refused to ship a lie.** The palette decode used int16 and
+overflowed — a 255 channel difference squares to 65,025 against int16's 32,767 and wraps negative, so
+the exact-match rate read **1.8% for a raster whose every pixel is an exact legend colour**. The decode
+guard refused it rather than shipping a plausible-looking biome map. And `fetch` had *cached the 460-byte
+XML failure*, re-serving it after the layer name was fixed.
+
+**Verified.** 543/543 native, `mod app` clean for wasm32, rig-watched. Honest about size: the seasonal
+shift is measurable and monotone but visually subtle — broadleaf is 0.45 of that class, and the
+canopy-versus-leaf gap (ledger row 35) flattens it further.
+
+★ **And Robin's question found a real defect**: *"I'm not sure we have a tilted axis yet?"* Half yes.
+`orbit.rs` carries the real 23.439° obliquity, which is why all of the above works; but `lib.rs` builds
+the space band's Earth with its spin axis PERPENDICULAR to its orbit. One body, two axial tilts
+(row 39).
+
+## 2026-08-03 — a leaf is not a plank: colour derived from measured spectra
+
+**What.** Ireland stopped rendering as cut lumber. `earth.json` mapped land-cover class 3 to `pine` —
+the catalogue's pine TIMBER, albedo [0.68, 0.48, 0.21] — so every forest on Earth was drawn the colour
+of a board. Robin: *"Pine Timber is always the wrong choice for flora though, we should look for 'pine
+needles' or 'pine leaves', same with other biomes."*
+
+Two new substances, `conifer_foliage` and `broadleaf_foliage`, and **their colour is not chosen**:
+
+    449 measured fresh-leaf spectra (NEON domains + UCSB HyspIRI California, 98 taxa)
+      -> mean visible spectrum
+      -> convolved against the engine's OWN CIE 1931 observer under a 5772 K sun
+      -> conifer   [0.0896, 0.1177, 0.0544]
+         broadleaf [0.0738, 0.1006, 0.0400]
+
+**Why this shape.** `Material::albedo` has always carried an honesty note calling itself *"a summary
+property, a stand-in for the full spectral … optics … a placeholder to be grounded later, not an
+irreducible fact."* This is that grounding. `blackbody.rs` already had `cie_observer` and the XYZ→sRGB
+primaries for star colour, so a surface's colour and a star's colour are now one law — Planck through
+the same observer — rather than two. `albedo_derives_from_the_measured_spectrum` re-derives the triple
+every run, so what is in the file can only ever be a CACHE of the measurement.
+
+★ **Two independent cross-checks nobody tuned toward.** The pulled spectra's 400–700 nm means are 0.084
+(conifer) and 0.069 (broadleaf); the published measured values for those plant functional types are
+0.08–0.09, and CLM 5.0's defaults are 0.07 and 0.10. And the derived colours come out green because
+chlorophyll absorbs the red and the blue — nothing anywhere says "leaves are green".
+
+★ **The forest class was SPLIT.** One class covered both the tropics and the boreal band, so the Amazon
+and Siberia were the same material. Splitting it (3 broadleaf / 6 needleleaf) costs one line in
+`bake.py` — and without it the second foliage substance would have shipped wired to nothing, which is
+the pattern docs/48 exists to name.
+
+**Verified.** Measured A/B through the engine on the 5060 Ti — same rig, same sun, same camera, the data
+reverted and the wasm rebuilt for the control:
+
+| site | before | after |
+|---|---|---|
+| Galway | 148.3 / 130.9 / 68.1 red-brown | **82.1 / 111.6 / 64.4 GREEN** |
+| Amazon | 148.3 / 132.3 / 67.9 red-brown | **78.2 / 108.9 / 55.8 GREEN** |
+| Siberia | 146.9 / 124.7 / 66.9 red-brown | **74.7 / 101.8 / 62.3 GREEN** |
+| Sahara | 148.3 / 135.1 / 100.1 | 148.3 / 135.1 / 100.1 — **bit-identical** |
+
+The Sahara is the negative control: unchanged to the byte, so only the forest classes moved. Before the
+split all three forests were literally the same colour. 512/512 native, `mod app` clean for wasm32.
+
+**★★ And the honest gap, recorded rather than papered over (ledger row 35).** A closed canopy returns
+about a THIRD of what a single leaf does, because light scattering into it is caught by the next leaf
+down. That darkening is an ARRANGEMENT, not a substance — so a forest still renders brighter than a real
+forest, and both entries say so in their own notes. Darkening the leaf to compensate would put an
+assembly's property inside a substance, and the same leaf held in a hand would then be too dark. This is
+the substance-versus-assembly distinction arriving a fourth time.
+
+**★ Two guards, each verified by making it fail.** `a_biome_never_paints_the_ground_with_the_inside_of_a_
+plant` fails the build if any body's land-cover class points at an organic material that is not green —
+a physical criterion, not a list of approved names, so it extends itself to materials nobody has written
+yet. Putting `pine` back on class 3 turns it red with the albedo printed. And the Yarrr! scene grew from
+one shore to four after Robin found the gun standing in the dark: `one_of_the_scenes_shores_is_always_in_
+daylight` sweeps a day through the engine's own solar direction and fails if every shore is dark at once.
+**Two shores was measured and does not work** — Ireland and Chile are 65° of longitude apart, leaving 7.6
+hours a day with both dark, worst case 57° BELOW the horizon. Mumbai cuts that to 2.1 hours; Sydney
+closes it, worst case 23° above.
+
+**★ Found on the way, and it would have been silent:** `tools/bake-earth/bake.py` wrote to
+`web/public/worlds/earth/`, which stopped holding Earth's rasters when Earth became a shared body. A
+rebake would have written a complete set of rasters into a directory nothing reads, and said "done".
+
+## 2026-08-03 — a cannon on a coast: assemblies, oxidation, and a shot that lands in the sea
+
+**What.** Robin's acceptance test for the whole assembly architecture — *"as long as we can build a
+working cannon and a working planet, and put a working cannon on a working planet and fire it, we know
+our assembly build is sound"* — passes, and can be watched at **/yarr.html**:
+
+    cannon: Fired at 589 m/s, peak 426 MPa, recoil 2.96 m/s,
+            ejecting 2.09 kg gas + 1.53 kg smoke at 1950 K
+    arrival: 10.9 kg at 0.1 km/s = 9.06e4 J
+
+**Why this shape.** docs/64 (the compiled assembly) says a planet and an ocean liner are not different
+kinds of thing: both are catalogued materials arranged in space, differing only in how the arrangement
+is INDEXED. The cannon is the test of that claim, because it is emphatically not a sphere.
+
+**Three assemblies, not one** (Robin): the GUN persists and recoils, the CHARGE is consumed, the SHOT is
+transferred out — so containment is a relationship with state and an assembly GRAPH, because a tree
+cannot express reloading. **Nothing declares a mass**: 2,375.7 kg and a centre of gravity 0.631 m behind
+the midpoint both follow from thirteen parts and the material catalogue. A cached mass is a CACHE —
+`verify_cache` re-derives and reports a mismatch as stale, "the parts win".
+
+★ **The ball's SIZE follows from its NAME.** 24 lb of cast iron as a sphere is 5.53 inches across
+against a historical 5.82 in bore; the difference is windage. A consequence, not a parameter.
+
+★★ **Substances before compounds.** Black powder was BACKED OUT as a material after a first draft
+carried an invented `specific_heat: 1000.0`. It is a MIXTURE — potassium nitrate, charcoal and sulfur,
+each catalogued with sources — and its bulk properties derive: 891.3 J/kg/K, true density 1957 kg/m3
+against a poured 1000, **and that gap IS the 48.9% porosity**, which is a property of an arrangement and
+not of matter. Hence `Part::packing`.
+
+★★ **`oxidation::apply_heat` is the general way matter is lit**, not `fire_gun` (Robin: *"we want these
+to not be tied to specific scene information... apply_heat would be useful in a forest fire"*). One call
+covers lightning on a tree — clearing oak's own catalogued 573 K — a linstock on a charge, and the same
+joules through 100x the mass NOT lighting it, which is why a bonfire needs kindling.
+
+★★★ **The number that makes it gunpowder, as a comparison between two derived quantities:** at 75/15/10
+the KNO3 supplies 0.356 kg O2 per kg against a fuel demand of 0.499 — **71% of stoichiometric with no
+air at all**. A fire is ventilation-limited; a charge is not. That single ratio is the whole difference.
+
+**Verified.** 507/507 native, `mod app` clean for wasm32, rig-verified on the 5060 Ti, deployed live.
+
+**★ Three disagreements with reality, all RECORDED rather than tuned.** The idealised black-powder
+equation over-states permanent gas by ~25%; deriving the flame temperature from the burn energy gives
+6751 K against a sourced 1950 K, because **over half of the product mass is CONDENSED** and heating those
+solids absorbs the energy while exerting no pressure; and the constant-volume assumption ignores that
+real powder burns while the shot is already moving. Muzzle velocity comes out 589 m/s against a
+historical ~450 for exactly these reasons. `naive_flame_k` is kept, unused, so the size of the deferred
+energy split can be READ — a deferred computation you cannot size is not an IOU.
+
+**★★ A scene must never introduce physics, and it is now enforced.** `PlanetAir` — the type answering
+what gravity is, what the air is, where the surface is — lived inside `mod app`. And a trajectory
+integrator written here took a DRAG COEFFICIENT as an argument, putting the caller in charge of how hard
+the air pushes back; it was deleted in favour of `flight::Flight`, which already flies meteors and
+integrates quadratic drag in closed form. `laws::scene_purity_tests::a_scene_never_introduces_physics`
+pairs each physics primitive with its owning module and fails the build if a scene calls one — verified
+against the exact violation committed hours earlier.
+
+**★ And the last picture told the truth about the one before it.** The scene looks orange because it IS
+`pine` — the catalogue's pine TIMBER — since `earth.json` maps "forest" to it and Ireland sits in the
+derived cover's boreal band. Lighting was MEASURED innocent (ground luminance 117.9 noon / 14.2
+midnight). Colours emerge from materials exactly as they should; the material is wrong (docs/46 row 28).
+
 ## 2026-08-02 — the appearance integral, and the negative result that re-orders the plan
 
 **What.** `terra::appearance` integrates the surface over the patch a vertex stands for and reports two

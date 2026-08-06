@@ -3,6 +3,7 @@
 //! scene struct itself lives in `mod app` (lib.rs) so it can reuse that module's render helpers directly.
 
 pub mod appearance;
+pub mod flora; // what is growing here — a land-cover class resolved into plants
 pub mod fly_camera;
 pub mod globe_mesh;
 pub mod ground_cap;

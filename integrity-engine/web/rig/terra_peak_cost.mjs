@@ -19,7 +19,7 @@ await p.evaluate(() => {
     lastRender = now;
     const a = performance.now(); orig(); window.__r.push(performance.now() - a);
   };
-  t.set_fly(10, 0, 700000, 0, -0.55);
+  t.place_camera(10, 0, 700000, 0, -0.55);
   window.launchSwarm();
 });
 let worst = 0, peakDrawn = 0;

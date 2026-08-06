@@ -50,6 +50,73 @@ pub fn cie_observer(nm: f64) -> (f64, f64, f64) {
     (x, y, z)
 }
 
+/// CIE XYZ → linear sRGB (IEC 61966-2-1 primaries, D65). Written once, because a colour space is
+/// exactly the kind of thing that gets typed out twice with one digit different.
+pub fn xyz_to_linear_srgb(x: f64, y: f64, z: f64) -> [f64; 3] {
+    [
+        3.2406 * x - 1.5372 * y - 0.4986 * z,
+        -0.9689 * x + 1.8758 * y + 0.0415 * z,
+        0.0557 * x - 0.2040 * y + 1.0570 * z,
+    ]
+}
+
+/// **The colour of a SURFACE, from what a spectrometer measured it reflect.**
+///
+/// `blackbody_srgb` answers "what colour is light of this temperature". This answers the other half:
+/// given a surface that returns `reflectance[i]` of the light at `lo_nm + i*step_nm`, and an
+/// illuminant that is a blackbody at `illuminant_k`, what fraction does each of the render's three
+/// channels get back? It is the same CIE observer and the same primaries — one question, one answer.
+///
+/// Per channel: `∫R(λ)·S(λ)·c̄(λ)dλ ÷ ∫S(λ)·c̄(λ)dλ`. The denominator is the illuminant seen by the
+/// same observer, so it is a REFLECTANCE and not a radiance: a surface that returns everything comes
+/// back `[1,1,1]` whatever the illuminant, and one that returns half comes back `[0.5,0.5,0.5]`.
+/// Those two are the tests.
+///
+/// ★ Why this exists: `Material::albedo`'s own doc calls itself *"a stand-in for the full spectral …
+/// optics … a placeholder to be grounded later"*. A material carrying a measured spectrum is that
+/// grounding — its three numbers stop being chosen and become a convolution of a measurement. It is
+/// also what phenology needs, since a leaf turning in autumn is a change of SPECTRUM (chlorophyll
+/// degrading, carotenoids unmasked) and only derivatively a change of colour.
+///
+/// Outside the sampled range the surface is treated as reflecting nothing, so the range must cover
+/// the visible band; the observer is ~0 beyond 380–780 nm, which is what the samples should span.
+pub fn reflectance_srgb(
+    reflectance: &[f64],
+    lo_nm: f64,
+    step_nm: f64,
+    illuminant_k: f64,
+) -> [f32; 3] {
+    if reflectance.is_empty() || step_nm <= 0.0 || illuminant_k <= 0.0 {
+        return [0.0, 0.0, 0.0];
+    }
+    let (mut rx, mut ry, mut rz) = (0.0, 0.0, 0.0); // reflected
+    let (mut wx, mut wy, mut wz) = (0.0, 0.0, 0.0); // the illuminant itself (the white point)
+    for (i, &r) in reflectance.iter().enumerate() {
+        let nm = lo_nm + step_nm * i as f64;
+        let s = planck(nm * 1e-9, illuminant_k);
+        let (cx, cy, cz) = cie_observer(nm);
+        rx += r * s * cx;
+        ry += r * s * cy;
+        rz += r * s * cz;
+        wx += s * cx;
+        wy += s * cy;
+        wz += s * cz;
+    }
+    let refl = xyz_to_linear_srgb(rx, ry, rz);
+    let white = xyz_to_linear_srgb(wx, wy, wz);
+    let mut out = [0.0f32; 3];
+    for c in 0..3 {
+        // A negative white channel would mean the illuminant is outside the sRGB gamut, which no
+        // blackbody in the visible is; guard anyway rather than divide by it.
+        out[c] = if white[c] > 0.0 {
+            (refl[c] / white[c]).max(0.0) as f32
+        } else {
+            0.0
+        };
+    }
+    out
+}
+
 /// The colour of a blackbody at `t_k`, as LINEAR sRGB normalised so the strongest channel is 1.
 ///
 /// Normalised because a star's brightness comes from its magnitude, not its temperature — this answers
@@ -77,11 +144,8 @@ pub fn blackbody_srgb(t_k: f64) -> [f32; 3] {
     }
     // Chromaticity only — discard the absolute scale, which is the magnitude's job.
     let (x, y, z) = (x / sum, y / sum, z / sum);
-    // CIE XYZ -> linear sRGB (IEC 61966-2-1 primaries, D65).
-    let r = 3.2406 * x - 1.5372 * y - 0.4986 * z;
-    let g = -0.9689 * x + 1.8758 * y + 0.0415 * z;
-    let b = 0.0557 * x - 0.2040 * y + 1.0570 * z;
-    let mut rgb = [r.max(0.0), g.max(0.0), b.max(0.0)];
+    let rgb = xyz_to_linear_srgb(x, y, z);
+    let mut rgb = [rgb[0].max(0.0), rgb[1].max(0.0), rgb[2].max(0.0)];
     let peak = rgb[0].max(rgb[1]).max(rgb[2]);
     if peak > 0.0 {
         for c in &mut rgb {
@@ -208,6 +272,76 @@ mod tests {
                 best.0
             );
         }
+    }
+
+    /// **A reflectance is a FRACTION, so the illuminant must cancel out of it.**
+    ///
+    /// The two cases that pin `reflectance_srgb` are the ones with an answer known in advance: a
+    /// surface returning everything is `[1,1,1]`, a surface returning half is `[0.5,0.5,0.5]`, and
+    /// both must hold under ANY illuminant. If the white-point division were wrong — or missing —
+    /// a white surface would come back the colour of the lamp, which is exactly the bug that makes a
+    /// renderer's "albedo" secretly a radiance.
+    #[test]
+    fn a_perfect_reflector_is_white_under_any_sun() {
+        for t in [3000.0, 5772.0, 20000.0] {
+            let white = reflectance_srgb(&[1.0; 81], 380.0, 5.0, t);
+            for (c, &v) in white.iter().enumerate() {
+                assert!(
+                    (v - 1.0).abs() < 1e-3,
+                    "a perfect reflector under {t} K: channel {c} = {v}, want 1"
+                );
+            }
+            let grey = reflectance_srgb(&[0.5; 81], 380.0, 5.0, t);
+            for (c, &v) in grey.iter().enumerate() {
+                assert!(
+                    (v - 0.5).abs() < 1e-3,
+                    "a half reflector under {t} K: channel {c} = {v}, want 0.5"
+                );
+            }
+        }
+        // And linearity in the reflectance, which is what makes it a fraction rather than a curve.
+        let a = reflectance_srgb(&[0.2; 81], 380.0, 5.0, 5772.0);
+        let b = reflectance_srgb(&[0.4; 81], 380.0, 5.0, 5772.0);
+        for c in 0..3 {
+            assert!((b[c] - 2.0 * a[c]).abs() < 1e-4, "channel {c} is linear");
+        }
+    }
+
+    /// **A green surface must come back green, and the greenness must be the SPECTRUM's doing.**
+    ///
+    /// A band that reflects only 500–600 nm has to land with G the largest channel. This is the
+    /// property the foliage materials depend on: nothing anywhere chooses that leaves are green —
+    /// chlorophyll absorbs the red and the blue, and the observer reports what is left.
+    #[test]
+    fn the_channel_that_wins_is_the_one_the_spectrum_favours() {
+        let band = |lo: f64, hi: f64| -> [f32; 3] {
+            let s: Vec<f64> = (0..81)
+                .map(|i| {
+                    let nm = 380.0 + 5.0 * i as f64;
+                    if nm >= lo && nm <= hi {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            reflectance_srgb(&s, 380.0, 5.0, 5772.0)
+        };
+        let green = band(500.0, 600.0);
+        assert!(
+            green[1] > green[0] && green[1] > green[2],
+            "500-600 nm should be green-dominant, got {green:?}"
+        );
+        let red = band(600.0, 700.0);
+        assert!(
+            red[0] > red[1] && red[0] > red[2],
+            "600-700 nm should be red-dominant, got {red:?}"
+        );
+        let blue = band(400.0, 490.0);
+        assert!(
+            blue[2] > blue[0] && blue[2] > blue[1],
+            "400-490 nm should be blue-dominant, got {blue:?}"
+        );
     }
 }
 

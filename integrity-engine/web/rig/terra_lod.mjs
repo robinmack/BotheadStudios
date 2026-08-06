@@ -17,7 +17,7 @@ await p.evaluate(() => {
     const a = performance.now(); orig(); window.__r.push(performance.now() - a); };
 });
 for (const alt of [200000, 30000, 8000, 2000, 500, 120, 30, 6]) {
-  await p.evaluate(({ LAT, LON, alt }) => { window.__r.length = 0; window.__terra.set_fly(LAT, LON, alt, 0.6, -0.35); },
+  await p.evaluate(({ LAT, LON, alt }) => { window.__r.length = 0; window.__terra.place_camera(LAT, LON, alt, 0.6, -0.35); },
     { LAT, LON, alt });
   await p.waitForTimeout(1800);
   const r = await p.evaluate(() => {
