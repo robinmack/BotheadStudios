@@ -210,3 +210,65 @@ control: an identical hit at lower energy that must leave the tree intact. Depth
 seam, fully measurable. If energy conserves across that seam and the failure comes from the tree's own
 materials rather than from anything written for trees, the recursion is proven and the rest is
 repetition. If it does not, that is found at depth 1 instead of depth 5.
+
+---
+
+## 7. The far end: evolve Earth from its components
+
+> **Robin, 2026-08-05:** *"More deeply, and probably for much, much later — I believe we already have the
+> bits in place to PROVE the components of earth in space would, over time, accrete to form the earth;
+> we have gravity, we have melting points, pressure, materials, etc. If we took our time (and maybe
+> someday we can, compute power growing as it does) we could evolve the earth from its components."*
+
+Not work for now. Written down because it is the **acceptance test this whole model is pointed at**, and
+because the honest accounting of it is not obvious.
+
+### The claim is substantially true, and the loop is already closed at one scale
+
+Everything named is built, and most of it is verified:
+
+| ingredient | where |
+|---|---|
+| gravity, at N-body and at scale | `orbit`, `gravity`, `bhtree`, `gpu_gravity` (Barnes–Hut, hardware-verified) |
+| condensed-matter EOS | `eos.rs` — Tillotson, pinned to Benz & Asphaug 1999 |
+| SPH under self-gravity | `gpu_sph.rs` / `sph_step.wgsl`, verified out-of-process by `tools/sph-verify` |
+| shock heating from impact | emergent in the SPH path, measured |
+| melting and boiling against PRESSURE | `planet::phase_at`, `damage::classify` |
+| the hydrostatic pressure profile | `planet::pressure_at` |
+| accretion of debris into bodies | `accretion.rs` — `Clump`, `absorb` |
+| **reading layers back OUT of particles** | `accretion::sample_layers` |
+
+★ **The birth-of-the-Moon scene is already this, run briefly.** Debris accretes under its own gravity
+into bodies, and `sample_layers` reads a layering back out of the particles. What Robin describes is the
+same loop run for longer with more matter — not a different machine.
+
+### What that would turn `earth.json` into
+
+Today `LayeredBody::as_assembly` proves two *descriptions* of Earth agree (§5). The far version is the
+much stronger claim: that the layers are **emergent**, so the declared PREM densities and radii in
+`assets/bodies/earth.json` stop being an input and become a **prediction**.
+
+**The acceptance test therefore already exists and is public: PREM.** A simulated Earth's density and
+pressure profile against the measured seismic one. That is a real, falsifiable target with published
+numbers, and it is the same shape as every other verification in this repo — pin the emergent answer to
+a measurement nobody in the loop can tune.
+
+### What is actually missing — and it is not compute
+
+Three things, in increasing order of difficulty:
+
+1. **Radiogenic heat.** Earth's differentiation was driven substantially by ²⁶Al decay alongside impact
+   heating. The engine has the impact half and not the decay half. This is the easy one: a per-material
+   heat source with a half-life, and the isotopes are already a subject the repo has touched (docs/31).
+2. **Chemistry.** Core formation is iron–silicate partitioning, not just density sorting — siderophile
+   elements go with the iron. The engine has materials and no reactions; `docs/46` already carries
+   *"chemical energy does not exist"* as a gap from the cannon chain. Density-driven segregation would
+   give a core; it would not give the right core.
+3. ★★ **The timescale, which is the real wall, and growing compute does not cross it.** Accretion is
+   ~10⁷–10⁸ years; core formation ~10⁶. An SPH step on molten rock is seconds to minutes. That is
+   **10¹³–10¹⁵ steps** — thirteen orders of magnitude, which Moore's law does not close and never will.
+   What closes it is **not stepping what is not changing**: a settled interior in hydrostatic and
+   thermal equilibrium has nothing to integrate, and the resolution should collapse to the analytic
+   profile the moment it stops moving. That is docs/44's resolution-by-necessity and §4's per-assembly
+   solver, aimed at time instead of space — and it means this far goal and the near work are the same
+   engineering, which is the reason to record it here rather than in a wish list.
