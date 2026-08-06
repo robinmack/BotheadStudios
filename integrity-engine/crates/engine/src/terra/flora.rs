@@ -34,6 +34,11 @@ use crate::materials::Material;
 /// One plant, sited. `yaw` and `scale` are derived from the cell too, so a stand does not look stamped.
 #[derive(Clone, Copy, Debug)]
 pub struct Sited {
+    /// ★ **Its identity, derived from the cell it grows in** — the same hash that decided it was there.
+    /// This is what lets a container hold an EXCEPTION for one plant (`containment::Contents`): an
+    /// exception has to be able to name what it is an exception to, and the rule keeps no list.
+    /// Stable across queries from any centre, which is the property row 47 was about.
+    pub id: crate::instance::InstanceId,
     pub lat_deg: f64,
     pub lon_deg: f64,
     /// Index into the `kinds` slice the caller passed to [`scatter`].
@@ -120,46 +125,86 @@ pub fn scatter(
     // spacing follows from the crown, so a meadow is fine-grained and a forest is not.
     let mut out = Vec::new();
     let m_per_deg_lat = 111_320.0;
-    let m_per_deg_lon = m_per_deg_lat * centre_lat.to_radians().cos().abs().max(1e-6);
 
     for (ki, kind) in kinds.iter().enumerate() {
         let fol = crate::materials::index_of(mats, &kind.foliage);
-        // Cover fraction here decides density; crown footprint decides spacing.
-        let frac = mixture_at(centre_lat, centre_lon)
-            .iter()
-            .find(|&&(m, _)| m == fol)
-            .map(|&(_, f)| f as f64)
-            .unwrap_or(0.0);
-        if frac <= 0.0 || kind.crown_m2 <= 0.0 {
-            continue; // this plant does not grow here
+        if kind.crown_m2 <= 0.0 {
+            continue;
         }
-        let per_m2 = frac / kind.crown_m2;
-        let cell_m = (1.0 / per_m2).sqrt();
-        let n = (radius_m / cell_m).ceil() as i64;
-        for cz in -n..=n {
-            for cx in -n..=n {
-                // Jitter inside the cell so a stand is not a lattice, but jitter DERIVED from the cell.
-                let jx = cell_unit(cx, cz, ki as u64 * 7 + 1) - 0.5;
-                let jz = cell_unit(cx, cz, ki as u64 * 7 + 2) - 0.5;
-                let dx = (cx as f64 + jx) * cell_m;
-                let dz = (cz as f64 + jz) * cell_m;
+        // ★★ **THE LATTICE IS A FACT ABOUT THE GROUND, NOT ABOUT THE OBSERVER** (docs/46 row 47).
+        //
+        // Spacing comes from the KIND's own crown and nothing else: at full cover one plant occupies
+        // one crown, so plants sit sqrt(crown) apart. What it must NOT come from is the local cover
+        // fraction, which is what it used to — cells were sized from `frac` sampled at the QUERY
+        // CENTRE and indexed `-n..=n` about it, so the whole lattice was pinned to the camera and
+        // every plant in the stand moved when you walked. Robin asked for the opposite in as many
+        // words: *"so trees don't move to different positions when one turns one's head away and turns
+        // back."*
+        //
+        // Cover still decides how MANY there are — by deciding whether each cell is occupied (below),
+        // which is what a cover fraction means. That change also makes density follow the cover at
+        // each PLANT's own position instead of the one sampled at the centre, so a stand thins out
+        // across a boundary rather than being uniform to its edge.
+        //
+        // ★ **THE COST THIS CHANGES, MEASURED.** Spacing no longer widens where cover is thin, so a
+        // sparse meadow now walks the same number of cells as a dense one — for grass (crown 0.011 m²,
+        // so 0.106 m apart) that is ~π(r/0.106)² cells, about 220,000 over a 25 m disc. The old
+        // lattice at 60% cover was ~1.7× cheaper and WRONG, and the whole test module went from 0.05 s
+        // to 3.5 s when these tests started asking about realistic radii. Two honest ways down if it
+        // matters: skip whole cells with a coarse cover test before sampling the mixture, or let
+        // spacing come from a QUANTISED cover (stable within a band, so plants only shift when the
+        // band does). Neither is worth doing before a rig measures a rebuild in a real scene.
+        let cell_m = kind.crown_m2.sqrt();
+        let d_lat = cell_m / m_per_deg_lat;
+        let lat_span = radius_m / m_per_deg_lat;
+        // ★ Each KIND gets its own lattice, and they are meant to overlap — grass grows under an oak,
+        // and their spacings differ by two orders of magnitude. What must never overlap is IDENTITY,
+        // so the kind goes into the salt of every hash below (Robin: *"different flora types have
+        // different spacing, so lattices will overlap"*).
+        let salt = |n: u64| ki as u64 * 16 + n;
+        let cz0 = ((centre_lat - lat_span) / d_lat).floor() as i64;
+        let cz1 = ((centre_lat + lat_span) / d_lat).ceil() as i64;
+        for cz in cz0..=cz1 {
+            // The row's own latitude — from the ROW INDEX, never from the camera, or the east-west
+            // spacing would drift with the observer exactly the way the whole lattice used to.
+            let lat_row = cz as f64 * d_lat;
+            let m_per_deg_lon = m_per_deg_lat * lat_row.to_radians().cos().abs().max(1e-6);
+            let d_lon = cell_m / m_per_deg_lon;
+            let lon_span = radius_m / m_per_deg_lon;
+            let cx0 = ((centre_lon - lon_span) / d_lon).floor() as i64;
+            let cx1 = ((centre_lon + lon_span) / d_lon).ceil() as i64;
+            for cx in cx0..=cx1 {
+                // Jitter inside the cell so a stand is not a lattice — derived from the ABSOLUTE cell,
+                // so a plant's offset is as fixed as the cell it sits in.
+                let jx = cell_unit(cx, cz, salt(1)) - 0.5;
+                let jz = cell_unit(cx, cz, salt(2)) - 0.5;
+                let lat = (cz as f64 + 0.5 + jz) * d_lat;
+                let lon = (cx as f64 + 0.5 + jx) * d_lon;
+                let dz = (lat - centre_lat) * m_per_deg_lat;
+                let dx = (lon - centre_lon) * m_per_deg_lon;
                 if dx * dx + dz * dz > radius_m * radius_m {
                     continue;
                 }
-                let lat = centre_lat + dz / m_per_deg_lat;
-                let lon = centre_lon + dx / m_per_deg_lon;
-                // Does this KIND actually grow at that point, or is the class different there?
-                let here = mixture_at(lat, lon);
-                if !here.iter().any(|&(m, f)| m == fol && f > 0.0) {
+                // **Cover decides OCCUPANCY.** A cover fraction is the share of ground this plant
+                // holds, so it is exactly the probability that a cell of its own size has one in it —
+                // and the draw is the cell's own deterministic number, so the answer is a property of
+                // that patch of ground forever.
+                let frac = mixture_at(lat, lon)
+                    .iter()
+                    .find(|&&(m, _)| m == fol)
+                    .map(|&(_, f)| f as f64)
+                    .unwrap_or(0.0);
+                if frac <= 0.0 || cell_unit(cx, cz, salt(5)) >= frac {
                     continue;
                 }
                 out.push(Sited {
+                    id: crate::instance::InstanceId::derived(salt(0), (cx, cz), 0),
                     lat_deg: lat,
                     lon_deg: lon,
                     kind: ki,
-                    yaw: cell_unit(cx, cz, ki as u64 * 7 + 3) * std::f64::consts::TAU,
+                    yaw: cell_unit(cx, cz, salt(3)) * std::f64::consts::TAU,
                     // Real stands vary; ±25% about the assembly's own size.
-                    scale: 0.75 + 0.5 * cell_unit(cx, cz, ki as u64 * 7 + 4),
+                    scale: 0.75 + 0.5 * cell_unit(cx, cz, salt(4)),
                 });
             }
         }
@@ -167,7 +212,8 @@ pub fn scatter(
     // Nearest first, then bound — the plants a viewer can actually resolve (Law III).
     out.sort_by(|a, b| {
         let d = |s: &Sited| {
-            let x = (s.lon_deg - centre_lon) * m_per_deg_lon;
+            let lon_scale = m_per_deg_lat * s.lat_deg.to_radians().cos().abs().max(1e-6);
+            let x = (s.lon_deg - centre_lon) * lon_scale;
             let z = (s.lat_deg - centre_lat) * m_per_deg_lat;
             x * x + z * z
         };
@@ -256,6 +302,82 @@ mod tests {
                 "a tighter budget must keep the NEAREST plants, not re-roll them"
             );
         }
+    }
+
+    /// ★★★ **THE TREES STAY PUT WHEN YOU WALK** (docs/46 row 47).
+    ///
+    /// Robin, 2026-08-04: *"so trees don't move to different positions when one turns one's head away
+    /// and turns back."* The old lattice could not do this and read as though it could: cells ran
+    /// `-n..=n` about the QUERY CENTRE and their size came from the cover fraction sampled there, so
+    /// the whole stand regenerated somewhere else the moment the camera moved far enough to trigger a
+    /// rebuild. The hash was stateless; its inputs were not absolute.
+    ///
+    /// This asks about the same patch of ground from three different places and requires the plants in
+    /// the overlap to be the SAME plants — same position, same identity, same size, same facing. It is
+    /// also the precondition for `containment::Contents`: an exception naming a damaged tree attaches
+    /// to nothing if the rule renames it when you walk away.
+    #[test]
+    fn the_same_ground_grows_the_same_plants_from_wherever_you_ask() {
+        let (kinds, mats) = kinds();
+        let leaf = crate::materials::index_of(&mats, "broadleaf_foliage");
+        let grass = crate::materials::index_of(&mats, "grass");
+        let all = move |_: f64, _: f64| vec![(leaf, 1.0f32), (grass, 0.6f32)];
+        let here = |lat: f64, lon: f64| scatter(lat, lon, 15.0, &kinds, &mats, all, 100_000);
+
+        let a = here(10.0, 20.0);
+        // Three centres, each offset by more than Terra's 2 m rebuild threshold.
+        // Offsets of 4-9 m: well past Terra's 2 m rebuild threshold, well inside the disc.
+        for (dlat, dlon) in [(0.00004, 0.0), (0.0, 0.00008), (-0.00005, 0.00004)] {
+            let b = here(10.0 + dlat, 20.0 + dlon);
+            let mut matched = 0;
+            for p in &a {
+                let Some(q) = b.iter().find(|q| q.id == p.id) else {
+                    continue; // outside the other query's disc — not a disagreement
+                };
+                matched += 1;
+                assert_eq!(p.lat_deg, q.lat_deg, "a plant moved north/south");
+                assert_eq!(p.lon_deg, q.lon_deg, "a plant moved east/west");
+                assert_eq!(p.yaw, q.yaw, "a plant turned around");
+                assert_eq!(p.scale, q.scale, "a plant changed size");
+                assert_eq!(p.kind, q.kind, "a plant changed species");
+            }
+            assert!(
+                matched > a.len() / 3,
+                "the two views overlap substantially: {matched} of {}",
+                a.len()
+            );
+        }
+    }
+
+    /// ★ **Two species share the ground and never share an identity.** Robin: *"Different flora types
+    /// have different spacing, so lattices will overlap."* They must — grass grows under an oak, and
+    /// their spacings differ by two orders of magnitude — so the lattices are deliberately independent.
+    /// What must never overlap is the ID, or damaging a tuft would damage a tree.
+    #[test]
+    fn overlapping_lattices_never_share_an_identity() {
+        let (kinds, mats) = kinds();
+        let leaf = crate::materials::index_of(&mats, "broadleaf_foliage");
+        let grass = crate::materials::index_of(&mats, "grass");
+        let all = move |_: f64, _: f64| vec![(leaf, 1.0f32), (grass, 1.0f32)];
+        // 25 m: wide enough that the OAK lattice (16 m spacing, from its 9 m crown) has cells in it at
+        // all, which an 8 m disc does not — the two lattices differ by two orders of magnitude.
+        let out = scatter(10.0, 20.0, 25.0, &kinds, &mats, all, 100_000);
+        let by_kind: Vec<usize> = (0..kinds.len())
+            .map(|k| out.iter().filter(|s| s.kind == k).count())
+            .collect();
+        assert!(
+            by_kind.iter().all(|&n| n > 0),
+            "both species grow on this ground: {by_kind:?}"
+        );
+        let mut ids: Vec<_> = out.iter().map(|s| s.id).collect();
+        let n = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            n,
+            "every plant has its own identity across both lattices"
+        );
     }
 
     /// **Nothing grows on the sea, on bare rock, or on an ice sheet** — and it costs nothing to ask.
