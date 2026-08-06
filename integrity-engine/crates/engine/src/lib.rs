@@ -78,6 +78,9 @@ pub mod ballistics; // docs/46 row 33 - a confined gas doing work on a moving bo
 pub mod flight;
 /// ONE entry point for "two things met — what does the engine do?". Delegates to the laws that already
 /// own each half, so a new scene finds them instead of writing a third path.
+/// A placed, stateful thing — an INSTANCE of an assembly type (docs/67 step 2). The type is the
+/// species; this is the individual, and it is where damage, attitude, motion and containment live.
+pub mod instance;
 pub mod interaction;
 mod intercept; // the launch-window solve: release time chosen so the site rotates under the impact
 mod isotropy;

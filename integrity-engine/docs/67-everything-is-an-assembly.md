@@ -152,9 +152,16 @@ of verified physics — `enclosed_mass`, `moment_of_inertia`, `gravity_at`, `pre
 
 1. **Fix the record.** `docs/46` row 45, `docs/65` §4, the architecture page. Nothing is built on a page
    that is lying. *(Done with this document.)*
-2. **Instance versus type.** An `Assembly` definition and a *placed, stateful* instance become different
-   things. Nothing else on this list is possible without it — damage, attitude, momentum and containment
-   all need somewhere to live.
+2. **Instance versus type.** ✅ **BUILT 2026-08-05, unwired** (`instance.rs`, `docs/46` row 46).
+   `Instance` holds only STATE — identity, placement (position + attitude, in a container's frame),
+   motion, thermal energy, damage — while mass, extent, temperature and strength are all asked of the
+   TYPE, so ten thousand oaks do not carry ten thousand copies of one oak's mass. It is deliberately not
+   a fifth sibling of `orbit::Body` / `accretion::Body` / `interaction::BodyState` / `render::Drawn`:
+   those become **projections of it**, and `Instance::body_state` lives here so a view cannot quietly
+   disagree with the instance. Damage is measured in matter — halving every part halves the mass through
+   the same envelope × packing × density the definition uses, with no damage-to-mass curve anywhere.
+   ★ Nothing holds one yet, and the reason is this list: the first natural consumer is the cannon, whose
+   placement is geographic, which needs Earth to be a container — step 5.
 3. **Extent, attitude, momentum on the instance.** `reach_m` exists; the rest is state.
 4. **Containment as a derivable rule + exceptions**, proven on the case that already exists: a planet
    containing its flora. `scatter` is the rule; the exception set is new.

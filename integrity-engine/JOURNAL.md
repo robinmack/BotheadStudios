@@ -3,6 +3,47 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-05 — type versus instance, and the dependency it walked straight into
+
+**What.** docs/67 step 2. `broadleaf-tree-oak.json` is a species; the tree at 53.1°N is an individual.
+Until today the engine had only the first, so **damage had nowhere to live** — `terra::flora::Sited`
+carried lat/lon/kind/yaw/scale and no state at all, and a bus cannot crush a tree that has no state to
+be crushed in.
+
+★★ **The design constraint that shaped it: this must not become a FIFTH "thing at a place".** Four
+already exist and each is a view for one consumer — `orbit::Body` (pos/vel/mass, for the integrator),
+`accretion::Body` (+rho/radius/ang_mom/thermal, for clumping), `interaction::BodyState`
+(+radius/strength/air, for contact), `render::Drawn` (for drawing). None says which assembly it is an
+instance OF, none has an attitude, none carries damage, none knows what contains it. So `Instance` is
+**the thing they are projections of**: it holds only STATE — identity, placement (position + attitude,
+*in a container's frame*), motion, thermal energy, damage — and everything definitional is asked of the
+TYPE. `Instance::body_state` lives in the same file so a view cannot quietly disagree with the instance.
+
+Mass is deliberately not a field, though Robin's property list names it: ten thousand oaks would carry
+ten thousand copies of one oak's mass. It is derived from the type and reduced by this individual's own
+damage, through the same envelope × packing × density the definition uses — so half of every part is
+half the mass, with **no damage-to-mass curve anywhere**. Same for extent, temperature and strength.
+
+**Verified** (five tests): two instances of one oak share every definitional number and nothing else;
+tearing the crown off one reduces its mass AND its reach while leaving the other pristine and **the
+species untouched**; a gun placed in a ship's frame goes where the ship puts it when the ship turns,
+with no change to the gun; the collision projection reports what the instance says; and the same joules
+in a half-burnt tree is a higher temperature than in a whole one, because there is less matter to heat.
+
+★★ **AND IT HAS NO CONSUMER — filed as `docs/46` row 46 by its author, on the day it was written.**
+"The law is built and proven, then wired into one place or none" is this repo's most repeated failure
+(docs/48), and the only defence is naming each instance of it out loud rather than intending to wire it
+later. The reason here is a real dependency and the migration order predicted it: the obvious first
+consumer is Terra's cannon, whose `cannon_at` is `(lat, lon, bearing)` — a GEOGRAPHIC placement, which
+becomes a `Placement` only when the gun can be *within Earth*, and that needs Earth to be an assembly
+with an id. **Step 5.** Robin, on being told: *"Agreed, this is part of why Earth must be an assembly."*
+
+The second candidate fails for the other predicted reason: `flora::Sited` is regenerated from a position
+hash every rebuild, so an instance placed there would not survive a frame — the derivable-rule-plus-
+exceptions problem, step 4.
+
+**Verified.** 568/568 native, `mod app` clean for wasm32.
+
 ## 2026-08-05 — a planet is not an assembly, and the docs said it was
 
 **What.** Asked whether the Earth assembly contains plant assemblies, I answered that Earth is a
