@@ -41,11 +41,55 @@ use std::collections::BTreeMap;
 pub struct Region {
     pub centre_m: DVec3,
     pub radius_m: f64,
+    /// ★★ **What can be SEEN from the centre**, as a direction and the cosine of a half-angle — or
+    /// `None` for the whole ball.
+    ///
+    /// Robin: *"let's try to scope to what is visible… if trees overlap the region behind so the region
+    /// behind is invisible to the viewport/camera, then there's no need to spend compute on them."*
+    /// Right, and it lands on the exact line **Law IV** draws: the camera changes REPRESENTATION, never
+    /// EXISTENCE. A cone is therefore only ever legitimate for a query about what to DESCRIBE. The
+    /// hidden tree still exists, still stands in the way of a bus, and still gets crushed — it simply is
+    /// not detailed for a picture.
+    ///
+    /// So this field is the difference between the two kinds of question, made explicit in the type:
+    /// **a renderer asks a cone, physics asks the ball.** A query that narrows what is COMPUTED by what
+    /// is looked at would be Law IV inverted, and the way to catch that is for the narrowing to be
+    /// visible at every call site rather than buried in a rule.
+    pub facing: Option<(DVec3, f64)>,
 }
 
 impl Region {
+    /// Everything within `radius_m` — the honest question, and the one physics must ask.
+    pub fn ball(centre_m: DVec3, radius_m: f64) -> Region {
+        Region {
+            centre_m,
+            radius_m,
+            facing: None,
+        }
+    }
+
+    /// Only what lies within `half_angle` of `dir` — a question about what to DESCRIBE. See `facing`.
+    pub fn seen(centre_m: DVec3, radius_m: f64, dir: DVec3, half_angle: f64) -> Region {
+        Region {
+            centre_m,
+            radius_m,
+            facing: Some((dir.normalize_or_zero(), half_angle.cos())),
+        }
+    }
+
     pub fn contains(&self, p: DVec3) -> bool {
-        (p - self.centre_m).length_squared() <= self.radius_m * self.radius_m
+        let d = p - self.centre_m;
+        if d.length_squared() > self.radius_m * self.radius_m {
+            return false;
+        }
+        match self.facing {
+            None => true,
+            // Anything at the centre is in view whichever way it faces.
+            Some((dir, cos_half)) => {
+                let len = d.length();
+                len < 1e-12 || d.dot(dir) / len >= cos_half
+            }
+        }
     }
 }
 
@@ -60,15 +104,23 @@ impl InstanceId {
     /// `salt` separates rules that share a container, so a planet's trees and its boulders cannot
     /// collide. The mixing is the same one `terra::flora::cell_unit` uses.
     pub fn derived(salt: u64, cell: (i64, i64), index: u64) -> InstanceId {
-        let mut h = (cell.0 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
-            ^ (cell.1 as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
-            ^ salt.wrapping_mul(0x1656_67B1_9E37_79F9)
-            ^ index.wrapping_mul(0xD6E8_FEB8_6659_FD93);
-        h ^= h >> 33;
-        h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
-        h ^= h >> 33;
-        h = h.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
-        InstanceId(h ^ (h >> 33))
+        // ★★ MIXED SEQUENTIALLY, NOT XOR-ED TOGETHER. The first version of this combined the inputs as
+        // `(x·A) ^ (z·B) ^ (salt·C) ^ (index·D)` and then finalised — which is not a hash, it is four
+        // numbers laid on top of each other, and it COLLIDED on the first realistic test: the trees at
+        // cells (−3, 1) and (3, −1) came back with one identity. Two trees sharing an id means damaging
+        // one damages the other, and a bus crushing a tree in front of you splinters one behind you.
+        // Caught by `looking_narrows_what_is_described_and_changes_nothing_about_it`, which compared
+        // two views of one wood and found the same id in two places.
+        let mut h = 0xCBF2_9CE4_8422_2325u64; // FNV offset basis, as a starting state
+        for x in [salt, cell.0 as u64, cell.1 as u64, index] {
+            h ^= x;
+            h = h.wrapping_mul(0x0100_0000_01B3); // FNV prime: every input reaches every later bit
+            h ^= h >> 29;
+        }
+        // Final avalanche (splitmix64), so neighbouring cells are not neighbouring ids.
+        h = (h ^ (h >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        h = (h ^ (h >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        InstanceId(h ^ (h >> 31))
     }
 }
 
@@ -159,12 +211,19 @@ impl Contents {
 
 #[cfg(test)]
 mod tests {
+    use super::tests_support::*;
     use super::*;
-    use crate::instance::Placement;
+}
 
-    /// A stand-in for `terra::flora::scatter`: one tree per metre of grid, generated from position and
-    /// nothing else. The point is not the trees — it is that the rule keeps no list.
-    struct Grid {
+/// The fake rule both test modules drive. A stand-in for `terra::flora::scatter`: one tree per metre of
+/// grid, generated from position and nothing else. The point is not the trees — it is that the rule
+/// keeps no list.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::*;
+    use crate::instance::{Instance, Placement};
+
+    pub struct Grid {
         salt: u64,
         calls: usize,
     }
@@ -193,14 +252,11 @@ mod tests {
         }
     }
 
-    fn grid() -> Grid {
+    pub fn grid() -> Grid {
         Grid { salt: 7, calls: 0 }
     }
-    fn region(r: f64) -> Region {
-        Region {
-            centre_m: DVec3::ZERO,
-            radius_m: r,
-        }
+    pub fn region(r: f64) -> Region {
+        Region::ball(DVec3::ZERO, r)
     }
 
     /// ★★★ **A CONTAINER FULL OF PRISTINE THINGS STORES NOTHING.** The whole scalability argument, as
@@ -241,10 +297,7 @@ mod tests {
         let mut shifted = Vec::new();
         contents.resolve(
             &mut grid(),
-            &Region {
-                centre_m: DVec3::new(4.0, 0.0, 0.0),
-                radius_m: 12.0,
-            },
+            &Region::ball(DVec3::new(4.0, 0.0, 0.0), 12.0),
             &mut shifted,
         );
         let here = a.iter().find(|i| i.placement.at_m == DVec3::ZERO).unwrap();
@@ -371,12 +424,83 @@ mod tests {
         // ...and it is only there when you are looking somewhere that contains it.
         contents.resolve(
             &mut grid(),
-            &Region {
-                centre_m: DVec3::new(500.0, 0.0, 500.0),
-                radius_m: 6.0,
-            },
+            &Region::ball(DVec3::new(500.0, 0.0, 500.0), 6.0),
             &mut out,
         );
         assert!(out.iter().all(|i| i.id != InstanceId(1)));
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    /// ★★ **NO TWO CELLS MAY SHARE AN IDENTITY.** A collision means damaging one tree damages another
+    /// somewhere else, and the first version of `derived` had one — cells (−3, 1) and (3, −1), found by
+    /// a test that was looking for something else entirely.
+    ///
+    /// This walks a realistic patch and every salt a handful of overlapping rules would use, because
+    /// species share ground deliberately (Robin: *"different flora types have different spacing, so
+    /// lattices will overlap"*) and only the identities must stay apart.
+    #[test]
+    fn a_wood_of_cells_never_repeats_an_identity() {
+        let mut ids = Vec::with_capacity(64 * 400 * 400);
+        for salt in 0..4u64 {
+            for x in -200..200i64 {
+                for z in -200..200i64 {
+                    ids.push(InstanceId::derived(salt, (x, z), 0));
+                }
+            }
+        }
+        let n = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            n,
+            "{} collisions across {n} cells — a collision is two trees with one fate",
+            n - ids.len()
+        );
+    }
+}
+
+#[cfg(test)]
+mod visibility_tests {
+    use super::tests_support::*;
+    use super::*;
+
+    /// ★★ **A CONE ASKS FOR FEWER THINGS, NEVER FOR DIFFERENT ONES** — which is Law IV as an assertion.
+    ///
+    /// Robin: *"let's try to scope to what is visible."* The saving is real and so is the constraint:
+    /// what a narrowed query returns must be a SUBSET of what the ball returns, identical in identity
+    /// and position. If looking somewhere changed what was there, the camera would be deciding
+    /// existence.
+    #[test]
+    fn looking_narrows_what_is_described_and_changes_nothing_about_it() {
+        let contents = Contents::new();
+        let (mut all, mut seen) = (Vec::new(), Vec::new());
+        contents.resolve(&mut grid(), &Region::ball(DVec3::ZERO, 20.0), &mut all);
+        // A 40-degree half-angle looking down +X — roughly a viewport.
+        contents.resolve(
+            &mut grid(),
+            &Region::seen(DVec3::ZERO, 20.0, DVec3::X, 40f64.to_radians()),
+            &mut seen,
+        );
+
+        assert!(!seen.is_empty(), "something is in view");
+        assert!(
+            seen.len() * 3 < all.len(),
+            "a 40-degree cone is a small share of the ball: {} of {}",
+            seen.len(),
+            all.len()
+        );
+        // ★ Every visible thing is EXACTLY the thing the ball had — same id, same place.
+        for v in &seen {
+            let same = all
+                .iter()
+                .find(|a| a.id == v.id)
+                .expect("in view but not in the world");
+            assert_eq!(same, v, "looking at a tree must not change the tree");
+        }
     }
 }

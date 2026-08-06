@@ -3,6 +3,52 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-05 — the trees stay put, and a test found two of them wearing one identity
+
+**What.** `flora::scatter`'s lattice is now a fact about the GROUND rather than about the observer
+(`docs/46` row 47, closed). Spacing comes from the kind's own crown, cells are indexed from a global
+origin, and each row's east-west spacing comes from the ROW INDEX rather than from the camera. Cover no
+longer resizes the lattice — it decides OCCUPANCY cell by cell, which is what a cover fraction means,
+and which also makes density follow the cover at each plant's own position instead of the one sampled at
+the query centre.
+
+Two tests: the same ground asked from three centres 4–9 m apart returns the same plants, with the same
+ids, positions, yaw and scale; and two species sharing ground never share an identity. Robin: *"different
+flora types have different spacing, so lattices will overlap"* — they must, since grass grows under an
+oak, so the lattices are independent by design and the kind goes into every hash.
+
+★★ **And a test looking for something else found an ID COLLISION.** `InstanceId::derived` combined its
+inputs as `(x·A) ^ (z·B) ^ (salt·C) ^ (index·D)` — which is not a hash, it is four numbers laid on top of
+each other — and cells (−3, 1) and (3, −1) came back with one identity. **A collision means damaging one
+tree damages another**, so a bus crushing a tree in front of you splinters one behind you. Now mixed
+sequentially (FNV, then a splitmix64 avalanche) and pinned by
+`a_wood_of_cells_never_repeats_an_identity`, which walks 640,000 cells across four salts.
+
+★ **The view cone, and the line it draws.** Robin: *"let's try to scope to what is visible… if trees
+overlap the region behind, there's no need to spend compute on them."* Right, and it lands exactly on
+**Law IV**: the camera changes REPRESENTATION, never EXISTENCE. So `Region` now carries an optional
+facing, and the distinction is in the type — **a renderer asks a cone, physics asks the ball.** The
+hidden tree still stands in the way of the bus. `looking_narrows_what_is_described_and_changes_nothing_about_it`
+asserts a cone returns a strict subset, identical in identity and position, which is what caught the
+collision.
+
+★★★ **Damage has a resolution too.** Robin: *"if that bus crushes 30 trees, we know it. Until it's
+visible we don't have to worry about which way they fell or how they splintered."* That is Law III
+applied to consequences instead of to matter: "this trunk is 40% gone" is the cheap true statement and it
+answers mass, extent, whether the tree still stands and what the bus lost. Which way it fell is a finer
+description of the same event. The constraint that keeps it honest is docs/63's convergence invariant
+generalised — **resolving further must not change the coarse answer** — so splintering must conserve the
+mass the integrity fraction already spent. Written into `Damage`'s own doc, with the resolved counterpart
+named: per-part fracture through `Connection`s and `fracture_strength`, producing `damage::Fragment`s,
+all of which exist.
+
+**And Robin's steer on where the effort goes:** *"I'm more concerned with getting things right in the
+first brush then optimizing."* The measured cost of the absolute lattice (~220k cells for grass over a
+25 m disc, 1.7× the old one) is recorded in place with two honest ways down, and neither is being taken
+until a rig measures a rebuild in a real scene.
+
+**Verified.** 581/581 native, `mod app` clean for wasm32.
+
 ## 2026-08-05 — containment: a rule and its exceptions, and the trees that move when you walk
 
 **What.** docs/67 step 4. A planet contains ~10^12 trees and no list of them, so containment is **a RULE

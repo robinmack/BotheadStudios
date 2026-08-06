@@ -122,6 +122,24 @@ pub struct Damage {
     pub severed: Vec<usize>,
 }
 
+/// ★★★ **DAMAGE HAS A RESOLUTION TOO, and this type is the coarse end of it.**
+///
+/// Robin, 2026-08-05: *"if that bus crushes 30 trees, we know it. Until it's visible we don't have to
+/// worry about which way they fell or how they splintered."*
+///
+/// That is Law III — *simulate what you can, compute what you can't* — applied to consequences rather
+/// than to matter. "This trunk is 40% gone" is the cheap true statement, and it is enough to answer
+/// mass, extent, whether the tree still stands and what the bus lost doing it. Which way it fell, where
+/// along the grain it split, and how many splinters went where are a FINER description of the same
+/// event, and they are worth computing when something is close enough to see them.
+///
+/// The constraint that makes it honest is docs/63's convergence invariant, generalised: **resolving
+/// further must not change the coarse answer.** Splintering a trunk into pieces has to conserve the
+/// mass the integrity fraction already said was lost, or the bus crushed a different tree than the one
+/// the physics charged it for.
+///
+/// So the resolved counterpart is named and not yet built: per-part fracture through `Connection`s and
+/// the material's own `fracture_strength`, producing `damage::Fragment`s — all of which exist.
 impl Damage {
     /// How much of part `i` is left, 1.0 for anything this damage record has nothing to say about.
     pub fn integrity(&self, i: usize) -> f64 {
