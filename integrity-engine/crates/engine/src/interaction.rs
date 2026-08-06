@@ -41,7 +41,7 @@ use glam::DVec3;
 
 /// A body as the engine holds it — everything the collision owner needs to forecast and size a contact.
 /// The scene supplies these (which bodies, where, how fast); the engine reads them.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BodyState {
     pub pos: DVec3,
     pub vel: DVec3,

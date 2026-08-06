@@ -85,6 +85,35 @@ is being refactored toward is [`docs/33-architecture-realignment.md`](docs/33-ar
   2026-07-21 at Robin's request (docs/50), and the **`Ground` scene that replaced it was deleted
   2026-08-03** (docs/46 row 37): a 96³ voxel cube of invented relief claiming a real coordinate on Earth.
   Its shader `world.wgsl` went with it, so there is one fewer surface render path.
+- ★★★ **EVERYTHING IS AN ASSEMBLY — AND A PLANET IS NOT ONE YET.** Read
+  [`docs/67`](docs/67-everything-is-an-assembly.md) **before designing anything about bodies, planets,
+  containment or collision.** This entry exists because the same argument was had from scratch on
+  2026-08-05 after two days of work were described in assembly language while `docs/65` §4 — titled
+  *"Where it stands, honestly"* — never mentioned it, and the deployed architecture page said *"adding a
+  species, a vehicle or a planet is adding an assembly"* in the present tense. Robin: *"A layered body is
+  either a bad assessment or the last couple of days work with Claude are a lie."* The state:
+  - `assembly::Assembly` describes **six** objects (cannon, charge, shot, oak, spruce, grass tuft).
+    Every planet is a `planet::LayeredBody` — layers, an atmosphere mass, surface rasters, no parts.
+  - **It is ONE thing, not two, and the engine already proves it both ways.** Robin: *"A planet is an
+    accretion of debris bound by its own gravitational effects which we've worked hard to model."*
+    `HydroBody::particalize` makes particles from layers; `accretion::sample_layers` makes layers from
+    particles. A `LayeredBody` is a **de-resolved summary of an assembly of matter** — what `Derived`
+    already is to `Assembly::parts`. The split is lineage (layers from the giant impact, assemblies from
+    the cannon), not principle.
+  - ★★★ **THE SCALABILITY LAW** (Robin, and it is what makes 10¹² trees affordable): *"Oaks can be
+    handled as identical to their construction until they are damaged, at which point they become
+    unique."* So a pristine instance **need not exist** — the containing assembly's rule generates it and
+    the TYPE answers every observable. A world stores **divergences, not individuals**. Never
+    materialise an instance to read it; materialise when something happens to it.
+  - **An assembly ends at the outermost boundary of its outermost component** (`Assembly::reach_m`) —
+    NOT "where its air ends", which teaches the engine a special case. Earth's air is merely its
+    outermost component; a mast, a canopy and a muzzle ask the identical question.
+  - **Type vs instance is built** (`instance.rs`) and **has no consumer** (`docs/46` row 46). Both
+    blockers are the same blocker: the cannon's placement is geographic, so it needs Earth as a
+    CONTAINER, and flora is hash-generated, so it needs the exception set. **Earth-as-assembly is not
+    step 5 because it is hard; it is step 5 because two other steps wait on it.**
+  - **One implementation, many instances.** If per-assembly collision solvers land, that is the rule —
+    per-assembly solver STATE, never per-assembly-type solver CODE. Gate it by counting implementations.
 - ★★ **A SCENE IS CHARACTERS AND SETTING; AN ASSEMBLY IS AN ACTOR; THE ENGINE IS DIRECTOR AND STAGE**
   (`docs/65`, Robin 2026-08-03). *"Setting a scene should never involve changes to the engine."* The
   permitted scene API is tiny and `laws::scene_api_tests` is a RATCHET over it: a new route fails the

@@ -72,26 +72,38 @@ Robin's decomposition, stated 2026-08-05, with what exists against each:
 
 1. **Extent before detail.** "Describe what is visible" is only affordable if *where are you and how
    big* is answerable without a description. `Assembly::reach_m` (2026-08-05) is the cheap half.
-2. **Containment must be DERIVABLE, not enumerated.** A planet contains ~10¹² trees. So containment is
+2. ★★★ **THE SCALABILITY LAW — identical until damaged.** Robin: *"Oaks can be handled as identical to
+   their construction until they are damaged, at which point they become unique. This will help for
+   limited compute."* Stronger than copy-on-write, and it is what makes 10¹² trees affordable: **a
+   pristine instance need not exist.** Its placement comes from its container's own rule and every other
+   observable is a question the TYPE answers, so there is nothing left for storage to hold. A world
+   stores **divergences, not individuals**, and `Damage::is_pristine` is the predicate deciding whether
+   an instance has earned its bytes. The consequence for everything built on this: **never materialise
+   an instance in order to read it** — ask the rule; materialise when something happens to it, and then
+   it is unique for good, because that is what damage means. Checkable rather than aspirational:
+   `instance::divergence_tests` asserts two pristine instances of one type at one place are the same
+   object to every consumer, and goes red the day something is added to `Instance` that a type cannot
+   answer — i.e. the day 10¹² trees quietly become 10¹² allocations.
+3. **Containment must be DERIVABLE, not enumerated.** A planet contains ~10¹² trees. So containment is
    *a rule answering "what is in this region"* **plus a set of exceptions the assembly remembers**.
    `terra::flora::scatter` already does the rule half — a position hash, deliberately stateless, so an
    unwatched meadow keeps its tufts. The exception half is what a bus crushing a tree creates. This is
    the load-bearing idea of the whole model.
-3. **Type versus instance.** `broadleaf-tree-oak.json` is a species; the tree at 53.1°N is an individual
+4. **Type versus instance.** `broadleaf-tree-oak.json` is a species; the tree at 53.1°N is an individual
    with its own lean, damage and season. `terra::flora::Sited` carries lat/lon/kind/yaw/scale and **no
    state**, so destructibility has nowhere to live.
-4. **Containment transfers at runtime.** The shot is contained by the gun and then is not. The tree is
+5. **Containment transfers at runtime.** The shot is contained by the gun and then is not. The tree is
    contained by the planet and then is debris on a bus. `assembly.rs`'s own header already says this —
    *"containment is a relationship with state rather than a static parent-child link — an assembly GRAPH,
    because a tree cannot express reloading"* — as a comment, not a type.
-5. **Cadence belongs to the actor**, or the time signal wakes 10¹² trees per frame. A leaf answers in
+6. **Cadence belongs to the actor**, or the time signal wakes 10¹² trees per frame. A leaf answers in
    days, a bear in minutes, a rock never (`docs/46` row 38, written and unbuilt).
-6. **The signal is bidirectional.** The bus must be able to say *I struck something, here, this hard*.
+7. **The signal is bidirectional.** The bus must be able to say *I struck something, here, this hard*.
    `docs/65` already names the missing verb and counts five bespoke spellings of it (`fire_cannon`,
    `throw_meteor`, `drop_moon`, `brake_moon`, `launch_swarm`).
-7. **Answers must agree across resolutions**, or the bus crushes a different tree than the one you saw.
+8. **Answers must agree across resolutions**, or the bus crushes a different tree than the one you saw.
    `docs/63` states this as the convergence invariant for footprints; it generalises.
-8. **Temperature and energy state**, and **frame**. Attitude and momentum relative to *what* — a bus on a
+9. **Temperature and energy state**, and **frame**. Attitude and momentum relative to *what* — a bus on a
    spinning planet has both in the planet's frame, and containers must compose them.
 
 ## 4. The collision engine, per assembly

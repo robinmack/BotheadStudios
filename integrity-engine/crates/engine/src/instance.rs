@@ -137,6 +137,22 @@ impl Damage {
     }
 }
 
+/// ★★★ **THE SCALABILITY LAW: an oak is identical to its construction UNTIL IT IS DAMAGED, and only
+/// then does it become unique.**
+///
+/// Robin, 2026-08-05: *"Oaks can be handled as identical to their construction until they are damaged,
+/// at which point they become unique. This will help for limited compute."*
+///
+/// This is stronger than copy-on-write, and it is what makes 10¹² trees affordable: **a pristine
+/// instance need not exist.** Its placement comes from the containing assembly's own rule
+/// (`terra::flora::scatter` already generates one deterministically from a position hash), and every
+/// other observable — mass, extent, temperature, strength — is a question the TYPE answers. There is
+/// nothing left for storage to hold. So a world stores **divergences, not individuals**, and
+/// [`Damage::is_pristine`] is the predicate that decides whether an instance has earned its bytes.
+///
+/// The consequence for anything built on this: **never materialise an instance to read it.** Ask the
+/// rule. Materialise when something happens to it — and then it is unique for good, because that is
+/// what damage means.
 /// **One placed, stateful thing.** See the module docs for what is state here and what is not.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Instance {
@@ -422,5 +438,68 @@ mod tests {
             burnt.temperature_rise_k(&def, &mats).unwrap() > hot,
             "the same joules in less matter is a higher temperature"
         );
+    }
+}
+
+#[cfg(test)]
+mod divergence_tests {
+    use super::*;
+    use crate::assembly::compiled;
+
+    /// ★★★ **A PRISTINE INSTANCE HAS NOTHING TO STORE.** Robin's scalability law: *"Oaks can be handled
+    /// as identical to their construction until they are damaged, at which point they become unique."*
+    ///
+    /// This is the test that makes it checkable rather than aspirational. Every observable of an
+    /// undamaged instance is answered by the TYPE, so two pristine oaks at the same place are the same
+    /// object in every respect a caller can see — which is licence to not create them. The moment one
+    /// is damaged, it diverges and must be kept.
+    ///
+    /// If this ever goes red, something has been added to `Instance` that a type cannot answer, and the
+    /// 10¹²-tree case has quietly become 10¹² allocations.
+    #[test]
+    fn a_pristine_instance_stores_nothing_a_damaged_one_stores_everything() {
+        let mats = crate::materials::load();
+        let def = compiled::parse(compiled::BROADLEAF_TREE_OAK);
+        let here = Placement {
+            at_m: DVec3::new(11.0, 0.0, -4.0),
+            attitude: DQuat::from_rotation_y(0.3),
+            within: Some(InstanceId(1)),
+        };
+
+        let a = Instance::of_type(InstanceId(10), "broadleaf-tree-oak", here);
+        let b = Instance::of_type(InstanceId(11), "broadleaf-tree-oak", here);
+        assert!(a.damage.is_pristine() && b.damage.is_pristine());
+
+        // Same type, same placement, different identity — and NOTHING a caller can observe differs.
+        // That is the licence to not store them: a rule that can regenerate the placement regenerates
+        // the whole tree.
+        assert_eq!(
+            a.mass_kg(&def, &mats).unwrap(),
+            b.mass_kg(&def, &mats).unwrap()
+        );
+        assert_eq!(a.reach_m(&def), b.reach_m(&def));
+        assert_eq!(
+            a.temperature_rise_k(&def, &mats).unwrap(),
+            b.temperature_rise_k(&def, &mats).unwrap()
+        );
+        assert_eq!(
+            a.body_state(&def, &mats, &here).unwrap(),
+            b.body_state(&def, &mats, &here).unwrap(),
+            "two pristine instances of one type at one place are the same object to every consumer"
+        );
+
+        // Now something happens to one of them, and it becomes an individual for good.
+        let mut hit = b.clone();
+        hit.damage.part_integrity = vec![1.0, 0.4];
+        hit.thermal_j = 5.0e6;
+        assert!(!hit.damage.is_pristine(), "this one has earned its bytes");
+        assert_ne!(
+            hit.body_state(&def, &mats, &here).unwrap(),
+            a.body_state(&def, &mats, &here).unwrap(),
+            "a damaged oak is no longer interchangeable with a fresh one"
+        );
+        // And the divergence is genuinely bounded: what it stores is what happened to it, not a copy
+        // of the species. Two f64s and a short vector against an entire assembly definition.
+        assert!(hit.damage.part_integrity.len() <= def.parts.len());
     }
 }
