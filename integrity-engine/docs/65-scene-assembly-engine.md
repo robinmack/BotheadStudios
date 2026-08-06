@@ -122,6 +122,15 @@ fetching is delegated. That is what every scene/engine boundary should look like
 
 ## 4. Where it stands, honestly
 
+★★★ **AMENDED 2026-08-05 — this section was titled "honestly" and left out the biggest thing.**
+It counted the scene-API debt and never said that **no planet is an assembly**. `assembly::Assembly`
+describes six objects (cannon, charge, shot, oak, spruce, grass tuft); every planet is a
+`planet::LayeredBody`, a different format that knows nothing about parts, containment or connections.
+So the model this document states — *"adding a species, a vehicle or a planet is adding an assembly"* —
+is true of species and vehicles and **false of planets**, and saying so was left to a conversation two
+days later rather than to the doc that exists to say it. `docs/67` states the unified model and the
+migration; `docs/46` row 45 carries the violation.
+
 Measured 2026-08-03 by scanning `web/src/*.ts` for calls on the engine handle:
 
 - **79 distinct engine methods are called by scene code.**

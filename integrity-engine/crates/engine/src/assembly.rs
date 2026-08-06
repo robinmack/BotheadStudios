@@ -98,6 +98,29 @@ impl Shape {
         }
     }
 
+    /// ★★ **How far this shape REACHES from its own centre**, metres — the radius of the smallest
+    /// sphere about that centre that contains it.
+    ///
+    /// This is not [`Shape::equivalent_radius_m`] and the difference is the point: the equal-VOLUME
+    /// radius answers *"how big is this, roughly"* and is right for summarising a distant object,
+    /// while this answers *"where does it END"* and is the only one that can bound anything. A 3 m
+    /// barrel 0.1 m across has an equivalent radius of 0.19 m and a reach of 1.5 m — a factor of eight,
+    /// and in the direction that matters.
+    pub fn reach_m(&self) -> f64 {
+        match *self {
+            Shape::Sphere { r } => r.max(0.0),
+            // Corner of the cylinder: the rim of an end cap.
+            Shape::Cylinder { r, length } => r.max(0.0).hypot(0.5 * length.max(0.0)),
+            Shape::Tube {
+                r_outer, length, ..
+            } => r_outer.max(0.0).hypot(0.5 * length.max(0.0)),
+            // Half the body diagonal.
+            Shape::Slab { x, y, z } => {
+                0.5 * (x.max(0.0).powi(2) + y.max(0.0).powi(2) + z.max(0.0).powi(2)).sqrt()
+            }
+        }
+    }
+
     /// The radius of the sphere of equal volume — how a part summarises when it is too far away to
     /// resolve (docs/44). One reduction for every shape, so a distant gun and a distant boulder are
     /// summarised the same way.
@@ -191,6 +214,14 @@ fn along_x() -> [f64; 3] {
 }
 
 impl Part {
+    /// **How far this part reaches from the ASSEMBLY's origin**, metres — its offset plus its own
+    /// reach. Conservative where the part's long axis is not radial, exact where it is; either way it
+    /// is a bound that contains the part, which is what a boundary has to be.
+    pub fn reach_m(&self) -> f64 {
+        let d = (self.at_m[0].powi(2) + self.at_m[1].powi(2) + self.at_m[2].powi(2)).sqrt();
+        d + self.shape.reach_m()
+    }
+
     /// The space this part takes up, m³ — its shape, void included.
     pub fn envelope_volume_m3(&self) -> f64 {
         self.shape.volume_m3()
@@ -253,6 +284,26 @@ pub struct Derived {
 }
 
 impl Assembly {
+    /// ★★ **WHERE THIS ASSEMBLY ENDS**, metres from its own origin — the outermost boundary of its
+    /// outermost component, and nothing else.
+    ///
+    /// Robin, stating the rule after correcting a narrower one of mine (2026-08-05): *"'A body ends
+    /// where its AIR ends' is not accurate, as bodies are assemblies. **An assembly ends at the
+    /// outermost boundary of the assembly.**"* The context was Earth: its atmosphere is a COMPONENT,
+    /// so Earth reaches ~97 km past its rock — but naming the rule after air would teach the engine a
+    /// special case, when the identical question is asked by a tree's canopy, a ship's mast, a
+    /// cannon's muzzle and a planet's air. One rule; whichever component is outermost wins.
+    ///
+    /// An assembly with no parts reaches nowhere, which is correct rather than an error: it is not
+    /// there.
+    ///
+    /// ★ This exists because things downstream were INFERRING it — a rig scanning pixel columns for
+    /// the edge of a planet, a ballistics helper reaching for the equal-volume radius because there
+    /// was nothing else to reach for. A boundary is a fact the assembly holds.
+    pub fn reach_m(&self) -> f64 {
+        self.parts.iter().map(Part::reach_m).fold(0.0, f64::max)
+    }
+
     /// Parse an assembly definition.
     pub fn from_json(text: &str) -> Result<Assembly, String> {
         serde_json::from_str(text).map_err(|e| format!("assembly definition: {e}"))
@@ -1286,6 +1337,133 @@ mod plant_tests {
                      grows in — does not contain it. Then the ground seen from orbit and the plant \
                      seen from a metre away are different matter, and the camera has changed what is \
                      TRUE rather than how finely it is computed (Law IV)."
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod reach_tests {
+    use super::*;
+
+    fn part(name: &str, shape: Shape, at: [f64; 3]) -> Part {
+        Part {
+            name: name.into(),
+            material: "iron".into(),
+            shape,
+            along: [1.0, 0.0, 0.0],
+            at_m: at,
+            packing: 1.0,
+        }
+    }
+
+    /// ★★ **An assembly ends at its OUTERMOST component — not its biggest, not its heaviest.**
+    ///
+    /// Robin, 2026-08-05: *"An assembly ends at the outermost boundary of the assembly."* A ship is
+    /// bounded by its MAST, which is neither its largest part nor its most massive, and any boundary
+    /// taken from volume or mass gets it wrong.
+    #[test]
+    fn an_assembly_ends_at_its_outermost_component_whichever_that_is() {
+        let hull = part(
+            "hull",
+            Shape::Slab {
+                x: 20.0,
+                y: 4.0,
+                z: 6.0,
+            },
+            [0.0, 0.0, 0.0],
+        );
+        let mast = part(
+            "mast",
+            Shape::Cylinder {
+                r: 0.2,
+                length: 18.0,
+            },
+            [0.0, 12.0, 0.0],
+        );
+        let ship = Assembly {
+            id: "ship".into(),
+            name: "ship".into(),
+            parts: vec![hull.clone(), mast.clone()],
+            connections: vec![],
+            notes: String::new(),
+            derived: None,
+        };
+        assert!(
+            hull.shape.volume_m3() > 100.0 * mast.shape.volume_m3(),
+            "the hull is by far the larger part"
+        );
+        assert!(
+            (ship.reach_m() - mast.reach_m()).abs() < 1e-9,
+            "the mast bounds the ship ({:.2} m), not the hull ({:.2} m)",
+            mast.reach_m(),
+            hull.reach_m()
+        );
+
+        // A component farther out moves the boundary, however small it is.
+        let mut flagged = ship.clone();
+        flagged.parts.push(part(
+            "pennant",
+            Shape::Slab {
+                x: 0.01,
+                y: 0.3,
+                z: 0.6,
+            },
+            [0.0, 21.5, 0.0],
+        ));
+        assert!(flagged.reach_m() > ship.reach_m());
+
+        // An assembly with nothing in it reaches nowhere. Not an error — it is not there.
+        assert_eq!(
+            Assembly {
+                parts: vec![],
+                ..ship
+            }
+            .reach_m(),
+            0.0
+        );
+    }
+
+    /// **Reach answers "where does it end", `equivalent_radius_m` answers "how big is it" — and taking
+    /// one for the other was a live error** in `ballistics::fire`, which read a gun's lowest matter off
+    /// the equal-VOLUME radius. For a barrel the two differ by more than six times.
+    #[test]
+    fn reach_is_not_the_equal_volume_radius() {
+        let barrel = Shape::Tube {
+            r_outer: 0.16,
+            r_bore: 0.14,
+            length: 3.0,
+        };
+        assert!(
+            barrel.reach_m() > 6.0 * barrel.equivalent_radius_m(),
+            "a 3 m barrel reaches {:.2} m and summarises as {:.2} m",
+            barrel.reach_m(),
+            barrel.equivalent_radius_m()
+        );
+        // A sphere is the one shape where they agree — which is why a sphere-only engine never notices.
+        let ball = Shape::Sphere { r: 0.07 };
+        assert!((ball.reach_m() - ball.equivalent_radius_m()).abs() < 1e-12);
+    }
+
+    /// The real cannon, so the rule is exercised on a compiled assembly and not only on a fixture.
+    #[test]
+    fn a_real_assembly_contains_every_one_of_its_parts() {
+        for (id, text) in [
+            ("naval-24pdr-gun", compiled::NAVAL_24PDR_GUN),
+            ("broadleaf-tree-oak", compiled::BROADLEAF_TREE_OAK),
+            ("conifer-tree-spruce", compiled::CONIFER_TREE_SPRUCE),
+        ] {
+            let a = compiled::parse(text);
+            let reach = a.reach_m();
+            assert!(reach > 0.0, "{id} has an extent");
+            for p in &a.parts {
+                assert!(
+                    p.reach_m() <= reach + 1e-9,
+                    "{id}: part {} reaches {:.3} m, past the assembly's {:.3} m",
+                    p.name,
+                    p.reach_m(),
+                    reach
                 );
             }
         }

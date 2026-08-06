@@ -4,11 +4,11 @@
 // realistic flora at very low altitude."* This walks the camera DOWN over Galway and reports how many
 // plants the engine resolved at each altitude. Above ~300 m a tuft is sub-pixel and the ground's albedo
 // is the whole answer; below it the same ground answers with the plants themselves.
-import { launch } from './_launch.mjs';
+import { launch, VIEWPORT } from './_launch.mjs';
 const out = process.env.OUT || '/tmp/rigshot';
 const [LAT, LON] = [53.10, -9.45];
 const b = await launch();
-const p = await b.newPage({ viewport: { width: 900, height: 620 } });
+const p = await b.newPage({ viewport: VIEWPORT });
 p.on('pageerror', e => console.log('PAGEERR:', e.message.split('\n')[0]));
 await p.route('**/__log', async (r) => {
   const d = r.request().postData();

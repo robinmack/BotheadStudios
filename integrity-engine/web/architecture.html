@@ -125,6 +125,16 @@
       footer { border-top: 1px solid var(--hair-2); margin-top: 70px; padding: 22px 0 40px; }
       .foot { display: flex; justify-content: space-between; color: var(--steel-dim); font-size: 12px; }
       .scroller { overflow-x: auto; }
+      /* A correction the page has to carry visibly. This one exists because the diagram ran ahead of
+         the engine and nobody could tell from the page. */
+      .caveat {
+        border-left: 2px solid var(--dirt);
+        background: rgba(154, 107, 64, 0.07);
+        padding: 12px 16px;
+        border-radius: 0 6px 6px 0;
+        font-size: 13.5px;
+      }
+      .caveat strong { color: var(--amber-pale); }
     </style>
   </head>
   <body>
@@ -282,7 +292,20 @@
       <p>
         The engine holds the clock and the state of the universe. Each step it signals the actors, they
         answer, and it renders the answers. Nothing in that loop needs to know what kind of thing it is
-        talking to — which is why adding a species, a vehicle or a planet is adding an assembly.
+        talking to — which is why adding a species or a vehicle is adding an assembly.
+      </p>
+      <p class="caveat">
+        <strong>Not yet true of planets.</strong> This page described the model in the present tense and
+        it was ahead of the code. Today an assembly describes six objects — a cannon, its charge and
+        shot, an oak, a spruce, a tuft of grass — while every planet is a different format
+        (<code>LayeredBody</code>: concentric layers, an atmosphere mass, surface rasters) that knows
+        nothing about parts, containment or connections. The split is lineage rather than principle: a
+        planet is an accretion of debris bound by its own gravity, and the engine already converts
+        between layers and particles in both directions, so a layered body <em>is</em> a de-resolved
+        assembly of matter. Unifying them is written up as
+        <a href="https://github.com/robinmack/BotheadStudios/blob/main/integrity-engine/docs/67-everything-is-an-assembly.md">docs/67</a>,
+        and the gap is recorded as row&nbsp;45 of the conformance ledger. Stated here because a diagram
+        that quietly runs ahead of its engine is how a model stops being checkable.
       </p>
 
       <figure>

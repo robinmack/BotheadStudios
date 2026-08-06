@@ -3,6 +3,53 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-05 — a planet is not an assembly, and the docs said it was
+
+**What.** Asked whether the Earth assembly contains plant assemblies, I answered that Earth is a
+`planet::LayeredBody`. Robin: *"WHAT? Everything we've done is supposedly building an assembly of earth,
+and you blithely inform me it is a LayeredBody? … A layered body is either a bad assessment or the last
+couple of days work with Claude are a lie."*
+
+**The assessment was right and the DOCUMENTATION was the lie.** `assets/bodies/earth.json` carries
+`layers`, `atmosphere_mass_kg` and `surface` — no `parts`. `assembly::Assembly` describes **six**
+objects: cannon, charge, shot, oak, spruce, grass tuft. Every planet is the other format. Meanwhile
+`docs/65` §4 was titled *"Where it stands, honestly"*, counted 79 scene-called methods and three scene
+structs, and **never said that no planet is an assembly** — and the architecture page shipped to
+integrity.bothead.net said *"adding a species, a vehicle or a planet is adding an assembly"* in the
+present tense. Two days of work were described in assembly language on top of that silence. All three
+are corrected; the violation is `docs/46` row 45.
+
+★★ **Robin's argument for why it is ONE thing, not two, and the engine already proves it both ways:**
+*"A planet is an accretion of debris bound by its own gravitational effects which we've worked hard to
+model."* The round trip is built and tested — `HydroBody::particalize(&LayeredBody, n)` turns layers into
+particles, `accretion::sample_layers(...)` reads layers back out of particles. So a `LayeredBody` is not
+a different KIND of object: it is a **de-resolved summary of an assembly of matter**, exactly the
+relationship `Derived` already has to `Assembly::parts`. The split is lineage — layers came from the
+giant impact, assemblies from the cannon — not principle, and it is the same shape as row 1
+(`Aggregate` vs the voxel `World`), which was closed by unifying rather than justifying.
+
+★ It is also the **fifth** arrival of the substance-versus-assembly distinction. Row 35 counted four and
+said it *"wants to be a first-class idea rather than a lesson relearned."*
+
+**Built today, small and load-bearing:** `Shape::reach_m` / `Part::reach_m` / `Assembly::reach_m` — an
+assembly ends at the outermost boundary of its outermost component. Not "where its air ends", which was
+my first wording and which Robin corrected: naming the rule after air teaches the engine a special case,
+when the identical question is asked by a tree's canopy, a ship's mast and a cannon's muzzle. It has a
+consumer immediately: `ballistics::fire` was taking a gun's lowest matter from `equivalent_radius_m`, the
+radius of a sphere of the same VOLUME, which for a barrel is off by more than six times.
+
+**Designed, not built:** [`docs/67`](docs/67-everything-is-an-assembly.md) — the unified model. Robin's
+seven assembly properties, the eight I think are missing (extent-before-detail; containment as a
+DERIVABLE rule plus exceptions, because a planet holds 10^12 trees and cannot list them; type versus
+instance, since damage has nowhere to live today; runtime re-parenting; per-actor cadence; a
+bidirectional signal; cross-resolution agreement; temperature and frame), the per-assembly collision
+engine with its one hard rule — **one implementation, many instances** — and a migration order whose
+guard rail already exists: `one_earth_tests::the_three_scenes_read_one_earth` asserts digit-identity
+across three scenes reading Earth, so any migration that moves a number fails.
+
+**Verified.** 563/563 native, `mod app` clean for wasm32. The correction to the architecture page is
+deployed, because a diagram that quietly runs ahead of its engine is how a model stops being checkable.
+
 ## 2026-08-05 — Earth got a sky, and it is the air
 
 **What.** Robin, on where a sky belongs: *"Sky must be a component of Earth assembly, no"* — and on

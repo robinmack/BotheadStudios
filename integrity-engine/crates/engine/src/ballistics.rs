@@ -420,10 +420,13 @@ pub fn fire_gun(
     // own height above that base is a fact about the assembly. A first version left the scene passing
     // 12.0 (copied from a ship-deck test), so the shot and its smoke were born twelve metres above the
     // carriage, clear of the gun and out of frame.
+    // ★ `reach_m`, not `equivalent_radius_m` — the shape's own extent rather than the radius of a
+    // sphere of the same VOLUME. For a barrel those differ by a factor of eight, and this is asking
+    // where the gun's lowest matter is, which is a boundary question (docs/66 §10).
     let base_y = gun
         .parts
         .iter()
-        .map(|p| p.at_m[1] - p.shape.equivalent_radius_m())
+        .map(|p| p.at_m[1] - p.shape.reach_m())
         .fold(f64::MAX, f64::min);
     let barrel_y = gun
         .parts

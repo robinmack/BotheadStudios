@@ -90,6 +90,14 @@ ground, a ray grazing the limb from orbit, and a ray straight up.
 
 ## 3. The sky is a component of the body, not of the scene
 
+> ★ **A WORD OF CAUTION ON THIS SECTION'S TITLE, added 2026-08-05.** "Body" here means
+> `planet::LayeredBody`, and **that is not an `Assembly`** — Earth has no parts, no containment and no
+> connections (`docs/46` row 45, `docs/67`). The atmosphere is a component of Earth in the sense Robin
+> asked for — derived from Earth's own declared mass of air, held once, drawn by the engine, absent when
+> the body declares none — and it is NOT a `Part` of an assembly, because Earth is not one yet. Read
+> every "component" below in the first sense.
+
+
 `AirColumn::of_body(body, mats, temp)` is the only place a declared mass of air becomes optical depth and
 scale height. Both scenes hold one, from the same body, so one planet cannot have two atmospheres
 depending on who is looking at it. `render::SkyVeil` draws whatever it is handed and has no opinion: hand
