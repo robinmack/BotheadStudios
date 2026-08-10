@@ -5918,6 +5918,8 @@ mod app {
         flora_verified: bool,
         flora_readback: Option<crate::renderer::Readback>,
         flora_readback_begun: bool,
+        /// Negative control for native tests (`set_draw_flora`); always true in the browser.
+        draw_flora: bool,
         segment_verts: Vec<Vertex>,
         /// What the segment's mesh currently HOLDS — the same cache-of-the-view rule the ground tiers use
         /// (`ground_cap::tier_is_current`), on the one mesh instead of a ladder of them. The LIFT term is
@@ -6307,6 +6309,7 @@ mod app {
                 flora_verified: false,
                 flora_readback: None,
                 flora_readback_begun: false,
+                draw_flora: true,
                 segment_uni,
                 segment_built: None,
                 surface_loaded: false,
@@ -7640,7 +7643,7 @@ mod app {
                     if let (Some(gpu), Some(uni)) =
                         (self.flora_gpu.as_ref(), self.flora_uni.as_ref())
                     {
-                        if self.flora_at.is_some_and(|b| b.n > 0) {
+                        if self.draw_flora && self.flora_at.is_some_and(|b| b.n > 0) {
                             pass.set_pipeline(&self.globe_pipeline);
                             draw(&mut pass, uni, gpu);
                         }
@@ -8000,6 +8003,22 @@ mod app {
                 n: sited.len(),
                 ..fresh
             });
+        }
+
+        /// ★★ **Draw the plants, or don't** — native only, and it exists to be a NEGATIVE CONTROL.
+        ///
+        /// A single frame cannot tell you whether the plants reached the picture, because nothing in
+        /// it knows what the ground alone looks like. MEASURED the hard way 2026-08-09: a test that
+        /// compared the near field against the mid field of the SAME frame passed with the flora draw
+        /// suppressed — the control band contained the thing it was controlling for, since grass
+        /// reaches the horizon too. Two frames, one switch, and the question becomes exact: *did
+        /// drawing the plants change the picture?*
+        ///
+        /// Native only, so it cannot become a scene verb (docs/65) or a shipped way to turn the world
+        /// off.
+        #[cfg(not(target_arch = "wasm32"))]
+        pub fn set_draw_flora(&mut self, on: bool) {
+            self.draw_flora = on;
         }
 
         /// ★★ **The frame this scene last drew, as RGBA bytes** — native only (docs/69 §3).
@@ -8759,6 +8778,132 @@ mod native_render_tests {
         assert!(
             hi - lo > 8,
             "the frame is one flat colour ({lo}..{hi}) — a clear is not a render"
+        );
+    }
+
+    /// Load the SHIPPED Earth, the same bytes the browser is handed — through `raster::shipped`, which
+    /// reads them via the engine's own body definition, so a test cannot drift from what the scene loads.
+    fn shipped_earth() -> (
+        String,
+        crate::terra::raster::Raster,
+        crate::terra::raster::Raster,
+        crate::terra::raster::Raster,
+    ) {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let json = std::fs::read_to_string(root.join("web/public/worlds/earth/world.json"))
+            .expect("the shipped Earth world");
+        let (elevation, _range) = crate::terra::raster::shipped::earth_elevation();
+        let (landcover, _classes) = crate::terra::raster::shipped::earth_landcover();
+        (
+            json,
+            crate::terra::raster::shipped::earth_landmask(),
+            elevation,
+            landcover,
+        )
+    }
+
+    /// ★★★ **STAND AT GALWAY AND CHECK THE GRASS IS IN FRAME — natively, in four seconds** (docs/69).
+    ///
+    /// This is the one-line version of nine deploy-and-photograph cycles. The flora defect (docs/46
+    /// row 50) was that 1,200 plants and 43,200 triangles were drawn 36 m in the air, behind a camera
+    /// pitched down — and every instrument the engine had reported something true and useless:
+    /// `flora_count` said 1,200, the readback said the device held what was sent. **Nothing could ask
+    /// whether the plants were in the picture**, because nothing could see the picture without a
+    /// browser.
+    ///
+    /// The assertion is STRUCTURAL, not a colour match. Resolved plants put high-frequency detail into
+    /// the near ground; bare ground under the same light is a smooth wash. So the test compares the
+    /// row-to-row variation of the bottom of the frame against the middle of it, in the same frame,
+    /// under the same sun — a control that survives any lighting change, including the sky irradiance
+    /// row 56 is still owed. It does not depend on the grass being dark, which today it wrongly is.
+    ///
+    /// `#[ignore]`: needs a GPU. `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn the_grass_at_galway_is_in_the_picture() {
+        const W: u32 = 480;
+        const H: u32 = 320;
+        let (json, lm, ev, lc) = shipped_earth();
+        let mut terra = pollster::block_on(app::Terra::headless(W, H)).expect("headless Terra");
+        terra
+            .load_world(
+                &json,
+                &lm.data,
+                lm.w as u32,
+                lm.h as u32,
+                &ev.data,
+                ev.w as u32,
+                ev.h as u32,
+                &lc.data,
+                lc.w as u32,
+                lc.h as u32,
+            )
+            .expect("the shipped Earth loads");
+        terra.set_alt_bounds(0.05, 8.0e10);
+        terra.set_epoch_sun_over_lon(-9.45); // daylight at Galway
+                                             // Crouched in the meadow, looking just below the horizon — where the plants are.
+        terra.place_camera(53.10, -9.45, 0.4, 0.0, -0.10);
+        // A few frames: the segment mesh and the flora both build on the frame that needs them.
+        for _ in 0..4 {
+            terra.render().expect("a frame");
+        }
+
+        assert!(
+            terra.flora_count() > 0,
+            "no plants resolved at Galway at all"
+        );
+
+        let with_plants = terra
+            .frame_pixels()
+            .expect("an offscreen frame is readable");
+
+        // ★ THE NEGATIVE CONTROL: the identical frame with the plants not drawn. Same camera, same
+        // sun, same ground, same everything — so any pixel that differs differs BECAUSE of a plant.
+        terra.set_draw_flora(false);
+        for _ in 0..2 {
+            terra.render().expect("a control frame");
+        }
+        let without = terra.frame_pixels().expect("the control frame is readable");
+
+        let changed = |y0: u32, y1: u32| -> f64 {
+            let mut n = 0u32;
+            let mut d = 0u32;
+            for y in y0..y1 {
+                for x in 0..W {
+                    let i = ((y * W + x) * 4) as usize;
+                    let diff = (0..3)
+                        .map(|c| (with_plants[i + c] as i32 - without[i + c] as i32).abs())
+                        .max()
+                        .unwrap_or(0);
+                    if diff > 8 {
+                        d += 1;
+                    }
+                    n += 1;
+                }
+            }
+            d as f64 / n.max(1) as f64
+        };
+        let near = changed(H / 2, H); // the ground half of the frame
+        let sky = changed(0, H / 4); // where no plant can be, so it must be ~0
+        println!(
+            "galway: sun {:.1}° up · {} plants · plants changed {:.0}% of the ground half and {:.1}% of the sky",
+            terra.sun_elevation_deg(53.10, -9.45),
+            terra.flora_count(),
+            near * 100.0,
+            sky * 100.0
+        );
+        assert!(
+            near > 0.20,
+            "drawing {} plants changed only {:.1}% of the ground half of the frame — they are \
+             resolved and are not reaching the picture. THAT IS docs/46 row 50, and it cost nine \
+             deploy-and-photograph cycles to see from the outside.",
+            terra.flora_count(),
+            near * 100.0
+        );
+        assert!(
+            sky < 0.02,
+            "the plants changed {:.1}% of the SKY — the control is not controlling for what it thinks",
+            sky * 100.0
         );
     }
 }
