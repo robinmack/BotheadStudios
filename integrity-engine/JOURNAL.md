@@ -3,6 +3,44 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-09 — a placement is not a movement; and the flora hunt's second round
+
+**Merged #104 to `main`** (`cfc0f66`) — 60 commits, a real merge so they stay reachable, branch deleted,
+`main` alone as the steady state again. CI was green on the merge head; the earlier red was a GitHub
+runner outage (*"The job was not acquired by Runner of type hosted"*) and the two jobs that did get
+runners had passed. The `--admin` exception was named on the PR rather than used quietly.
+
+★★ **THE CAMERA WAS RESTING ON MOUNTAINS IT NEVER VISITED.** The camera is matter, so its contact sweep
+runs from where it last was to where it is going — correct for a camera that WALKS, wrong for one that
+is PLACED. `place_camera` set the fly camera and left `last_eye_m` holding the previous eye, so the
+sweep ran a straight line to the new continent, resolved against the highest ground it crossed, and left
+the eye on a ridge nowhere near the request.
+
+What made it hard to see is that **the shell's own fix-up then recomputed `alt_m` to match**, so the HUD
+read a plausible 11 m where 1.7 had been asked for — self-consistent and wrong. Measured: eye 60 m above
+the ground; after clearing the swept path, the same call reads **2 m**. The same trap sat in
+`clear_camera_pose` and `camera_follow`; all three clear it now, because the rule is general — **any
+verb that places the eye rather than moving it has no swept path.** `docs/46` row 51.
+
+**And the flora still does not draw**, which row 51 said it would not claim to fix.
+
+★ **Every earlier probe had been confounded by that 60 m.** Plants lifted 200 m were ABOVE a frame whose
+eye was 60 m up — not hidden by anything, which is why that anomaly never made sense. Re-run with the
+eye genuinely at 2 m: plants lifted 5 m, self-lit, tinted magenta at 30× — **still zero fragments**. So
+it is not depth and not occlusion.
+
+★★ **And I closed a blind spot in my own instrumentation.** The first bounds probe used `f32::min`/`max`,
+which **ignore NaN** — a buffer full of NaN would have reported perfectly clean bounds. Re-probed
+explicitly: 151,647 verts, 473,760 indices, max index 151,646 (exactly verts−1), **non-finite 0**. The
+data is perfect and nothing rasterises.
+
+What is left is now very small, and it is the one link verified on the CPU side and never on the GPU
+side: whether the vertex buffer's contents actually reach the device. A readback after submit is the
+next probe — which is precisely what `tools/gpu-verify` exists for, and the same gap `docs/66` §9 owes
+for `atmos.wgsl`'s hand-mirror.
+
+**Verified.** 592/592 native, `mod app` clean for wasm32, all probes reverted, deployed.
+
 ## 2026-08-06 — the eye and the plants disagree about ground level by sixty metres
 
 **What.** Continuing the hunt for why the flora draws and cannot be seen, after checking the vertex
