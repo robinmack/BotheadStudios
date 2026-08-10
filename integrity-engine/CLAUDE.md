@@ -122,6 +122,14 @@ is being refactored toward is [`docs/33-architecture-realignment.md`](docs/33-ar
     canopy drawn as a texture is honest because the METEOR DOES NOT CONSULT IT — it meets real matter,
     the hole is real, and through the hole we draw the trunk that was always there. If anything
     *interacts* with the illusion, it is a fudge.
+  - ★★★ **LAW V GOVERNS THE ENGINE; THE RENDERER'S LAW IS FAITHFULNESS** (Robin, 2026-08-09): *"the
+    renderer is all about approximation… it isn't bound by 'no fudge' as long as it is trying faithfully
+    to reproduce a meaningful, believable visual faithful to the real physics presented by the engine."*
+    **The renderer may approximate HOW it shows what the engine says; it may never change WHAT the
+    engine says.** Reversed-Z, a star's point-spread function, a canopy texture and an interpolated
+    frame are all legitimate — a depth encoding carries no physical content and nothing can interact
+    with it. An albedo nudged because it looks better is still forbidden, because everything interacts
+    with an albedo. Same test as the illusion rule, applied to quantities instead of geometry.
   - **The viewport decides RESOLUTION, and resolution is a request the renderer MAKES of the model, not
     a decision it makes FOR it.** That dissolves the objection I raised on 2026-08-04 (*"so many
     simulation choices are made based on viewport"*) — recorded because I argued it the wrong way.

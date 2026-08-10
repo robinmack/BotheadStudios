@@ -3,6 +3,213 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-09 — the plants were behind the camera, and the negative control that said so
+
+★★★ **Terra's flora draws.** 1,200 plants, 43,200 triangles and ZERO fragments — at every altitude,
+for weeks — and the cause was none of the things this branch had named.
+
+**What it was not.** The previous entry (below) named **reversed-Z**, from a probe reading
+`ndc z = 0.997` against a 1:117,000 near/far ratio. One negative control retired it: draw everything
+EXCEPT the ground, and the plants were still not there — black sky, stars, an intact horizon, no
+plants. Depth and occlusion were innocent, and a change touching every depth comparison in both
+scenes was called off before it was written. The `ndc z = 0.997` reading was real; it was one corner
+of a mesh whose other corners were behind the eye, and reading one sample as the answer is what made
+it look like a depth problem.
+
+**What it was.** Projecting the flora mesh's own bounds with the frame's own matrices:
+
+```
+flora clip: ndc y [-110.6 -9.2]  w [-1.215e-6 -1.022e-7]  (model translate 34.6 m, alt 1.5 m)
+```
+
+All eight corners with **negative w** — the whole mesh behind the camera. And the offset was a
+constant: `|anchor − eye|` came back as `|36.1 m − alt|` at 4000, 600, 300, 120, 40, 12, 3 and 1.5 m.
+
+The elevation tiles stream in seconds after the scene loads and **revise the ground under the
+camera** — the new ground probe shows Galway going 426 m → 24 m as they arrive. `build_flora` had
+already baked the pre-tile number into its anchor, and its rebuild test asked exactly one question:
+*has the camera moved 2 m horizontally?* So neither the tiles' correction nor an entire descent from
+4 km to standing height could invalidate it. The plants hung 36 m in the air for the whole session.
+From 1.5 m with the eye pitched down, 36 m overhead is behind you.
+
+**The fix is to key the cache on its inputs.** `flora::Built` carries where we stand, how high the
+ground under us turned out to be, and the eye height the angular budget was spent at. Ground is
+checked at a quarter of a metre because the shortest plant the engine draws is a 0.35 m tuft;
+altitude is checked by RATIO rather than difference, because the budget buys subtended angle and the
+rule has to behave the same at 4 km and at 1.5 m. It lives in `terra::flora` rather than in the
+wasm-only scene, so it is natively testable — three tests, each of which fails against the rule it
+replaces.
+
+★★ **Why it hid for so long, and it is Robin's point about the seam** (*"too much pollution between
+duties"*): the renderer had BAKED a model answer, so it owned a copy the model could not correct.
+Nothing was ever wrong on the GPU. That is why nine deploy-and-photograph cycles bisecting toward the
+device found nothing, and why `renderer::Readback` kept truthfully reporting that the device held
+exactly what was sent — it did.
+
+**Two more findings, both recorded rather than fixed** (docs/46 rows 53 and 54):
+
+- **Two answers to "how high is the ground here", still.** The mesh displaces its vertices by
+  measured elevation PLUS generated sub-raster relief; `ground_disp_at` — which places the flora,
+  stands the cannon and resolves the camera shell — returns the measured term alone. Measured at
+  Galway: **+1.19 m** at the centre, **12.3 m worst over the patch** on the coarse raster, falling to
+  **0.000 m** once tiles cover. Small where the camera stands, large where a descent has not yet
+  streamed. Worse, the generated term is band-limited to the MESH's own cell, so the ground's height
+  currently depends on how finely it is drawn — Law IV inverted.
+- **The renderer computes the crater.** `globe.wgsl`'s vertex shader carries `crater_sink()`, a
+  paraboloid excavation profile, while the engine's ground answer has no crater term at all. Robin:
+  *"The engine understands craters — radius, energy, impact, velocity. The renderer should be
+  blissfully free of these calculations and just render the world as best it can, represent what the
+  assemblies/models are telling it."* Anything standing on the ground inside a bowl floats above the
+  drawn surface by the crater's depth.
+
+**Verified:** rig-photographed at Galway (`scripts/rig.sh terra_flora.mjs`) — plants visible from
+standing height for the first time, dark hexagonal tufts across the foreground. 591/591 native,
+`mod app` clean for wasm32. ★ Two defects the picture now exposes and the numbers confirm: the
+plants are still extruded prisms (`GRASS_TUFT`'s assembly mesh), and 1,200 tufts at 0.106 m spacing
+fill a **2 m disc** with painted albedo beyond it — from 12 m up the whole meadow is a speck, which
+is the "clumped in one tiny area, suspiciously crater-like" Robin reported months ago, finally
+visible for what it is.
+
+## 2026-08-09 — the coordinates, and the renderer's own law
+
+★★★ **The instrument gave the coordinates and the defect became specific.** Robin: *"at least now we
+should be able to see the coordinates of the graphical elements and figure out what happened."*
+Transforming known flora vertices with the EXACT matrices the shader receives:
+
+```
+flora clip[0]: ndc (0.409, -0.258, 0.997)  IN FRAME
+```
+
+**The plants are in frame** — and sitting at **z = 0.997**, jammed against the far plane. (Two other
+samples come back with negative `w`: plants behind the eye, which half of them are.) Confirmed against
+`fly_camera::view`: at 2 m altitude `near = (alt_disp*0.03).clamp(5e-9, 0.5)` = **0.06 m** and
+`far = horizon*1.4` = **7 km** — a ratio of **1:117,000**, so `1 − near/z` puts everything past ~20 m at
+z ≈ 0.997 and the whole visible world collapses into the last thousandth of the depth range. The ground
+is drawn first and `depth_compare: Less` rejects anything not strictly nearer.
+
+The named fix is **reversed-Z** (near at 1.0, far at 0.0, `Greater` compare), the standard answer to
+exactly this ratio, and the existing `Depth32Float` attachment already suits it. It touches every depth
+comparison in both scenes, so it is its own change with its own rig evidence. ★ Still not closed: a 5 m
+lift should have put a plant against the sky where the clear depth is 1.0 and z = 0.994 passes — but
+that probe predates the camera fix, so it needs re-running before anything is concluded.
+
+★★★ **And the governance statement the split needed**, which I would have got wrong by importing a law
+across the boundary. Robin: *"the renderer is all about approximation… it isn't bound by 'no fudge' as
+long as it is trying faithfully to reproduce a meaningful, believable visual faithful to the real physics
+presented by the engine."*
+
+**Law V is a rule about what is TRUE. The renderer does not decide what is true; it decides how to show
+it.** So: **the renderer may approximate HOW it shows what the engine says, and may never change WHAT
+the engine says.** Reversed-Z, a star's PSF, a canopy texture and an interpolated frame are all
+legitimate — a depth encoding carries zero physical content and nothing can interact with it. An albedo
+nudged because it looks better stays forbidden, because everything interacts with an albedo. It is the
+same test as the illusion rule, applied to quantities instead of geometry. `docs/68` §1b, and summarised
+in CLAUDE.md.
+
+**Verified.** 592/592 native, `mod app` clean for wasm32, all probes reverted.
+
+## 2026-08-09 — the renderer can be asked what it holds, and it corrected me at once
+
+**What.** docs/68 step 3, first increment — and the piece that had to come first for a reason that was
+measured, not argued: bisecting one defect had cost **nine deploy-and-photograph cycles** because a
+photograph was the only instrument this engine had.
+
+`renderer::Uploaded` records what the CPU said it sent, at the moment it said it; `renderer::Readback`
+fetches what the device actually has, and `verdict()` states the comparison in one line. The readback is
+**deferred** — requested on one frame, collected on a later one — because a browser cannot block on
+`map_async`, and a question to another processor arriving later is the honest shape rather than a
+limitation. It is also the shape the eventual cross-thread protocol needs, so it is not throwaway.
+Dynamic mesh buffers gained `COPY_SRC`: a buffer the engine cannot read is one it can only reason about.
+
+★★★ **It disproved my own conclusion on its first use.** I had bisected the flora defect to the vertex
+buffer's contents — the one link verified on the CPU and never on the device. The device's answer:
+
+```
+terra-flora vertices: the device holds what was sent (6,672,468 bytes, 5,601,074 non-zero)
+terra-flora INDICES:  the device holds what was sent (1,895,040 bytes = 473,760 x 4)
+```
+
+Position-sensitive matches, both of them — and the index buffer takes a *different* upload path
+(`mapped_at_creation` + copy rather than `write_buffer`), so that was worth checking separately.
+
+**One deploy cycle to overturn a wrong conclusion, against the nine it took to reach it.** That ratio is
+the argument for the whole split, and it was Robin's hint, offered twice before I weighted it properly:
+*"I've got decades of experience behind me informing my hints."* Recorded.
+
+★★ **Where that leaves the defect: a contradiction, not a mystery.** Geometry, indices, uniform,
+pipeline, draw call, vertex layout, depth and camera are all now verified — and the picture shows
+nothing. One of those checks is therefore verified in a way that does not mean what it appears to, and
+finding which is a much better question than the one I started with.
+
+**Verified.** 592/592 native, `mod app` clean for wasm32, deployed. The readback is one-shot per upload
+and stops entirely once the device confirms a match, so the steady state costs nothing.
+
+## 2026-08-09 — bisected to one link, and the instrument that does not exist
+
+**What.** The flora defect is now bisected to a single link, by swapping the two halves against each
+other:
+
+- flora mesh + **segment's** uniform → nothing
+- segment mesh + **flora's** uniform → **the frame changes** (mean level 121.86 → 99.36)
+
+So the flora's uniform, pipeline, bind group and draw call are all functional, and **the fault is the
+flora vertex buffer's contents not reaching the GPU** — the one link verified on the CPU side and never
+on the device. A buffer of zeros makes every triangle degenerate, which is exactly zero fragments with a
+correct index count, which is what the picture shows.
+
+★★ **And the instrument to confirm it does not exist.** The engine's `wgpu` is pinned to the webgpu
+backend only, so nothing in-process can create a native device or read a buffer back; `tools/gpu-verify`
+and `tools/sph-verify` are standalone crates with their own `wgpu` for that reason, and can only run
+REPLICAS of the shipped code. The engine cannot look at its own GPU state. The only instrument available
+is a photograph — and bisecting this took **nine deploy-and-photograph cycles**.
+
+Robin, watching that: *"remember my hint about separating the renderer from the engine itself; I think
+that will add observability opportunities that can help resolve this type of situation faster."* The
+count is the argument, and I had under-weighted it — `docs/68` §6b now carries it, because on this
+evidence observability may be the largest benefit of the split rather than a side effect. ★ The same gap
+is already owed at `docs/66` §9 for `atmos.wgsl`'s hand-mirror; **two independent hunts arriving at one
+missing capability** is what makes it a capability rather than an errand.
+
+**Verified.** 592/592 native, `mod app` clean for wasm32, probes reverted, deployed.
+
+## 2026-08-09 — a placement is not a movement; and the flora hunt's second round
+
+**Merged #104 to `main`** (`cfc0f66`) — 60 commits, a real merge so they stay reachable, branch deleted,
+`main` alone as the steady state again. CI was green on the merge head; the earlier red was a GitHub
+runner outage (*"The job was not acquired by Runner of type hosted"*) and the two jobs that did get
+runners had passed. The `--admin` exception was named on the PR rather than used quietly.
+
+★★ **THE CAMERA WAS RESTING ON MOUNTAINS IT NEVER VISITED.** The camera is matter, so its contact sweep
+runs from where it last was to where it is going — correct for a camera that WALKS, wrong for one that
+is PLACED. `place_camera` set the fly camera and left `last_eye_m` holding the previous eye, so the
+sweep ran a straight line to the new continent, resolved against the highest ground it crossed, and left
+the eye on a ridge nowhere near the request.
+
+What made it hard to see is that **the shell's own fix-up then recomputed `alt_m` to match**, so the HUD
+read a plausible 11 m where 1.7 had been asked for — self-consistent and wrong. Measured: eye 60 m above
+the ground; after clearing the swept path, the same call reads **2 m**. The same trap sat in
+`clear_camera_pose` and `camera_follow`; all three clear it now, because the rule is general — **any
+verb that places the eye rather than moving it has no swept path.** `docs/46` row 51.
+
+**And the flora still does not draw**, which row 51 said it would not claim to fix.
+
+★ **Every earlier probe had been confounded by that 60 m.** Plants lifted 200 m were ABOVE a frame whose
+eye was 60 m up — not hidden by anything, which is why that anomaly never made sense. Re-run with the
+eye genuinely at 2 m: plants lifted 5 m, self-lit, tinted magenta at 30× — **still zero fragments**. So
+it is not depth and not occlusion.
+
+★★ **And I closed a blind spot in my own instrumentation.** The first bounds probe used `f32::min`/`max`,
+which **ignore NaN** — a buffer full of NaN would have reported perfectly clean bounds. Re-probed
+explicitly: 151,647 verts, 473,760 indices, max index 151,646 (exactly verts−1), **non-finite 0**. The
+data is perfect and nothing rasterises.
+
+What is left is now very small, and it is the one link verified on the CPU side and never on the GPU
+side: whether the vertex buffer's contents actually reach the device. A readback after submit is the
+next probe — which is precisely what `tools/gpu-verify` exists for, and the same gap `docs/66` §9 owes
+for `atmos.wgsl`'s hand-mirror.
+
+**Verified.** 592/592 native, `mod app` clean for wasm32, all probes reverted, deployed.
+
 ## 2026-08-06 — the eye and the plants disagree about ground level by sixty metres
 
 **What.** Continuing the hunt for why the flora draws and cannot be seen, after checking the vertex

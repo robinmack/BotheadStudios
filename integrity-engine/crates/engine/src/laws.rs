@@ -1742,3 +1742,161 @@ mod compiled_shader_tests {
         }
     }
 }
+
+/// **THE SEPARATION SWEEP — matter, assembly, engine, viewer** (docs/69).
+///
+/// Robin, 2026-08-09: *"I think we need to do a rigor sweep based on the assembly/matter/engine/viewer
+/// paradigm and make sure they are all separated out correctly and tested properly."* This module is
+/// the machine-checkable part of that sweep. The rest — the audit, with its evidence — is docs/69, and
+/// the open violations are docs/46 rows 52-56.
+///
+/// The boundary each test defends is stated on the test, because a gate whose reason is elsewhere is a
+/// gate the next person deletes.
+#[cfg(test)]
+mod separation_tests {
+    /// ★★★ **THE MODEL MUST NOT INVENT A VIEWER.**
+    ///
+    /// docs/68, in Robin's words: *"the viewport decides RESOLUTION, and resolution is a request the
+    /// renderer MAKES of the model, not a decision it makes FOR it."* A model module that calls
+    /// `ResolutionController::default()` has done the opposite — it has conjured a viewer with a
+    /// declared 1 mrad eye and answered a question nobody asked it, which is Law IV inverted: the
+    /// resolution of an imaginary camera decides what the world resolves into.
+    ///
+    /// It is also how `FLORA_ALT_M = 300` happened — one declared cutoff for every plant, wrong by a
+    /// factor of forty against the real viewport (docs/46 row 49). `render::Fidelity` is the shape of
+    /// the fix: derived from the viewport that frame was actually projected with.
+    ///
+    /// ★ This is a RATCHET, not a ban. Every site below is DEBT, listed with its count. Adding one
+    /// fails the build; removing one also fails, so the list cannot rot into a lie. Fix a site and
+    /// delete its line.
+    #[test]
+    fn the_model_does_not_invent_a_viewer() {
+        // (file, how many `ResolutionController::default()` it still contains)
+        const DEBT: &[(&str, usize)] = &[
+            // Ballistic arc and impact-site machinery, each sizing its own detail against an
+            // imagined eye rather than being told what is looking.
+            ("arc.rs", 2),
+            ("site.rs", 1),
+            // The generated-relief octave count — the same number docs/46 row 53 shows the mesh and
+            // the model already disagreeing about.
+            ("surface_detail.rs", 1),
+            ("terra/ground_cap.rs", 1),
+            // The scenes. These are the ones with a real viewport in hand, so they have the least
+            // excuse; `render::Fidelity` already exists for exactly this.
+            ("lib.rs", 3),
+        ];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found: Vec<(String, usize)> = Vec::new();
+        fn walk(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<(String, usize)>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, root, out);
+                } else if p.extension().is_some_and(|x| x == "rs")
+                    && !p.ends_with("resolution.rs")
+                    && !p.ends_with("laws.rs")
+                {
+                    let Ok(t) = std::fs::read_to_string(&p) else {
+                        continue;
+                    };
+                    let n = t.matches("ResolutionController::default()").count();
+                    if n > 0 {
+                        let rel = p
+                            .strip_prefix(root)
+                            .unwrap_or(&p)
+                            .to_string_lossy()
+                            .replace('\\', "/");
+                        out.push((rel, n));
+                    }
+                }
+            }
+        }
+        walk(&root, &root, &mut found);
+        found.sort();
+        let mut want: Vec<(String, usize)> =
+            DEBT.iter().map(|(f, n)| (f.to_string(), *n)).collect();
+        want.sort();
+        assert!(
+            !found.is_empty(),
+            "no sites found at all — this gate is pointing at the wrong directory, which is worse \
+             than having no gate. Verify a gate by making it fail."
+        );
+        assert_eq!(
+            found, want,
+            "\nThe model invents a viewer in a place this list does not admit to.\n\
+             If you ADDED one: don't. Ask the renderer what is looking — `render::Fidelity::of_view` \
+             derives angular resolution from the real viewport (docs/68 step 2).\n\
+             If you REMOVED one: thank you — delete its line from DEBT so the ratchet tightens.\n"
+        );
+    }
+
+    /// ★★ **A RENDER SHADER MAY SHAPE LIGHT; IT MAY NOT SHAPE MATTER.**
+    ///
+    /// Robin, 2026-08-09: *"The engine understands craters — radius, energy, impact, velocity. The
+    /// renderer should be blissfully free of these calculations and just render the world as best it
+    /// can, represent what the assemblies/models are telling it."* And the governing form (docs/68
+    /// §1b): the renderer may approximate HOW it shows what the engine says, never WHAT it says.
+    ///
+    /// The line this draws is not "no maths in shaders" — `sph_step.wgsl`, `particle_step.wgsl` and
+    /// `bh_gravity.wgsl` are the ENGINE running on the GPU, which is a processor and not a renderer,
+    /// and `atmos.wgsl` is light transport, which is the renderer's own realm. The line is that a
+    /// VERTEX or FRAGMENT shader must not compute where matter IS. `globe.wgsl` does: `crater_sink`
+    /// deforms the surface by an excavation profile the model has no record of, so the ground you can
+    /// see inside a bowl and the ground the model reports differ by the whole crater depth.
+    ///
+    /// ★ RATCHET, same rules as above: the debt is named and cannot grow.
+    #[test]
+    fn a_render_shader_does_not_move_matter() {
+        // (shader, function that computes a position the model does not know about)
+        const DEBT: &[(&str, &str)] = &[("globe.wgsl", "crater_sink")];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../shaders");
+        // Shaders whose entry points are `cs_*`: the engine on the GPU, out of scope for this gate.
+        const COMPUTE: &[&str] = &[
+            "sph_step.wgsl",
+            "particle_step.wgsl",
+            "bh_gravity.wgsl",
+            "gpu_gravity.wgsl",
+        ];
+        let mut render_shaders = Vec::new();
+        for e in std::fs::read_dir(&root).expect("shaders/ exists").flatten() {
+            let p = e.path();
+            if p.extension().is_none_or(|x| x != "wgsl") {
+                continue;
+            }
+            let name = p.file_name().unwrap().to_string_lossy().to_string();
+            let Ok(text) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            if COMPUTE.contains(&name.as_str()) || text.contains("@compute") {
+                continue;
+            }
+            render_shaders.push((name, text));
+        }
+        assert!(
+            !render_shaders.is_empty(),
+            "no render shaders found — the gate is pointing at the wrong directory."
+        );
+        let mut found: Vec<(String, String)> = Vec::new();
+        for (name, text) in &render_shaders {
+            for (shader, func) in DEBT {
+                if name == shader && text.contains(&format!("fn {func}")) {
+                    found.push((name.clone(), func.to_string()));
+                }
+            }
+        }
+        let want: Vec<(String, String)> = DEBT
+            .iter()
+            .map(|(s, f)| (s.to_string(), f.to_string()))
+            .collect();
+        assert_eq!(
+            found, want,
+            "\nThe declared list of matter-moving render shaders no longer matches the tree.\n\
+             If a shader gained one: it belongs in the model — the engine states the surface, the \
+             renderer draws it (docs/46 row 54).\n\
+             If `crater_sink` is gone: excellent, delete its DEBT line.\n"
+        );
+    }
+}

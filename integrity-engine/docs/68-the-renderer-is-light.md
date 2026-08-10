@@ -47,6 +47,37 @@ world stayed whole. That is the test for every representational shortcut this en
 - Does everything interact with the matter and only the *picture* take the shortcut? → legitimate, and it
   should be flagged with the resolved version it stands in for (Law V again).
 
+### 1b. ★★★ Law V governs the ENGINE. The renderer's law is faithfulness.
+
+> **Robin, 2026-08-09:** *"a separated renderer will allow us to make adjustments that the physics engine
+> would not… the renderer is all about approximation; making a viewable, believable expression of what
+> the engine/assemblies deliver. It isn't bound by 'no fudge' as long as it is trying faithfully to
+> reproduce a meaningful, believable visual faithful to the real physics presented by the engine."*
+
+This is the governance statement the split needs, and without it the extraction would have imported a
+law that does not belong on the far side of the boundary. **NO FUDGE (Law V) is a rule about what is
+TRUE.** The renderer does not decide what is true; it decides how to show it. So its obligation is not
+derivation-from-first-principles, it is **faithfulness to what the engine says**.
+
+The line, stated so it can be applied:
+
+> **The renderer may approximate HOW it shows what the engine says. It may never change WHAT the engine
+> says.**
+
+| legitimate on the renderer's side | still forbidden, anywhere |
+|---|---|
+| reversed-Z depth, a point-spread function for a star, a canopy drawn as a texture, an interpolated frame, a mip chain | an albedo nudged because it "looks better", a light with no source, a size that is not the object's size |
+| approximating the *encoding* of a quantity | inventing or altering the *quantity* |
+
+A depth encoding carries **zero physical content** — no experiment on the world can detect which one was
+used — so choosing reversed-Z over standard-Z is a rendering decision in the way that choosing a font is.
+Whereas a tint added because skies look blue would be the renderer lying about the world, and stays
+forbidden however pretty it is: the sky is blue here because `atmos.wgsl` integrates the air Earth
+declares (`docs/66`), and that is physics arriving at the eye rather than a decision about pixels.
+
+★ This is the same test as §1's illusion rule, applied to quantities instead of geometry: **does anything
+interact with it?** Nothing interacts with a depth encoding. Everything interacts with an albedo.
+
 ## 2. What this dissolves — an objection of mine, recorded because it was wrong
 
 On 2026-08-04 I wrote: *"I'm beginning to think we need to separate the renderer from the engine, but
@@ -106,6 +137,32 @@ so the texture changes, and through it the renderer draws the trunks that were a
 **The invariant that keeps it honest is docs/63's convergence rule, generalised:** the canopy texture's
 integrated albedo must equal what the resolved trees would return over the same footprint. If flying
 lower changes the colour of a forest, one of the two is lying.
+
+## 6b. ★★ Observability is the argument I under-weighted
+
+> **Robin, 2026-08-09:** *"remember my hint about separating the renderer from the engine itself; I think
+> that will add observability opportunities that can help resolve this type of situation faster."*
+
+She is right, and there is now a number attached. Bisecting one defect — flora meshed at 473,760 indices
+and producing zero fragments — took **nine deploy-and-photograph cycles**, each a wasm build, a deploy
+and a rig run, to establish by elimination what a single buffer readback would have answered directly:
+the geometry is correct, the uniform is correct, the draw executes, and the vertex buffer's contents are
+not on the device.
+
+The reason it could not be answered directly is structural, not incidental. The engine's `wgpu` is
+pinned to the **webgpu backend only**, so nothing in-process can create a native device or read a buffer
+back; `tools/gpu-verify` and `tools/sph-verify` exist as standalone crates with their own `wgpu` for
+exactly that reason, and they can only run REPLICAS of the shipped code. So the engine cannot look at
+its own GPU state, and the only instrument available is a photograph.
+
+A renderer that is a separate entity — with its own device, its own thread or process, and a protocol
+it answers on — can be **asked what it has**. That is not a side benefit of the split; on this evidence
+it may be the largest one, and it is the reason to do the split before the next hard graphical defect
+rather than after.
+
+★ The same gap is already owed elsewhere: `docs/66` §9 wants a GPU pin for `atmos.wgsl`, whose WGSL is a
+hand-mirror of the Rust checked only by reading. **Two independent hunts arriving at one missing
+capability** is the signal that it is a capability and not an errand.
 
 ## 7. Risks, named now
 

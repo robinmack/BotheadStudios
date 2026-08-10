@@ -9,6 +9,20 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★★ **Terra's flora draws.** It was uploaded, indexed, drawn and invisible at every altitude; the cause
+  was a renderer cache the model could not correct. `build_flora` baked the ground elevation into its mesh
+  anchor and asked only *has the camera moved 2 m?* before reusing it — so the elevation tiles that stream
+  in seconds later and revise the ground (36 m at Galway) never invalidated anything, and neither did an
+  entire descent from 4 km to standing height. Every plant hung 36 m in the air; from standing height with
+  the eye pitched down, that is behind the camera. `flora::Built` now keys the cache on its INPUTS —
+  position, the ground under it, and the eye height the angular budget was spent at — and lives in the
+  model, so it is natively testable (`flora::cache_tests`).
+  - The previously named fix, **reversed-Z, was wrong and is not being done**: a negative control (draw
+    everything except the ground) showed the plants still absent, so depth was innocent.
+  - `Terra::build_segment` now reports the two answers to "how high is the ground here" on every rebuild
+    (the mesh adds generated relief that no other caller sees — 12.3 m worst before tiles land), and the
+    flora log reports the NEAREST plant, which is the number that decides whether any of it can be seen.
+
 - ★★ **The sky, and it is the air** (docs/66). `atmosphere::air_inscatter` — one marched single-scatter
   integral through a body's DECLARED atmosphere — replaces the plane-parallel closed form in every render
   path. The closed form (`rayleigh_veil`) is now its analytic special case, pinned to it under 1% and kept
