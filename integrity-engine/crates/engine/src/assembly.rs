@@ -603,11 +603,31 @@ impl Assembly {
     /// Cylinders and tubes lie along the assembly's +X, which is the axis a barrel runs on. `segments`
     /// is a RESOLUTION choice, not physics (docs/44): the same shape sampled more finely.
     pub fn mesh(&self, mats: &[Material], segments: usize) -> crate::mesher::Mesh {
+        self.mesh_damaged(mats, segments, None)
+    }
+
+    /// ★★ **THE SAME MESH, MINUS WHAT IS GONE** (docs/70). `integrity[i] <= 0` means that part no
+    /// longer exists, so it is not drawn — the render REPORTING the model's damage, which is Law VI in
+    /// the direction it is meant to run. A shorter slice than `parts` leaves the rest pristine, exactly
+    /// as `instance::Damage` defines it.
+    ///
+    /// Partial damage still draws the whole part today. ★ FLAGGED with its name: a blade 40% broken
+    /// should be drawn 40% shorter, and the honest version is the part's own geometry scaled along its
+    /// `along` axis — cheap, and worth doing once something can break a part part-way and be looked at.
+    pub fn mesh_damaged(
+        &self,
+        mats: &[Material],
+        segments: usize,
+        integrity: Option<&[f64]>,
+    ) -> crate::mesher::Mesh {
         let mut out = crate::mesher::Mesh {
             vertices: Vec::new(),
             indices: Vec::new(),
         };
-        for p in &self.parts {
+        for (pi, p) in self.parts.iter().enumerate() {
+            if integrity.and_then(|v| v.get(pi)).is_some_and(|&i| i <= 0.0) {
+                continue;
+            }
             let Some(mi) = mats.iter().position(|m| m.id == p.material) else {
                 continue; // an unknown material draws nothing rather than drawing a lie
             };

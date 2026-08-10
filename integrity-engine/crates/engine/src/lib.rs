@@ -5971,6 +5971,11 @@ mod app {
         /// The sky's light this frame, and what it was computed FOR — a cache that names its own
         /// inputs, the lesson of `flora::Built` (docs/46 row 52).
         sky_light: crate::atmosphere::SkyLight,
+        /// ★★★ **WHAT IMPACTS HAVE BROKEN** (docs/70, docs/46 row 57). Divergences from the rule, not
+        /// a list of plants: an untouched meadow costs nothing to remember, and a clump a meteor went
+        /// through is one entry. This is what `containment::Contents` was built for and what
+        /// `instance::Damage` was built to hold.
+        flora_damage: crate::containment::Contents,
         sky_light_for: Option<(f32, f32, f32, f32)>,
         /// Negative control for native tests (`set_draw_flora`); always true in the browser.
         draw_flora: bool,
@@ -6365,6 +6370,7 @@ mod app {
                 flora_readback_begun: false,
                 draw_flora: true,
                 sky_light: Default::default(),
+                flora_damage: crate::containment::Contents::new(),
                 sky_light_for: None,
                 segment_uni,
                 segment_built: None,
@@ -7494,7 +7500,8 @@ mod app {
                     // answering the mouse. (Robin: "we seem to lose camera controls when the engine is
                     // working.")
                     let env = &self.flight_env;
-                    for a in self.flight.step(env, &self.mats, dt) {
+                    let arrivals = self.flight.step(env, &self.mats, dt);
+                    for a in arrivals {
                         log::info!(
                             "arrival: {:.1} kg at {:.1} km/s, {:.0} K = {:.2e} J",
                             a.body.mass_kg,
@@ -7502,6 +7509,7 @@ mod app {
                             a.body.temp_k,
                             a.energy_j
                         );
+                        self.impact_meets_the_plants(&a);
                     }
                     // What the engine is holding, as it must be drawn — mapped once, by the engine's rule,
                     // into buffers that persist across frames.
@@ -7917,6 +7925,123 @@ mod app {
             resolved * ds
         }
 
+        /// ★★★ **THE IMPACT MEETS THE PLANTS** (docs/70, docs/46 row 57).
+        ///
+        /// Robin, on being told the grass was decoration: *"We need a way for grass to… be smashed…
+        /// in a very energetic impact."* This is the call that makes that true. Everything it needs
+        /// already existed and was simply never connected: `flight::Arrival` says where and how much,
+        /// `flora::scatter` says what grows there, `Assembly::meet` says what that energy does to it,
+        /// and `containment::Contents` remembers the divergence.
+        ///
+        /// **The footprint is the engine's own crater law**, not a radius anybody picked:
+        /// `damage::crater_radius(damage::crater_volume(E, σ_ground))` — the same pair of functions
+        /// that size a meteor's crater on a planet. So what an impact touches and how big its hole is
+        /// are one answer.
+        ///
+        /// Plants are met NEAREST FIRST and the energy is debited as it goes, so the far side of a
+        /// stand is sheltered by the near side — Robin's *"debited from the total energy of a
+        /// collision for zero loss"*, at the scale of a meadow.
+        ///
+        /// ★ Only DIVERGENCES are stored (`Contents::diverge`), so an untouched meadow costs nothing
+        /// and the pristine clumps need never exist — the scalability law, doing its job.
+        fn impact_meets_the_plants(&mut self, a: &crate::flight::Arrival) {
+            if a.energy_j <= 0.0 || self.landcover.is_none() || self.flora_kinds.is_empty() {
+                return;
+            }
+            let (lat, lon) = crate::geo::lat_lon_from_dir(a.at.normalize_or(glam::DVec3::Y));
+            // How far this energy reaches, by the law that already sizes craters.
+            let ground = materials::index_of(&self.mats, "dirt");
+            let strength = self.mats[ground].fracture_strength as f64;
+            let volume = crate::damage::crater_volume(a.energy_j, strength);
+            let reach_m = crate::damage::crater_radius(volume).clamp(0.05, 5_000.0);
+
+            let biome_mix = &self.biome_mix;
+            let landcover = self.landcover.as_ref();
+            let sited = crate::terra::flora::scatter(
+                lat,
+                lon,
+                reach_m,
+                &self.flora_kinds,
+                &self.mats,
+                |la, lo| {
+                    let class = landcover.map_or(0, |r| r.biome_at(la, lo) as usize);
+                    biome_mix.get(class).cloned().unwrap_or_default()
+                },
+                0.05,
+                4_000,
+            );
+            if sited.is_empty() {
+                return;
+            }
+            // Nearest first: the energy meets the near side of the stand before the far side.
+            let mut order: Vec<&crate::terra::flora::Sited> = sited.iter().collect();
+            order.sort_by(|x, y| x.dist_m.total_cmp(&y.dist_m));
+
+            let along = a.momentum.normalize_or(glam::DVec3::NEG_Y);
+            let mut budget = a.energy_j;
+            let mut broken = 0usize;
+            for s in order {
+                if budget <= 0.0 {
+                    break;
+                }
+                let txt = match self.flora_kinds[s.kind].assembly_id.as_str() {
+                    "broadleaf-tree-oak" => crate::assembly::compiled::BROADLEAF_TREE_OAK,
+                    "conifer-tree-spruce" => crate::assembly::compiled::CONIFER_TREE_SPRUCE,
+                    _ => crate::assembly::compiled::GRASS_TUFT,
+                };
+                let def = crate::assembly::compiled::parse(txt);
+                // ★ The event enters the plant's frame from WHERE IT CAME FROM, aimed through the
+                // plant's middle — not from above. MEASURED: entering from directly overhead while
+                // travelling the impactor's own direction means a nearly-horizontal shot passes OVER
+                // the clump and meets nothing, which is exactly what the first run of
+                // `a_shot_breaks_the_grass_it_lands_in` reported: the ball landed, and 0 plants
+                // diverged.
+                let mid = glam::DVec3::new(0.0, def.reach_m() * 0.5, 0.0);
+                let met = def.meet(
+                    &self.mats,
+                    &crate::assembly::Arriving {
+                        energy_j: budget,
+                        at_m: mid - along * (def.reach_m() * 1.5),
+                        along,
+                    },
+                );
+                if met.hits.is_empty() {
+                    continue;
+                }
+                let mut integrity = vec![1.0; def.parts.len()];
+                for h in &met.hits {
+                    integrity[h.part] = (1.0 - h.broken).clamp(0.0, 1.0);
+                }
+                let gone = integrity.iter().all(|&i| i <= 0.0);
+                if gone {
+                    // Nothing left of it: the rule says it is there and it is not.
+                    self.flora_damage.forget(s.id);
+                } else {
+                    let mut inst = crate::instance::Instance::of_type(
+                        s.id,
+                        &self.flora_kinds[s.kind].assembly_id,
+                        crate::instance::Placement::inside(None),
+                    );
+                    inst.damage.part_integrity = integrity;
+                    self.flora_damage.diverge(inst);
+                }
+                broken += 1;
+                budget = met.remaining_j;
+            }
+            log::info!(
+                "impact met the plants: {:.2e} J over {:.1} m reached {} of {} plants, {:.2e} J left; \
+                 {} divergences remembered",
+                a.energy_j,
+                reach_m,
+                broken,
+                sited.len(),
+                budget,
+                self.flora_damage.remembered()
+            );
+            // The mesh is a cache of an answer that just changed.
+            self.flora_at = None;
+        }
+
         /// **Resolve the plants standing near the eye into geometry** — the near half of Law IV.
         ///
         /// Robin (2026-08-04): *"These are hues at altitude but must become realistic flora at very low
@@ -8034,7 +8159,30 @@ mod app {
                 })
                 .collect();
             for s in &sited {
-                let m = &meshes[s.kind];
+                // ★★ **WHAT AN IMPACT BROKE IS NOT DRAWN** (docs/70, docs/46 row 57). The renderer asks
+                // the model what it remembers about this plant and shows that — physics driving the
+                // render, never the reverse. A clump nothing has touched is not remembered at all and
+                // costs this lookup and nothing else.
+                let damage = self.flora_damage.about(s.id);
+                if matches!(damage, Some(None)) {
+                    continue; // remembered as GONE
+                }
+                let integrity = damage.flatten().map(|i| &i.damage.part_integrity);
+                // A damaged plant gets its own mesh — only the ones something happened to pay for it.
+                let damaged;
+                let m = match integrity {
+                    None => &meshes[s.kind],
+                    Some(v) => {
+                        let txt = match self.flora_kinds[s.kind].assembly_id.as_str() {
+                            "broadleaf-tree-oak" => crate::assembly::compiled::BROADLEAF_TREE_OAK,
+                            "conifer-tree-spruce" => crate::assembly::compiled::CONIFER_TREE_SPRUCE,
+                            _ => crate::assembly::compiled::GRASS_TUFT,
+                        };
+                        damaged =
+                            crate::assembly::compiled::parse(txt).mesh_damaged(mats, 6, Some(v));
+                        &damaged
+                    }
+                };
                 let ground = r_disp + self.ground_disp_at(s.lat_deg, s.lon_deg);
                 let model = crate::assembly::place_on_surface(
                     s.lat_deg,
@@ -8117,6 +8265,12 @@ mod app {
         pub fn frame_pixels(&self) -> Option<Vec<u8>> {
             let tex = self.surface.texture()?;
             Some(crate::renderer::read_frame(&self.device, &self.queue, tex))
+        }
+
+        /// How many plants this world remembers something about — divergences from the rule, which is
+        /// the number that must stay small while the population does not (docs/67).
+        pub fn flora_damage_remembered(&self) -> usize {
+            self.flora_damage.remembered()
         }
 
         /// How many plants are standing right now — a read, for rigs and the HUD.
@@ -8990,6 +9144,99 @@ mod native_render_tests {
             sky < 0.02,
             "the plants changed {:.1}% of the SKY — the control is not controlling for what it thinks",
             sky * 100.0
+        );
+    }
+
+    /// ★★★ **THE IMPACT MEETS SOMETHING** — the exact sentence docs/46 row 57 said was false.
+    ///
+    /// The chain, end to end, natively: a swarm is released, its fragments fly, one ARRIVES, the
+    /// arrival's energy is debited through the plants standing where it lands, what broke is remembered
+    /// as a divergence, and the next frame does not draw it. Every link existed before today and none
+    /// of them were joined.
+    ///
+    /// This asserts on the MODEL — how many plants the impact broke and how many divergences are
+    /// remembered — rather than on pixels, because that is what the row is about. The picture is the
+    /// rig's job.
+    ///
+    /// `#[ignore]`: needs a GPU.
+    #[test]
+    #[ignore]
+    fn a_shot_breaks_the_grass_it_lands_in() {
+        let (json, lm, ev, lc) = shipped_earth();
+        let mut terra = pollster::block_on(app::Terra::headless(320, 200)).expect("headless Terra");
+        terra
+            .load_world(
+                &json,
+                &lm.data,
+                lm.w as u32,
+                lm.h as u32,
+                &ev.data,
+                ev.w as u32,
+                ev.h as u32,
+                &lc.data,
+                lc.w as u32,
+                lc.h as u32,
+            )
+            .expect("the shipped Earth loads");
+        terra.set_alt_bounds(0.05, 8.0e10);
+        terra.set_epoch_sun_over_lon(-9.45);
+        terra.place_camera(53.10, -9.45, 1.5, 0.0, -0.10);
+        for _ in 0..4 {
+            terra.render().expect("a frame");
+        }
+        let before = terra.flora_count();
+        assert!(before > 0, "there is a meadow to hit");
+        assert_eq!(
+            terra.flora_damage_remembered(),
+            0,
+            "and nothing has happened to it yet"
+        );
+
+        // ★ A CANNON, not a meteor, and the reason is measured: a swarm is released 500 km up and
+        // needs about a minute of flight, while this headless loop advances on WALL-CLOCK dt and covers
+        // roughly two milliseconds a frame — 4,000 frames is eight seconds, so nothing ever arrived. A
+        // 24-pounder at 20° lands in a few seconds and travels the identical `flight::Flight` path to
+        // the identical `flight::Arrival`. The chain under test is the same; only the flight is shorter.
+        terra.emplace_cannon(0.0);
+        // Nearly flat, so the shot is down in ~2 s of flight rather than the ~31 s a 20° arc
+        // takes: this loop advances on wall-clock dt and covers about a second per thousand frames.
+        let muzzle = terra.fire_cannon(0.0, 1.0);
+        assert!(muzzle > 100.0, "the gun fired: {muzzle:.0} m/s");
+        let mut landed = false;
+        for _ in 0..8000 {
+            terra.render().expect("a frame");
+            if terra.flora_damage_remembered() > 0 {
+                landed = true;
+                break;
+            }
+        }
+        assert!(
+            landed,
+            "nothing ever arrived — {} still in flight",
+            terra.flight_count()
+        );
+        let remembered = terra.flora_damage_remembered();
+        println!(
+            "round shot: {remembered} plants remembered as changed; {before} were standing in the \
+             camera's own view when it fired"
+        );
+        assert!(
+            remembered > 0,
+            "the impact must break something it lands in"
+        );
+
+        // ★ THE TWO COUNTS ARE DIFFERENT POPULATIONS, and comparing them is a mistake this test made
+        // first time round. `flora_count` is what the RENDERER resolved near the camera; the shot lands
+        // hundreds of metres away and meets the plants inside ITS OWN footprint, which the engine's
+        // crater law sizes. So `remembered` may exceed `before` without anything being wrong — and
+        // asserting otherwise measured the camera instead of the impact.
+        //
+        // What IS worth pinning is the scalability law: an untouched meadow costs NOTHING (asserted
+        // above, before the gun fired) and only what an impact actually reached is paid for. The
+        // footprint's own scan is bounded, so this is bounded with it.
+        assert!(
+            remembered <= 4_000,
+            "one shot must not make a continent individual: {remembered} remembered"
         );
     }
 }
