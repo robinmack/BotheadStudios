@@ -667,6 +667,124 @@ impl Assembly {
     }
 }
 
+/// **What arrives at a piece of matter** (docs/70). Energy, where it entered, and where it is going —
+/// in the assembly's own frame, in metres and joules.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Arriving {
+    pub energy_j: f64,
+    /// Where the event enters the assembly's frame, metres.
+    pub at_m: glam::DVec3,
+    /// Unit direction of travel.
+    pub along: glam::DVec3,
+}
+
+/// What one part did with it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PartHit {
+    /// Index into `Assembly::parts`.
+    pub part: usize,
+    /// Joules this part took out of the event.
+    pub spent_j: f64,
+    /// How much of it was broken, `0..=1`. This is what `instance::Damage::part_integrity` holds:
+    /// `integrity = 1 - broken`.
+    pub broken: f64,
+}
+
+/// The whole answer: the debit, and what happened on the way.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Met {
+    pub spent_j: f64,
+    /// What continues past this assembly — to the next thing, or to the ground.
+    pub remaining_j: f64,
+    pub hits: Vec<PartHit>,
+}
+
+impl Assembly {
+    /// ★★★ **WHAT THIS MUCH ENERGY DOES TO ME** (docs/70) — the verb that makes an assembly matter
+    /// rather than scenery.
+    ///
+    /// Robin, on being told the plants were decoration (2026-08-09): *"Each impact with each assembly
+    /// can be debited from the total energy of a collision for zero loss… but that way we could have a
+    /// rock fall on a haystack, unsettle the hay (dry grass), but the impact could be absorbed."* This
+    /// is that debit. Energy enters, every part on its path takes what it costs to break, and the
+    /// remainder leaves. **Spent + remaining = arriving, exactly** — conservation is a property of the
+    /// arithmetic here, not something checked afterwards.
+    ///
+    /// ★ **It is the engine's OWN law at a different scale.** `damage::crater_volume(E, σ) = E/σ` is
+    /// what decides a meteor's crater on a planet (`interaction::respond`); read backwards it says what
+    /// a PART costs to destroy, `E = σ·V`. This calls that function rather than restating the ratio, so
+    /// a grass blade and a continent are the same arithmetic (Law II).
+    ///
+    /// ★★ **FLAGGED — FRACTURE IS THE ONLY CHANNEL OPEN** (docs/70 §4). Energy arriving at matter can
+    /// also DISPLACE it (½mv²), COMPACT it (crushing porosity, which is what a haystack really does),
+    /// or HEAT it (`oxidation::apply_heat`, `damage::classify`). Those are named IOUs with their real
+    /// quantities, not omissions: a rock through straw is under-resisted here until compaction lands,
+    /// and this is said plainly because that is precisely the case that prompted the design.
+    ///
+    /// Geometry is a ray against each part's bounding sphere — coarse, and honest about it: a part is
+    /// either on the path or it is not, and a blade's exact silhouette does not change the energy
+    /// arithmetic by more than the ordering of two neighbours.
+    pub fn meet(&self, mats: &[Material], a: &Arriving) -> Met {
+        let mut met = Met {
+            spent_j: 0.0,
+            remaining_j: a.energy_j.max(0.0),
+            hits: Vec::new(),
+        };
+        if met.remaining_j <= 0.0 {
+            return met;
+        }
+        let dir = a.along.normalize_or(glam::DVec3::Y);
+        // Parts on the path, nearest first — the order energy actually meets them in.
+        let mut on_path: Vec<(f64, usize)> = Vec::new();
+        for (i, p) in self.parts.iter().enumerate() {
+            let c = glam::DVec3::from(p.at_m);
+            let r = p.shape.reach_m();
+            let to_c = c - a.at_m;
+            let t = to_c.dot(dir);
+            // Behind the entry point is behind the event; it meets nothing there.
+            if t < -r {
+                continue;
+            }
+            if (to_c - dir * t).length() <= r {
+                on_path.push((t, i));
+            }
+        }
+        on_path.sort_by(|x, y| x.0.total_cmp(&y.0));
+
+        for (_, i) in on_path {
+            if met.remaining_j <= 0.0 {
+                break;
+            }
+            let p = &self.parts[i];
+            let Some(m) = mats.iter().find(|m| m.id == p.material) else {
+                continue; // unknown matter resists nothing rather than resisting infinitely
+            };
+            let strength = m.fracture_strength as f64;
+            let volume = p.matter_volume_m3();
+            if volume <= 0.0 {
+                continue;
+            }
+            // What this energy could break of THIS material, and what the part actually offers.
+            let breakable = crate::damage::crater_volume(met.remaining_j, strength);
+            let broken = (breakable / volume).min(1.0);
+            // The cost of what was broken, by the same law read backwards.
+            let spent = if breakable >= volume {
+                strength * volume
+            } else {
+                met.remaining_j
+            };
+            met.spent_j += spent;
+            met.remaining_j = (met.remaining_j - spent).max(0.0);
+            met.hits.push(PartHit {
+                part: i,
+                spent_j: spent,
+                broken,
+            });
+        }
+        met
+    }
+}
+
 /// **Stand an assembly on a body's surface, facing a bearing** — the engine's answer to "put it on the
 /// ground", so a scene never builds a transform by hand.
 ///
@@ -1888,6 +2006,163 @@ mod placement_tests {
         assert!(
             height_m > 0.25,
             "the tuft stands up (0.35 m of blade), it does not lie flat: {height_m:.3} m"
+        );
+    }
+}
+
+#[cfg(test)]
+mod meet_tests {
+    use super::*;
+
+    fn falling_rock(joules: f64, from_above: bool) -> Arriving {
+        Arriving {
+            energy_j: joules,
+            at_m: if from_above {
+                glam::DVec3::new(0.0, 20.0, 0.0)
+            } else {
+                glam::DVec3::new(-20.0, 0.5, 0.0)
+            },
+            along: if from_above {
+                glam::DVec3::NEG_Y
+            } else {
+                glam::DVec3::X
+            },
+        }
+    }
+
+    /// ★★★ **THE TEST THAT MAKES THE OTHER TWO TRUSTWORTHY** (docs/70 §6). Robin's mechanism was
+    /// *"debited from the total energy of a collision for ZERO LOSS"*, so conservation is not a nice
+    /// property here — it is the definition. Spent plus remaining must equal what arrived, to the last
+    /// float, for every material and every energy.
+    #[test]
+    fn spent_plus_remaining_is_exactly_what_arrived() {
+        let mats = crate::materials::load();
+        let clump = compiled::parse(compiled::GRASS_TUFT);
+        let oak = compiled::parse(compiled::BROADLEAF_TREE_OAK);
+        for a in [&clump, &oak] {
+            for j in [1.0e-3, 1.0, 1.0e3, 1.0e6, 1.0e12] {
+                let met = a.meet(&mats, &falling_rock(j, true));
+                let total = met.spent_j + met.remaining_j;
+                assert!(
+                    (total - j).abs() <= j * 1e-12,
+                    "{}: {j:.3e} J in, {total:.6e} J accounted for",
+                    a.id
+                );
+                // And no part may claim more than it cost, or less than nothing.
+                let summed: f64 = met.hits.iter().map(|h| h.spent_j).sum();
+                assert!((summed - met.spent_j).abs() <= met.spent_j * 1e-12);
+                assert!(met.hits.iter().all(|h| (0.0..=1.0).contains(&h.broken)));
+            }
+        }
+    }
+
+    /// ★★ **A ROCK ONTO GRASS CARRIES ON; THE SAME ROCK INTO AN OAK STOPS.** The picture Robin drew of
+    /// what an assembly obeying physics would mean, and the reason it belongs to the assembly: the two
+    /// answers differ only by the matter, not by any code that knows what a tree is.
+    #[test]
+    fn grass_barely_slows_a_rock_and_an_oak_stops_it() {
+        let mats = crate::materials::load();
+        let clump = compiled::parse(compiled::GRASS_TUFT);
+        let oak = compiled::parse(compiled::BROADLEAF_TREE_OAK);
+        // A 5 kg rock at 10 m/s — a stone dropped from about five metres.
+        let joules = 0.5 * 5.0 * 10.0f64.powi(2);
+
+        let through_grass = clump.meet(&mats, &falling_rock(joules, true));
+        let into_oak = oak.meet(&mats, &falling_rock(joules, false));
+        println!(
+            "250 J rock: grass takes {:.3} J ({:.4}%), oak takes {:.1} J ({:.1}%)",
+            through_grass.spent_j,
+            through_grass.spent_j / joules * 100.0,
+            into_oak.spent_j,
+            into_oak.spent_j / joules * 100.0
+        );
+
+        assert!(
+            through_grass.spent_j / joules < 0.05,
+            "a clump of grass should barely notice a falling rock, it took {:.1}%",
+            through_grass.spent_j / joules * 100.0
+        );
+        assert!(
+            !through_grass.hits.is_empty(),
+            "but it must MEET it — the whole point of row 57"
+        );
+        assert!(
+            into_oak.spent_j / joules > 0.9,
+            "an oak should stop it, it took only {:.1}%",
+            into_oak.spent_j / joules * 100.0
+        );
+        assert!(
+            into_oak.remaining_j < joules * 0.1,
+            "and little should continue past the trunk"
+        );
+    }
+
+    /// Energy that meets nothing passes through untouched — the airless-control equivalent. If this
+    /// ever spends anything, the debit has acquired an opinion of its own.
+    #[test]
+    fn a_miss_costs_nothing() {
+        let mats = crate::materials::load();
+        let clump = compiled::parse(compiled::GRASS_TUFT);
+        let past = Arriving {
+            energy_j: 1000.0,
+            at_m: glam::DVec3::new(50.0, 20.0, 0.0), // fifty metres to the side
+            along: glam::DVec3::NEG_Y,
+        };
+        let met = clump.meet(&mats, &past);
+        assert_eq!(met.spent_j, 0.0);
+        assert_eq!(met.remaining_j, 1000.0);
+        assert!(met.hits.is_empty());
+    }
+
+    /// ★ **A BLADE IS BROKEN BEFORE THE WHOLE CLUMP IS.** Damage is per PART, which is what makes
+    /// `instance::Damage::part_integrity` meaningful: a clump a boot has stepped on is not a clump that
+    /// no longer exists.
+    ///
+    /// Each blade costs `σ·V` = 15 kPa × 3.18e-7 m³ ≈ **4.8 mJ** to break, so the energies here are
+    /// derived from the matter rather than picked: a millijoule cannot finish even one, and 50 mJ
+    /// finishes about ten and leaves one part-way through.
+    #[test]
+    fn energy_breaks_blades_one_at_a_time_and_stops_when_it_runs_out() {
+        let mats = crate::materials::load();
+        let clump = compiled::parse(compiled::GRASS_TUFT);
+
+        // A millijoule cannot break a single blade — it is spent part-way through the first one, and
+        // NOTHING continues. That is the debit working, not a miss.
+        let tiny = clump.meet(&mats, &falling_rock(1.0e-3, true));
+        assert_eq!(tiny.hits.len(), 1, "it stops at the first blade it meets");
+        assert!(tiny.hits[0].broken > 0.0 && tiny.hits[0].broken < 1.0);
+        assert_eq!(tiny.remaining_j, 0.0, "and nothing passes through");
+
+        // Fifty millijoules gets through about ten blades and is caught by the next.
+        let some = clump.meet(&mats, &falling_rock(0.05, true));
+        let fully = some.hits.iter().filter(|h| h.broken >= 1.0).count();
+        let partly = some
+            .hits
+            .iter()
+            .filter(|h| h.broken > 0.0 && h.broken < 1.0)
+            .count();
+        println!(
+            "50 mJ into a clump: {fully} blades broken through, {partly} part-way, {} met, {:.4} J left",
+            some.hits.len(),
+            some.remaining_j
+        );
+        assert!(
+            fully >= 5,
+            "50 mJ should get through several blades, got {fully}"
+        );
+        assert!(
+            fully < clump.parts.len(),
+            "but not the whole clump — {fully} of {}",
+            clump.parts.len()
+        );
+        assert!(partly <= 1, "at most one blade is caught mid-break");
+
+        // And enough energy levels the clump and carries on, which is the rock in the test above.
+        let plenty = clump.meet(&mats, &falling_rock(10.0, true));
+        assert!(plenty.hits.iter().all(|h| h.broken >= 1.0));
+        assert!(
+            plenty.remaining_j > 9.0,
+            "a clump of grass does not stop a rock"
         );
     }
 }
