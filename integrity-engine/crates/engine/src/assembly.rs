@@ -708,6 +708,9 @@ pub struct PartHit {
     /// How much of it was broken, `0..=1`. This is what `instance::Damage::part_integrity` holds:
     /// `integrity = 1 - broken`.
     pub broken: f64,
+    /// ★ How much of its VOID was closed, `0..=1` — compaction (docs/70). A haystack stops a rock by
+    /// this and never by `broken`; a solid part has no void and so can never spend anything here.
+    pub compacted: f64,
 }
 
 /// The whole answer: the debit, and what happened on the way.
@@ -779,26 +782,69 @@ impl Assembly {
             let Some(m) = mats.iter().find(|m| m.id == p.material) else {
                 continue; // unknown matter resists nothing rather than resisting infinitely
             };
-            let strength = m.fracture_strength as f64;
             let volume = p.matter_volume_m3();
             if volume <= 0.0 {
                 continue;
             }
-            // What this energy could break of THIS material, and what the part actually offers.
+            let mut spent = 0.0;
+
+            // ★★★ **COMPACTION FIRST** (docs/70 §4), because that is the order it happens in: an impact
+            // closes a body's VOID before it breaks the substance around it. This is why a haystack
+            // stops a rock and a granite boulder of the same size does not — Robin's own example:
+            // *"a rock fall on a haystack, unsettle the hay (dry grass), but the impact could be
+            // absorbed."*
+            //
+            // Same law as fracture, read with the other strength and the other volume:
+            // `E = σ_compressive · V_void`. The void is the part's envelope minus its matter, which is
+            // exactly what `packing` already says — so a field that existed to get a powder charge's
+            // mass right now also decides what a bale of straw absorbs.
+            let void = (p.envelope_volume_m3() - volume).max(0.0);
+            // ★ The crush stress is a property of the ARRANGEMENT, so it follows this part's own
+            // packing rather than being read flat off the catalogue — see `damage::crush_stress_pa`.
+            // Without this a loose haystack and a high-density bale resist identically, which is the
+            // "sand versus sandstone" conflation in a different coat.
+            let crush = crate::damage::crush_stress_pa(
+                m.compressive_strength as f64,
+                p.packing,
+                crate::damage::BALE_REFERENCE_PACKING,
+            );
+            let mut compacted = 0.0;
+            if void > 0.0 && crush > 0.0 {
+                let closable = crate::damage::crater_volume(met.remaining_j, crush);
+                compacted = (closable / void).min(1.0);
+                let cost = if closable >= void {
+                    crush * void
+                } else {
+                    met.remaining_j
+                };
+                spent += cost;
+                met.remaining_j = (met.remaining_j - cost).max(0.0);
+            }
+
+            // Then FRACTURE, with whatever is left — the substance itself.
+            let strength = m.fracture_strength as f64;
             let breakable = crate::damage::crater_volume(met.remaining_j, strength);
-            let broken = (breakable / volume).min(1.0);
-            // The cost of what was broken, by the same law read backwards.
-            let spent = if breakable >= volume {
-                strength * volume
+            let broken = if volume > 0.0 {
+                (breakable / volume).min(1.0)
             } else {
-                met.remaining_j
+                0.0
             };
+            if met.remaining_j > 0.0 {
+                let cost = if breakable >= volume {
+                    strength * volume
+                } else {
+                    met.remaining_j
+                };
+                spent += cost;
+                met.remaining_j = (met.remaining_j - cost).max(0.0);
+            }
+
             met.spent_j += spent;
-            met.remaining_j = (met.remaining_j - spent).max(0.0);
             met.hits.push(PartHit {
                 part: i,
                 spent_j: spent,
                 broken,
+                compacted,
             });
         }
         met
@@ -946,6 +992,9 @@ pub mod compiled {
         include_str!("../../../assets/assemblies/compiled/conifer-tree-spruce.json");
     pub const GRASS_TUFT: &str =
         include_str!("../../../assets/assemblies/compiled/grass-tuft.json");
+    /// A round straw bale — the assembly docs/70's compaction channel was built for.
+    pub const HAYSTACK_BALE: &str =
+        include_str!("../../../assets/assemblies/compiled/haystack-bale.json");
 
     /// Parse a baked assembly. Panics on malformed input, because a compiled asset that does not parse
     /// is a build error wearing a runtime error's clothes.
@@ -2115,6 +2164,104 @@ mod meet_tests {
             into_oak.remaining_j < joules * 0.1,
             "and little should continue past the trunk"
         );
+    }
+
+    /// ★★★ **THE HAYSTACK** — Robin's own example, and the reason the compaction channel exists
+    /// (docs/70 §4): *"we could have a rock fall on a haystack, unsettle the hay (dry grass), but the
+    /// impact could be absorbed."*
+    ///
+    /// A bale is **92.9% air** — measured bulk density 100 kg/m³ over straw's own 1400 — and an impact
+    /// closes that void before it snaps a single stem. `E = σ_compressive · V_void` is the same law as
+    /// fracture with the other strength and the other volume, so nothing new was invented to make this
+    /// work: `packing`, a field that existed to get a powder charge's mass right, is what decides how
+    /// much a bale can swallow.
+    #[test]
+    fn a_haystack_absorbs_the_rock_that_a_boulder_would_bounce_off() {
+        let mats = crate::materials::load();
+        let bale = compiled::parse(compiled::HAYSTACK_BALE);
+        // A 20 kg rock dropped 5 m: mgh = 20 × 9.81 × 5 ≈ 981 J.
+        let joules = 20.0 * 9.81 * 5.0;
+        let met = bale.meet(
+            &mats,
+            &Arriving {
+                energy_j: joules,
+                at_m: glam::DVec3::new(0.0, 4.0, 0.0),
+                along: glam::DVec3::NEG_Y,
+            },
+        );
+        let hit = met.hits.first().expect("the rock meets the bale");
+        println!(
+            "{joules:.0} J onto a bale: {:.0}% absorbed, void closed {:.2}%, straw broken {:.4}%, \
+             {:.1} J continues",
+            met.spent_j / joules * 100.0,
+            hit.compacted * 100.0,
+            hit.broken * 100.0,
+            met.remaining_j
+        );
+        assert!(
+            met.spent_j >= joules * 0.999,
+            "a haystack must absorb a dropped rock, it took only {:.1}%",
+            met.spent_j / joules * 100.0
+        );
+        assert!(
+            hit.compacted > 0.0 && hit.compacted < 1.0,
+            "it absorbs by CLOSING ITS VOID part-way, got {:.3}",
+            hit.compacted
+        );
+        assert_eq!(hit.broken, 0.0, "and without snapping a single stem");
+    }
+
+    /// The other half of the same claim: a solid has no void, so it can spend nothing on compaction and
+    /// the energy goes straight to breaking it. Nothing branches on what the object IS — granite simply
+    /// has `packing = 1`.
+    #[test]
+    fn a_solid_has_no_void_to_close() {
+        let mats = crate::materials::load();
+        let bale = compiled::parse(compiled::HAYSTACK_BALE);
+        // The same bale, made solid: one part at packing 1.0.
+        let mut rock = bale.clone();
+        rock.parts[0].packing = 1.0;
+        rock.parts[0].material = "granite".to_string();
+        let met = rock.meet(
+            &mats,
+            &Arriving {
+                energy_j: 981.0,
+                at_m: glam::DVec3::new(0.0, 4.0, 0.0),
+                along: glam::DVec3::NEG_Y,
+            },
+        );
+        let hit = met.hits.first().expect("it meets the boulder");
+        assert_eq!(hit.compacted, 0.0, "a solid has no void");
+        println!(
+            "981 J onto solid granite of the same size: {:.4}% broken, {:.0} J continues",
+            hit.broken * 100.0,
+            met.remaining_j
+        );
+        // 981 J against granite's tensile strength barely marks it, and almost everything continues.
+        assert!(hit.broken < 0.01, "it barely scratches granite");
+        assert!(met.remaining_j < 981.0, "but it still costs something");
+    }
+
+    /// Conservation must survive the second channel — the property the whole design rests on.
+    #[test]
+    fn compaction_does_not_break_the_ledger() {
+        let mats = crate::materials::load();
+        let bale = compiled::parse(compiled::HAYSTACK_BALE);
+        for j in [1.0, 1.0e3, 1.0e6, 1.0e9] {
+            let met = bale.meet(
+                &mats,
+                &Arriving {
+                    energy_j: j,
+                    at_m: glam::DVec3::new(0.0, 4.0, 0.0),
+                    along: glam::DVec3::NEG_Y,
+                },
+            );
+            let total = met.spent_j + met.remaining_j;
+            assert!(
+                (total - j).abs() <= j * 1e-12,
+                "{j:.1e} J in, {total:.6e} accounted for"
+            );
+        }
     }
 
     /// Energy that meets nothing passes through untouched — the airless-control equivalent. If this

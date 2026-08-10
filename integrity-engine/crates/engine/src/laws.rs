@@ -807,6 +807,18 @@ mod numbering_tests {
 /// Read the other way, this is an inventory of physics the engine has DATA for and does not yet do —
 /// a roadmap derived from measurement rather than opinion. Nearly half the catalogue is on it.
 pub(crate) const UNWIRED_MATERIAL_PROPERTIES: &[(&str, &str)] = &[
+    // ★ Straw's, added 2026-08-10 with the compaction channel (docs/70). Both are real numbers with no
+    // reader YET, and the gate is right to insist they be named rather than left to look wired.
+    (
+        "ignition_point",
+        "dry straw burns at ~550 K — `oxidation::burn` exists and no assembly is wired to it (docs/70 §4)",
+    ),
+    (
+        "tensile_strength_stem",
+        "a single straw in tension (25 MPa) against a bale's ~8 kPa as a mass — the same blade-vs-turf \
+         distinction `grass` records, and it is what a RESOLVED pile of blades would spend instead of \
+         the bale-scale figure (docs/46 row 59)",
+    ),
     // Anisotropic failure — docs/46 row 30. The set that makes wood splinter along its grain, and
     // rolled steel and composite layup tear along theirs.
     (
@@ -831,10 +843,6 @@ pub(crate) const UNWIRED_MATERIAL_PROPERTIES: &[(&str, &str)] = &[
         "a turbine blade's own direction-dependent limit",
     ),
     // Bulk elasticity and strength the contact law does not yet ask for.
-    (
-        "compressive_strength",
-        "crushing failure, distinct from the tensile fracture already used",
-    ),
     (
         "bulk_modulus",
         "volumetric stiffness; the EOS covers this where a Tillotson block exists",

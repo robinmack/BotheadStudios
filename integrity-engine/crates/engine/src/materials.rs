@@ -65,6 +65,10 @@ struct RawMechanical {
     /// Pa. Fallback bonding strength where tensile isn't given.
     #[serde(default)]
     cohesion: Option<f32>,
+    /// Pa. Resistance to being CRUSHED — the stress at which the arrangement collapses. Read for
+    /// compaction (docs/70): a porous body absorbs by closing its void, not by snapping.
+    #[serde(default)]
+    compressive_strength: Option<f32>,
     /// Coulomb friction coefficient μ (dimensionless). For granular debris this drives the contact
     /// friction, from which the angle of repose emerges (`docs/23`).
     #[serde(default)]
@@ -364,6 +368,13 @@ pub struct Material {
     /// Pa. How hard it is to fracture/detach a chunk (Phase 3): rock is high (barely chips), soil and
     /// grass are ~1000× lower (detach easily). Falls back to cohesion, then to "effectively unbreakable".
     pub fracture_strength: f32,
+    /// Pa. **What it takes to CRUSH it** — the stress at which the arrangement collapses, as distinct
+    /// from `fracture_strength`, which is what it takes to pull it apart. A porous body absorbs an
+    /// impact by closing its void long before anything snaps: that is how a haystack stops a rock and
+    /// a granite boulder does not (docs/70). Falls back to the tensile figure where the catalogue is
+    /// silent, which is conservative in the direction that matters — it makes a thing HARDER to crush
+    /// than it is, never softer.
+    pub compressive_strength: f32,
     /// Pa. Young's (elastic) modulus — how stiffly the material resists deformation. A solid is rigid
     /// because its bonds are stiff; the cohesive-aggregate bond stiffness derives from this (`docs/23`).
     /// 0 where not characterized (falls back to a soft default at the call site).
@@ -533,6 +544,10 @@ pub fn load() -> Vec<Material> {
                 density: m.mechanical.density,
                 albedo: m.optical.albedo,
                 fracture_strength,
+                compressive_strength: m
+                    .mechanical
+                    .compressive_strength
+                    .unwrap_or(fracture_strength),
                 youngs_modulus: m.mechanical.youngs_modulus.unwrap_or(0.0),
                 friction_coefficient: m.mechanical.friction_coefficient.unwrap_or(0.6),
                 restitution: m.mechanical.restitution.unwrap_or(0.5),

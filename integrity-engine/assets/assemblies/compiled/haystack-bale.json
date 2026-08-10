@@ -1,0 +1,38 @@
+{
+  "id": "haystack-bale",
+  "name": "Round straw bale",
+  "parts": [
+    {
+      "name": "bale",
+      "material": "straw",
+      "shape": {
+        "kind": "cylinder",
+        "r": 0.6,
+        "length": 1.2
+      },
+      "along": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "at_m": [
+        0.0,
+        0.6,
+        0.0
+      ],
+      "packing": 0.071429
+    }
+  ],
+  "connections": [],
+  "notes": "A standard round field bale, and the reason it exists is docs/70: Robin's own example of an assembly absorbing an impact — *\"we could have a rock fall on a haystack, unsettle the hay (dry grass), but the impact could be absorbed.\"*\n\nNOTHING HERE IS CHOSEN. The dimensions are a standard round bale (1.2 m x 1.2 m). The PACKING is the measured bulk density of a field bale over straw's own cell-wall density: 100 / 1400 = 0.0714 — so the bale is 92.9% AIR, which is the whole point. That void is what an impact closes, and `compressive_strength` (45 kPa, mid-range of published straw-bale compression tests at 20% strain) is what closing it costs.\n\nMass follows: envelope 1.357 m3 x packing x 1400 kg/m3 = 136 kg, which is what a round bale weighs.\n\nFLAGGED: one part, so it compacts uniformly. A real bale crushes locally under the strike and stays whole elsewhere; the honest version is the bale as a stack of parts, which is the same resolution question every assembly here faces.",
+  "derived": {
+    "mass_kg": 135.71761693589488,
+    "envelope_volume_m3": 1.3571680263507906,
+    "matter_volume_m3": 0.09694115495421063,
+    "centre_of_mass_m": [
+      0.0,
+      0.6,
+      0.0
+    ]
+  }
+}
