@@ -3,6 +3,44 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-09 — the coordinates, and the renderer's own law
+
+★★★ **The instrument gave the coordinates and the defect became specific.** Robin: *"at least now we
+should be able to see the coordinates of the graphical elements and figure out what happened."*
+Transforming known flora vertices with the EXACT matrices the shader receives:
+
+```
+flora clip[0]: ndc (0.409, -0.258, 0.997)  IN FRAME
+```
+
+**The plants are in frame** — and sitting at **z = 0.997**, jammed against the far plane. (Two other
+samples come back with negative `w`: plants behind the eye, which half of them are.) Confirmed against
+`fly_camera::view`: at 2 m altitude `near = (alt_disp*0.03).clamp(5e-9, 0.5)` = **0.06 m** and
+`far = horizon*1.4` = **7 km** — a ratio of **1:117,000**, so `1 − near/z` puts everything past ~20 m at
+z ≈ 0.997 and the whole visible world collapses into the last thousandth of the depth range. The ground
+is drawn first and `depth_compare: Less` rejects anything not strictly nearer.
+
+The named fix is **reversed-Z** (near at 1.0, far at 0.0, `Greater` compare), the standard answer to
+exactly this ratio, and the existing `Depth32Float` attachment already suits it. It touches every depth
+comparison in both scenes, so it is its own change with its own rig evidence. ★ Still not closed: a 5 m
+lift should have put a plant against the sky where the clear depth is 1.0 and z = 0.994 passes — but
+that probe predates the camera fix, so it needs re-running before anything is concluded.
+
+★★★ **And the governance statement the split needed**, which I would have got wrong by importing a law
+across the boundary. Robin: *"the renderer is all about approximation… it isn't bound by 'no fudge' as
+long as it is trying faithfully to reproduce a meaningful, believable visual faithful to the real physics
+presented by the engine."*
+
+**Law V is a rule about what is TRUE. The renderer does not decide what is true; it decides how to show
+it.** So: **the renderer may approximate HOW it shows what the engine says, and may never change WHAT
+the engine says.** Reversed-Z, a star's PSF, a canopy texture and an interpolated frame are all
+legitimate — a depth encoding carries zero physical content and nothing can interact with it. An albedo
+nudged because it looks better stays forbidden, because everything interacts with an albedo. It is the
+same test as the illusion rule, applied to quantities instead of geometry. `docs/68` §1b, and summarised
+in CLAUDE.md.
+
+**Verified.** 592/592 native, `mod app` clean for wasm32, all probes reverted.
+
 ## 2026-08-09 — the renderer can be asked what it holds, and it corrected me at once
 
 **What.** docs/68 step 3, first increment — and the piece that had to come first for a reason that was
