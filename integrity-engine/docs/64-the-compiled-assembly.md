@@ -79,6 +79,128 @@ rather than an aspiration:
    assembly matters as much as the binary, and "scenes as data" (docs/46 row 14) stops being a tidiness
    argument and becomes the thing that lets anyone build content at all.
 
+★★★ **THE ACCEPTANCE TEST FOR THE WHOLE ARCHITECTURE** (Robin, 2026-08-02): *"As long as we can build a
+working cannon and a working planet, and put a working cannon on a working planet and fire it, we know
+our assembly build is sound."*
+
+That is one sentence and it exercises every claim this document makes: a PARTS assembly (the cannon), a
+STACK+SURF assembly (the planet), an assembly PLACED on a body at a coordinate (§0 item 1), chemical
+energy becoming gas becoming motion (the gap at row 31), ballistics through that planet's real gravity
+and real air, and a shot landing on real terrain. **Nothing in it can be faked without another part of
+it failing**, which is what makes it an acceptance test rather than a demo.
+
+★★ **A SHIP'S CANNON, not a barrel on the ground** (Robin): *"the cannon needs to be more than just a
+capped cylinder; it will need a way to place/hold it on the ground. Possibly a ship cannon would be the
+right first approach (simplest, the barrel is on a blocky assembly tied to the ground to keep it from
+rolling far in recoil)."*
+
+This is what stops the first assembly being a toy, and it is genuinely the simpler carriage — a naval
+truck carriage is blocks and axles, where a field carriage needs a trail, large wheels and an elevating
+screw. It forces the format to carry parts of DIFFERENT materials joined in DIFFERENT ways, which one
+capped cylinder never would:
+
+| part | material | joined how |
+|---|---|---|
+| barrel | bronze or cast iron | trunnions resting in the carriage cheeks — a BEARING that carries load in compression and permits rotation |
+| carriage cheeks, bed, trucks | oak — and its **anisotropy is load-bearing here** (docs/46 row 30) | pinned and bolted |
+| breeching rope | hemp | **tension only, with slack** — it does nothing until it comes taut, then arrests the recoil |
+| carriage on deck | — | `Rest`: no tension capacity at all, friction decelerating the recoil |
+
+★ **Two additions to §6's join taxonomy fall straight out of it**, which is the point of building a real
+object early: a **bearing** (carries compression, permits rotation about an axis) and a **tension-only
+member with slack** (a rope does nothing until taut — a join whose capacity depends on its current
+extension, not merely on its material). Neither appears in a hull made of welded plate, and neither
+would have been noticed by designing the taxonomy from first principles.
+
+★★ **And recoil hands us a FREE, EXACT validation that needs no historical figure at all: momentum must
+balance.** The shot's momentum out of the muzzle equals the gun-and-carriage momentum backwards, and
+that check is independent of whether our muzzle velocity is right — it tests the interior-ballistics
+chain's *bookkeeping* rather than its calibration. Then friction on the deck and the breeching rope
+arrest it, which exercises `Rest` and the tension-only member under a real impulse rather than a
+declared one.
+
+### ★ Black powder is a MIXTURE, not a substance — found by trying to catalogue it (2026-08-02)
+
+The first attempt at the cannon began where the SOP says it must: source the propellant before any code
+uses it (Law VII). It got this far and then hit something worth writing down.
+
+**Sourced cleanly** — the ENERGETIC properties, which is what a gun actually needs: specific energy
+**2.86 MJ/kg**; permanent gas yield **~0.265 m³/kg at STP** (converted from the ~1.05 in³ per grain
+quoted for muzzleloaders — black powder is unusual in that much of its product mass stays CONDENSED as
+potassium salts and smoke, which is why its gas yield is far below a smokeless propellant's);
+products' specific-heat ratio **γ ≈ 1.2**; Noble-Abel covolume **~1 cm³/g**; and a flame temperature of
+**~1950 K at 1000 psi** for the classic 75/15/10 composition.
+
+**Could NOT be sourced** — the properties of the SOLID: specific heat, decomposition temperature,
+thermal conductivity. And `materials::thermal_data_tests` rightly refuses an entry without a specific
+heat, on the correct principle that *"specific heat is measurable for everything, so everything has
+one"*.
+
+★ **The block is the answer, not an obstacle.** Black powder is not a substance — it is a mechanical
+MIXTURE of three: ~75% potassium nitrate, ~15% charcoal, ~10% sulfur, none of which is in the catalogue.
+Its bulk specific heat, density and conductivity are *derivable from its constituents* by exactly the
+mixture reduction §4 already specifies; what is irreducibly its own is the ENERGY RELEASED when those
+three react, which is a property of the reaction rather than of any one of them.
+
+So the SOP-correct order is: **catalogue KNO₃, charcoal and sulfur as substances; represent black powder
+as a mixture of them plus a reaction; derive the bulk thermal properties rather than typing them.** A
+first draft of the entry did the opposite and quietly carried `specific_heat: 1000.0` — a number
+invented at the keyboard, and precisely the defect `Material::specific_heat` was built to prevent (840
+in `impact.rs`, 1000 in `aggregate.rs`, 1000 in `matter.rs`: one unknown, three answers). It was backed
+out rather than landed with a plausible figure.
+
+★★ **And the physics this needs is RAPID OXIDATION, not "a propellant"** (Robin): *"Rapid oxidation will
+be an important principle in the engine (fires, etc) so this won't be wasted."* A campfire, a burning
+ship, a gunpowder charge and a rusting hull are one reaction at different rates and different oxidiser
+availability — the charter's own shape, one law at every scale. The distinguishing quantity is **where
+the oxygen comes from**: a fire is air-limited and therefore ventilation-limited; black powder is
+SELF-oxidising, which is exactly why it works in a sealed bore. So the three substances catalogued here
+already split along the axis the model needs — `potassium_nitrate` is the oxidiser, `charcoal` and
+`sulfur` the fuels — and what they still lack is REACTION data (enthalpy of combustion per kg,
+stoichiometric oxygen demand, available oxygen per kg) rather than anything about themselves.
+
+This is the substance-versus-assembly distinction from §6b arriving from the other direction — first met
+in a rainforest canopy, met again in a keg of powder — which is the sign it is real and not a
+convenience of the biome discussion.
+
+### ★★★ THREE assemblies, not one — and the integration is the interesting part
+
+Robin (2026-08-03), and this is a structural correction rather than a detail: *"the gunpowder and its
+properties might be an assembly of its own... that way we can reload cannons"*, *"The cannonball another
+assembly"*, *"And the canon itself a third"*, *"The integration of them will be interesting."*
+
+A single `cannon.assembly` containing barrel, carriage, charge and ball would fire exactly once and
+could never be reloaded. Split three ways, each has its own lifetime:
+
+| assembly | lifetime | what happens to it |
+|---|---|---|
+| **the gun** — barrel, carriage, trunnions, breeching rope | persistent | recoils, is arrested, survives to be reloaded |
+| **the charge** — powder, wad | consumable | **CEASES TO EXIST**, converting to gas and residue |
+| **the shot** | transferred | leaves at ~450 m/s and becomes an independent assembly in flight |
+
+★ **So containment is a RELATIONSHIP with state, not a static parent-child link.** §6's nesting was
+written for a ship that contains a galley that contains a stove — true forever. A gun contains a charge
+only until it is fired. The format therefore needs a placement that can be **created, consumed and
+emptied**: `loaded -> fired -> empty -> loaded again`. That is the difference between an assembly
+GRAPH and an assembly TREE, and a tree cannot express reloading.
+
+★★ **And the integration hands us three free, exact validations — none needing a historical figure:**
+
+1. **Mass closes across the event.** `powder + shot + gun` before equals `gas + residue + shot + gun`
+   after. An assembly that is consumed must put its mass somewhere, and `oxidation::burn` already
+   reports what became gas; the remainder is condensed residue and fouling. Nothing may vanish.
+2. **Momentum closes.** The shot's momentum plus the gas's equals the gun-and-carriage's, backwards.
+   This tests the interior-ballistics BOOKKEEPING independently of whether its calibration is right,
+   which is what makes it worth having before the muzzle velocity is trusted.
+3. **The shot must LEAVE.** It stops being contained by the gun and starts being an assembly with its
+   own trajectory — so the format has to hand ownership over cleanly, which is exactly the operation a
+   static tree cannot perform and the one a game will do thousands of times.
+
+★ **Shot start is real physics, not bookkeeping.** A ball is held in the bore by wadding and by its
+clearance fit until pressure overcomes it — which is §6's *interference fit*, resolved through the same
+`friction_coefficient` every grain contact uses. So the moment the shot begins to move is derived from
+the join, not declared as a trigger, and the join taxonomy earns its keep the first time it is used.
+
 ★ **The format's first test is a cannon, not a planet.** The direct enforcement of everything above is
 to exercise a NON-PLANET through the same path the planets use — build a cannon (or a plank, or a
 bolted joint) as a PARTS assembly, round-trip it, and run the §7 validations on it. If the format ever
@@ -309,6 +431,15 @@ differ, one is lying. That single requirement forces the two readings to be one 
 - **up close**, instanced plant assemblies with real geometry, resolved by necessity (docs/44), never by
   camera altitude alone.
 
+★★ **And "up close" means eye level, which is where the acceptance bar actually sits.** Robin
+(2026-08-03), standing at the gun: *"that should change at the elevation of the cannon, looking toward
+the horizon, there should be real trees one day."* A foliage albedo is what a FOOTPRINT looks like; from
+a gun deck on a shore the same matter has to be individual trees with trunks and crowns and gaps you can
+see between. Both readings are the same description at two resolutions, and the convergence invariant
+above is what forbids them from being two different Irelands — integrate the trees over a footprint and
+you must get the mixture back. That is the flora case of the one thing docs/63 exists to say: *the Earth
+should be the Earth, no matter how close or how far the camera pans.*
+
 Which is Robin's own sentence from docs/63 — *"we only materialize that matter visually when we need to,
 and only the amount we need to"* — with a rainforest as the worked example instead of a hillside.
 
@@ -343,6 +474,23 @@ to run them, and several of these are checks **nothing currently performs at all
   compiler can catch, and the answer comes from the join table in §6 with no new physics.
 - **Quadtree self-consistency.** Every SURF parent must equal `combine(children)` — §5's invariant,
   verified over the whole tree at build time rather than sampled at runtime.
+
+★★★ **And the same physics must be available at RUN time, not only at compile time, because a
+destroyed assembly is the interesting case.** Robin: *"a ball slightly too large, a charge too strong,
+should be able to destroy a cannon as history shows it did."* A compile-time check that the gun holds
+its proof charge is necessary and not sufficient — the gun that bursts is the one loaded wrongly, and
+that happens in play. So §7's structural closure is not a gate that blesses an assembly once; it is a
+predicate the assembly carries and is re-asked under real load. **An engine in which a cannon can never
+burst is not simpler than one in which it can — it is one that has quietly declared the failure mode out
+of existence**, which is Law IV inverted and would make the whole join taxonomy decorative.
+
+★ **And it is cheap, which is the part that makes it practical rather than aspirational.** Robin:
+*"if it all checks out we hand the easy 1d to the renderer, if physics predicts catastrophy, we share
+that with the renderer. No need to actually render the matter particles, so should be a fast
+calculation."* Deciding whether an assembly fails is closed-form arithmetic on numbers it already
+carries; only a failure that IS happening needs matter resolved, and then only to show how it comes
+apart. So the expensive path is never entered speculatively — the assembly's own validation predicate
+is the trigger, and a sound gun costs nothing to prove sound.
 
 The results go into the header's `validation_summary` and the PROV section, so **an assembly carries the
 evidence that it was checked**, and a consumer can see which checks ran, which passed, and which were

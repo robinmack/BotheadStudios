@@ -1,8 +1,8 @@
-import { launch } from './_launch.mjs';
+import { launch, VIEWPORT } from './_launch.mjs';
 const out = process.env.OUT || '/tmp';
 const PORT = process.env.PORT || '5173';
 const b = await launch();
-const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
+const p = await b.newPage({ viewport: VIEWPORT });
 await p.goto(`http://127.0.0.1:${PORT}/birth.html`, { waitUntil: 'load' });
 await p.evaluate(() => window.__demo?.set_render_blend?.(0));
 for (const t of [6,9,12,16,20]) {

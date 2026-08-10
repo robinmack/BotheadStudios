@@ -49,7 +49,7 @@ pub fn build_globe(res: usize, r_disp: f64, sample: impl Fn(DVec3) -> SurfaceSam
                 let p = dir * (r_disp + s.offset);
                 dirs[j * res + i] = dir;
                 pos[j * res + i] = Vec3::new(p.x as f32, p.y as f32, p.z as f32);
-                cols[j * res + i] = s.albedo;
+                cols[j * res + i] = s.albedo_ratio;
                 mats[j * res + i] = s.material;
                 roughs[j * res + i] = s.rough;
             }
@@ -167,7 +167,13 @@ mod tests {
 pub struct SurfaceSample {
     /// Albedo to show here. Below the appearance integral this is one material's flat colour; where
     /// the integral runs it is the fraction-weighted MIXTURE over the patch this vertex stands for.
-    pub albedo: [f32; 3],
+    /// **How this footprint's colour relates to its dominant material's own albedo**, per channel.
+    ///
+    /// NOT an albedo — it was one, and the shader threw it away because the texture already carries the
+    /// material's albedo and multiplying two of them squares it. It now carries the RATIO: the mixture's
+    /// seasonal colour over the dominant material's flat colour, so the texture supplies the detail and
+    /// this supplies what is actually standing there. Unity for a uniform, seasonless class.
+    pub albedo_ratio: [f32; 3],
     /// Radial offset above the sea-level sphere, in DISPLAY units.
     pub offset: f64,
     /// The material whose texture layer the shader samples — the largest share where there is a mixture.
@@ -181,9 +187,9 @@ pub struct SurfaceSample {
 impl SurfaceSample {
     /// A sample with no measured sub-mesh residual — the shading it produces is exactly Lambert, as
     /// it was before the integral existed.
-    pub fn flat(albedo: [f32; 3], offset: f64, material: u32) -> SurfaceSample {
+    pub fn flat(albedo_ratio: [f32; 3], offset: f64, material: u32) -> SurfaceSample {
         SurfaceSample {
-            albedo,
+            albedo_ratio,
             offset,
             material,
             rough: 0.0,
@@ -198,7 +204,7 @@ impl SurfaceSample {
 /// elevation (Law II). The rasters and biome→material map come from the body definition.
 pub struct SurfaceSampler<'a> {
     mats: &'a [crate::materials::Material],
-    biome_mats: &'a [usize],
+    biome_mix: &'a [Vec<(usize, f32)>],
     landmask: Option<&'a crate::terra::raster::Raster>,
     elevation: Option<&'a crate::terra::raster::Raster>,
     landcover: Option<&'a crate::terra::raster::Raster>,
@@ -208,13 +214,24 @@ pub struct SurfaceSampler<'a> {
     /// the declared relief exaggeration.
     exag: f64,
     water_idx: usize,
+    /// **When this surface is being drawn**, Unix seconds — so what grows here can answer for the
+    /// season it is actually in. `None` means "no clock supplied": every material answers with its
+    /// summer self, which is what a body with no orbit should do.
+    epoch_s: Option<f64>,
 }
 
 impl<'a> SurfaceSampler<'a> {
+    /// Tell this surface WHEN it is being drawn, so what grows on it can answer for the season.
+    /// Without it every material answers with its summer self.
+    pub fn at_epoch(mut self, unix_s: f64) -> Self {
+        self.epoch_s = Some(unix_s);
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         mats: &'a [crate::materials::Material],
-        biome_mats: &'a [usize],
+        biome_mix: &'a [Vec<(usize, f32)>],
         landmask: Option<&'a crate::terra::raster::Raster>,
         elevation: Option<&'a crate::terra::raster::Raster>,
         landcover: Option<&'a crate::terra::raster::Raster>,
@@ -224,8 +241,9 @@ impl<'a> SurfaceSampler<'a> {
     ) -> SurfaceSampler<'a> {
         let water_idx = crate::materials::index_of(mats, "water");
         SurfaceSampler {
+            epoch_s: None,
             mats,
-            biome_mats,
+            biome_mix,
             landmask,
             elevation,
             landcover,
@@ -272,9 +290,12 @@ impl<'a> SurfaceSampler<'a> {
             return self.water_idx as u32;
         }
         let biome = self.landcover.map_or(1, |r| r.biome_at(lat, lon) as usize);
-        self.biome_mats
+        // The class's DOMINANT constituent — this answers "which material is here", and the caller
+        // wants one. The full mixture is what `sample` spends on colour.
+        self.biome_mix
             .get(biome)
-            .copied()
+            .and_then(|m| m.iter().max_by(|a, b| a.1.total_cmp(&b.1)))
+            .map(|&(m, _)| m)
             .unwrap_or(self.water_idx) as u32
     }
 
@@ -288,22 +309,66 @@ impl<'a> SurfaceSampler<'a> {
             .unwrap_or_else(|| crate::planet::earth_surface_material(dir) == "granite");
         if is_land {
             let biome = self.landcover.map_or(1, |r| r.biome_at(lat, lon) as usize);
-            let mi = self
-                .biome_mats
+            let fallback = [(self.water_idx, 1.0f32)];
+            let mix: &[(usize, f32)] = self
+                .biome_mix
                 .get(biome)
-                .copied()
+                .map(|v| v.as_slice())
+                .unwrap_or(&fallback);
+            // The class's dominant constituent still names the SurfaceSample's material, which is what
+            // the appearance integral and the contact law key on. The COLOUR is the whole mixture.
+            let mi = mix
+                .iter()
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|&(m, _)| m)
                 .unwrap_or(self.water_idx);
             let e = self.elevation.map_or(0.0, |r| {
                 r.elevation_m_at(lat, lon, self.elev_range[0], self.elev_range[1])
             });
+            // ★★ **THE SEASON, ASKED HERE.** Robin: *"wire it up so Ireland actually turns."* The
+            // engine holds the clock; the material answers what it looks like now. A material with no
+            // senescent state — an evergreen, rock, sand, the sea — answers with its ordinary albedo
+            // and costs nothing, so this is free for almost all of the planet.
+            //
+            // The fraction is `solar::senescence_fraction` at THIS vertex's latitude, so a single
+            // frame can show a green tropics and a turned north at the same instant, which is what the
+            // real planet looks like from orbit in October.
+            let albedo = match self.epoch_s {
+                Some(t) => crate::materials::aggregate_albedo_turned(
+                    mix,
+                    self.mats,
+                    crate::solar::senescence_fraction(lat, t),
+                ),
+                None => crate::materials::aggregate_albedo(mix, self.mats),
+            };
+            // ★ The vertex carries a RATIO, not a colour: what this footprint's mixture-and-season
+            // albedo is, RELATIVE to the dominant material whose texture the shader will sample. The
+            // texture already carries that material's own albedo, so handing over a second absolute
+            // colour would square it — which is why the shader used to discard this value outright.
+            // A uniform class gives exactly 1.0 and changes nothing.
+            let base = self.mats[mi].albedo;
+            let ratio = [
+                if base[0] > 1e-6 {
+                    albedo[0] / base[0]
+                } else {
+                    1.0
+                },
+                if base[1] > 1e-6 {
+                    albedo[1] / base[1]
+                } else {
+                    1.0
+                },
+                if base[2] > 1e-6 {
+                    albedo[2] / base[2]
+                } else {
+                    1.0
+                },
+            ];
             // Land above sea level; below-sea-level land (Dead Sea etc.) clamps to the shore.
-            SurfaceSample::flat(
-                self.mats[mi].albedo,
-                e.max(0.0) * self.ds * self.exag,
-                mi as u32,
-            )
+            SurfaceSample::flat(ratio, e.max(0.0) * self.ds * self.exag, mi as u32)
         } else {
-            SurfaceSample::flat(self.mats[self.water_idx].albedo, 0.0, self.water_idx as u32)
+            // Open water is one material, so its ratio is unity.
+            SurfaceSample::flat([1.0, 1.0, 1.0], 0.0, self.water_idx as u32)
         }
     }
 }
@@ -321,14 +386,14 @@ pub fn build_body_globe(
     ds: f64,
     exag: f64,
     mats: &[crate::materials::Material],
-    biome_mats: &[usize],
+    biome_mix: &[Vec<(usize, f32)>],
     landmask: Option<&crate::terra::raster::Raster>,
     elevation: Option<&crate::terra::raster::Raster>,
     landcover: Option<&crate::terra::raster::Raster>,
     elev_range: [f64; 2],
 ) -> Mesh {
     let sampler = SurfaceSampler::new(
-        mats, biome_mats, landmask, elevation, landcover, elev_range, ds, exag,
+        mats, biome_mix, landmask, elevation, landcover, elev_range, ds, exag,
     );
     build_globe(res, r_disp, |dir| sampler.sample(dir))
 }

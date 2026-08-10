@@ -1,10 +1,10 @@
 // Rig-watch the full GPU birth → disk → geologic hand-off (docs/35 stage 5, 2c). Loads birth.html (GPU SPH
 // impact), lets the disk form, triggers enter_geologic_time(), and checks the moonlet appears.
-import { launch } from './_launch.mjs';
+import { launch, VIEWPORT } from './_launch.mjs';
 const out = process.env.OUT || '/tmp';
 const PORT = process.env.PORT || '5173';
 const b = await launch();
-const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
+const p = await b.newPage({ viewport: VIEWPORT });
 p.on('console', (m) => { const t = m.text(); if (!t.includes('[vite]') && !t.includes('deprecated')) console.log('PAGE:', t); });
 p.on('pageerror', (e) => console.log('PAGEERR:', e.message));
 await p.goto(`http://127.0.0.1:${PORT}/birth.html`, { waitUntil: 'load' });

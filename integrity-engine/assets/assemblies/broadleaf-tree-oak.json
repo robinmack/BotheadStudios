@@ -1,0 +1,50 @@
+{
+  "id": "broadleaf-tree-oak",
+  "name": "Oak (Quercus robur), mature",
+  "notes": "A mature pedunculate oak, LOW-POLY BUT FAITHFUL: every dimension is a real measurement and every material is catalogued, so the mass and centre of gravity DERIVE rather than being declared. Dimensions: 20 m tall with a crown as broad as it is tall and a bole up to ~1.5 m through (RHS/Missouri Botanical Garden; the species reaches 20-40 m in Europe). \u2605 THE CROWN IS A SPHERE OF FOLIAGE AT A DERIVED PACKING FRACTION, which is what `packing` exists for: a crown is overwhelmingly air. packing = LAI x leaf thickness / crown depth = 5.5 x 0.25 mm / 18.0 m = 7.64e-05. Both inputs are measured \u2014 temperate deciduous LAI ~5.5 m2/m2, deciduous woody lamina 0.25 +/- 0.08 mm \u2014 so the leaf mass is a consequence of the tree's size, not a number anyone picked. \u2605\u2605 This is also what makes a canopy DARKER than its own leaves (docs/46 row 35) something the engine can eventually derive instead of declare: light entering a crown at this packing meets many leaves, and the mutual shadowing is geometry rather than a constant.",
+  "parts": [
+    {
+      "name": "bole",
+      "material": "oak",
+      "shape": {
+        "kind": "cylinder",
+        "r": 0.6,
+        "length": 6.0
+      },
+      "at_m": [
+        0.0,
+        3.0,
+        0.0
+      ],
+      "along": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "name": "crown",
+      "material": "broadleaf_foliage",
+      "shape": {
+        "kind": "sphere",
+        "r": 9.0
+      },
+      "at_m": [
+        0.0,
+        11.0,
+        0.0
+      ],
+      "packing": 7.639e-05
+    }
+  ],
+  "connections": [
+    {
+      "a": "bole",
+      "b": "crown",
+      "join": {
+        "kind": "weld",
+        "area_m2": 1.13
+      }
+    }
+  ]
+}

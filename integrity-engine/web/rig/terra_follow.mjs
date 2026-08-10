@@ -20,7 +20,7 @@ await p.evaluate(({ LAT, LON }) => {
     lastRender = now;
     const a = performance.now(); orig(); window.__r.push(performance.now() - a);
   };
-  t.set_fly(LAT, LON, 700000, 0, -0.55);
+  t.place_camera(LAT, LON, 700000, 0, -0.55);
   window.launchSwarm();
 }, { LAT: Number(process.env.LAT ?? 10), LON: Number(process.env.LON ?? 0) });
 await p.waitForTimeout(2000);

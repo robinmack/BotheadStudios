@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <meta
+      name="description"
+      content="How Integrity is put together: the scene sets the characters and the setting, the assemblies are the actors, the engine is the director and the stage."
+    />
+    <title>Integrity — architecture: scenes, assemblies, and the engine</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <style>
+      /* Same design language as the landing page, and inlined for the same reason: styling must
+         never fail. Colour is the engine's own materials palette. */
+      :root {
+        --ink: #06080d;
+        --ink-1: #0a0e17;
+        --ink-2: #0e1420;
+        --hair: rgba(143, 182, 217, 0.13);
+        --hair-2: rgba(143, 182, 217, 0.26);
+        --steel: #8fb6d9;
+        --steel-dim: #5f748e;
+        --text: #b4c3d9;
+        --bright: #eef4fd;
+        --amber: #ffb24c;
+        --amber-pale: #ffe1a8;
+        --grass: #6bb14e;
+        --dirt: #9a6b40;
+        --stone: #aeb6c2;
+        --shell: min(1120px, 92vw);
+        --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+      }
+      * { box-sizing: border-box; }
+      html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+      @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+      body {
+        margin: 0;
+        background: var(--ink);
+        color: var(--text);
+        font-family: var(--font-mono);
+        font-size: 15px;
+        line-height: 1.65;
+      }
+      a { color: var(--amber); }
+      .wrap { width: var(--shell); margin: 0 auto; }
+      header.top {
+        border-bottom: 1px solid var(--hair-2);
+        padding: 18px 0;
+        position: sticky;
+        top: 0;
+        background: rgba(6, 8, 13, 0.92);
+        backdrop-filter: blur(8px);
+        z-index: 5;
+      }
+      .top .wrap { display: flex; gap: 18px; align-items: baseline; flex-wrap: wrap; }
+      .brand { color: var(--bright); font-weight: 700; letter-spacing: 0.08em; }
+      .top nav { margin-left: auto; display: flex; gap: 14px; flex-wrap: wrap; }
+      .top nav a { color: var(--steel); text-decoration: none; font-size: 13px; }
+      .top nav a:hover { color: var(--amber); }
+      h1 {
+        font-family: var(--font-sans);
+        color: var(--bright);
+        font-size: clamp(28px, 4.6vw, 46px);
+        line-height: 1.12;
+        margin: 54px 0 10px;
+        letter-spacing: -0.01em;
+      }
+      h2 {
+        font-family: var(--font-sans);
+        color: var(--bright);
+        font-size: clamp(20px, 2.6vw, 27px);
+        margin: 58px 0 6px;
+        letter-spacing: -0.005em;
+      }
+      h3 { color: var(--amber-pale); font-size: 15px; margin: 26px 0 4px; letter-spacing: 0.02em; }
+      .lede { color: var(--steel); font-size: clamp(15px, 1.7vw, 18px); max-width: 74ch; }
+      p { max-width: 78ch; }
+      .kicker {
+        color: var(--steel-dim);
+        text-transform: uppercase;
+        letter-spacing: 0.18em;
+        font-size: 11px;
+      }
+      figure { margin: 26px 0 8px; }
+      figcaption { color: var(--steel-dim); font-size: 12.5px; margin-top: 8px; max-width: 78ch; }
+      svg { width: 100%; height: auto; display: block; }
+      .panel {
+        background: var(--ink-1);
+        border: 1px solid var(--hair);
+        border-radius: 10px;
+        padding: 18px 20px;
+      }
+      .cols { display: grid; gap: 16px; grid-template-columns: repeat(3, 1fr); margin: 22px 0; }
+      @media (max-width: 860px) { .cols { grid-template-columns: 1fr; } }
+      .cols h3 { margin-top: 0; }
+      ul { padding-left: 1.1em; max-width: 78ch; }
+      li { margin: 5px 0; }
+      code {
+        font-family: var(--font-mono);
+        background: var(--ink-2);
+        border: 1px solid var(--hair);
+        border-radius: 4px;
+        padding: 1px 5px;
+        font-size: 13px;
+        color: var(--amber-pale);
+      }
+      table { border-collapse: collapse; width: 100%; margin: 18px 0; font-size: 13.5px; }
+      th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--hair); vertical-align: top; }
+      th { color: var(--steel); font-weight: 600; }
+      .wrong { color: var(--dirt); }
+      .right { color: var(--grass); }
+      .law { border-left: 2px solid var(--amber); padding-left: 14px; margin: 16px 0; }
+      .law b { color: var(--amber-pale); }
+      blockquote {
+        margin: 18px 0;
+        padding: 12px 18px;
+        border-left: 2px solid var(--hair-2);
+        color: var(--steel);
+        font-style: italic;
+        max-width: 78ch;
+      }
+      footer { border-top: 1px solid var(--hair-2); margin-top: 70px; padding: 22px 0 40px; }
+      .foot { display: flex; justify-content: space-between; color: var(--steel-dim); font-size: 12px; }
+      .scroller { overflow-x: auto; }
+      /* A correction the page has to carry visibly. This one exists because the diagram ran ahead of
+         the engine and nobody could tell from the page. */
+      .caveat {
+        border-left: 2px solid var(--dirt);
+        background: rgba(154, 107, 64, 0.07);
+        padding: 12px 16px;
+        border-radius: 0 6px 6px 0;
+        font-size: 13.5px;
+      }
+      .caveat strong { color: var(--amber-pale); }
+    </style>
+  </head>
+  <body>
+    <header class="top">
+      <div class="wrap">
+        <span class="brand">INTEGRITY</span>
+        <nav aria-label="site">
+          <a href="/">Home</a>
+          <a href="/terra.html">Earth</a>
+          <a href="/orbit.html">Space</a>
+          <a href="/yarr.html">Yarrr!</a>
+          <a href="/gallery.html">Shots</a>
+          <a href="#roles">Roles</a>
+          <a href="#loop">The loop</a>
+          <a href="#principles">Principles</a>
+        </nav>
+      </div>
+    </header>
+
+    <main class="wrap">
+      <p class="kicker">Architecture</p>
+      <h1>Scenes, assemblies, and the engine</h1>
+      <p class="lede">
+        Integrity is a physics engine, not a graphics engine that resembles one. That single commitment
+        decides the whole architecture — including who is allowed to know what. This page is the model,
+        the parts, and the rules that keep them apart.
+      </p>
+
+      <blockquote>
+        The scene sets the characters and the setting. The assemblies are the actors. The engine is the
+        director and the stage — it knows what should happen and gets the actors to make it happen.
+      </blockquote>
+
+      <h2 id="roles">The three roles</h2>
+      <p>
+        Almost every architectural mistake this engine has made was a role doing another role's job: a
+        scene computing a force, a camera exempt from collision, an appearance chosen instead of derived.
+        The separation below is what those mistakes taught, stated so a machine can check it.
+      </p>
+
+      <figure>
+        <svg viewBox="0 0 900 380" role="img" aria-labelledby="d1t d1d">
+          <title id="d1t">The three roles and what passes between them</title>
+          <desc id="d1d">
+            A scene names which assemblies are present and where. The engine holds time and the state of
+            the universe, signals the assemblies, and renders what they report. Assemblies answer with
+            their own appearance and behaviour, and contain further assemblies without limit.
+          </desc>
+          <defs>
+            <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+              <path d="M0 0 L10 5 L0 10 z" fill="#8fb6d9" />
+            </marker>
+            <marker id="ara" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+              <path d="M0 0 L10 5 L0 10 z" fill="#ffb24c" />
+            </marker>
+          </defs>
+
+          <!-- SCENE -->
+          <rect x="14" y="96" width="212" height="150" rx="10" fill="#0e1420" stroke="rgba(143,182,217,.26)" />
+          <text x="120" y="128" text-anchor="middle" fill="#eef4fd" font-family="system-ui" font-size="17" font-weight="600">SCENE</text>
+          <text x="120" y="150" text-anchor="middle" fill="#5f748e" font-size="11.5" font-family="ui-monospace">characters + setting</text>
+          <text x="120" y="178" text-anchor="middle" fill="#b4c3d9" font-size="12" font-family="ui-monospace">which assemblies</text>
+          <text x="120" y="196" text-anchor="middle" fill="#b4c3d9" font-size="12" font-family="ui-monospace">where they are</text>
+          <text x="120" y="214" text-anchor="middle" fill="#b4c3d9" font-size="12" font-family="ui-monospace">how fast they go</text>
+          <text x="120" y="232" text-anchor="middle" fill="#b4c3d9" font-size="12" font-family="ui-monospace">where you watch from</text>
+
+          <!-- ENGINE -->
+          <rect x="330" y="60" width="240" height="230" rx="10" fill="#0a0e17" stroke="#ffb24c" stroke-opacity=".55" />
+          <text x="450" y="92" text-anchor="middle" fill="#ffe1a8" font-family="system-ui" font-size="17" font-weight="600">ENGINE</text>
+          <text x="450" y="114" text-anchor="middle" fill="#5f748e" font-size="11.5" font-family="ui-monospace">director + stage</text>
+          <text x="450" y="144" text-anchor="middle" fill="#b4c3d9" font-size="12" font-family="ui-monospace">keeps the time</text>
+          <text x="450" y="162" text-anchor="middle" fill="#b4c3d9" font-size="12" font-family="ui-monospace">keeps the universe state</text>
+          <text x="450" y="180" text-anchor="middle" fill="#b4c3d9" font-size="12" font-family="ui-monospace">gravity · contact · heat</text>
+          <text x="450" y="198" text-anchor="middle" fill="#b4c3d9" font-size="12" font-family="ui-monospace">decides what to resolve</text>
+          <text x="450" y="216" text-anchor="middle" fill="#b4c3d9" font-size="12" font-family="ui-monospace">renders what it is told</text>
+          <text x="450" y="248" text-anchor="middle" fill="#5f748e" font-size="11" font-family="ui-monospace">knows about matter,</text>
+          <text x="450" y="264" text-anchor="middle" fill="#5f748e" font-size="11" font-family="ui-monospace">never about cannons</text>
+
+          <!-- ASSEMBLY -->
+          <rect x="672" y="86" width="214" height="170" rx="10" fill="#0e1420" stroke="rgba(143,182,217,.26)" />
+          <rect x="686" y="100" width="214" height="170" rx="10" fill="#0e1420" stroke="rgba(143,182,217,.18)" />
+          <rect x="700" y="114" width="186" height="142" rx="10" fill="#0e1420" stroke="rgba(143,182,217,.26)" />
+          <text x="793" y="146" text-anchor="middle" fill="#eef4fd" font-family="system-ui" font-size="17" font-weight="600">ASSEMBLY</text>
+          <text x="793" y="168" text-anchor="middle" fill="#5f748e" font-size="11.5" font-family="ui-monospace">an actor</text>
+          <text x="793" y="194" text-anchor="middle" fill="#b4c3d9" font-size="12" font-family="ui-monospace">matter with a shape</text>
+          <text x="793" y="212" text-anchor="middle" fill="#b4c3d9" font-size="12" font-family="ui-monospace">its own systems</text>
+          <text x="793" y="230" text-anchor="middle" fill="#b4c3d9" font-size="12" font-family="ui-monospace">contains assemblies</text>
+          <text x="793" y="248" text-anchor="middle" fill="#5f748e" font-size="11" font-family="ui-monospace">…ad infinitum</text>
+
+          <!-- flows -->
+          <line x1="228" y1="150" x2="322" y2="150" stroke="#8fb6d9" stroke-width="1.6" marker-end="url(#ar)" />
+          <text x="275" y="140" text-anchor="middle" fill="#8fb6d9" font-size="11" font-family="ui-monospace">place</text>
+          <line x1="228" y1="196" x2="322" y2="196" stroke="#8fb6d9" stroke-width="1.6" marker-end="url(#ar)" />
+          <text x="275" y="186" text-anchor="middle" fill="#8fb6d9" font-size="11" font-family="ui-monospace">signal</text>
+
+          <path d="M572 140 L664 140" stroke="#ffb24c" stroke-width="1.6" marker-end="url(#ara)" />
+          <text x="618" y="118" text-anchor="middle" fill="#ffb24c" font-size="11" font-family="ui-monospace">time, heat,</text>
+          <text x="618" y="130" text-anchor="middle" fill="#ffb24c" font-size="11" font-family="ui-monospace">collision</text>
+          <path d="M664 208 L572 208" stroke="#ffb24c" stroke-width="1.6" marker-end="url(#ara)" />
+          <text x="618" y="228" text-anchor="middle" fill="#ffb24c" font-size="11" font-family="ui-monospace">appearance,</text>
+          <text x="618" y="242" text-anchor="middle" fill="#ffb24c" font-size="11" font-family="ui-monospace">behaviour</text>
+
+          <text x="450" y="332" text-anchor="middle" fill="#5f748e" font-size="12" font-family="ui-monospace">
+            a scene never reaches past the engine to an assembly · an assembly never asks who is watching
+          </text>
+        </svg>
+        <figcaption>
+          The scene talks only to the engine, and only in four verbs. The engine talks to the assemblies.
+          Nothing skips a step — which is what makes a scene addable without touching the engine.
+        </figcaption>
+      </figure>
+
+      <div class="cols">
+        <div class="panel">
+          <h3>The scene may</h3>
+          <ul>
+            <li><b>place</b> — name which assemblies are present, where, how fast</li>
+            <li><b>observe</b> — <code>place_camera</code>, <code>camera_follow</code></li>
+            <li><b>step</b> — let time pass, draw what is</li>
+            <li><b>signal</b> — say something happened at a point</li>
+          </ul>
+          <p style="color: var(--steel-dim); font-size: 12.5px">
+            And nothing else. A scene is data: <code>yarr.html</code> is the Earth scene plus one
+            attribute naming a gun, a coordinate and a bearing.
+          </p>
+        </div>
+        <div class="panel">
+          <h3>The assembly knows</h3>
+          <ul>
+            <li>what it is made of — real catalogued materials</li>
+            <li>its own shape, and where its parts sit <em>relative to itself</em></li>
+            <li>how it answers heat, contact, and the passage of time</li>
+            <li>what it looks like now — derived, never chosen</li>
+          </ul>
+          <p style="color: var(--steel-dim); font-size: 12.5px">
+            Nothing declares a mass. A 24-pounder's 2,375 kg and its centre of gravity follow from
+            thirteen parts and the material catalogue.
+          </p>
+        </div>
+        <div class="panel">
+          <h3>The engine decides</h3>
+          <ul>
+            <li>gravity, contact, heat, chemistry — one law at every scale</li>
+            <li>what must be resolved into particles, and what stays cheap maths</li>
+            <li>what is visible, and therefore what to ask about</li>
+            <li>where the camera actually ends up — it is matter too</li>
+          </ul>
+          <p style="color: var(--steel-dim); font-size: 12.5px">
+            It knows about matter, heat, contact, time and light. It does not know what a cannon is.
+          </p>
+        </div>
+      </div>
+
+      <h2 id="loop">The loop</h2>
+      <p>
+        The engine holds the clock and the state of the universe. Each step it signals the actors, they
+        answer, and it renders the answers. Nothing in that loop needs to know what kind of thing it is
+        talking to — which is why adding a species or a vehicle is adding an assembly.
+      </p>
+      <p class="caveat">
+        <strong>Not yet true of planets.</strong> This page described the model in the present tense and
+        it was ahead of the code. Today an assembly describes six objects — a cannon, its charge and
+        shot, an oak, a spruce, a tuft of grass — while every planet is a different format
+        (<code>LayeredBody</code>: concentric layers, an atmosphere mass, surface rasters) that knows
+        nothing about parts, containment or connections. The split is lineage rather than principle: a
+        planet is an accretion of debris bound by its own gravity, and the engine already converts
+        between layers and particles in both directions, so a layered body <em>is</em> a de-resolved
+        assembly of matter. Unifying them is written up as
+        <a href="https://github.com/robinmack/BotheadStudios/blob/main/integrity-engine/docs/67-everything-is-an-assembly.md">docs/67</a>,
+        and the gap is recorded as row&nbsp;45 of the conformance ledger. Stated here because a diagram
+        that quietly runs ahead of its engine is how a model stops being checkable.
+      </p>
+
+      <figure>
+        <svg viewBox="0 0 900 300" role="img" aria-labelledby="d2t d2d">
+          <title id="d2t">The signal loop</title>
+          <desc id="d2d">
+            The engine advances time, signals each assembly with what has happened to it, receives its
+            appearance and behaviour, resolves only what necessity requires into particles, and renders.
+          </desc>
+          <g font-family="ui-monospace" font-size="12">
+            <rect x="30" y="120" width="132" height="60" rx="8" fill="#0e1420" stroke="rgba(143,182,217,.26)" />
+            <text x="96" y="146" text-anchor="middle" fill="#eef4fd" font-size="13">advance</text>
+            <text x="96" y="164" text-anchor="middle" fill="#5f748e" font-size="11">time moves</text>
+
+            <rect x="212" y="120" width="150" height="60" rx="8" fill="#0e1420" stroke="rgba(143,182,217,.26)" />
+            <text x="287" y="146" text-anchor="middle" fill="#eef4fd" font-size="13">signal</text>
+            <text x="287" y="164" text-anchor="middle" fill="#5f748e" font-size="11">heat · impact · date</text>
+
+            <rect x="412" y="120" width="150" height="60" rx="8" fill="#0e1420" stroke="rgba(143,182,217,.26)" />
+            <text x="487" y="146" text-anchor="middle" fill="#eef4fd" font-size="13">answer</text>
+            <text x="487" y="164" text-anchor="middle" fill="#5f748e" font-size="11">albedo · state · motion</text>
+
+            <rect x="612" y="120" width="150" height="60" rx="8" fill="#0e1420" stroke="#ffb24c" stroke-opacity=".5" />
+            <text x="687" y="146" text-anchor="middle" fill="#ffe1a8" font-size="13">resolve</text>
+            <text x="687" y="164" text-anchor="middle" fill="#5f748e" font-size="11">only what must be</text>
+
+            <rect x="800" y="120" width="72" height="60" rx="8" fill="#0e1420" stroke="rgba(143,182,217,.26)" />
+            <text x="836" y="153" text-anchor="middle" fill="#eef4fd" font-size="13">render</text>
+
+            <line x1="164" y1="150" x2="206" y2="150" stroke="#8fb6d9" stroke-width="1.5" marker-end="url(#ar)" />
+            <line x1="364" y1="150" x2="406" y2="150" stroke="#8fb6d9" stroke-width="1.5" marker-end="url(#ar)" />
+            <line x1="564" y1="150" x2="606" y2="150" stroke="#8fb6d9" stroke-width="1.5" marker-end="url(#ar)" />
+            <line x1="764" y1="150" x2="794" y2="150" stroke="#8fb6d9" stroke-width="1.5" marker-end="url(#ar)" />
+
+            <path d="M836 186 L836 236 L96 236 L96 186" fill="none" stroke="rgba(143,182,217,.3)" stroke-width="1.4" marker-end="url(#ar)" />
+            <text x="466" y="256" text-anchor="middle" fill="#5f748e" font-size="11.5">
+              the picture is a report of the simulation — never the other way round
+            </text>
+            <text x="687" y="98" text-anchor="middle" fill="#ffb24c" font-size="11">necessity, not the camera</text>
+          </g>
+        </svg>
+        <figcaption>
+          Off-camera physics still happens; the camera decides only how finely it is computed. An
+          unwatched wheel still sinks, and the crater on the far side of the planet is there when you
+          arrive.
+        </figcaption>
+      </figure>
+
+      <h2>A worked example: firing a gun</h2>
+      <p>
+        The same event, done the wrong way and the right way. The difference is not style — the wrong
+        version puts an assembly's name inside the engine and makes the scene the thing that fires.
+      </p>
+      <div class="scroller">
+        <table>
+          <thead>
+            <tr><th></th><th class="wrong">The wrong way</th><th class="right">The right way</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>the scene says</td>
+              <td class="wrong"><code>fire_cannon(bearing, elevation)</code></td>
+              <td class="right"><em>apply heat, here</em></td>
+            </tr>
+            <tr>
+              <td>who knows where the charge is</td>
+              <td class="wrong">the engine, by name</td>
+              <td class="right">the gun, which contains it</td>
+            </tr>
+            <tr>
+              <td>who decides it burns</td>
+              <td class="wrong"><code>fire_cannon</code></td>
+              <td class="right">oxidation — heat reached something combustible</td>
+            </tr>
+            <tr>
+              <td>who decides the shot leaves</td>
+              <td class="wrong"><code>fire_cannon</code></td>
+              <td class="right">the pressure, against the ball's fit</td>
+            </tr>
+            <tr>
+              <td>what else the call can do</td>
+              <td class="wrong">nothing — it is gun-shaped</td>
+              <td class="right">light a forest; the engine cannot tell the difference</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        In the right version nobody asks for smoke, recoil or a muzzle flash. They are consequences:
+        over half of black powder's product mass stays condensed, which is <em>why</em> it smokes; the
+        products leave at 1,950 K, which is above the temperature at which matter visibly glows, so the
+        flash is the same incandescence that lights a meteor.
+      </p>
+
+      <h2 id="principles">Operating principles</h2>
+      <p>
+        These were earned, mostly by getting them wrong first. When a design argument cannot be settled,
+        one of these settles it.
+      </p>
+
+      <div class="law"><b>Physics is the product.</b> Real physics, not graphics that resemble it. When
+        you are tempted to make something <em>look</em> right — stop. That instinct is the enemy.</div>
+      <div class="law"><b>One law, every scale, every scene.</b> A raindrop on a petal, a tyre on gravel
+        and a moon striking a planet differ in scale, material and energy — never in kind. One question
+        must not get two answers.</div>
+      <div class="law"><b>Simulate what you can; compute what you can't; fake nothing.</b> Maths sizes
+        the interaction, the minimal necessary matter becomes real particles, the rest is real maths.</div>
+      <div class="law"><b>The camera changes representation, never existence.</b> Looking away must never
+        change what is true. The camera is itself a small shell of matter, and obeys contact like a grain.</div>
+      <div class="law"><b>No fudge, ever.</b> Every number traces to physics or is an openly flagged debt
+        that names the real computation it stands in for. If physics disagrees with the hope, record the
+        physics.</div>
+      <div class="law"><b>Measure and derive; never assume.</b> A number you did not measure or derive is
+        a guess. A negative result, honestly measured, is a real deliverable.</div>
+
+      <h3>What that looks like in practice</h3>
+      <ul>
+        <li>
+          <b>Colour is not chosen.</b> Foliage albedo is 449 measured leaf spectra convolved against the
+          CIE 1931 observer under the Sun — the same Planck curve that colours the stars. A test
+          re-derives it every run, so the stored value can only ever be a cache of the measurement.
+        </li>
+        <li>
+          <b>Size follows from identity.</b> A 24-pounder's ball is 5.53 inches across because that is
+          what 24 lb of cast iron is. Nobody typed a diameter.
+        </li>
+        <li>
+          <b>Rules that matter are machine-checked.</b> Prose is not a gate. The scene/engine boundary,
+          the material catalogue, the numbering of documents and the ban on inventing a surface at a
+          real coordinate all fail the build rather than being remembered.
+        </li>
+        <li>
+          <b>Known gaps are written down, not hidden.</b> A public ledger records every place the engine
+          currently answers a question twice, or carries data nothing reads, with the evidence.
+        </li>
+      </ul>
+
+      <h2>Honest state</h2>
+      <p>
+        The model above is the target, and the engine is not all the way there. Two scene structs still
+        live inside the engine crate, so adding a scene still touches it — that is the largest open item.
+        The boundary is enforced by a ratchet: every existing violation is written down, a new one fails
+        the build, and an entry that no longer describes the code fails too, so the list stays true and
+        can only shrink.
+      </p>
+      <p style="color: var(--steel-dim)">
+        A scene that needed a capability the engine lacked used to grow a method for itself. Five such
+        methods turned out to be five spellings of one missing verb.
+      </p>
+    </main>
+
+    <footer>
+      <div class="wrap foot">
+        <span><b>INTEGRITY</b> &nbsp;·&nbsp; Bothead Studios</span>
+        <span><a href="/">← back to the engine</a></span>
+      </div>
+    </footer>
+  </body>
+</html>

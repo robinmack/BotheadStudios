@@ -1,7 +1,7 @@
 // Every scene must have a working "Send Shot": the button exists, clicking it posts the frame, and a
 // PNG lands in shots/. Asserts the SAVED FILE, not just that the click did not throw — a capture taken
 // outside the presented frame silently yields a blank or empty image.
-import { launch, PORT } from './_launch.mjs';
+import { launch, PORT, VIEWPORT } from './_launch.mjs';
 import { readdirSync, statSync } from 'node:fs';
 const SHOTS = new URL('../../shots/', import.meta.url).pathname;
 const count = () => { try { return readdirSync(SHOTS).filter(f => f.endsWith('.png')).length; } catch { return 0; } };
@@ -11,7 +11,7 @@ const newest = () => { try { const f = readdirSync(SHOTS).filter(x=>x.endsWith('
 const b = await launch();
 let fail = 0;
 for (const page of ['ground.html', 'terra.html', 'birth.html', 'orbit.html', 'twomoons.html']) {
-  const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
+  const p = await b.newPage({ viewport: VIEWPORT });
   const errs = []; p.on('pageerror', e => errs.push(e.message));
   await p.goto(`http://127.0.0.1:${PORT}/${page}`, { waitUntil: 'load' });
   // WAIT FOR THE CONDITION, not a duration. The fixed 7 s below used to pass and fail the SAME scene on

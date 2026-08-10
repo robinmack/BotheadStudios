@@ -1,9 +1,9 @@
 // docs/42 Phase 1: verify the pretty⇄physics slider. Shots at blend 0 (pretty sphere), 0.5, 1 (particles).
-import { launch } from './_launch.mjs';
+import { launch, VIEWPORT } from './_launch.mjs';
 const out = process.env.OUT || '/tmp';
 const PORT = process.env.PORT || '5173';
 const b = await launch();
-const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
+const p = await b.newPage({ viewport: VIEWPORT });
 p.on('pageerror', (e) => console.log('PAGEERR:', e.message));
 await p.goto(`http://127.0.0.1:${PORT}/birth.html`, { waitUntil: 'load' });
 await p.waitForTimeout(15000); // let the impact resolve into a remnant + disk

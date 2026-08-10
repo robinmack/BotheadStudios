@@ -16,7 +16,7 @@
 // Otherwise compare real pixels, decoded from the compositor screenshot (a WebGPU canvas cannot be read
 // back with drawImage — that returns solid black). Either way the gesture must beat an IDLE CONTROL
 // measured the same way in the same scene, because these scenes animate whether or not you touch them.
-import { launch, PORT, OUT } from './_launch.mjs';
+import { launch, PORT, OUT, VIEWPORT } from './_launch.mjs';
 import { decodePng, meanLevel, meanDiff } from './_png.mjs';
 
 const SCENES = [
@@ -31,7 +31,7 @@ const HOLD = 900; // ms a gesture (and the idle control) lasts
 const b = await launch();
 let bad = 0;
 for (const [pg, settle] of SCENES) {
-  const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
+  const p = await b.newPage({ viewport: VIEWPORT });
   p.on('pageerror', (e) => console.log(`  PAGEERR ${pg}: ${e.message}`));
   await p.goto(`http://127.0.0.1:${PORT}/${pg}`, { waitUntil: 'load' });
   await p.waitForTimeout(settle);

@@ -36,7 +36,7 @@ await p.waitForFunction(() => !!window.__terra, { timeout: 60000 });
 await p.waitForTimeout(4000); // let the globe mesh build + first frames settle
 
 for (const [name, lat, lon, alt, pitch] of STEPS) {
-  await p.evaluate(([la, lo, a, pt]) => window.__terra.set_fly(la, lo, a, 0.0, pt), [lat, lon, alt, pitch]);
+  await p.evaluate(([la, lo, a, pt]) => window.__terra.place_camera(la, lo, a, 0.0, pt), [lat, lon, alt, pitch]);
   await p.waitForTimeout(1200);
   await p.screenshot({ path: `${OUT}/${name}.png` });
   const hud = (await p.locator('#stats').innerText().catch(() => '')).replace(/\s+/g, ' ').trim();

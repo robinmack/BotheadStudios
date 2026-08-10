@@ -82,7 +82,57 @@ is being refactored toward is [`docs/33-architecture-realignment.md`](docs/33-ar
 - **Two scene structs** in `lib.rs`: `OrbitDemo` (space band, the giant impact / birth-of-the-Moon; owns
   a `gpu_sph::GpuSph` running `sph_step.wgsl`) and `Terra` (the docs/43 worlds-as-data planet scene,
   backed by `crates/engine/src/terra/`). The terrain `Engine` — the first scene designed — was DELETED
-  2026-07-21 at Robin's request (docs/50).
+  2026-07-21 at Robin's request (docs/50), and the **`Ground` scene that replaced it was deleted
+  2026-08-03** (docs/46 row 37): a 96³ voxel cube of invented relief claiming a real coordinate on Earth.
+  Its shader `world.wgsl` went with it, so there is one fewer surface render path.
+- ★★★ **EVERYTHING IS AN ASSEMBLY — AND A PLANET IS NOT ONE YET.** Read
+  [`docs/67`](docs/67-everything-is-an-assembly.md) **before designing anything about bodies, planets,
+  containment or collision.** This entry exists because the same argument was had from scratch on
+  2026-08-05 after two days of work were described in assembly language while `docs/65` §4 — titled
+  *"Where it stands, honestly"* — never mentioned it, and the deployed architecture page said *"adding a
+  species, a vehicle or a planet is adding an assembly"* in the present tense. Robin: *"A layered body is
+  either a bad assessment or the last couple of days work with Claude are a lie."* The state:
+  - `assembly::Assembly` describes **six** objects (cannon, charge, shot, oak, spruce, grass tuft).
+    Every planet is a `planet::LayeredBody` — layers, an atmosphere mass, surface rasters, no parts.
+  - **It is ONE thing, not two, and the engine already proves it both ways.** Robin: *"A planet is an
+    accretion of debris bound by its own gravitational effects which we've worked hard to model."*
+    `HydroBody::particalize` makes particles from layers; `accretion::sample_layers` makes layers from
+    particles. A `LayeredBody` is a **de-resolved summary of an assembly of matter** — what `Derived`
+    already is to `Assembly::parts`. The split is lineage (layers from the giant impact, assemblies from
+    the cannon), not principle.
+  - ★★★ **THE SCALABILITY LAW** (Robin, and it is what makes 10¹² trees affordable): *"Oaks can be
+    handled as identical to their construction until they are damaged, at which point they become
+    unique."* So a pristine instance **need not exist** — the containing assembly's rule generates it and
+    the TYPE answers every observable. A world stores **divergences, not individuals**. Never
+    materialise an instance to read it; materialise when something happens to it.
+  - **An assembly ends at the outermost boundary of its outermost component** (`Assembly::reach_m`) —
+    NOT "where its air ends", which teaches the engine a special case. Earth's air is merely its
+    outermost component; a mast, a canopy and a muzzle ask the identical question.
+  - **Type vs instance is built** (`instance.rs`) and **has no consumer** (`docs/46` row 46). Both
+    blockers are the same blocker: the cannon's placement is geographic, so it needs Earth as a
+    CONTAINER, and flora is hash-generated, so it needs the exception set. **Earth-as-assembly is not
+    step 5 because it is hard; it is step 5 because two other steps wait on it.**
+  - **One implementation, many instances.** If per-assembly collision solvers land, that is the rule —
+    per-assembly solver STATE, never per-assembly-type solver CODE. Gate it by counting implementations.
+- ★★★ **THE RENDERER IS A SEPARATE ENTITY AND ITS REALM IS LIGHT** ([`docs/68`](docs/68-the-renderer-is-light.md),
+  Robin 2026-08-05). *"Particle physics cares little about photons."* Engine owns matter and time;
+  renderer owns light and RAY TRACING, and asks the model questions rather than being handed answers.
+  - ★★ **The test for any visual shortcut**, sharper than Law IV's own wording: *"It's OK if what the eye
+    can see is an illusion, as long as when it's interacted with the simulation/physics govern it."* A
+    canopy drawn as a texture is honest because the METEOR DOES NOT CONSULT IT — it meets real matter,
+    the hole is real, and through the hole we draw the trunk that was always there. If anything
+    *interacts* with the illusion, it is a fudge.
+  - **The viewport decides RESOLUTION, and resolution is a request the renderer MAKES of the model, not
+    a decision it makes FOR it.** That dissolves the objection I raised on 2026-08-04 (*"so many
+    simulation choices are made based on viewport"*) — recorded because I argued it the wrong way.
+  - Consequence, not yet acted on: `atmos.wgsl`/`SkyVeil` are renderer work sitting in the engine crate,
+    and `FLORA_ALT_M` + the flora budget are renderer decisions living in the model.
+- ★★ **A SCENE IS CHARACTERS AND SETTING; AN ASSEMBLY IS AN ACTOR; THE ENGINE IS DIRECTOR AND STAGE**
+  (`docs/65`, Robin 2026-08-03). *"Setting a scene should never involve changes to the engine."* The
+  permitted scene API is tiny and `laws::scene_api_tests` is a RATCHET over it: a new route fails the
+  build, and a declared debt nothing calls any more ALSO fails. Read docs/65 before adding any method to
+  a scene struct. The camera is the worked example — `place_camera` and `camera_follow`, two verbs that
+  replaced ten.
 - **A scene should be DATA, and is not** (docs/46 ledger row 14). Robin's standing requirement: scenes
   carry object/assembly definitions, coordinates and materials and must *"not require special mods of the
   engine itself"*. Both remaining scenes are `#[wasm_bindgen]` structs INSIDE the engine crate with their

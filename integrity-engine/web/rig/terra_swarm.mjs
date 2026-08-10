@@ -25,7 +25,7 @@ const stat = await p.evaluate(async ({alt, LAT, LON, YAW, PITCH}) => {
   // Frame the LIMB from orbit: the classic view of an entry from the ISS — the sunlit edge of the world
   // along the top, the dark side below it, and the streak crossing the dark. Looking straight down at the
   // night side is honest and completely black, which verifies nothing.
-  t.set_fly(LAT, LON, alt, YAW, PITCH);
+  t.place_camera(LAT, LON, alt, YAW, PITCH);
   return { world: t.world_name(), alt: t.altitude_m(), lat: t.latitude(), lon: t.longitude() };
 }, { alt: ALT, LAT, LON, YAW, PITCH });
 console.log('camera:', JSON.stringify(stat));

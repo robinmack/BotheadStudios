@@ -1,0 +1,37 @@
+{
+  "id": "round-shot-24pdr",
+  "name": "24-pounder round shot",
+  "parts": [
+    {
+      "name": "ball",
+      "material": "cast_iron",
+      "shape": {
+        "kind": "sphere",
+        "r": 0.070238577
+      },
+      "along": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "at_m": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "packing": 1.0
+    }
+  ],
+  "connections": [],
+  "notes": "★ THE RADIUS IS NOT A CHOICE. 'Twenty-four pounder' names a MASS of cast iron, and the ball's size follows from that mass and the metal's density: 24 lb = 10.8862 kg over 7500 kg/m3 gives r = 0.070239 m, a ball 5.53 inches across. A 24-pdr bore is 5.82 in, so the difference is WINDAGE — the clearance that let a ball be rammed down a fouled barrel, and the gap the propellant gas blows past. It is a consequence here, not a parameter. The radius below is that derivation written out; `assembly::tests` recomputes it from the pound mass and fails if the two disagree. ★ The radius here was TYPED at 0.070264 on a first pass and the test that recomputes it caught the error immediately — it is now the computed value. A fixture is a measurement too.",
+  "derived": {
+    "mass_kg": 10.88621696990954,
+    "envelope_volume_m3": 0.0014514955959879388,
+    "matter_volume_m3": 0.0014514955959879388,
+    "centre_of_mass_m": [
+      0.0,
+      0.0,
+      0.0
+    ]
+  }
+}

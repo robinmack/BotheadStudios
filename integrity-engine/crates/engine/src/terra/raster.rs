@@ -254,7 +254,10 @@ pub(crate) mod shipped {
     /// **DERIVED, not measured**: latitude bands plus elevation plus a coast test
     /// (`tools/bake-earth/bake.py::bake_landcover`), with real MODIS MCD12Q1 recorded as the follow-up.
     /// The elevation and land mask beside it ARE measured, so it is easy to assume this one is too.
-    pub fn earth_landcover() -> (Raster, std::collections::BTreeMap<String, String>) {
+    pub fn earth_landcover() -> (
+        Raster,
+        std::collections::BTreeMap<String, Vec<(String, f32)>>,
+    ) {
         let def = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/bodies/earth.json");
         let json =
             std::fs::read_to_string(&def).unwrap_or_else(|e| panic!("{}: {e}", def.display()));

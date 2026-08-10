@@ -1,6 +1,6 @@
 // The Share view button must EXIST where the /__shot receiver does (localhost, LAN) and be HIDDEN where
 // it does not (the public site, which answers 405). A button that silently fails is worse than none.
-import { launch, PORT } from './_launch.mjs';
+import { launch, PORT, VIEWPORT } from './_launch.mjs';
 const b = await launch();
 const targets = [
   ['LOCAL  ', `http://127.0.0.1:${PORT}/ground.html`, true],
@@ -8,7 +8,7 @@ const targets = [
 ];
 let bad = 0;
 for (const [label, url, wantVisible] of targets) {
-  const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
+  const p = await b.newPage({ viewport: VIEWPORT });
   await p.goto(url, { waitUntil: 'load' });
   await p.waitForTimeout(7000);
   const exists = await p.locator('#share-view').count() > 0;

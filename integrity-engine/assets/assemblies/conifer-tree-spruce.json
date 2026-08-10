@@ -1,0 +1,303 @@
+{
+  "id": "conifer-tree-spruce",
+  "name": "Norway spruce (Picea abies), mature",
+  "notes": "A mature Norway spruce, low-poly but faithful: 30 m tall with a 7.6-13.7 m spread and a 1-1.5 m bole (Morton Arboretum / conifers.org; the species reaches 35-55 m). \u2605 THE BOLE IS SIX STACKED CYLINDERS OF DECREASING RADIUS, not one \u2014 a constant-radius cylinder is not a trunk, and modelling 30 m of bole as one gave 9.5 tonnes against a real Norway spruce's 3-6. The fix is the taper, NOT a smaller radius chosen to land on a nicer number: the geometry was wrong, so the geometry is what changed. The crown is FIVE STACKED WHORLS of decreasing radius rather than a sphere, because a spruce is a cone and the taper is the tree's actual shape \u2014 the cheapest geometry that is still the right geometry. Crown packing = LAI x needle thickness / crown depth = 6.0 x 0.50 mm / 20.0 m = 1.50e-04. \u2605 It is EVERGREEN, and that is not a property written here \u2014 it follows from `conifer_foliage` carrying no senescent spectrum. The same time signal that turns the oak leaves this one alone.",
+  "parts": [
+    {
+      "name": "bole_0",
+      "material": "pine",
+      "shape": {
+        "kind": "cylinder",
+        "r": 0.55,
+        "length": 5.0
+      },
+      "at_m": [
+        0.0,
+        2.5,
+        0.0
+      ],
+      "along": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "name": "bole_1",
+      "material": "pine",
+      "shape": {
+        "kind": "cylinder",
+        "r": 0.472,
+        "length": 5.0
+      },
+      "at_m": [
+        0.0,
+        7.5,
+        0.0
+      ],
+      "along": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "name": "bole_2",
+      "material": "pine",
+      "shape": {
+        "kind": "cylinder",
+        "r": 0.393,
+        "length": 5.0
+      },
+      "at_m": [
+        0.0,
+        12.5,
+        0.0
+      ],
+      "along": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "name": "bole_3",
+      "material": "pine",
+      "shape": {
+        "kind": "cylinder",
+        "r": 0.315,
+        "length": 5.0
+      },
+      "at_m": [
+        0.0,
+        17.5,
+        0.0
+      ],
+      "along": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "name": "bole_4",
+      "material": "pine",
+      "shape": {
+        "kind": "cylinder",
+        "r": 0.237,
+        "length": 5.0
+      },
+      "at_m": [
+        0.0,
+        22.5,
+        0.0
+      ],
+      "along": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "name": "bole_5",
+      "material": "pine",
+      "shape": {
+        "kind": "cylinder",
+        "r": 0.158,
+        "length": 5.0
+      },
+      "at_m": [
+        0.0,
+        27.5,
+        0.0
+      ],
+      "along": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "name": "whorl_0",
+      "material": "conifer_foliage",
+      "shape": {
+        "kind": "cylinder",
+        "r": 4.5,
+        "length": 4.0
+      },
+      "at_m": [
+        0.0,
+        10.0,
+        0.0
+      ],
+      "packing": 0.00015,
+      "along": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "name": "whorl_1",
+      "material": "conifer_foliage",
+      "shape": {
+        "kind": "cylinder",
+        "r": 3.6,
+        "length": 4.0
+      },
+      "at_m": [
+        0.0,
+        14.0,
+        0.0
+      ],
+      "packing": 0.00015,
+      "along": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "name": "whorl_2",
+      "material": "conifer_foliage",
+      "shape": {
+        "kind": "cylinder",
+        "r": 2.7,
+        "length": 4.0
+      },
+      "at_m": [
+        0.0,
+        18.0,
+        0.0
+      ],
+      "packing": 0.00015,
+      "along": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "name": "whorl_3",
+      "material": "conifer_foliage",
+      "shape": {
+        "kind": "cylinder",
+        "r": 1.8,
+        "length": 4.0
+      },
+      "at_m": [
+        0.0,
+        22.0,
+        0.0
+      ],
+      "packing": 0.00015,
+      "along": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "name": "whorl_4",
+      "material": "conifer_foliage",
+      "shape": {
+        "kind": "cylinder",
+        "r": 0.9,
+        "length": 4.0
+      },
+      "at_m": [
+        0.0,
+        26.0,
+        0.0
+      ],
+      "packing": 0.00015,
+      "along": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "a": "bole_0",
+      "b": "bole_1",
+      "join": {
+        "kind": "weld",
+        "area_m2": 0.5
+      }
+    },
+    {
+      "a": "bole_1",
+      "b": "bole_2",
+      "join": {
+        "kind": "weld",
+        "area_m2": 0.5
+      }
+    },
+    {
+      "a": "bole_2",
+      "b": "bole_3",
+      "join": {
+        "kind": "weld",
+        "area_m2": 0.5
+      }
+    },
+    {
+      "a": "bole_3",
+      "b": "bole_4",
+      "join": {
+        "kind": "weld",
+        "area_m2": 0.5
+      }
+    },
+    {
+      "a": "bole_4",
+      "b": "bole_5",
+      "join": {
+        "kind": "weld",
+        "area_m2": 0.5
+      }
+    },
+    {
+      "a": "bole_2",
+      "b": "whorl_0",
+      "join": {
+        "kind": "weld",
+        "area_m2": 0.5
+      }
+    },
+    {
+      "a": "bole_2",
+      "b": "whorl_1",
+      "join": {
+        "kind": "weld",
+        "area_m2": 0.5
+      }
+    },
+    {
+      "a": "bole_2",
+      "b": "whorl_2",
+      "join": {
+        "kind": "weld",
+        "area_m2": 0.5
+      }
+    },
+    {
+      "a": "bole_2",
+      "b": "whorl_3",
+      "join": {
+        "kind": "weld",
+        "area_m2": 0.5
+      }
+    },
+    {
+      "a": "bole_2",
+      "b": "whorl_4",
+      "join": {
+        "kind": "weld",
+        "area_m2": 0.5
+      }
+    }
+  ]
+}

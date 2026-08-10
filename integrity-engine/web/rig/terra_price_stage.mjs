@@ -17,7 +17,7 @@ for (const draw of [2, 1, 0]) {
     const orig = t.render.bind(t);
     window.__r = [];
     t.render = () => { const a = performance.now(); orig(); window.__r.push(performance.now() - a); };
-    t.set_fly(10, 0, 700000, 0, -0.55);
+    t.place_camera(10, 0, 700000, 0, -0.55);
     t.launch_swarm_n(1200);
   }, draw);
   await p.waitForTimeout(1500);

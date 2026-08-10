@@ -293,6 +293,62 @@ impl Flight {
     }
 
     /// What the bodies have ablated away — still on the books (docs/59).
+    /// **Shed mass into the world at a point** — matter leaving something, entering the air.
+    ///
+    /// An ablating meteor is one source; a gun's muzzle is another. Both put hot matter into the
+    /// atmosphere at a place with a velocity and a temperature, and both are then carried, cooled and
+    /// mixed by the same trail. Nothing here is written for either case.
+    pub fn shed_at(&mut self, mass_kg: f64, material: usize, pos: DVec3, vel: DVec3, temp_k: f64) {
+        self.trail.shed(mass_kg, material, pos, vel, temp_k);
+    }
+
+    /// **Shed a CLOUD** — the same mass, spread over many parcels and a spray of directions.
+    ///
+    /// A muzzle blast is not a point. `shed_at` puts all of it in one place, which is honest about mass
+    /// and useless as a picture; this divides it, which is a RESOLUTION choice and not a physical one
+    /// (Law IV, docs/44): the same matter, held more finely. `introduce_swarm` makes exactly this
+    /// distinction for a disintegrating bolide.
+    ///
+    /// The spread is derived from the jet itself — parcels leave within `cone` radians of the jet
+    /// direction at speeds from a third of it to the whole, which is what an expanding gas leaving a
+    /// tube does. Deterministic (a golden-angle spiral, not a random draw), so two runs of the same
+    /// shot produce the same cloud and a rig can compare frames.
+    pub fn shed_cloud(
+        &mut self,
+        mass_kg: f64,
+        material: usize,
+        pos: DVec3,
+        vel: DVec3,
+        temp_k: f64,
+        cone: f64,
+        parcels: usize,
+    ) {
+        let n = parcels.max(1);
+        let each = mass_kg / n as f64;
+        let dir = vel.normalize_or(DVec3::Y);
+        // A frame about the jet, so the spray is around IT rather than around a world axis.
+        let a = if dir.x.abs() < 0.9 {
+            DVec3::X
+        } else {
+            DVec3::Y
+        };
+        let u = dir.cross(a).normalize_or(DVec3::X);
+        let w = dir.cross(u);
+        let golden = std::f64::consts::PI * (3.0 - 5f64.sqrt());
+        for i in 0..n {
+            let t = (i as f64 + 0.5) / n as f64;
+            // Angle from the axis grows with sqrt(t) so parcels fill the cone evenly by AREA rather
+            // than bunching at the rim.
+            let (sa, ca) = (cone * t.sqrt()).sin_cos();
+            let phi = i as f64 * golden;
+            let d = (dir * ca + (u * phi.cos() + w * phi.sin()) * sa).normalize();
+            // Slower at the edges, fastest on the axis — a jet, not a shell.
+            let speed = vel.length() * (0.33 + 0.67 * (1.0 - t));
+            self.trail
+                .shed(each, material, pos + d * 0.5, d * speed, temp_k);
+        }
+    }
+
     pub fn trail(&self) -> &Trail {
         &self.trail
     }
@@ -460,6 +516,95 @@ impl Flight {
             temp_k: p.temp_k as f32,
             resting: false,
         }));
+    }
+}
+
+/// **A planet as a world to fly through**: gravity is the body's own layered mass, the air is its
+/// emergent hydrostatic column, and hard matter is its surface. A flat ground patch answers the same
+/// three questions from a heightfield (`simulation::GroundAir`), and the flight physics between them
+/// is the same code.
+///
+/// ★★ **This lived inside `mod app` — inside a SCENE — until 2026-08-03, and that was the defect.**
+/// Robin: *"SCENES must never apply physics."* Answering *what is gravity here, what is the air here,
+/// where is the surface* IS physics, so a scene that owns those answers is applying them; and being
+/// wasm-only, it could not be tested natively or reused by anything that was not a browser. It is the
+/// shape docs/46 row 15 records — capability reachable only THROUGH a scene. Now the scene merely
+/// names a body and the engine answers.
+pub struct PlanetAir {
+    matter: crate::planet::LayeredBody,
+    air: crate::atmosphere::AirShell,
+    radius_m: f64,
+}
+
+impl PlanetAir {
+    /// Resolve a placed body's matter and its emergent air once, so the flight step does not have to
+    /// rebuild the planet to ask what gravity is.
+    pub fn of(mats: &[crate::materials::Material], body_id: &str, radius_m: f64) -> Self {
+        let matter = crate::planet::body(body_id);
+        let air = match mats.iter().find(|m| m.id == "air") {
+            Some(a) => crate::atmosphere::AirShell::new(
+                matter.surface_pressure(),
+                a,
+                288.0,
+                matter.gravity_at(matter.radius()),
+            ),
+            None => crate::atmosphere::AirShell {
+                rho_surface: 0.0,
+                scale_height_m: 0.0,
+                ambient_temp_k: 288.0,
+            },
+        };
+        PlanetAir {
+            matter,
+            air,
+            radius_m,
+        }
+    }
+}
+
+impl FlightEnvironment for PlanetAir {
+    fn gravity_at(&self, pos: glam::DVec3) -> glam::DVec3 {
+        // Gauss's law over the body's REAL differentiated mass profile — not a declared surface g.
+        self.matter.acceleration_at(pos, glam::DVec3::ZERO)
+    }
+    fn air_at(&self, pos: glam::DVec3) -> Option<(f64, f64)> {
+        if !self.air.exists() {
+            return None; // an airless body: real vacuum, and its bodies fly ballistically
+        }
+        Some((
+            self.air.density_at(pos.length() - self.radius_m),
+            self.air.ambient_temp_k,
+        ))
+    }
+    fn arrival(
+        &self,
+        body: &FlyingBody,
+        from: glam::DVec3,
+        to: glam::DVec3,
+        _dt: f64,
+    ) -> Option<Met> {
+        if to.length() > self.radius_m {
+            return None;
+        }
+        // **The site is where the trajectory CROSSED the surface.** This used to return `to`, the
+        // post-step sample, which at orbital entry speed is kilometres inside the planet — the same
+        // defect the ground patch had, and worse here because the speeds are higher.
+        //
+        // The sphere is analytic, so the crossing can be resolved as finely as the loop allows; the
+        // tolerance that would matter is the elevation raster's, and this coarse shell does not carry
+        // one. (docs/46: the raster is 19.55 km/pixel, so a metre of site precision is already far
+        // below the surface this radius stands in for.)
+        let at = surface_crossing(from, to, |p| p.length() <= self.radius_m);
+        // A planet is immovable: the reduced mass is the arriving body's own.
+        let (energy_j, momentum) = delivered(body, glam::DVec3::ZERO, None);
+        Some(Met {
+            at,
+            energy_j,
+            momentum,
+        })
+    }
+    fn air_scale_height_m(&self) -> f64 {
+        self.air.scale_height_m
     }
 }
 

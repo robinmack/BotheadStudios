@@ -11,7 +11,7 @@ await p.goto(`http://127.0.0.1:${PORT}/terra.html`, { waitUntil: 'load' });
 await p.waitForFunction(() => !!window.__terra, null, { timeout: 60000 });
 await p.waitForTimeout(3000);
 for (let lon = -180; lon < 180; lon += 30) {
-  await p.evaluate(({ lon }) => window.__terra.set_fly(28, lon, 8.0e6, 0.6, -0.45), { lon });
+  await p.evaluate(({ lon }) => window.__terra.place_camera(28, lon, 8.0e6, 0.6, -0.45), { lon });
   await p.waitForTimeout(700);
   await p.screenshot({ path: `${out}/lit-${String(lon).padStart(4, '0')}.png` });
   console.log(`lon ${lon}: shot`);

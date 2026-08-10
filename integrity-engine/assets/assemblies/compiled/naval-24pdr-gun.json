@@ -1,0 +1,397 @@
+{
+  "id": "naval-24pdr-gun",
+  "name": "24-pounder naval gun on a truck carriage",
+  "parts": [
+    {
+      "name": "breech",
+      "material": "gunmetal",
+      "shape": {
+        "kind": "cylinder",
+        "r": 0.215,
+        "length": 0.34
+      },
+      "along": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "at_m": [
+        -1.62,
+        0.0,
+        0.0
+      ],
+      "packing": 1.0
+    },
+    {
+      "name": "first_reinforce",
+      "material": "gunmetal",
+      "shape": {
+        "kind": "tube",
+        "r_outer": 0.205,
+        "r_bore": 0.0739,
+        "length": 0.95
+      },
+      "along": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "at_m": [
+        -0.98,
+        0.0,
+        0.0
+      ],
+      "packing": 1.0
+    },
+    {
+      "name": "second_reinforce",
+      "material": "gunmetal",
+      "shape": {
+        "kind": "tube",
+        "r_outer": 0.165,
+        "r_bore": 0.0739,
+        "length": 0.8
+      },
+      "along": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "at_m": [
+        -0.1,
+        0.0,
+        0.0
+      ],
+      "packing": 1.0
+    },
+    {
+      "name": "chase",
+      "material": "gunmetal",
+      "shape": {
+        "kind": "tube",
+        "r_outer": 0.128,
+        "r_bore": 0.0739,
+        "length": 0.85
+      },
+      "along": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "at_m": [
+        0.72,
+        0.0,
+        0.0
+      ],
+      "packing": 1.0
+    },
+    {
+      "name": "muzzle_swell",
+      "material": "gunmetal",
+      "shape": {
+        "kind": "tube",
+        "r_outer": 0.15,
+        "r_bore": 0.0739,
+        "length": 0.14
+      },
+      "along": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "at_m": [
+        1.22,
+        0.0,
+        0.0
+      ],
+      "packing": 1.0
+    },
+    {
+      "name": "carriage_bed",
+      "material": "oak",
+      "shape": {
+        "kind": "slab",
+        "x": 1.35,
+        "y": 0.14,
+        "z": 0.62
+      },
+      "along": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "at_m": [
+        -0.35,
+        -0.42,
+        0.0
+      ],
+      "packing": 1.0
+    },
+    {
+      "name": "cheek_left",
+      "material": "oak",
+      "shape": {
+        "kind": "slab",
+        "x": 1.3,
+        "y": 0.46,
+        "z": 0.09
+      },
+      "along": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "at_m": [
+        -0.35,
+        -0.2,
+        0.31
+      ],
+      "packing": 1.0
+    },
+    {
+      "name": "cheek_right",
+      "material": "oak",
+      "shape": {
+        "kind": "slab",
+        "x": 1.3,
+        "y": 0.46,
+        "z": 0.09
+      },
+      "along": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "at_m": [
+        -0.35,
+        -0.2,
+        -0.31
+      ],
+      "packing": 1.0
+    },
+    {
+      "name": "truck_front_left",
+      "material": "oak",
+      "shape": {
+        "kind": "cylinder",
+        "r": 0.13,
+        "length": 0.11
+      },
+      "along": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "at_m": [
+        0.15,
+        -0.62,
+        0.31
+      ],
+      "packing": 1.0
+    },
+    {
+      "name": "truck_front_right",
+      "material": "oak",
+      "shape": {
+        "kind": "cylinder",
+        "r": 0.13,
+        "length": 0.11
+      },
+      "along": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "at_m": [
+        0.15,
+        -0.62,
+        -0.31
+      ],
+      "packing": 1.0
+    },
+    {
+      "name": "truck_rear_left",
+      "material": "oak",
+      "shape": {
+        "kind": "cylinder",
+        "r": 0.1,
+        "length": 0.11
+      },
+      "along": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "at_m": [
+        -0.85,
+        -0.65,
+        0.31
+      ],
+      "packing": 1.0
+    },
+    {
+      "name": "truck_rear_right",
+      "material": "oak",
+      "shape": {
+        "kind": "cylinder",
+        "r": 0.1,
+        "length": 0.11
+      },
+      "along": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "at_m": [
+        -0.85,
+        -0.65,
+        -0.31
+      ],
+      "packing": 1.0
+    },
+    {
+      "name": "breeching_rope",
+      "material": "oak",
+      "shape": {
+        "kind": "cylinder",
+        "r": 0.032,
+        "length": 5.5
+      },
+      "along": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "at_m": [
+        -1.7,
+        -0.1,
+        0.0
+      ],
+      "packing": 1.0
+    }
+  ],
+  "connections": [
+    {
+      "a": "breech",
+      "b": "first_reinforce",
+      "join": {
+        "kind": "weld",
+        "area_m2": 0.12
+      }
+    },
+    {
+      "a": "first_reinforce",
+      "b": "second_reinforce",
+      "join": {
+        "kind": "weld",
+        "area_m2": 0.068
+      }
+    },
+    {
+      "a": "second_reinforce",
+      "b": "chase",
+      "join": {
+        "kind": "weld",
+        "area_m2": 0.0343
+      }
+    },
+    {
+      "a": "chase",
+      "b": "muzzle_swell",
+      "join": {
+        "kind": "weld",
+        "area_m2": 0.0343
+      }
+    },
+    {
+      "a": "first_reinforce",
+      "b": "cheek_left",
+      "join": {
+        "kind": "bearing",
+        "area_m2": 0.0113
+      }
+    },
+    {
+      "a": "first_reinforce",
+      "b": "cheek_right",
+      "join": {
+        "kind": "bearing",
+        "area_m2": 0.0113
+      }
+    },
+    {
+      "a": "cheek_left",
+      "b": "carriage_bed",
+      "join": {
+        "kind": "fastener",
+        "area_m2": 0.00049,
+        "count": 4
+      }
+    },
+    {
+      "a": "cheek_right",
+      "b": "carriage_bed",
+      "join": {
+        "kind": "fastener",
+        "area_m2": 0.00049,
+        "count": 4
+      }
+    },
+    {
+      "a": "carriage_bed",
+      "b": "truck_front_left",
+      "join": {
+        "kind": "fastener",
+        "area_m2": 0.0008,
+        "count": 1
+      }
+    },
+    {
+      "a": "carriage_bed",
+      "b": "truck_front_right",
+      "join": {
+        "kind": "fastener",
+        "area_m2": 0.0008,
+        "count": 1
+      }
+    },
+    {
+      "a": "carriage_bed",
+      "b": "truck_rear_left",
+      "join": {
+        "kind": "fastener",
+        "area_m2": 0.0008,
+        "count": 1
+      }
+    },
+    {
+      "a": "carriage_bed",
+      "b": "truck_rear_right",
+      "join": {
+        "kind": "fastener",
+        "area_m2": 0.0008,
+        "count": 1
+      }
+    },
+    {
+      "a": "breech",
+      "b": "breeching_rope",
+      "join": {
+        "kind": "tension_only",
+        "area_m2": 0.00322,
+        "slack_m": 0.9
+      }
+    }
+  ],
+  "notes": "A ship's gun, chosen over a field piece because a naval truck carriage is BLOCKS AND AXLES where a field carriage needs a trail, large wheels and an elevating screw (Robin, docs/64). Dimensions are representative of a mid-18th-century British 24-pounder: bore 5.82 in (0.1478 m), barrel about 9.5 ft, and a barrel mass historically around 2.3-2.6 tonnes. **NOTHING HERE DECLARES A MASS** — the barrel is three tube segments plus a solid breech, and what it weighs follows from that geometry and gunmetal's density. The taper is expressed as SEGMENTS rather than as a tapered primitive, which is both closer to how founders described these guns (reinforce, chase, muzzle) and a better test of the format: composition does the work instead of a special shape. FLAGGED: the segment walls step rather than taper continuously, so the metal is slightly under-counted at each step; and the trunnions and cascabel are omitted, which under-counts further. Both err the same way, so the derived mass is a LOWER BOUND on the real gun.",
+  "derived": {
+    "mass_kg": 2375.664637518403,
+    "envelope_volume_m3": 0.5109654782067595,
+    "matter_volume_m3": 0.5109654782067595,
+    "centre_of_mass_m": [
+      -0.631378082092748,
+      -0.02677427934285311,
+      0.0
+    ]
+  }
+}

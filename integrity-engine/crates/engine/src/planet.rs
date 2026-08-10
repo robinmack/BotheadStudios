@@ -172,6 +172,81 @@ impl LayeredBody {
         -(d / r) * self.gravity_at(r)
     }
 
+    /// ★★★ **THIS BODY AS AN ASSEMBLY OF MATTER** (docs/67).
+    ///
+    /// Robin, on why a planet is not a different kind of thing (2026-08-05): *"A planet is an accretion
+    /// of debris bound by its own gravitational effects which we've worked hard to model."* This is that
+    /// claim made checkable. Each layer becomes a `Shape::Shell` of its own material at its own measured
+    /// in-situ density; the declared atmosphere becomes one more shell, of air, on the outside — because
+    /// it is a component of the body and not something draped over it (docs/66 §10).
+    ///
+    /// **Nothing is invented and nothing is lost**: `an_earth_described_as_an_assembly_weighs_the_same`
+    /// asserts the resulting assembly's mass, matter volume and extent against this body's own
+    /// `total_mass`, layer volumes and `radius` — to the last f64 bit where the arithmetic permits.
+    /// That agreement is the whole argument: a `LayeredBody` is not a second kind of object, it is a
+    /// **de-resolved summary of an assembly**, exactly as `Derived` is to `Assembly::parts`.
+    ///
+    /// ★ The atmosphere shell's thickness is the column's own scale height rather than a chosen
+    /// altitude — `atmosphere::AirColumn::top`, the height above which the remaining air is 1e-5 of the
+    /// whole. An airless body gets no shell at all rather than an empty one.
+    pub fn as_assembly(&self, mats: &[Material]) -> crate::assembly::Assembly {
+        use crate::assembly::{Assembly, Part, Shape};
+        let mut parts = Vec::with_capacity(self.layers.len() + 1);
+        let mut inner = 0.0f64;
+        for (i, l) in self.layers.iter().enumerate() {
+            parts.push(Part {
+                name: format!("layer-{i}-{}", l.material),
+                material: l.material.clone(),
+                shape: Shape::Shell {
+                    r_inner: inner,
+                    r_outer: l.outer_r,
+                },
+                along: [0.0, 1.0, 0.0], // a layer has no long axis; the spin axis is the honest default
+                at_m: [0.0; 3],
+                packing: 1.0,
+                // MEASURED (PREM for Earth), and the reason a planet needs this at all: the catalogue's
+                // reference density is the surface-condition one, and a planet is mostly not at the
+                // surface. See `Part::in_situ_density` for the resolved counterpart this stands in for.
+                in_situ_density: Some(l.density),
+            });
+            inner = l.outer_r;
+        }
+        // The air, as the outermost component — present only if the body declares any.
+        let air = crate::atmosphere::AirColumn::of_body(self, mats, 288.0);
+        if self.atmosphere_mass > 0.0 && air.scale_height > 0.0 {
+            let r_outer = self.radius() + air.top();
+            let shell = Shape::Shell {
+                r_inner: self.radius(),
+                r_outer,
+            };
+            // The declared MASS spread over the shell the column actually occupies — so the assembly
+            // weighs what the body says its air weighs, rather than what a uniform slab of sea-level
+            // air would. The profile inside it is exponential (`AirShell`), not uniform; this is the
+            // bulk quantity, and it is exact.
+            let v = shell.volume_m3();
+            parts.push(Part {
+                name: "atmosphere".into(),
+                material: "air".into(),
+                shape: shell,
+                along: [0.0, 1.0, 0.0],
+                at_m: [0.0; 3],
+                packing: 1.0,
+                in_situ_density: (v > 0.0).then(|| self.atmosphere_mass / v),
+            });
+        }
+        Assembly {
+            id: self.name.to_lowercase().replace(' ', "-"),
+            name: self.name.clone(),
+            parts,
+            connections: Vec::new(),
+            notes:
+                "Derived from the body's own layers and declared air (docs/67). Not a definition — \
+                    the layers are."
+                    .into(),
+            derived: None,
+        }
+    }
+
     /// Surface pressure (Pa), EMERGENT: the weight of the declared atmosphere column spread over the
     /// sphere, P = M_atm·g/(4πR²). Earth's declared 5.15e18 kg comes out ≈1 atm; an airless body is 0.
     pub fn surface_pressure(&self) -> f64 {
@@ -1005,6 +1080,112 @@ mod hadean_atmosphere_tests {
             glow[0] > glow[2],
             "at {} K it glows red-orange, got {glow:?}",
             top.t_outer
+        );
+    }
+}
+
+#[cfg(test)]
+mod as_assembly_tests {
+    use super::*;
+    use crate::materials;
+
+    /// ★★★ **EARTH DESCRIBED AS AN ASSEMBLY WEIGHS THE SAME EARTH** (docs/67).
+    ///
+    /// Robin's argument for why a planet is not a second kind of object: *"A planet is an accretion of
+    /// debris bound by its own gravitational effects which we've worked hard to model."* This is that
+    /// argument as a number rather than a claim. The same Earth, described two ways — concentric layers
+    /// on one side, parts of an assembly on the other — must agree, and where it does not the
+    /// difference has to be nameable.
+    ///
+    /// If this goes red, the two descriptions have diverged and one of them is wrong.
+    #[test]
+    fn an_earth_described_as_an_assembly_weighs_the_same_earth() {
+        let mats = materials::load();
+        let e = earth();
+        let a = e.as_assembly(&mats);
+
+        // Every layer, plus the air, and not one part more.
+        assert_eq!(
+            a.parts.len(),
+            e.layers.len() + 1,
+            "five layers and an atmosphere: {:?}",
+            a.parts.iter().map(|p| &p.name).collect::<Vec<_>>()
+        );
+
+        // ★ MASS. The assembly's is summed part by part through envelope x packing x density; the
+        // body's is summed shell by shell. Same matter, two summations — they must land together.
+        let solid: f64 = a
+            .parts
+            .iter()
+            .filter(|p| p.name != "atmosphere")
+            .map(|p| p.matter_volume_m3() * p.in_situ_density.unwrap())
+            .sum();
+        let rel = (solid - e.total_mass()).abs() / e.total_mass();
+        assert!(
+            rel < 1e-12,
+            "Earth as an assembly weighs {solid:.6e} kg against the body's {:.6e} kg ({rel:.2e})",
+            e.total_mass()
+        );
+
+        // ★ THE AIR IS A COMPONENT, not something draped on top: the atmosphere part carries exactly
+        // the mass the body declares.
+        let air = a.parts.iter().find(|p| p.name == "atmosphere").unwrap();
+        let air_kg = air.matter_volume_m3() * air.in_situ_density.unwrap();
+        assert!(
+            (air_kg - e.atmosphere_mass).abs() / e.atmosphere_mass < 1e-12,
+            "the air part weighs {air_kg:.4e} kg, the body declares {:.4e}",
+            e.atmosphere_mass
+        );
+
+        // ★ EXTENT. The assembly ends at its outermost component — which is the air, ~97 km past the
+        // rock (docs/66 §10). Asked of the assembly, not inferred from anything.
+        let reach = a.reach_m();
+        assert!(
+            reach > e.radius(),
+            "the assembly reaches past the surface: {reach:.0} m vs {:.0} m",
+            e.radius()
+        );
+        let km = (reach - e.radius()) / 1000.0;
+        assert!(
+            (80.0..120.0).contains(&km),
+            "and it reaches past it by the air's own depth (~97 km), got {km:.0} km"
+        );
+
+        // ★ THE SHELLS TILE THE BODY with no gap and no overlap — which is what `Shape::Shell` exists
+        // for. Nested SPHERES would have counted the core five times over.
+        let volume: f64 = a
+            .parts
+            .iter()
+            .filter(|p| p.name != "atmosphere")
+            .map(|p| p.envelope_volume_m3())
+            .sum();
+        let ball = 4.0 / 3.0 * std::f64::consts::PI * e.radius().powi(3);
+        assert!(
+            (volume - ball).abs() / ball < 1e-12,
+            "the layers fill the sphere exactly: {volume:.6e} m3 against {ball:.6e}"
+        );
+
+        // ★ And the CENTRE OF MASS is the centre, because concentric shells cannot be lopsided. A
+        // non-zero answer here would mean a layer had acquired an offset from somewhere.
+        let com = a.centre_of_mass_m(&mats).unwrap();
+        assert!(
+            com.iter().all(|c| c.abs() < 1e-6),
+            "a body of concentric shells has its centre of mass at its centre, got {com:?}"
+        );
+    }
+
+    /// **The airless case needs no branch**: the Moon declares no atmosphere, so its assembly has one
+    /// part per layer and ends at its rock. Same call, same code path.
+    #[test]
+    fn an_airless_body_becomes_an_assembly_with_no_air_in_it() {
+        let mats = materials::load();
+        let moon = body("moon");
+        let a = moon.as_assembly(&mats);
+        assert_eq!(a.parts.len(), moon.layers.len(), "no atmosphere part");
+        assert!(a.parts.iter().all(|p| p.material != "air"));
+        assert!(
+            (a.reach_m() - moon.radius()).abs() < 1e-9,
+            "an airless assembly ends at its surface"
         );
     }
 }

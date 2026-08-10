@@ -40,7 +40,7 @@ await p.evaluate(({ lat, lon, alt }) => {
   const t = window.__terra;
   t.set_alt_bounds(0.05, 8e10);
   t.set_epoch_sun_over_lon(lon + 70);
-  t.set_fly(lat, lon, alt, 0.6, -0.45);
+  t.place_camera(lat, lon, alt, 0.6, -0.45);
 }, { lat: LAT, lon: LON, alt: ALT });
 
 // Let the tiles for this site arrive before timing anything: a rebuild with no tiles loaded probes a

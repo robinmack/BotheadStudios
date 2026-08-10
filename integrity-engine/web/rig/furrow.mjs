@@ -1,8 +1,8 @@
-import { launch } from './_launch.mjs';
+import { launch, VIEWPORT } from './_launch.mjs';
 const PORT = process.env.PORT || '5173';
 const out = process.env.OUT || '/tmp';
 const b = await launch();
-const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
+const p = await b.newPage({ viewport: VIEWPORT });
 const stat = async () => (await p.locator('#stats').innerText().catch(()=> '')).replace(/\s+/g,' ').trim();
 await p.goto(`http://127.0.0.1:${PORT}/birth.html`, { waitUntil: 'load' });
 await p.waitForTimeout(8500); await p.screenshot({ path: `${out}/f1-furrow.png` }); console.log('f1:', await stat());

@@ -11,14 +11,14 @@
 //      producers, ONE sink. Clicking the other must flip which one reads pressed, never light both.
 //      That invariant is the whole reason two camera systems can coexist without "where is the camera"
 //      having two answers.
-import { launch, PORT } from './_launch.mjs';
+import { launch, PORT, VIEWPORT } from './_launch.mjs';
 
 const b = await launch();
 let fail = 0;
 // terra: fly ⇄ follow-fragment. orbit/groundzero: manual ⇄ Sean's demo arc (where the world declares one).
 // ground/birth/twomoons: one camera system, so the selector must be ABSENT rather than a dead single choice.
 for (const page of ['ground.html', 'terra.html', 'orbit.html', 'groundzero.html', 'twomoons.html']) {
-  const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
+  const p = await b.newPage({ viewport: VIEWPORT });
   const errs = [];
   p.on('pageerror', (e) => errs.push(e.message));
   await p.goto(`http://127.0.0.1:${PORT}/${page}`, { waitUntil: 'load' });

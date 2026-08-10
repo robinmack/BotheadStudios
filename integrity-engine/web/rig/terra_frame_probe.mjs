@@ -13,7 +13,7 @@ await p.waitForTimeout(3000);
 const results = [];
 for (const lon of [-140, -100, -60, -20, 20, 60]) {
   for (const pitch of [-1.4, -1.0, -0.7]) {
-    await p.evaluate(({ alt, lon, pitch }) => window.__terra.set_fly(10, lon, alt, 0, pitch), { alt: ALT, lon, pitch });
+    await p.evaluate(({ alt, lon, pitch }) => window.__terra.place_camera(10, lon, alt, 0, pitch), { alt: ALT, lon, pitch });
     await p.waitForTimeout(700);
     const buf = await p.screenshot();
     // Mean luminance of the raw PNG bytes is a crude but sufficient "is anything there" measure.

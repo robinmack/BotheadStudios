@@ -1,7 +1,7 @@
-import { launch, PORT } from './_launch.mjs';
+import { launch, PORT, VIEWPORT } from './_launch.mjs';
 const b = await launch();
 for (const pg of ['birth.html','terra.html']) {
-  const p = await b.newPage({ viewport: { width: 1280, height: 800 } });
+  const p = await b.newPage({ viewport: VIEWPORT });
   const errs = [];
   p.on('pageerror', e => errs.push(e.message));
   p.on('console', m => { const t = m.text(); if (/error|fail|panic|Validation|expected/i.test(t)) errs.push(t.slice(0,220)); });
