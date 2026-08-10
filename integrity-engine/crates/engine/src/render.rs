@@ -195,14 +195,21 @@ pub(crate) fn make_dynamic_mesh(
     let vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size: (vert_capacity * std::mem::size_of::<Vertex>()) as u64,
-        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        // ★ COPY_SRC so the renderer can be ASKED what it holds (`renderer::Readback`, docs/68 §6b).
+        // Without it a buffer is write-only from the engine's point of view, which is how bisecting one
+        // upload defect came to cost nine deploy-and-photograph cycles.
+        usage: wgpu::BufferUsages::VERTEX
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
     let index_buf = make_buffer(
         device,
         label,
         bytemuck::cast_slice(indices),
-        wgpu::BufferUsages::INDEX,
+        // COPY_SRC for the same reason as the vertices: a buffer the engine cannot read is a buffer it
+        // can only reason about (docs/68 §6b).
+        wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_SRC,
     );
     GpuMesh {
         vertex_buf,

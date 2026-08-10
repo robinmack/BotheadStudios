@@ -3,6 +3,42 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-09 — the renderer can be asked what it holds, and it corrected me at once
+
+**What.** docs/68 step 3, first increment — and the piece that had to come first for a reason that was
+measured, not argued: bisecting one defect had cost **nine deploy-and-photograph cycles** because a
+photograph was the only instrument this engine had.
+
+`renderer::Uploaded` records what the CPU said it sent, at the moment it said it; `renderer::Readback`
+fetches what the device actually has, and `verdict()` states the comparison in one line. The readback is
+**deferred** — requested on one frame, collected on a later one — because a browser cannot block on
+`map_async`, and a question to another processor arriving later is the honest shape rather than a
+limitation. It is also the shape the eventual cross-thread protocol needs, so it is not throwaway.
+Dynamic mesh buffers gained `COPY_SRC`: a buffer the engine cannot read is one it can only reason about.
+
+★★★ **It disproved my own conclusion on its first use.** I had bisected the flora defect to the vertex
+buffer's contents — the one link verified on the CPU and never on the device. The device's answer:
+
+```
+terra-flora vertices: the device holds what was sent (6,672,468 bytes, 5,601,074 non-zero)
+terra-flora INDICES:  the device holds what was sent (1,895,040 bytes = 473,760 x 4)
+```
+
+Position-sensitive matches, both of them — and the index buffer takes a *different* upload path
+(`mapped_at_creation` + copy rather than `write_buffer`), so that was worth checking separately.
+
+**One deploy cycle to overturn a wrong conclusion, against the nine it took to reach it.** That ratio is
+the argument for the whole split, and it was Robin's hint, offered twice before I weighted it properly:
+*"I've got decades of experience behind me informing my hints."* Recorded.
+
+★★ **Where that leaves the defect: a contradiction, not a mystery.** Geometry, indices, uniform,
+pipeline, draw call, vertex layout, depth and camera are all now verified — and the picture shows
+nothing. One of those checks is therefore verified in a way that does not mean what it appears to, and
+finding which is a much better question than the one I started with.
+
+**Verified.** 592/592 native, `mod app` clean for wasm32, deployed. The readback is one-shot per upload
+and stops entirely once the device confirms a match, so the steady state costs nothing.
+
 ## 2026-08-09 — bisected to one link, and the instrument that does not exist
 
 **What.** The flora defect is now bisected to a single link, by swapping the two halves against each

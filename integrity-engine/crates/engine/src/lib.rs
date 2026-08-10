@@ -99,6 +99,9 @@ mod orbit;
 pub mod oxidation; // docs/46 row 31 - rapid oxidation: fires, charges, one reaction
 pub mod recohere; // docs/61 — the batch downward rung: a settled particle field re-coheres to ground
 pub mod refine; // docs/62, the upward rung: the celestial field initializes the local patch, conserved
+/// The renderer as a thing you can ASK — what it holds, on the device, not what was intended
+/// (docs/68 step 3). Built first because a photograph was the only instrument this engine had.
+pub mod renderer;
 pub mod resolution; // docs/44 — resolution by necessity: the quasi-static admission test
 pub mod simulation;
 pub mod site; // docs/62, the camera-driven materialization trigger and its site (wires refine.rs)
@@ -5867,6 +5870,13 @@ mod app {
         flora_at: Option<(f64, f64, usize)>,
         /// Where the flora mesh's vertices are measured FROM (display units).
         flora_anchor: glam::DVec3,
+        /// What the CPU said it uploaded for the flora, and the device's own answer when it arrives —
+        /// the comparison the flora defect is bisected to (docs/46 row 50, docs/68 §6b).
+        flora_upload: crate::renderer::Uploaded,
+        flora_indices: crate::renderer::Uploaded,
+        flora_verified: bool,
+        flora_readback: Option<crate::renderer::Readback>,
+        flora_readback_begun: bool,
         segment_verts: Vec<Vertex>,
         /// What the segment's mesh currently HOLDS — the same cache-of-the-view rule the ground tiers use
         /// (`ground_cap::tier_is_current`), on the one mesh instead of a ladder of them. The LIFT term is
@@ -6205,6 +6215,11 @@ mod app {
                 flora_gpu: None,
                 flora_at: None,
                 flora_anchor: glam::DVec3::ZERO,
+                flora_upload: Default::default(),
+                flora_indices: Default::default(),
+                flora_verified: false,
+                flora_readback: None,
+                flora_readback_begun: false,
                 segment_uni,
                 segment_built: None,
                 surface_loaded: false,
@@ -7568,7 +7583,43 @@ mod app {
                     );
                 }
             }
+            // ★★ **ASK THE DEVICE WHAT IT HOLDS** (docs/68 §6b). Recorded into THIS frame's encoder, so
+            // the answer is about the buffer as this frame saw it. One request, collected later — a
+            // browser cannot block on `map_async`, and a question to another processor arriving later
+            // is the honest shape rather than a limitation.
+            // ONE-SHOT per rebuild: the copy is 6.6 MB and the question only has one answer per
+            // upload. `flora_verified` stops it entirely once the device has confirmed a match, so the
+            // steady state costs nothing.
+            if self.flora_readback.is_none()
+                && self.flora_upload.nonzero > 0
+                && !self.flora_verified
+            {
+                if let Some(gpu) = self.flora_gpu.as_ref() {
+                    self.flora_readback = Some(crate::renderer::Readback::request(
+                        &self.device,
+                        &mut encoder,
+                        "terra-flora INDICES",
+                        &gpu.index_buf,
+                        (gpu.index_count as u64) * 4,
+                        self.flora_indices,
+                    ));
+                }
+            }
             self.queue.submit(std::iter::once(encoder.finish()));
+            // The map only means anything once the copy has been submitted.
+            if let Some(rb) = self.flora_readback.as_ref() {
+                if !self.flora_readback_begun {
+                    rb.begin();
+                    self.flora_readback_begun = true;
+                }
+            }
+            if let Some(rb) = self.flora_readback.as_ref() {
+                if let Some(held) = rb.collect() {
+                    log::info!("{}", rb.verdict().unwrap_or_default());
+                    self.flora_verified = !held.is_blank();
+                    self.flora_readback = None;
+                }
+            }
             output.present();
             Ok(())
         }
@@ -7830,8 +7881,14 @@ mod app {
                 combined.vertices.len(),
                 &combined.indices,
             );
-            self.queue
-                .write_buffer(&gpu.vertex_buf, 0, bytemuck::cast_slice(&combined.vertices));
+            let bytes: &[u8] = bytemuck::cast_slice(&combined.vertices);
+            self.flora_upload = crate::renderer::Uploaded::of(bytes);
+            self.flora_indices =
+                crate::renderer::Uploaded::of(bytemuck::cast_slice(&combined.indices));
+            self.flora_readback = None;
+            self.flora_readback_begun = false;
+            self.flora_verified = false;
+            self.queue.write_buffer(&gpu.vertex_buf, 0, bytes);
             log::info!(
                 "flora: {} plants resolved within {:.0} m at {:.0} m altitude ({} tris)",
                 sited.len(),
