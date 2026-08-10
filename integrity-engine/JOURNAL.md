@@ -3,6 +3,73 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-09 — the plants were behind the camera, and the negative control that said so
+
+★★★ **Terra's flora draws.** 1,200 plants, 43,200 triangles and ZERO fragments — at every altitude,
+for weeks — and the cause was none of the things this branch had named.
+
+**What it was not.** The previous entry (below) named **reversed-Z**, from a probe reading
+`ndc z = 0.997` against a 1:117,000 near/far ratio. One negative control retired it: draw everything
+EXCEPT the ground, and the plants were still not there — black sky, stars, an intact horizon, no
+plants. Depth and occlusion were innocent, and a change touching every depth comparison in both
+scenes was called off before it was written. The `ndc z = 0.997` reading was real; it was one corner
+of a mesh whose other corners were behind the eye, and reading one sample as the answer is what made
+it look like a depth problem.
+
+**What it was.** Projecting the flora mesh's own bounds with the frame's own matrices:
+
+```
+flora clip: ndc y [-110.6 -9.2]  w [-1.215e-6 -1.022e-7]  (model translate 34.6 m, alt 1.5 m)
+```
+
+All eight corners with **negative w** — the whole mesh behind the camera. And the offset was a
+constant: `|anchor − eye|` came back as `|36.1 m − alt|` at 4000, 600, 300, 120, 40, 12, 3 and 1.5 m.
+
+The elevation tiles stream in seconds after the scene loads and **revise the ground under the
+camera** — the new ground probe shows Galway going 426 m → 24 m as they arrive. `build_flora` had
+already baked the pre-tile number into its anchor, and its rebuild test asked exactly one question:
+*has the camera moved 2 m horizontally?* So neither the tiles' correction nor an entire descent from
+4 km to standing height could invalidate it. The plants hung 36 m in the air for the whole session.
+From 1.5 m with the eye pitched down, 36 m overhead is behind you.
+
+**The fix is to key the cache on its inputs.** `flora::Built` carries where we stand, how high the
+ground under us turned out to be, and the eye height the angular budget was spent at. Ground is
+checked at a quarter of a metre because the shortest plant the engine draws is a 0.35 m tuft;
+altitude is checked by RATIO rather than difference, because the budget buys subtended angle and the
+rule has to behave the same at 4 km and at 1.5 m. It lives in `terra::flora` rather than in the
+wasm-only scene, so it is natively testable — three tests, each of which fails against the rule it
+replaces.
+
+★★ **Why it hid for so long, and it is Robin's point about the seam** (*"too much pollution between
+duties"*): the renderer had BAKED a model answer, so it owned a copy the model could not correct.
+Nothing was ever wrong on the GPU. That is why nine deploy-and-photograph cycles bisecting toward the
+device found nothing, and why `renderer::Readback` kept truthfully reporting that the device held
+exactly what was sent — it did.
+
+**Two more findings, both recorded rather than fixed** (docs/46 rows 53 and 54):
+
+- **Two answers to "how high is the ground here", still.** The mesh displaces its vertices by
+  measured elevation PLUS generated sub-raster relief; `ground_disp_at` — which places the flora,
+  stands the cannon and resolves the camera shell — returns the measured term alone. Measured at
+  Galway: **+1.19 m** at the centre, **12.3 m worst over the patch** on the coarse raster, falling to
+  **0.000 m** once tiles cover. Small where the camera stands, large where a descent has not yet
+  streamed. Worse, the generated term is band-limited to the MESH's own cell, so the ground's height
+  currently depends on how finely it is drawn — Law IV inverted.
+- **The renderer computes the crater.** `globe.wgsl`'s vertex shader carries `crater_sink()`, a
+  paraboloid excavation profile, while the engine's ground answer has no crater term at all. Robin:
+  *"The engine understands craters — radius, energy, impact, velocity. The renderer should be
+  blissfully free of these calculations and just render the world as best it can, represent what the
+  assemblies/models are telling it."* Anything standing on the ground inside a bowl floats above the
+  drawn surface by the crater's depth.
+
+**Verified:** rig-photographed at Galway (`scripts/rig.sh terra_flora.mjs`) — plants visible from
+standing height for the first time, dark hexagonal tufts across the foreground. 591/591 native,
+`mod app` clean for wasm32. ★ Two defects the picture now exposes and the numbers confirm: the
+plants are still extruded prisms (`GRASS_TUFT`'s assembly mesh), and 1,200 tufts at 0.106 m spacing
+fill a **2 m disc** with painted albedo beyond it — from 12 m up the whole meadow is a speck, which
+is the "clumped in one tiny area, suspiciously crater-like" Robin reported months ago, finally
+visible for what it is.
+
 ## 2026-08-09 — the coordinates, and the renderer's own law
 
 ★★★ **The instrument gave the coordinates and the defect became specific.** Robin: *"at least now we
