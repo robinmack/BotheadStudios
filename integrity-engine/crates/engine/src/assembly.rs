@@ -140,6 +140,29 @@ impl Shape {
         }
     }
 
+    /// **Half-extents along the shape's own axes**, metres — `x` is the axis the primitive is built
+    /// along (`+X`, the cannon-barrel convention that `Part::along` rotates), `y` and `z` are across it.
+    ///
+    /// This exists so a caller can ask what a part occupies in a chosen DIRECTION rather than as one
+    /// number. `reach_m` answers "how far from the centre", which is the right question for an
+    /// assembly's outer boundary and the wrong one for its footprint: a grass blade is 0.35 m long and
+    /// 4 mm wide, and reading its length as a radius makes a tuft a third of a metre across.
+    pub fn half_extents_m(&self) -> glam::DVec3 {
+        match *self {
+            Shape::Sphere { r } => glam::DVec3::splat(r.max(0.0)),
+            Shape::Shell { r_outer, .. } => glam::DVec3::splat(r_outer.max(0.0)),
+            Shape::Cylinder { r, length } => {
+                glam::DVec3::new(0.5 * length.max(0.0), r.max(0.0), r.max(0.0))
+            }
+            Shape::Tube {
+                r_outer, length, ..
+            } => glam::DVec3::new(0.5 * length.max(0.0), r_outer.max(0.0), r_outer.max(0.0)),
+            Shape::Slab { x, y, z } => {
+                glam::DVec3::new(0.5 * x.max(0.0), 0.5 * y.max(0.0), 0.5 * z.max(0.0))
+            }
+        }
+    }
+
     /// The radius of the sphere of equal volume — how a part summarises when it is too far away to
     /// resolve (docs/44). One reduction for every shape, so a distant gun and a distant boulder are
     /// summarised the same way.
@@ -282,6 +305,65 @@ impl Part {
         self.shape.volume_m3()
     }
 
+    /// **How far this part reaches SIDEWAYS from the assembly's axis**, metres — its footprint radius,
+    /// with the part standing where and pointing how it says.
+    ///
+    /// The horizontal sibling of [`Part::reach_m`], and it exists because a crown is a horizontal
+    /// question. Both matter: an assembly ENDS at its outermost boundary (`reach_m`), and it COVERS
+    /// the ground out to this. Reading one for the other is what made a 0.35 m grass blade claim a
+    /// 0.35 m crown, which through `plants per m² = cover ÷ crown` would have thinned a pasture by
+    /// thirty-fold.
+    /// ★ Exact per shape, not via a bounding box. A box's horizontal corner over-reads a SPHERE by
+    /// √2 — measured: the oak's 18 m crown reported 509 m² of ground instead of 254, which would have
+    /// halved the trees in every forest on the planet.
+    pub fn crown_radius_m(&self) -> f64 {
+        let along = glam::DVec3::from(self.along).normalize_or(glam::DVec3::X);
+        // How much of the part's own axis lies in the horizontal plane. A blade standing straight up
+        // reaches sideways by its width; the same blade laid flat reaches by its length.
+        let axis_h = (along.x * along.x + along.z * along.z)
+            .sqrt()
+            .clamp(0.0, 1.0);
+        let r = match self.shape {
+            Shape::Sphere { r } => r.max(0.0),
+            Shape::Shell { r_outer, .. } => r_outer.max(0.0),
+            // A capped cylinder's farthest horizontal point is on an end rim, and which point that is
+            // depends on the tilt: `sup(t) = (L/2)·t + r·√(1−t²)` over the tilt `t` the axis allows.
+            // Unconstrained the maximum sits at `t* = (L/2)/√((L/2)²+r²)`; a less-tilted part is
+            // capped by its own axis instead.
+            Shape::Cylinder { r, length }
+            | Shape::Tube {
+                r_outer: r, length, ..
+            } => {
+                let (hl, r) = (0.5 * length.max(0.0), r.max(0.0));
+                let hyp = hl.hypot(r);
+                let t = if hyp > 0.0 {
+                    (hl / hyp).min(axis_h)
+                } else {
+                    0.0
+                };
+                hl * t + r * (1.0 - t * t).max(0.0).sqrt()
+            }
+            // A box's extreme really is a vertex, so eight of them settle it exactly.
+            Shape::Slab { .. } => {
+                let h = self.shape.half_extents_m();
+                let rot =
+                    glam::DMat3::from_quat(glam::DQuat::from_rotation_arc(glam::DVec3::X, along));
+                (0..8)
+                    .map(|c| {
+                        let s = glam::DVec3::new(
+                            if c & 1 == 0 { -h.x } else { h.x },
+                            if c & 2 == 0 { -h.y } else { h.y },
+                            if c & 4 == 0 { -h.z } else { h.z },
+                        );
+                        let p = rot * s;
+                        p.x.hypot(p.z)
+                    })
+                    .fold(0.0f64, f64::max)
+            }
+        };
+        (self.at_m[0].powi(2) + self.at_m[2].powi(2)).sqrt() + r
+    }
+
     /// The volume of actual SUBSTANCE in it, m³. Packing outside `0..=1` is clamped: more matter than
     /// space is not a denser arrangement, it is a broken definition.
     pub fn matter_volume_m3(&self) -> f64 {
@@ -357,6 +439,25 @@ impl Assembly {
     /// was nothing else to reach for. A boundary is a fact the assembly holds.
     pub fn reach_m(&self) -> f64 {
         self.parts.iter().map(Part::reach_m).fold(0.0, f64::max)
+    }
+
+    /// **The ground this assembly's `material` parts cover**, m² — its crown.
+    ///
+    /// A crown is the footprint of the parts made of one substance: a tree's leaves and not its
+    /// trunk, a tussock's blades and not the soil it roots in. That is what
+    /// `plants per m² = cover fraction ÷ crown` divides by, so it is a property of the ASSEMBLY and
+    /// belongs here rather than being re-derived by whatever needs a density.
+    ///
+    /// ★ It is the outermost boundary of the outermost matching component, taken HORIZONTALLY —
+    /// Robin's rule for where an assembly ends, asked about the ground instead of about space.
+    pub fn crown_m2(&self, material: &str) -> f64 {
+        let r = self
+            .parts
+            .iter()
+            .filter(|p| p.material == material)
+            .map(Part::crown_radius_m)
+            .fold(0.0f64, f64::max);
+        std::f64::consts::PI * r * r
     }
 
     /// Parse an assembly definition.
@@ -594,18 +695,73 @@ pub fn place_on_surface(
     metres_to_display: f64,
     eye: glam::DVec3,
 ) -> glam::DMat4 {
+    // Both halves back to back, so existing callers read the same while there is exactly one piece of
+    // geometry underneath and it is the model's. ★ `surface_r` arrives ALREADY in display units — the
+    // conflation this pair exists to end — so the position needs no further conversion (1.0) and the
+    // caller's `metres_to_display` is doing duty as the size scale.
+    let p = stand_on_body(lat_deg, lon_deg, bearing_deg, surface_r);
+    model_of(&p, 1.0, metres_to_display, eye)
+}
+
+/// **STANDING ON A BODY, as a model question** — where a body's surface puts something, in metres, in
+/// that body's own frame, with no camera and no display scale anywhere in it. [`model_of`] is the
+/// separate, later question of how to DRAW that answer, and the seam between them is docs/68's whole
+/// point: the model says where matter is, the renderer says how to show it.
+///
+/// Robin, 2026-08-09, on a test called *"a tuft of grass lands where the SCENE puts it"*: *"that is a
+/// horrible test; it now should land where the ASSEMBLY THAT CONTAINS IT puts it."* The name was
+/// reporting the architecture accurately — the scene really was doing the placing, in display units,
+/// relative to the eye, three different things in one expression.
+///
+/// ★★ **AND THE CONTAINER STILL DOES NOT CALL THIS** (docs/46 row 55). Robin, immediately after, and
+/// she was right to check: *"that 'its container places a plant' may not be accurate yet. That is the
+/// model I decreed, but I'm not certain the source matches that model."* It does not. What this
+/// changes is that the geometry is now a model question with no viewer in it, and that
+/// `instance::Placement` finally has a consumer (row 46). What it does NOT change is WHO asks:
+/// `Terra::build_flora` still does, so a plant is still placed by a scene walking a list. The
+/// container asking on its own behalf needs Earth to be an assembly that holds contents, which is
+/// docs/67 §5 and is not built. **Do not describe this as containment until it is.**
+///
+/// The assembly's own axes map onto the local frame: **+X along the bearing, +Y up, +Z completing a
+/// right-handed set** — the convention `naval-24pdr-gun.json` is authored in.
+pub fn stand_on_body(
+    lat_deg: f64,
+    lon_deg: f64,
+    bearing_deg: f64,
+    surface_r_m: f64,
+) -> crate::instance::Placement {
     let (up, north, east) = crate::geo::tangent_frame(lat_deg, lon_deg);
     let b = bearing_deg.to_radians();
     let fwd = (north * b.cos() + east * b.sin()).normalize();
-    // Right-handed: X cross Y = Z.
+    // Right-handed: X cross Y = Z. See the note above — the left-handed version renders inside-out.
     let side = fwd.cross(up).normalize();
-    let at = up * surface_r;
-    let s = metres_to_display;
+    crate::instance::Placement {
+        at_m: up * surface_r_m,
+        attitude: glam::DQuat::from_mat3(&glam::DMat3::from_cols(fwd, up, side)),
+        within: None,
+    }
+}
+
+/// **How to DRAW a placement** — the renderer half: the model matrix that carries an assembly's own
+/// vertices into this frame's camera-relative, display-scaled space.
+///
+/// `size_scale` multiplies the assembly's own dimensions (a real stand of grass is not clones);
+/// `display_per_m` is the scene's metres-to-display factor; `eye` is where the camera is, in display
+/// units. None of the three is a fact about the world — which is exactly why they live here and not in
+/// [`stand_on_body`].
+pub fn model_of(
+    p: &crate::instance::Placement,
+    display_per_m: f64,
+    size_scale: f64,
+    eye: glam::DVec3,
+) -> glam::DMat4 {
+    let m = glam::DMat3::from_quat(p.attitude);
+    let s = display_per_m * size_scale;
     glam::DMat4::from_cols(
-        (fwd * s).extend(0.0),
-        (up * s).extend(0.0),
-        (side * s).extend(0.0),
-        (at - eye).extend(1.0),
+        (m.x_axis * s).extend(0.0),
+        (m.y_axis * s).extend(0.0),
+        (m.z_axis * s).extend(0.0),
+        (p.at_m * display_per_m - eye).extend(1.0),
     )
 }
 
@@ -1553,6 +1709,131 @@ mod placement_tests {
     /// A tuft 3 m from the anchor should come out ~4.7e-7 display units away from it (3 m at
     /// 1/6371000 per metre) and ~0.35 m tall in the same units. If it does, the placement is right and
     /// the fault is downstream, on the GPU side.
+    /// ★★ **A CLUMP IS THE SAME MATTER AS THE TUFT IT REPLACED, RESOLVED** (Robin, 2026-08-09:
+    /// *"grass clumps… multiple strands in a clump that can be handled as one unit"*, and *"grass is
+    /// blades, not hexagons or columns"*).
+    ///
+    /// The cylinder declared a 0.12 × 0.35 m envelope at packing 2.571e-3, which is grassland LAI 3.0
+    /// times a 0.30 mm blade over its height. Both forms are therefore *leaf area × thickness* and must
+    /// weigh the same to the last significant figure — the geometry got finer and nothing was invented.
+    /// If a future edit changes the blade count, the width has to move with it or this fails, which is
+    /// the point: **the count and the width are one number.** The count is set by the measured blade
+    /// width (Lolium perenne, 2-3 mm) — 32 blades of 3.03 mm.
+    #[test]
+    fn a_grass_clump_weighs_exactly_what_the_cylinder_it_replaced_weighed() {
+        let mats = crate::materials::load();
+        let clump = compiled::parse(compiled::GRASS_TUFT);
+        assert_eq!(clump.parts.len(), 32, "a clump is blades, not one column");
+
+        // What the single cylinder held: envelope × packing.
+        let cylinder_matter = std::f64::consts::PI * 0.06f64.powi(2) * 0.35 * 0.002_571_43;
+        let got: f64 = clump.parts.iter().map(Part::matter_volume_m3).sum();
+        assert!(
+            (got - cylinder_matter).abs() / cylinder_matter < 1e-4,
+            "the clump must be the same matter: {got:.6e} m³ vs the cylinder's {cylinder_matter:.6e}"
+        );
+
+        // And every blade is solid: with the strands resolved there is no arrangement left to summarise.
+        assert!(clump.parts.iter().all(|p| p.packing == 1.0));
+
+        // The crown it reports is the crown it was defined with — the leaf-area derivation divided by
+        // this same radius, so the two cannot be allowed to drift apart.
+        let want = std::f64::consts::PI * 0.06f64 * 0.06;
+        let crown = clump.crown_m2("grass");
+        // 0.5% of AREA is 0.25% of radius — 0.08 mm on a 60 mm crown. That is the authored file's own
+        // 9-decimal rounding, not slack in the physics: the splay was solved against R exactly.
+        assert!(
+            (crown - want).abs() / want < 5e-3,
+            "a 0.12 m clump covers {want:.5} m² of ground, reports {crown:.5}"
+        );
+        // ★ The trap this replaced: a 0.35 m blade read as a 0.35 m radius would claim 0.385 m².
+        assert!(crown < 0.05, "a blade's LENGTH is not the clump's radius");
+    }
+
+    /// A crown is a HORIZONTAL question and `reach_m` answers a spherical one. Pinned on the oak
+    /// because that is where the difference bit: treating its crown sphere as a bounding box reported
+    /// **509 m²** of shaded ground instead of 254, which through `plants per m² = cover ÷ crown` puts
+    /// half as many trees in every forest.
+    #[test]
+    fn a_crown_is_the_ground_covered_not_the_bounding_box_corner() {
+        let oak = compiled::parse(compiled::BROADLEAF_TREE_OAK);
+        let crown = oak.crown_m2("broadleaf_foliage");
+        let want = std::f64::consts::PI * 9.0 * 9.0; // an 18 m crown
+        assert!(
+            (crown - want).abs() / want < 0.05,
+            "an 18 m crown covers ~{want:.0} m², got {crown:.0}"
+        );
+        // The tree still REACHES higher than it is wide — the two questions stay distinct.
+        assert!(oak.reach_m() > 9.0);
+    }
+
+    /// ★★ **WHERE A PLANT STANDS IS A MODEL QUESTION, AND THIS TEST USED TO ASK IT OF A SCENE.**
+    ///
+    /// Robin, 2026-08-09: *"`a_tuft_of_grass_lands_where_the_scene_puts_it` is a horrible test; it now
+    /// should land where the assembly that CONTAINS it puts it."* The old name was honest about a
+    /// dishonest arrangement — it computed a display-scaled, eye-relative matrix and called the result
+    /// a placement, so "where the plant is" could not be asked without a camera in the room.
+    ///
+    /// It now asks `stand_on_body` in METRES, in the body's own frame, and only then hands the answer
+    /// to the renderer. ★ Robin's own caution, recorded because it is correct: this is not yet
+    /// containment — `Terra::build_flora` is still the caller, and Earth does not hold contents that
+    /// could place themselves (docs/46 row 55). What is fixed is that the question no longer has a
+    /// viewer in it; who does the asking is a separate, unfinished thing.
+    #[test]
+    fn a_plant_stands_on_the_body_before_any_camera_exists() {
+        let clump = compiled::parse(compiled::GRASS_TUFT);
+        let planet_radius = 6_371_000.0f64;
+        let (lat, lon) = (45.3f64, -69.0f64);
+        // Standing on ground 120 m above the datum, facing east.
+        let p = stand_on_body(lat, lon, 90.0, planet_radius + 120.0);
+
+        // It is ON the body, at the radius it was told, under its own coordinate.
+        assert!((p.at_m.length() - (planet_radius + 120.0)).abs() < 1e-6);
+        let up = crate::geo::dir_from_lat_lon(lat, lon);
+        assert!(
+            p.at_m.normalize().dot(up) > 1.0 - 1e-12,
+            "under its own lat/lon"
+        );
+
+        // And it stands UP: the assembly's own +Y — the axis its blades run along — is the local
+        // zenith. This is the failure `Part::along` was added for, asked of the placement instead of
+        // of a matrix: the first tree came out lying flat on the ground.
+        let m = glam::DMat3::from_quat(p.attitude);
+        assert!(
+            m.y_axis.dot(up) > 1.0 - 1e-9,
+            "its up is the body's up here"
+        );
+        assert!(
+            m.determinant() > 0.0,
+            "right-handed, or it renders inside-out"
+        );
+
+        // NOTHING above needed a camera, a display scale or a scene. Those enter only now, and only to
+        // DRAW it — the renderer's half, which cannot move the plant because it is handed the answer.
+        let ds = 1.0 / planet_radius;
+        let eye = up * (planet_radius * ds); // the camera at the datum under the plant
+        let model = model_of(&p, ds, 1.0, eye);
+        let mats = crate::materials::load();
+        let mesh = clump.mesh(&mats, 6);
+        assert!(!mesh.vertices.is_empty(), "the clump has geometry at all");
+        let top = mesh
+            .vertices
+            .iter()
+            .map(|v| {
+                let q = model.transform_point3(glam::DVec3::new(
+                    v.pos[0] as f64,
+                    v.pos[1] as f64,
+                    v.pos[2] as f64,
+                ));
+                (q - (up * (planet_radius + 120.0) * ds - eye)).dot(up) / ds
+            })
+            .fold(f64::MIN, f64::max);
+        assert!(
+            (0.25..0.40).contains(&top),
+            "0.35 m of blade above its own ground, got {top:.3} m"
+        );
+    }
+
     #[test]
     fn a_tuft_of_grass_lands_where_the_scene_puts_it() {
         let mats = crate::materials::load();

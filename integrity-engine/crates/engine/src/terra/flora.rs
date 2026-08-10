@@ -77,25 +77,17 @@ pub struct Kind {
 impl Kind {
     /// Read a plant's crown footprint off the assembly itself, so the density that follows from it
     /// cannot drift from the thing being drawn.
+    /// ★ The crown is the assembly's own footprint (`Assembly::crown_m2`) — the outermost boundary of
+    /// its outermost foliage part, taken horizontally, with each part standing where and pointing how
+    /// it says. What stood here read each part's widest DIMENSION and ignored both its orientation and
+    /// its offset, which is fine for a crown that is one sphere on an axis and wrong the moment an
+    /// assembly resolves into components: a grass clump's 0.35 m blade would have claimed a 0.35 m
+    /// crown and thinned the pasture thirty-fold through `plants per m² = cover ÷ crown`.
     pub fn from_assembly(a: &crate::assembly::Assembly, foliage: &str) -> Kind {
-        let widest = a
-            .parts
-            .iter()
-            .filter(|p| p.material == foliage)
-            .map(|p| match p.shape {
-                crate::assembly::Shape::Sphere { r } => r,
-                crate::assembly::Shape::Cylinder { r, .. } => r,
-                crate::assembly::Shape::Tube { r_outer, .. } => r_outer,
-                crate::assembly::Shape::Slab { x, z, .. } => 0.5 * x.max(z),
-                // No plant is a shell today; if one ever is (a hollow gourd, a shell of leaves) its
-                // crown covers its outer radius.
-                crate::assembly::Shape::Shell { r_outer, .. } => r_outer,
-            })
-            .fold(0.0f64, f64::max);
         Kind {
             assembly_id: a.id.clone(),
             foliage: foliage.to_string(),
-            crown_m2: std::f64::consts::PI * widest * widest,
+            crown_m2: a.crown_m2(foliage),
             height_m: a.reach_m(),
         }
     }

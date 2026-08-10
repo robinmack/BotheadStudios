@@ -1,26 +1,646 @@
 {
   "id": "grass-tuft",
-  "name": "Grass tuft",
-  "notes": "One tuft of pasture grass \u2014 the unit a grassland is made of, and the smallest plant the engine carries. A cylinder 0.35 m tall and 0.12 m across at a packing derived the same way as a tree crown: LAI x blade thickness / height = 3.0 x 0.30 mm / 0.35 m = 2.57e-03. Grassland LAI runs lower than forest (~1-4); the blade is thicker than a broadleaf lamina and is taken at 0.30 mm. \u2605 At altitude nobody instantiates a tuft \u2014 the ground answers with `grass`'s albedo, which is itself a measured spectrum. This exists for the metre or two where you can see individual plants, and it is the SAME matter either way (Law IV: the camera changes representation, never existence).",
+  "name": "Grass clump",
+  "notes": "One clump of pasture grass \u2014 the unit a grassland is made of, and the smallest plant the engine carries. Robin, 2026-08-09: \"grass clumps (multiple strands in a clump that can be handled as one unit)\", \"grass is blades, not hexagons or columns\", and \"it's natural for grass to extend beyond the root clump.\" It was a single cylinder and it drew as a hexagonal prism.\n\nNOTHING HERE IS CHOSEN \u2014 every number is either measured or solved.\n  * LEAF AREA: the cylinder declared grassland LAI 3.0 over a 0.12 m crown, so one-sided leaf area is LAI x pi R^2 = 0.033929 m^2. N blades of width W and length H then satisfy N x W x H = leaf area, so the COUNT AND THE WIDTH ARE ONE NUMBER, not two.\n  * BLADE WIDTH is the measured one: Lolium perenne (perennial ryegrass \u2014 the commonest pasture grass in Ireland, where this is first drawn) has blades 2-3 mm wide (Lucid Centre pasture key; NC State Extension). N = 32 puts the width at 3.03 mm, inside that band. It is the blade that is measured; the count follows.\n  * THE ROOT CLUMP follows from the blades having to FIT around it: N blades of width W need a ring of circumference N x W, so r_root = N x W / 2pi = leaf area / (2 pi H) = 15.43 mm \u2014 a number that does not even depend on how the leaf area is divided up.\n  * THE SPLAY is solved, not chosen: sin(theta) = k x sqrt(u), u = i/(N-1), fills the crown by EQUAL AREA, and k = 0.123475 is the value at which the outermost blade reaches exactly R. Blades emerge from a 15.4 mm ring and reach 0.059 m, so the foliage extends well beyond the root clump, as grass does.\n\nMASS IS UNCHANGED BY CONSTRUCTION. The cylinder carried packing 2.571e-03 over a 3.9584e-03 m^3 envelope = 1.017877e-05 m^3 of grass; the blades are solid and total N x W x H x T = 1.017876e-05 m^3. Identical, because both are leaf area x thickness. The clump is the SAME MATTER, resolved \u2014 Law IV, the camera changes representation and never existence. Packing is gone with the cylinder: the blades ARE the matter and the air between them is air, which is the distinction Robin drew about sand and sandstone \u2014 a packing fraction is a lossy summary of an arrangement.\n\nAzimuth steps by the golden angle, because a tussock is not a regular star.\n\nFLAGGED (Law V, an IOU that names its own fix): a real ryegrass blade ARCHES \u2014 the same sources describe a distinct arching keel down the centre of the leaf \u2014 and these are STRAIGHT, because a slab is the primitive available. Straightness is also what forces the splay so upright: a 0.35 m straight blade cannot reach far sideways and stay inside a 0.12 m crown, whereas an arching one leans out and drops its tip. The honest version is one part per segment along the arc \u2014 3x the parts and 3x the triangles \u2014 and it should follow a measurement of what the arc changes on screen.\n\nAt altitude nobody instantiates a clump: the ground answers with `grass`'s albedo, itself a measured spectrum. This exists for the metre or two where you can see individual plants.",
   "parts": [
     {
-      "name": "blades",
+      "name": "blade-01",
       "material": "grass",
       "shape": {
-        "kind": "cylinder",
-        "r": 0.06,
-        "length": 0.35
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
       },
       "at_m": [
-        0.0,
+        0.015428571,
         0.175,
         0.0
       ],
-      "packing": 0.00257143,
       "along": [
         0.0,
         1.0,
         0.0
+      ]
+    },
+    {
+      "name": "blade-02",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        -0.014238222,
+        0.174956962,
+        0.013043378
+      ],
+      "along": [
+        -0.016352422,
+        0.999754066,
+        0.014980158
+      ]
+    },
+    {
+      "name": "blade-03",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        0.001828686,
+        0.174913913,
+        -0.020836939
+      ],
+      "along": [
+        0.002741899,
+        0.999508072,
+        -0.03124253
+      ]
+    },
+    {
+      "name": "blade-04",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        0.013477245,
+        0.174870853,
+        0.017578679
+      ],
+      "along": [
+        0.023370869,
+        0.999262017,
+        0.03048316
+      ]
+    },
+    {
+      "name": "blade-05",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        -0.022835922,
+        0.174827783,
+        -0.004039353
+      ],
+      "along": [
+        -0.043675428,
+        0.999015902,
+        -0.007725568
+      ]
+    },
+    {
+      "name": "blade-06",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        0.020340059,
+        0.174784702,
+        -0.012938681
+      ],
+      "along": [
+        0.041840687,
+        0.998769726,
+        -0.02661562
+      ]
+    },
+    {
+      "name": "blade-07",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        -0.006473197,
+        0.174741611,
+        0.02407997
+      ],
+      "along": [
+        -0.014102133,
+        0.998523489,
+        0.052459232
+      ]
+    },
+    {
+      "name": "blade-08",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        -0.011843714,
+        0.174698509,
+        -0.02280435
+      ],
+      "along": [
+        -0.027043297,
+        0.998277192,
+        -0.052070223
+      ]
+    },
+    {
+      "name": "blade-09",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        0.024803237,
+        0.174655396,
+        0.009058102
+      ],
+      "along": [
+        0.058919147,
+        0.998030834,
+        0.021517178
+      ]
+    },
+    {
+      "name": "blade-10",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        -0.025023281,
+        0.174612273,
+        0.010329247
+      ],
+      "along": [
+        -0.061496855,
+        0.997784415,
+        0.025385008
+      ]
+    },
+    {
+      "name": "blade-11",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        0.011741016,
+        0.174569139,
+        -0.025089869
+      ],
+      "along": [
+        0.029723872,
+        0.997537935,
+        -0.063518187
+      ]
+    },
+    {
+      "name": "blade-12",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        0.008469777,
+        0.174525994,
+        0.027002984
+      ],
+      "along": [
+        0.022012884,
+        0.997291394,
+        0.070180542
+      ]
+    },
+    {
+      "name": "blade-13",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        -0.024980804,
+        0.174482839,
+        -0.014476887
+      ],
+      "along": [
+        -0.066467608,
+        0.997044792,
+        -0.038519338
+      ]
+    },
+    {
+      "name": "blade-14",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        0.028735216,
+        0.174439673,
+        -0.006317357
+      ],
+      "along": [
+        0.078094308,
+        0.996798129,
+        -0.017168815
+      ]
+    },
+    {
+      "name": "blade-15",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        -0.017224934,
+        0.174396496,
+        0.024500697
+      ],
+      "along": [
+        -0.047722908,
+        0.996551406,
+        0.067880926
+      ]
+    },
+    {
+      "name": "blade-16",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        -0.00391435,
+        0.174353309,
+        -0.030206767
+      ],
+      "along": [
+        -0.011037791,
+        0.996304621,
+        -0.085177873
+      ]
+    },
+    {
+      "name": "blade-17",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        0.023667626,
+        0.174310111,
+        0.0199471
+      ],
+      "along": [
+        0.067829623,
+        0.996057775,
+        0.057166878
+      ]
+    },
+    {
+      "name": "blade-18",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        -0.031403199,
+        0.174266902,
+        0.001298621
+      ],
+      "along": [
+        -0.091358872,
+        0.995810867,
+        0.003777976
+      ]
+    },
+    {
+      "name": "blade-19",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        0.022607366,
+        0.174223682,
+        -0.022497349
+      ],
+      "along": [
+        0.066692236,
+        0.995563899,
+        -0.066367682
+      ]
+    },
+    {
+      "name": "blade-20",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        -0.001494069,
+        0.174180452,
+        0.03231061
+      ],
+      "along": [
+        -0.004465146,
+        0.995316869,
+        0.096562896
+      ]
+    },
+    {
+      "name": "blade-21",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        -0.021005393,
+        0.174137211,
+        -0.025171481
+      ],
+      "along": [
+        -0.063543804,
+        0.995069778,
+        -0.076146715
+      ]
+    },
+    {
+      "name": "blade-22",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        0.032916594,
+        0.174093959,
+        0.004428881
+      ],
+      "along": [
+        0.100718909,
+        0.994822625,
+        0.013551587
+      ]
+    },
+    {
+      "name": "blade-23",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        -0.027606883,
+        0.174050697,
+        0.01920815
+      ],
+      "along": [
+        -0.085384069,
+        0.994575411,
+        0.059408011
+      ]
+    },
+    {
+      "name": "blade-24",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        0.00747133,
+        0.174007424,
+        -0.033210809
+      ],
+      "along": [
+        0.023343118,
+        0.994328136,
+        -0.103762501
+      ]
+    },
+    {
+      "name": "blade-25",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        0.01712348,
+        0.17396414,
+        0.029882755
+      ],
+      "along": [
+        0.054015366,
+        0.994080799,
+        0.094264017
+      ]
+    },
+    {
+      "name": "blade-26",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        -0.033185338,
+        0.173920845,
+        -0.010587028
+      ],
+      "along": [
+        -0.105638,
+        0.993833401,
+        -0.033701403
+      ]
+    },
+    {
+      "name": "blade-27",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        0.031970123,
+        0.17387754,
+        -0.014771008
+      ],
+      "along": [
+        0.102652588,
+        0.993585941,
+        -0.047428099
+      ]
+    },
+    {
+      "name": "blade-28",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        -0.013741633,
+        0.173834223,
+        0.03283493
+      ],
+      "along": [
+        -0.044487213,
+        0.993338419,
+        0.106299921
+      ]
+    },
+    {
+      "name": "blade-29",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        -0.012172267,
+        0.173790896,
+        -0.033842004
+      ],
+      "along": [
+        -0.039716754,
+        0.993090836,
+        -0.110422695
+      ]
+    },
+    {
+      "name": "blade-30",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        0.032157159,
+        0.173747558,
+        0.016900901
+      ],
+      "along": [
+        0.105714002,
+        0.992843191,
+        0.055560317
+      ]
+    },
+    {
+      "name": "blade-31",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        -0.035473563,
+        0.17370421,
+        0.009350717
+      ],
+      "along": [
+        -0.117454841,
+        0.992595484,
+        0.030960719
+      ]
+    },
+    {
+      "name": "blade-32",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030293929159615866
+      },
+      "at_m": [
+        0.020030819,
+        0.17366085,
+        -0.031152526
+      ],
+      "along": [
+        0.066779802,
+        0.992347715,
+        -0.103857935
       ]
     }
   ],
