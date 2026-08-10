@@ -31,6 +31,14 @@ struct U {
     // The column's shape: x = scale height (m), y = surface radius (m), z = where the column stops
     // (m above the surface), w = metres per display unit.
     air2      : vec4<f32>,
+    // ★★ THE SKY'S OWN LIGHT (docs/46 row 56). `atmosphere::sky_light` projects the hemispherical
+    // integral onto two spherical-harmonic bands once per frame on the CPU; here it costs one dot
+    // product per band. `sky_ambient.xyz` is the orientation-independent term, `sky_grad_*` the
+    // gradient in world axes. All zero for a body with no air, so vacuum lights nothing with no branch.
+    sky_ambient : vec4<f32>,
+    sky_grad_r  : vec4<f32>,
+    sky_grad_g  : vec4<f32>,
+    sky_grad_b  : vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> u : U;
 // The material texture arrays (docs/12): albedo for reference, NORMAL for relief lighting. Terra bakes
@@ -125,6 +133,18 @@ fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     let grain = surface_albedo_triplanar(i.wpos + u.emissive.xyz, n, i.mat, GLOBE_TEX_SCALE);
     let albedo = grain * i.col * u.tint.rgb;
     var radiance = albedo * (ndl * SUN_GAIN);
+    // ★★★ **AND THE SKY LIGHTS IT TOO** (docs/46 row 56). Every surface here received direct sunlight
+    // and nothing else, which a horizontal ground hides and a vertical one exposes: a grass blade
+    // standing up under a high sun has `ndl` ≈ 0 and rendered BLACK beside ground of the same
+    // material. Robin, seeing it: *"one would assume the light scatter from the atmosphere would make
+    // the grass green, no?"* It does — this is that light, integrated over the hemisphere the surface
+    // can see, from the same `air_inscatter` that draws the sky above it.
+    let sky_e = vec3<f32>(
+        max(0.0, u.sky_ambient.x + dot(u.sky_grad_r.xyz, n)),
+        max(0.0, u.sky_ambient.y + dot(u.sky_grad_g.xyz, n)),
+        max(0.0, u.sky_ambient.z + dot(u.sky_grad_b.xyz, n)),
+    );
+    radiance += albedo * sky_e;
     // **The body's own heat.** A surface hot enough to glow emits regardless of where the Sun is, so this
     // is added on BOTH sides of the terminator — which is the physics: proto-Earth's 1,900 K magma ocean
     // radiates ~547x what a sunlit white surface reflects, so it outshines its own daylight and has no

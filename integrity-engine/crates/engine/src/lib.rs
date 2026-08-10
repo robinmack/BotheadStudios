@@ -934,7 +934,23 @@ mod app {
         /// (m above the surface), w = metres per display unit. The shader's positions are display units
         /// and the integral is metres; this is the one place they meet.
         air2: [f32; 4],
+        /// ★★ **THE SKY'S OWN LIGHT ON THIS SURFACE** (docs/46 row 56) — `atmosphere::SkyLight`,
+        /// projected onto two spherical-harmonic bands once per frame on the CPU because the honest
+        /// integral costs a hemisphere of marches per normal. `sky_ambient.xyz` is the
+        /// orientation-independent term; `sky_grad_r/g/b.xyz` dot with the surface normal.
+        ///
+        /// Appended at the END on purpose: `CRATER_UNIFORM_OFFSET` names a byte offset into this
+        /// struct, so anything inserted above it moves the crater and nothing says so.
+        sky_ambient: [f32; 4],
+        sky_grad_r: [f32; 4],
+        sky_grad_g: [f32; 4],
+        sky_grad_b: [f32; 4],
     }
+
+    /// Byte offset of `SpaceUniforms::sky_ambient` — 2 mat4 (128) + 9 vec4 (144). Patched in like the
+    /// crater below, for the same reason: it is one per-frame fact that every lit surface wants and
+    /// no call site should have to thread through.
+    const SKYLIGHT_UNIFORM_OFFSET: u64 = 272;
 
     /// Byte offset of `SpaceUniforms::crater` — 2 mat4 (128) + 5 vec4 (80). The globe patches just these
     /// 32 bytes after `write_space_uniform`, so the crater does not have to be threaded through all 14
@@ -5338,6 +5354,11 @@ mod app {
         up: [f32; 3],
         alt_m: f32,
         metres_per_display: f32,
+        /// ★★ **What this air SHINES on things** (docs/46 row 56) — `atmosphere::sky_light`, projected
+        /// once per frame. It rides on `Air` because it IS a property of the air seen from the eye,
+        /// exactly like the optical depth beside it: put anywhere else, a surface could be lit by a
+        /// different sky from the one drawn above it.
+        sky: crate::atmosphere::SkyLight,
     }
 
     impl Air {
@@ -5366,6 +5387,10 @@ mod app {
     const NO_GLOW: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
 
     const AIRLESS: Air = Air {
+        sky: crate::atmosphere::SkyLight {
+            ambient: [0.0; 3],
+            gradient: [[0.0; 3]; 3],
+        },
         tau: [0.0; 3],
         gain: crate::atmosphere::SUN_GAIN,
         twilight: 0.0,
@@ -5416,6 +5441,7 @@ mod app {
                 scale_height_m: self.air_column.scale_height as f32,
                 radius_m: self.air_column.radius as f32,
                 top_m: self.air_column.top() as f32,
+                sky: self.sky_light,
                 ..AIRLESS
             }
         }
@@ -5532,6 +5558,30 @@ mod app {
                 air.radius_m,
                 air.top_m,
                 air.metres_per_display,
+            ],
+            sky_ambient: [
+                air.sky.ambient[0],
+                air.sky.ambient[1],
+                air.sky.ambient[2],
+                0.0,
+            ],
+            sky_grad_r: [
+                air.sky.gradient[0][0],
+                air.sky.gradient[0][1],
+                air.sky.gradient[0][2],
+                0.0,
+            ],
+            sky_grad_g: [
+                air.sky.gradient[1][0],
+                air.sky.gradient[1][1],
+                air.sky.gradient[1][2],
+                0.0,
+            ],
+            sky_grad_b: [
+                air.sky.gradient[2][0],
+                air.sky.gradient[2][1],
+                air.sky.gradient[2][2],
+                0.0,
             ],
         };
         queue.write_buffer(&slot.buf, 0, bytemuck::bytes_of(&u));
@@ -5918,6 +5968,10 @@ mod app {
         flora_verified: bool,
         flora_readback: Option<crate::renderer::Readback>,
         flora_readback_begun: bool,
+        /// The sky's light this frame, and what it was computed FOR — a cache that names its own
+        /// inputs, the lesson of `flora::Built` (docs/46 row 52).
+        sky_light: crate::atmosphere::SkyLight,
+        sky_light_for: Option<(f32, f32, f32, f32)>,
         /// Negative control for native tests (`set_draw_flora`); always true in the browser.
         draw_flora: bool,
         segment_verts: Vec<Vertex>,
@@ -6310,6 +6364,8 @@ mod app {
                 flora_readback: None,
                 flora_readback_begun: false,
                 draw_flora: true,
+                sky_light: Default::default(),
+                sky_light_for: None,
                 segment_uni,
                 segment_built: None,
                 surface_loaded: false,
@@ -7347,6 +7403,36 @@ mod app {
             // seasons come from the same declination that makes them real.
             let sun_dir = crate::orbit::solar_direction_earth_fixed(self.celestial_epoch_s());
             let sun_light = Vec3::new(sun_dir.x as f32, sun_dir.y as f32, sun_dir.z as f32);
+
+            // ★★ **THE SKY'S OWN LIGHT, ONCE PER FRAME** (docs/46 row 56). The honest integral costs a
+            // hemisphere of marches per NORMAL, so it is projected onto two bands here, on the CPU, and
+            // the shader spends a dot product. Recomputed only when an INPUT moves — the sun's place in
+            // the sky, or the eye's height, which is what the column looks like from — because a cache
+            // keyed on anything else is the defect docs/46 row 52 records.
+            {
+                let up = view.eye.normalize_or(glam::DVec3::Y);
+                let key = (
+                    (sun_dir.dot(up) * 512.0).round() as f32,
+                    (sun_dir.x * 256.0).round() as f32,
+                    (sun_dir.z * 256.0).round() as f32,
+                    (self.fly.alt_m.max(0.0).sqrt() * 4.0).round() as f32,
+                );
+                if self.sky_light_for != Some(key) {
+                    self.sky_light_for = Some(key);
+                    // 6x12 = 72 directions. `sky_irradiance_converges_as_the_hemisphere_is_refined`
+                    // measures what refining buys; this is the grid a frame can afford, and the cost
+                    // of being wrong about it is a slightly mis-shaped ambient, never a wrong physics.
+                    self.sky_light = crate::atmosphere::sky_light(
+                        &self.air_column,
+                        self.fly.alt_m.max(0.0),
+                        up,
+                        sun_dir,
+                        crate::atmosphere::SUN_GAIN as f64,
+                        6,
+                        12,
+                    );
+                }
+            }
 
             // docs/43 Phase 5 — build the fine ground cap under the camera and cross-fade it in as we
             // descend. The fade/lift rules live in `terra::ground_cap` (natively tested). The hand-off
