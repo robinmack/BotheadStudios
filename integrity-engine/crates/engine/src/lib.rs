@@ -5803,6 +5803,7 @@ mod app {
     /// **45 ms** before this work — a pre-existing cost nobody had measured. The mesh, not the maths, is the
     /// budget.
     const TERRA_OCTAVE_BUDGET: f64 = 16.0;
+
     /// (fixed topology) is built once. **One resolution for every scene's SEGMENT** — Terra's descent and
     /// the space band's corridor build the same surface, by the same builder, at the same density
     /// (docs/63). Rings out from under the eye, spokes around it.
@@ -5866,8 +5867,8 @@ mod app {
         flora_gpu: Option<GpuMesh>,
         flora_uni: Option<UniformSlot>,
         flora_kinds: Vec<crate::terra::flora::Kind>,
-        /// Where the current flora mesh was built for, and how many plants are in it.
-        flora_at: Option<(f64, f64, usize)>,
+        /// What the current flora mesh was built FROM — the cache key that decides when it is stale.
+        flora_at: Option<crate::terra::flora::Built>,
         /// Where the flora mesh's vertices are measured FROM (display units).
         flora_anchor: glam::DVec3,
         /// What the CPU said it uploaded for the flora, and the device's own answer when it arrives —
@@ -7555,7 +7556,7 @@ mod app {
                     if let (Some(gpu), Some(uni)) =
                         (self.flora_gpu.as_ref(), self.flora_uni.as_ref())
                     {
-                        if self.flora_at.is_some_and(|(_, _, n)| n > 0) {
+                        if self.flora_at.is_some_and(|b| b.n > 0) {
                             pass.set_pipeline(&self.globe_pipeline);
                             draw(&mut pass, uni, gpu);
                         }
@@ -7785,13 +7786,22 @@ mod app {
                 self.flora_at = None;
                 return;
             }
-            // Rebuild only when the ground under the eye has actually moved — the segment's own rule.
+            // ★ Rebuild when any INPUT to the answer has moved — where we stand, how high the ground
+            // under us turned out to be, and how high the eye is. Keyed on position alone this cache
+            // outlived a 36 m correction from the elevation tiles and an entire descent (`crate::terra::flora::Built`).
             let (lat, lon) = (self.fly.lat, self.fly.lon);
-            if let Some((blat, blon, _)) = self.flora_at {
-                let moved_m = ((lat - blat).powi(2) + (lon - blon).powi(2)).sqrt() * 111_320.0;
-                if moved_m < 2.0 {
-                    return;
-                }
+            let fresh = crate::terra::flora::Built {
+                lat,
+                lon,
+                ground_m: self.ground_disp_at(lat, lon) / display_scale(),
+                alt_m: alt,
+                n: 0,
+            };
+            if self
+                .flora_at
+                .is_some_and(|built| built.still_current(&fresh))
+            {
+                return;
             }
             // A CAP, not the reach: each kind derives its own from its density and the budget
             // (docs/46 row 49). The cap is now the distance at which the TALLEST kind falls below one
@@ -7818,7 +7828,7 @@ mod app {
                 fidelity.instance_budget,
             );
             if sited.is_empty() {
-                self.flora_at = Some((lat, lon, 0));
+                self.flora_at = Some(fresh);
                 return;
             }
             // One mesh for the lot: each plant's own assembly mesh, moved to where it stands. The
@@ -7889,21 +7899,28 @@ mod app {
             self.flora_readback_begun = false;
             self.flora_verified = false;
             self.queue.write_buffer(&gpu.vertex_buf, 0, bytes);
+            // ★ NEAREST is the number that decides whether any of this can be SEEN. A count and a
+            // radius both looked healthy while every plant the budget bought stood kilometres away.
+            let nearest = sited.iter().map(|s| s.dist_m).fold(f64::INFINITY, f64::min);
             log::info!(
-                "flora: {} plants resolved within {:.0} m at {:.0} m altitude ({} tris)",
+                "flora: {} plants resolved within {:.0} m at {:.0} m altitude ({} tris), nearest {:.1} m",
                 sited.len(),
                 radius_m,
                 alt,
-                combined.indices.len() / 3
+                combined.indices.len() / 3,
+                nearest
             );
             self.flora_gpu = Some(gpu);
             self.flora_anchor = anchor_m * ds;
-            self.flora_at = Some((lat, lon, sited.len()));
+            self.flora_at = Some(crate::terra::flora::Built {
+                n: sited.len(),
+                ..fresh
+            });
         }
 
         /// How many plants are standing right now — a read, for rigs and the HUD.
         pub fn flora_count(&self) -> u32 {
-            self.flora_at.map_or(0, |(_, _, n)| n as u32)
+            self.flora_at.map_or(0, |b| b.n as u32)
         }
 
         /// **Build the ONE surface segment** (docs/63) — the collapse of globe + cap into a single mesh.
@@ -8021,6 +8038,14 @@ mod app {
                 // The finest grid the DATA under this segment could support, over the whole rebuild —
                 // the budget's convergence ceiling (see `WorkBudget::observe`).
                 let max_want = std::cell::Cell::new(1usize);
+                // ★ **THE TWO ANSWERS TO "HOW HIGH IS THE GROUND HERE", MEASURED** (docs/46 row 52).
+                // The mesh displaces its vertices by measured elevation PLUS generated sub-raster
+                // relief; `ground_disp_at` — which places the flora AND resolves the camera shell —
+                // returns the measured elevation ALONE. Whatever this probe reports as `relief` is
+                // how far the drawn ground sits from where the model believes it is. Recorded at the
+                // sample nearest the segment centre, plus the worst over the patch.
+                let relief_probe = std::cell::Cell::new((f64::INFINITY, 0.0f64, 0.0f64, 0.0f64));
+                let relief_absmax = std::cell::Cell::new(0.0f64);
                 let t_appearance = crate::clock::now_seconds();
                 let sample = |dir: glam::DVec3| -> crate::terra::globe_mesh::SurfaceSample {
                     let point = sampler.sample(dir);
@@ -8064,7 +8089,7 @@ mod app {
                             crate::surface_detail::detail_octaves(detail, cell_m, base_feature_m)
                                 .min((base_feature_m / cell_m).max(1.0).log2())
                                 .min(octave_budget);
-                        if octaves > 0.0 {
+                        let relief = if octaves > 0.0 {
                             let frac = if mu > 0.0 {
                                 (tier_slope / mu).clamp(0.0, 1.0)
                             } else {
@@ -8072,7 +8097,7 @@ mod app {
                             };
                             let px = lon.to_radians() * planet_radius * lat.to_radians().cos();
                             let pz = lat.to_radians() * planet_radius;
-                            let relief = crate::surface_detail::micro_relief_m(
+                            crate::surface_detail::micro_relief_m(
                                 px,
                                 pz,
                                 base_feature_m,
@@ -8080,9 +8105,15 @@ mod app {
                                 mu,
                                 h_crit,
                                 frac,
-                            );
-                            off += relief * ds * exag;
+                            )
+                        } else {
+                            0.0
+                        };
+                        off += relief * ds * exag;
+                        if a_ang < relief_probe.get().0 {
+                            relief_probe.set((a_ang, elev_m, relief, cell_m));
                         }
+                        relief_absmax.set(relief_absmax.get().max(relief.abs()));
                     }
                     // **THE APPEARANCE INTEGRAL** (docs/63). The mesh carries this cell's mean shape;
                     // everything finer than the cell — the material MIXTURE and the slope SPREAD — is
@@ -8146,6 +8177,20 @@ mod app {
                     res,
                     sample,
                 );
+                // ★ **THE TWO ANSWERS, IN METRES OF REAL GROUND** (docs/46 row 53). The mesh's own
+                // vertex is `measured + generated`; every OTHER caller — the flora that stands on it,
+                // the camera shell that rests on it, the cannon — asks `ground_disp_at`, which is the
+                // measured term ALONE. `generated` is therefore exactly how far the drawn surface sits
+                // from where the model believes it is, and `worst` is that over the whole patch.
+                let (_, probe_elev, probe_relief, probe_cell) = relief_probe.get();
+                log::info!(
+                    "ground: {:.2} m measured {:+.3} m generated (cell {:.3} m) — the model sees only the \
+                     first; worst gap {:.3} m over the patch",
+                    probe_elev,
+                    probe_relief,
+                    probe_cell,
+                    relief_absmax.get(),
+                );
                 // One rebuild is one unit of work: fold its real cost back into the budget. The side
                 // REALLY used is the smaller of what we allowed and what the data supports — passing
                 // the allowance alone would let a cheap, data-bound rebuild argue for a bigger budget.
@@ -8192,8 +8237,8 @@ mod app {
             // matrix carries them to camera-relative space — the same thing the segment does, and for
             // the same two reasons: f32 has ~0.6 m ULP at Earth's radius, and a mesh built about one
             // eye is wrong for every other.
-            if let (Some(uni), Some((_, _, n))) = (self.flora_uni.as_ref(), self.flora_at) {
-                if n > 0 {
+            if let (Some(uni), Some(built)) = (self.flora_uni.as_ref(), self.flora_at) {
+                if built.n > 0 {
                     let model =
                         glam::DMat4::from_translation(self.flora_anchor - view.eye).as_mat4();
                     write_space_uniform(

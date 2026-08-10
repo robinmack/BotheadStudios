@@ -12,7 +12,9 @@ const p = await b.newPage({ viewport: VIEWPORT });
 p.on('pageerror', e => console.log('PAGEERR:', e.message.split('\n')[0]));
 await p.route('**/__log', async (r) => {
   const d = r.request().postData();
-  if (d && /flora/.test(d)) console.log('  ' + JSON.parse(d).msg);
+  // `ground` too: where the plants STAND is half of whether they can be seen, and the mesh and the
+  // model have to agree about it. A flora rig that could not see that measurement watched the symptom.
+  if (d && /flora|ground:/.test(d)) console.log('  ' + JSON.parse(d).msg);
   await r.fulfill({ status: 200, body: 'ok' });
 });
 await p.goto('http://127.0.0.1:5173/terra.html', { waitUntil: 'load' });

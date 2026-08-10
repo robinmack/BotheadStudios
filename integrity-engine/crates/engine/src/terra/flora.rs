@@ -282,6 +282,113 @@ pub fn scatter(
     out
 }
 
+/// **What the flora mesh was built FROM** — the renderer's cache key (docs/68, docs/46 row 52).
+///
+/// The mesh is a CACHE of an answer the model can give at any instant: *which plants stand within
+/// reach of this point.* A cache goes stale when its INPUTS change — and this one was keyed on the
+/// camera's latitude and longitude alone. So it survived two things that change the answer: the
+/// descent, which changes which plants are worth resolving, and the elevation tiles, which arrive
+/// seconds later and move the ground.
+///
+/// ★★ MEASURED at Galway, 2026-08-09. The anchor froze the pre-tile ground (426 m); the tiles
+/// revised it to 390 m; the plants stayed where the frozen number put them, **36.1 m in the air**,
+/// for the whole descent — `|anchor − eye|` came back as `|36.1 − alt|` at every altitude the rig
+/// visited. From 1.5 m with the eye pitched down, 36 m overhead is BEHIND the camera: all eight
+/// corners of the mesh's bounds projected with negative `w`. Meanwhile `flora_count` reported
+/// 1,200 and the draw reported 43,200 triangles the entire way down, which is why nine
+/// deploy-and-photograph cycles bisected toward the GPU and found nothing wrong there.
+///
+/// The lesson is the one docs/68 is built on: a renderer that BAKES a model answer owns a copy
+/// that the model cannot correct. Ask again, or be told when to.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Built {
+    pub lat: f64,
+    pub lon: f64,
+    /// Ground elevation under the anchor (m above sea level) — the number the streamed tiles revise.
+    pub ground_m: f64,
+    /// The eye height the angular budget was spent at (m). The budget buys SUBTENDED ANGLE, so
+    /// altitude decides WHICH plants win a slot, not merely how many.
+    pub alt_m: f64,
+    /// How many plants this mesh holds.
+    pub n: usize,
+}
+
+impl Built {
+    /// Is a mesh built for `self` still the answer at `fresh`? Tolerances rather than equality:
+    /// rebuilding on every float wobble would walk a quarter of a million lattice cells per frame.
+    pub fn still_current(&self, fresh: &Built) -> bool {
+        let moved_m =
+            ((self.lat - fresh.lat).powi(2) + (self.lon - fresh.lon).powi(2)).sqrt() * 111_320.0;
+        // GROUND: a quarter of a metre is well under the shortest plant the engine draws (a
+        // 0.35 m tuft), so any revision large enough to hide one forces a rebuild.
+        let ground_moved = (self.ground_m - fresh.ground_m).abs();
+        // ALTITUDE: the budget spends on angle, which goes as 1/slant, so equal RATIOS are equal
+        // changes — a rule that behaves the same at 4 km and at 1.5 m, which no absolute
+        // threshold does.
+        let alt_ratio = fresh.alt_m.max(1e-3) / self.alt_m.max(1e-3);
+        moved_m < 2.0 && ground_moved < 0.25 && (0.8..1.25).contains(&alt_ratio)
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    fn at(lat: f64, lon: f64, ground_m: f64, alt_m: f64) -> Built {
+        Built {
+            lat,
+            lon,
+            ground_m,
+            alt_m,
+            n: 1200,
+        }
+    }
+
+    /// ★★ **THE BUG THIS EXISTS FOR** (2026-08-09). The elevation tiles stream in seconds after the
+    /// scene loads and REVISE the ground under the camera — at Galway, by 36 m. The flora mesh was
+    /// keyed on latitude and longitude alone, so nothing about that revision invalidated it: every
+    /// plant stayed at the height the pre-tile guess put it, hanging in the air, for the rest of the
+    /// session. From standing height with the eye pitched down they were *behind the camera*, and the
+    /// scene reported 1,200 plants and 43,200 triangles the whole time.
+    ///
+    /// Ground is checked at a quarter of a metre because the shortest plant the engine draws is a
+    /// 0.35 m tuft: any revision big enough to bury one has to force a rebuild.
+    #[test]
+    fn a_revised_ground_makes_the_mesh_stale() {
+        let before = at(53.10, -9.45, 426.6, 4000.0);
+        let after_tiles = at(53.10, -9.45, 390.5, 4000.0);
+        assert!(
+            !before.still_current(&after_tiles),
+            "a 36 m correction to the ground must invalidate the mesh standing on it"
+        );
+        // A revision far below the shortest plant is not worth a quarter-million-cell rebuild.
+        assert!(before.still_current(&at(53.10, -9.45, 426.7, 4000.0)));
+    }
+
+    /// The other half of the same bug: the budget buys SUBTENDED ANGLE, so the eye's height decides
+    /// which plants win a slot — not merely how many. Keyed on position alone, a descent from 4 km to
+    /// standing height reused the selection made at 4 km, which is the wrong 1,200 plants.
+    #[test]
+    fn descending_makes_the_mesh_stale() {
+        let high = at(53.10, -9.45, 390.0, 4000.0);
+        assert!(!high.still_current(&at(53.10, -9.45, 390.0, 1.5)));
+        // Ratios, not absolutes: the SAME rule has to behave at 4 km and at 1.5 m.
+        assert!(high.still_current(&at(53.10, -9.45, 390.0, 4200.0)));
+        let low = at(53.10, -9.45, 390.0, 1.5);
+        assert!(low.still_current(&at(53.10, -9.45, 390.0, 1.6)));
+        assert!(!low.still_current(&at(53.10, -9.45, 390.0, 3.0)));
+    }
+
+    /// Walking still invalidates it, which is the rule that was already there and still holds.
+    #[test]
+    fn walking_two_metres_makes_the_mesh_stale() {
+        let here = at(53.10, -9.45, 390.0, 1.5);
+        let step = 2.5 / 111_320.0;
+        assert!(!here.still_current(&at(53.10 + step, -9.45, 390.0, 1.5)));
+        assert!(here.still_current(&at(53.10 + step * 0.5, -9.45, 390.0, 1.5)));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
