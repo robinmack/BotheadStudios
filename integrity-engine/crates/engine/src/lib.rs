@@ -6599,6 +6599,9 @@ mod app {
         /// Hand the camera back to the built-in fly camera, where the pose left it.
         pub fn clear_camera_pose(&mut self) {
             self.cam_pose = None;
+            // A hand-back is a placement too (see `place_camera`): the eye jumps from the pose to
+            // wherever the fly camera stands, and a swept path across that jump is a fiction.
+            self.last_eye_m = None;
         }
 
         /// The heaviest body still in flight, as `[id, x, y, z, vx, vy, vz, radius_m, temp_k]` in metres —
@@ -6934,6 +6937,19 @@ mod app {
             self.fly.alt_m = alt_m.clamp(self.fly.min_alt, self.fly.max_alt);
             self.fly.yaw = yaw;
             self.fly.pitch = pitch;
+            // ★★ **A PLACEMENT IS NOT A MOVEMENT** (docs/46 row 51). The camera is matter and its
+            // contact sweep runs from where it last was to where it is going, which is right for a
+            // camera that WALKS and wrong for one that is placed: the sweep from the old eye to a new
+            // continent crosses every mountain on the straight line between, resolves against the
+            // highest, and leaves the eye resting on a ridge it never visited.
+            //
+            // Measured before this line existed: `place_camera(45.3, -69.0, 1.7, ...)` produced an eye
+            // **60 m** above the ground, `alt_m` recomputed to match, and every plant — placed on the
+            // real surface — buried 58 m under the drawn one. Clearing the previous eye makes the sweep
+            // start where the camera is, so a placement resolves against the ground it is placed on and
+            // nothing else. The camera is still matter; it simply has no swept path when it did not
+            // sweep.
+            self.last_eye_m = None;
         }
 
         /// **CAMERA-FOLLOW** — `<assembly>, <relative position>, <heading>`, the second verb.
@@ -8151,6 +8167,8 @@ mod app {
                 );
             }
             self.segment_verts = verts;
+            // Taking a seat on a moving actor is a placement, not a walk to it.
+            self.last_eye_m = None;
         }
     }
 }
