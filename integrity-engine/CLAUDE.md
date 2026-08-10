@@ -263,10 +263,13 @@ computation it defers** (Law V) — recorded in `docs/46`'s ledger, not a quiet 
    verified out-of-process by `tools/sph-verify` (which carries its own replica of the structs), but the
    module is no longer invisible to the suite: it compiles on every target since 2026-07-20, and its three
    shader-facing layouts are pinned to `sph_step.wgsl` in-crate.
-   ★★ **The FULL run now compiles `mod app` for wasm32, and that is a GATE, not advice** (added
-   2026-07-25). The scene structs (`Terra`, `OrbitDemo`, `Ground`) sit behind
-   `#[cfg(target_arch = "wasm32")]`, so a native `cargo check --all-targets` is **green for code that does
-   not build**. This file warned about that in prose for months and it still bit us: Sean's one-Earth step
+   ★★ **The FULL run compiles `mod app` for wasm32, and that is a GATE, not advice** (added
+   2026-07-25; its reason NARROWED 2026-08-09). ~~The scene structs sit behind
+   `#[cfg(target_arch = "wasm32")]`, so a native `cargo check --all-targets` is green for code that does
+   not build.~~ **The scenes now build on BOTH targets** (`renderer::Target`, docs/69) — a native check
+   sees `Terra` and `OrbitDemo` in full, and a native test can render a real frame and read it back. What
+   the wasm gate still covers is the browser HOST: `create(canvas)`, the swapchain, `wasm_bindgen`'s
+   bindings. Keep the gate; it is simply smaller than it was. This file warned about that in prose for months and it still bit us: Sean's one-Earth step
    removed `EARTH_RADIUS_M`, three readers survived inside `mod app`, the native check reported **0
    errors**, and only the wasm target found them. Prose is not a gate. `--fast` skips it to keep the inner
    loop tight; the full run is the deploy gate, so nothing ships unchecked. CI has the same job

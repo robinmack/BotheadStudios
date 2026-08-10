@@ -379,7 +379,6 @@ fn live_resolution_crossing(
     None
 }
 
-#[cfg(target_arch = "wasm32")]
 mod app {
     use crate::mesher::{self, Mesh, Vertex};
     use crate::{materials, matter, texture};
@@ -997,7 +996,9 @@ mod app {
         /// birth-of-the-Moon scene is proto-Earth while Terra is this afternoon, and both draw the
         /// same Earth (docs/65: time is part of the setting, not part of the body).
         scene_epoch: Option<f64>,
-        surface: wgpu::Surface<'static>,
+        /// Where this scene's finished frames go — a canvas swapchain in the browser, an
+        /// offscreen texture natively (`renderer::Target`, docs/69 §3).
+        surface: crate::renderer::Target,
         device: wgpu::Device,
         queue: wgpu::Queue,
         config: wgpu::SurfaceConfiguration,
@@ -1282,28 +1283,73 @@ mod app {
         /// Initialize the space band: acquire the GPU, build a unit sphere, seed the Earth + `num_moons`
         /// moons. `num_moons == 1` is the standard scene; `2` places moons on opposite sides of the same
         /// orbit (the de-orbit-both stress test).
+        /// **The browser host**: a canvas and its swapchain. Everything after it is shared with the
+        /// headless host below — one scene, two answers to *where does the frame go*.
+        #[cfg(target_arch = "wasm32")]
         pub async fn create(
             canvas: HtmlCanvasElement,
             num_moons: u32,
         ) -> Result<OrbitDemo, JsValue> {
             console_error_panic_hook::set_once();
             let _ = console_log::init_with_level(log::Level::Info);
-
             let width = canvas.width().max(1);
             let height = canvas.height().max(1);
-
             let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
                 backends: wgpu::Backends::BROWSER_WEBGPU,
                 ..Default::default()
             });
-            let surface = instance
-                .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
-                .map_err(|e| JsValue::from_str(&format!("create_surface failed: {e}")))?;
+            let surface = crate::renderer::Target::Surface(
+                instance
+                    .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+                    .map_err(|e| JsValue::from_str(&format!("create_surface failed: {e}")))?,
+            );
+            OrbitDemo::create_on(instance, surface, width, height, num_moons).await
+        }
+
+        /// **The headless host** — the space band drawing into a texture, for native tests. See
+        /// `Terra::headless` for why this exists (docs/69 §3).
+        #[cfg(not(target_arch = "wasm32"))]
+        pub async fn headless(
+            width: u32,
+            height: u32,
+            num_moons: u32,
+        ) -> Result<OrbitDemo, JsValue> {
+            let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
             let adapter = instance
                 .request_adapter(&wgpu::RequestAdapterOptions {
                     power_preference: wgpu::PowerPreference::HighPerformance,
                     force_fallback_adapter: false,
-                    compatible_surface: Some(&surface),
+                    compatible_surface: None,
+                })
+                .await
+                .ok_or_else(|| JsValue::from_str("no suitable GPU adapter found"))?;
+            let (device, _q) = adapter
+                .request_device(&wgpu::DeviceDescriptor::default(), None)
+                .await
+                .map_err(|e| JsValue::from_str(&format!("request_device failed: {e}")))?;
+            let target = crate::renderer::Target::offscreen(
+                &device,
+                width,
+                height,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+            );
+            drop(device);
+            OrbitDemo::create_on(instance, target, width.max(1), height.max(1), num_moons).await
+        }
+
+        /// Everything after the host: one body, whichever target it draws into.
+        async fn create_on(
+            instance: wgpu::Instance,
+            mut surface: crate::renderer::Target,
+            width: u32,
+            height: u32,
+            num_moons: u32,
+        ) -> Result<OrbitDemo, JsValue> {
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    force_fallback_adapter: false,
+                    compatible_surface: surface.surface(),
                 })
                 .await
                 .ok_or_else(|| JsValue::from_str("no suitable GPU adapter found"))?;
@@ -1320,20 +1366,14 @@ mod app {
                 .await
                 .map_err(|e| JsValue::from_str(&format!("request_device failed: {e}")))?;
 
-            let caps = surface.get_capabilities(&adapter);
-            let format = caps
-                .formats
-                .iter()
-                .copied()
-                .find(|f| f.is_srgb())
-                .unwrap_or(caps.formats[0]);
+            let (format, alpha_mode) = surface.formats(&adapter);
             let config = wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 format,
                 width,
                 height,
                 present_mode: wgpu::PresentMode::Fifo,
-                alpha_mode: caps.alpha_modes[0],
+                alpha_mode,
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
             };
@@ -4977,11 +5017,9 @@ mod app {
 
             let output = self
                 .surface
-                .get_current_texture()
-                .map_err(|e| JsValue::from_str(&format!("get_current_texture failed: {e}")))?;
-            let view = output
-                .texture
-                .create_view(&wgpu::TextureViewDescriptor::default());
+                .acquire()
+                .map_err(|e| JsValue::from_str(&format!("acquire frame failed: {e}")))?;
+            let view = output.view();
             let mut encoder = self
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -5819,7 +5857,9 @@ mod app {
         /// right distance for the ground cap specifically — anything else drawn in this scene must ask
         /// with its OWN distance, never reuse this one (the spacewalk rule in `surface_detail`).
         detail: crate::resolution::ResolutionController,
-        surface: wgpu::Surface<'static>,
+        /// Where this scene's finished frames go — a canvas swapchain in the browser, an
+        /// offscreen texture natively (`renderer::Target`, docs/69 §3).
+        surface: crate::renderer::Target,
         device: wgpu::Device,
         queue: wgpu::Queue,
         config: wgpu::SurfaceConfiguration,
@@ -5974,6 +6014,9 @@ mod app {
             Ok(())
         }
 
+        /// **The browser host**: a canvas, its swapchain, and everything else shared with every other
+        /// host below.
+        #[cfg(target_arch = "wasm32")]
         pub async fn create(canvas: HtmlCanvasElement) -> Result<Terra, JsValue> {
             console_error_panic_hook::set_once();
             let _ = console_log::init_with_level(log::Level::Info);
@@ -5983,14 +6026,63 @@ mod app {
                 backends: wgpu::Backends::BROWSER_WEBGPU,
                 ..Default::default()
             });
-            let surface = instance
-                .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
-                .map_err(|e| JsValue::from_str(&format!("create_surface failed: {e}")))?;
+            let surface = crate::renderer::Target::Surface(
+                instance
+                    .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+                    .map_err(|e| JsValue::from_str(&format!("create_surface failed: {e}")))?,
+            );
+            Terra::create_on(instance, surface, width, height).await
+        }
+
+        /// ★★ **THE HEADLESS HOST** — the same scene, drawing into a texture instead of a canvas, so a
+        /// NATIVE test can render a real frame on a real GPU and assert on the pixels (docs/69 §3).
+        ///
+        /// Robin asked for exactly this: *"I think we need to achieve feature parity then with the
+        /// native renderer; seems a vital part of the rig, no?"* The viewer was the one role in the
+        /// engine that no test could see — both scenes lived behind `#[cfg(target_arch = "wasm32")]`,
+        /// so a native run could not build one, and everything else was a photograph judged by eye.
+        /// The flora defect survived weeks inside that gap.
+        ///
+        /// Not a second renderer: the same pipelines, the same shaders, the same frame. Only the
+        /// answer to *where does the finished frame go* differs (`renderer::Target`).
+        #[cfg(not(target_arch = "wasm32"))]
+        pub async fn headless(width: u32, height: u32) -> Result<Terra, JsValue> {
+            let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
             let adapter = instance
                 .request_adapter(&wgpu::RequestAdapterOptions {
                     power_preference: wgpu::PowerPreference::HighPerformance,
                     force_fallback_adapter: false,
-                    compatible_surface: Some(&surface),
+                    compatible_surface: None,
+                })
+                .await
+                .ok_or_else(|| JsValue::from_str("no suitable GPU adapter found"))?;
+            let (device, _q) = adapter
+                .request_device(&wgpu::DeviceDescriptor::default(), None)
+                .await
+                .map_err(|e| JsValue::from_str(&format!("request_device failed: {e}")))?;
+            // sRGB, to match what a browser swapchain picks — the shaders are written for it.
+            let target = crate::renderer::Target::offscreen(
+                &device,
+                width,
+                height,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+            );
+            drop(device);
+            Terra::create_on(instance, target, width.max(1), height.max(1)).await
+        }
+
+        /// Everything after the host: one body, whichever target it draws into.
+        async fn create_on(
+            instance: wgpu::Instance,
+            mut surface: crate::renderer::Target,
+            width: u32,
+            height: u32,
+        ) -> Result<Terra, JsValue> {
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    force_fallback_adapter: false,
+                    compatible_surface: surface.surface(),
                 })
                 .await
                 .ok_or_else(|| JsValue::from_str("no suitable GPU adapter found"))?;
@@ -6006,20 +6098,14 @@ mod app {
                 )
                 .await
                 .map_err(|e| JsValue::from_str(&format!("request_device failed: {e}")))?;
-            let caps = surface.get_capabilities(&adapter);
-            let format = caps
-                .formats
-                .iter()
-                .copied()
-                .find(|f| f.is_srgb())
-                .unwrap_or(caps.formats[0]);
+            let (format, alpha_mode) = surface.formats(&adapter);
             let config = wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 format,
                 width,
                 height,
                 present_mode: wgpu::PresentMode::Fifo,
-                alpha_mode: caps.alpha_modes[0],
+                alpha_mode,
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
             };
@@ -7443,11 +7529,9 @@ mod app {
             }
             let output = self
                 .surface
-                .get_current_texture()
-                .map_err(|e| JsValue::from_str(&format!("get_current_texture failed: {e}")))?;
-            let view = output
-                .texture
-                .create_view(&wgpu::TextureViewDescriptor::default());
+                .acquire()
+                .map_err(|e| JsValue::from_str(&format!("acquire frame failed: {e}")))?;
+            let view = output.view();
             let mut encoder = self
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -7916,6 +8000,18 @@ mod app {
                 n: sited.len(),
                 ..fresh
             });
+        }
+
+        /// ★★ **The frame this scene last drew, as RGBA bytes** — native only (docs/69 §3).
+        ///
+        /// The whole point of `renderer::Target::Offscreen`: a test can render a real frame on a real
+        /// GPU and then ASK WHAT IS IN IT, instead of photographing the browser and judging by eye.
+        /// `None` when this scene is drawing into a swapchain, which is the honest answer — a
+        /// presented frame is gone.
+        #[cfg(not(target_arch = "wasm32"))]
+        pub fn frame_pixels(&self) -> Option<Vec<u8>> {
+            let tex = self.surface.texture()?;
+            Some(crate::renderer::read_frame(&self.device, &self.queue, tex))
         }
 
         /// How many plants are standing right now — a read, for rigs and the HUD.
@@ -8618,6 +8714,51 @@ mod tests {
         assert_eq!(
             boundary, 0,
             "mesh must be closed (watertight); found {boundary} boundary edges"
+        );
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod native_render_tests {
+    use super::*;
+
+    /// ★★★ **THE VIEWER, TESTED — a real frame, on a real GPU, with no browser** (docs/69 §3).
+    ///
+    /// Robin, 2026-08-09: *"I think we need to achieve feature parity then with the native renderer;
+    /// seems a vital part of the rig, no?"* This is what that buys. The viewer was the one role in
+    /// the engine no test could see: both scenes lived behind `#[cfg(target_arch = "wasm32")]`, so a
+    /// native run could not build one, and every visual claim rested on a photograph judged by eye.
+    /// **The flora defect survived weeks inside that gap** — `flora_count` said 1,200, the draw said
+    /// 43,200 triangles, the readback said the device held what was sent, and all three were true.
+    ///
+    /// What this asserts is deliberately coarse — that a frame was drawn at all, and that it is not a
+    /// uniform field. Backends differ (native Vulkan here, Dawn in Chrome) and Robin's call on that
+    /// is that it is *"absolutely fine and a deliberate design choice… we do the best approximation
+    /// available in the renderer"* — so a native test asserts STRUCTURE, never bit-equality.
+    ///
+    /// `#[ignore]` because it needs a GPU: `cargo test -- --ignored`. CI has no adapter.
+    #[test]
+    #[ignore]
+    fn a_scene_renders_a_frame_with_no_browser_anywhere() {
+        let mut terra = pollster::block_on(app::Terra::headless(320, 200))
+            .expect("a headless Terra on this box's GPU");
+        terra.render().expect("a frame");
+        let px = terra
+            .frame_pixels()
+            .expect("an offscreen frame is readable");
+        assert_eq!(px.len(), 320 * 200 * 4, "one RGBA texel per pixel");
+
+        // Not blank, and not one flat colour: a scene that drew nothing and a scene that cleared to a
+        // single colour are both failures this would otherwise pass.
+        let lum: Vec<u16> = px
+            .chunks_exact(4)
+            .map(|p| p[0] as u16 + p[1] as u16 + p[2] as u16)
+            .collect();
+        let (lo, hi) = (*lum.iter().min().unwrap(), *lum.iter().max().unwrap());
+        assert!(hi > 0, "the frame is entirely black — nothing was drawn");
+        assert!(
+            hi - lo > 8,
+            "the frame is one flat colour ({lo}..{hi}) — a clear is not a render"
         );
     }
 }
