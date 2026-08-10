@@ -107,6 +107,32 @@ so the texture changes, and through it the renderer draws the trunks that were a
 integrated albedo must equal what the resolved trees would return over the same footprint. If flying
 lower changes the colour of a forest, one of the two is lying.
 
+## 6b. ★★ Observability is the argument I under-weighted
+
+> **Robin, 2026-08-09:** *"remember my hint about separating the renderer from the engine itself; I think
+> that will add observability opportunities that can help resolve this type of situation faster."*
+
+She is right, and there is now a number attached. Bisecting one defect — flora meshed at 473,760 indices
+and producing zero fragments — took **nine deploy-and-photograph cycles**, each a wasm build, a deploy
+and a rig run, to establish by elimination what a single buffer readback would have answered directly:
+the geometry is correct, the uniform is correct, the draw executes, and the vertex buffer's contents are
+not on the device.
+
+The reason it could not be answered directly is structural, not incidental. The engine's `wgpu` is
+pinned to the **webgpu backend only**, so nothing in-process can create a native device or read a buffer
+back; `tools/gpu-verify` and `tools/sph-verify` exist as standalone crates with their own `wgpu` for
+exactly that reason, and they can only run REPLICAS of the shipped code. So the engine cannot look at
+its own GPU state, and the only instrument available is a photograph.
+
+A renderer that is a separate entity — with its own device, its own thread or process, and a protocol
+it answers on — can be **asked what it has**. That is not a side benefit of the split; on this evidence
+it may be the largest one, and it is the reason to do the split before the next hard graphical defect
+rather than after.
+
+★ The same gap is already owed elsewhere: `docs/66` §9 wants a GPU pin for `atmos.wgsl`, whose WGSL is a
+hand-mirror of the Rust checked only by reading. **Two independent hunts arriving at one missing
+capability** is the signal that it is a capability and not an errand.
+
 ## 7. Risks, named now
 
 1. **A protocol is a place for two answers to hide.** The moment the renderer can compute anything the

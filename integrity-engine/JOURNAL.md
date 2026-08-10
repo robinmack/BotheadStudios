@@ -3,6 +3,34 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-09 — bisected to one link, and the instrument that does not exist
+
+**What.** The flora defect is now bisected to a single link, by swapping the two halves against each
+other:
+
+- flora mesh + **segment's** uniform → nothing
+- segment mesh + **flora's** uniform → **the frame changes** (mean level 121.86 → 99.36)
+
+So the flora's uniform, pipeline, bind group and draw call are all functional, and **the fault is the
+flora vertex buffer's contents not reaching the GPU** — the one link verified on the CPU side and never
+on the device. A buffer of zeros makes every triangle degenerate, which is exactly zero fragments with a
+correct index count, which is what the picture shows.
+
+★★ **And the instrument to confirm it does not exist.** The engine's `wgpu` is pinned to the webgpu
+backend only, so nothing in-process can create a native device or read a buffer back; `tools/gpu-verify`
+and `tools/sph-verify` are standalone crates with their own `wgpu` for that reason, and can only run
+REPLICAS of the shipped code. The engine cannot look at its own GPU state. The only instrument available
+is a photograph — and bisecting this took **nine deploy-and-photograph cycles**.
+
+Robin, watching that: *"remember my hint about separating the renderer from the engine itself; I think
+that will add observability opportunities that can help resolve this type of situation faster."* The
+count is the argument, and I had under-weighted it — `docs/68` §6b now carries it, because on this
+evidence observability may be the largest benefit of the split rather than a side effect. ★ The same gap
+is already owed at `docs/66` §9 for `atmos.wgsl`'s hand-mirror; **two independent hunts arriving at one
+missing capability** is what makes it a capability rather than an errand.
+
+**Verified.** 592/592 native, `mod app` clean for wasm32, probes reverted, deployed.
+
 ## 2026-08-09 — a placement is not a movement; and the flora hunt's second round
 
 **Merged #104 to `main`** (`cfc0f66`) — 60 commits, a real merge so they stay reachable, branch deleted,
