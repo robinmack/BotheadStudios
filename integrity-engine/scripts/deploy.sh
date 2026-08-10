@@ -53,6 +53,16 @@ echo "▶ publishing $DIST → $DEST"
 mkdir -p "$DEST"
 # --delete so stale content-hashed assets from prior builds don't accumulate; the build reproduces the
 # full page set (index/terrain/orbit/twomoons/birth + assets), so nothing live is lost.
-rsync -a --delete "$DIST/" "$DEST/"
+# ★ `--exclude=/shots/` — WITHOUT IT A DEPLOY SILENTLY UNDOES `publish-shots.sh`. The gallery lives at
+# `/shots` on the live host and is written by that script; `--delete` was wiping it and restoring
+# whatever stale copy happened to sit in `web/public/shots` on this disk. Robin, 2026-08-09: *"rig shots
+# on the web hasn't updated in a while"* — they had not updated since 4 August, which is the last time
+# that local directory was touched, and every deploy since had quietly reverted the gallery to it.
+rsync -a --delete --exclude=/shots/ "$DIST/" "$DEST/"
+
+# **The gallery ships with the site.** Robin asked for the rig shots to be copied up "every so often";
+# every so often is a thing someone has to remember, and this repo's habit is to make it structural
+# instead. A deploy now publishes whatever the rigs last saw.
+"$(dirname "${BASH_SOURCE[0]}")/publish-shots.sh" || echo "  (shots not published — continuing)"
 
 echo "✓ deployed — live at https://integrity.bothead.net  (nginx :8080 via the Cloudflare tunnel)"
