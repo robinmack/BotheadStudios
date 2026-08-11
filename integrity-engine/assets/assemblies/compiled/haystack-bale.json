@@ -1,37 +1,30 @@
 {
   "id": "haystack-bale",
   "name": "Round straw bale",
-  "parts": [
+  "parts": [],
+  "contains": [
     {
-      "name": "bale",
-      "material": "straw",
-      "shape": {
-        "kind": "cylinder",
-        "r": 0.6,
-        "length": 1.2
-      },
-      "along": [
-        0.0,
-        1.0,
-        0.0
-      ],
-      "at_m": [
-        0.0,
-        0.6,
-        0.0
-      ],
-      "packing": 0.071429
+      "of": "grass-blade-dry",
+      "count": 304781,
+      "arrangement": {
+        "kind": "pile",
+        "within": {
+          "kind": "cylinder",
+          "r": 0.6,
+          "length": 1.2
+        }
+      }
     }
   ],
   "connections": [],
-  "notes": "A standard round field bale, and the reason it exists is docs/70: Robin's own example of an assembly absorbing an impact — *\"we could have a rock fall on a haystack, unsettle the hay (dry grass), but the impact could be absorbed.\"*\n\nNOTHING HERE IS CHOSEN. The dimensions are a standard round bale (1.2 m x 1.2 m). The PACKING is the measured bulk density of a field bale over straw's own cell-wall density: 100 / 1400 = 0.0714 — so the bale is 92.9% AIR, which is the whole point. That void is what an impact closes, and `compressive_strength` (45 kPa, mid-range of published straw-bale compression tests at 20% strain) is what closing it costs.\n\nMass follows: envelope 1.357 m3 x packing x 1400 kg/m3 = 136 kg, which is what a round bale weighs.\n\nFLAGGED: one part, so it compacts uniformly. A real bale crushes locally under the strike and stays whole elsewhere; the honest version is the bale as a stack of parts, which is the same resolution question every assembly here faces.",
+  "notes": "A standard round field bale, and now what Robin said it should be: **a pile of dry grass blades** (docs/71), not a cylinder with a packing fraction somebody typed.\n\nNOTHING HERE IS CHOSEN. 1.2 m x 1.2 m are a standard round bale. The COUNT is derived: a measured bale bulk density of 100 kg/m3 over straw's own 1400 kg/m3 cell wall puts 0.0969 m3 of straw in a 1.357 m3 envelope, and one blade is 3.181e-07 m3, so the bale is **304,781 blades**. Its packing is no longer authored — it is what that many blades in that cylinder come to.\n\nThe blades are `straw`, not `grass`: same geometry, dry. That is the whole difference between a meadow and a haystack, and it lives on the BLADE where it belongs.\n\nFLAGGED (docs/71 §3): 304,781 members cannot be resolved as geometry — 1.1 M triangles for one bale — so this answers as its own summary until something needs the individuals. The summary and the resolved answer must agree, and `a_pile_answers_the_same_summarised_or_resolved` measures it.",
   "derived": {
-    "mass_kg": 135.71761693589488,
+    "mass_kg": 135.7166629644,
     "envelope_volume_m3": 1.3571680263507906,
-    "matter_volume_m3": 0.09694115495421063,
+    "matter_volume_m3": 0.096940473546,
     "centre_of_mass_m": [
       0.0,
-      0.6,
+      0.0,
       0.0
     ]
   }

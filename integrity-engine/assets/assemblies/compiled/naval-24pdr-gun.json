@@ -270,6 +270,7 @@
       "packing": 1.0
     }
   ],
+  "contains": [],
   "connections": [
     {
       "a": "breech",

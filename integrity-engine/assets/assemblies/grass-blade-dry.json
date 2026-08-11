@@ -1,0 +1,29 @@
+{
+  "id": "grass-blade-dry",
+  "name": "Dry grass blade (straw)",
+  "notes": "The same blade, dried. Identical geometry to `grass-blade` \u2014 a stem does not change shape when it dries, it changes MATERIAL \u2014 so a haystack and a meadow are piles of the same thing in two conditions (docs/71).",
+  "parts": [
+    {
+      "name": "blade",
+      "material": "straw",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.0030292
+      },
+      "at_m": [
+        0.0,
+        0.175,
+        0.0
+      ],
+      "along": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    }
+  ],
+  "contains": [],
+  "connections": []
+}

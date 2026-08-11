@@ -379,6 +379,94 @@ pub struct Connection {
     pub join: Join,
 }
 
+/// **How the members of a contained group are placed** (docs/71).
+///
+/// `count` is a number rather than a list — a million blades cost the same to declare as one — so the
+/// arrangement is what turns that number into positions when something needs the individuals.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Arrangement {
+    /// Exactly where `at_m` says, facing `along`. For `count = 1`: a barrel on a carriage.
+    At {
+        #[serde(default)]
+        at_m: [f64; 3],
+        #[serde(default = "along_x")]
+        along: [f64; 3],
+    },
+    /// **A PILE.** The members fill `within`, at positions and attitudes derived from the group's own
+    /// index — the same rule `terra::flora::scatter` uses for a meadow, one level down: nothing is
+    /// stored, and asking twice gives the same pile.
+    Pile { within: Shape },
+}
+
+/// **Assemblies inside an assembly** (docs/71) — the thing `docs/67` has claimed for days and the type
+/// could not express (docs/46 row 59).
+///
+/// Robin: *"A clump of grass should be an assembly of multiple 'grass blade' assemblies. A haystack is
+/// then a pile of 'grass blades' with the 'dry' properties, no?"*
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct Contained {
+    /// Which assembly type is inside. Resolved through `compiled::by_id`.
+    pub of: String,
+    /// How many. **95,239 is a legal value** — that is a bale's straws, and the whole design is that
+    /// this costs one integer rather than ninety-five thousand records.
+    #[serde(default = "one_member")]
+    pub count: u64,
+    pub arrangement: Arrangement,
+}
+
+fn one_member() -> u64 {
+    1
+}
+
+impl Contained {
+    /// The envelope this group occupies, m³ — the space the pile takes up, void included. For a `Pile`
+    /// that is the containing shape itself; for a single placement it is the member's own envelope.
+    pub fn envelope_volume_m3(&self, member: &Assembly) -> f64 {
+        match &self.arrangement {
+            Arrangement::Pile { within } => within.volume_m3(),
+            Arrangement::At { .. } => member.envelope_volume_m3() * self.count as f64,
+        }
+    }
+
+    /// The actual substance in it, m³ — `count` members' worth, exactly, at every resolution. This is
+    /// why mass is not an approximation under de-resolution (docs/71 §3).
+    pub fn matter_volume_m3(&self, member: &Assembly) -> f64 {
+        member.matter_volume_m3() * self.count as f64
+    }
+
+    /// ★★ **THE SUMMARY: what this group looks like when nobody can afford its members.**
+    ///
+    /// The de-resolved form of a pile is one part of the pile's own shape, made of the member's
+    /// dominant material, at the packing the rule implies — `matter / envelope`. **Nothing here is
+    /// authored**: a bale's 0.071 stops being a number somebody typed and becomes what 95,239 straws
+    /// in a 1.2 m cylinder actually come to (docs/71 §4).
+    pub fn as_part(&self, member: &Assembly) -> Option<Part> {
+        let envelope = self.envelope_volume_m3(member);
+        if envelope <= 0.0 {
+            return None;
+        }
+        // A single placement RESOLVES; only a pile has anything to summarise.
+        let Arrangement::Pile { within } = &self.arrangement else {
+            return None;
+        };
+        let (shape, at_m, along) = (*within, [0.0, 0.0, 0.0], along_y());
+        Some(Part {
+            name: format!("{} x{}", self.of, self.count),
+            material: member.dominant_material()?,
+            shape,
+            along,
+            at_m,
+            packing: (self.matter_volume_m3(member) / envelope).clamp(0.0, 1.0),
+            in_situ_density: None,
+        })
+    }
+}
+
+fn along_y() -> [f64; 3] {
+    [0.0, 1.0, 0.0]
+}
+
 /// **An assembly.** Parts, and how they are joined.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Assembly {
@@ -386,6 +474,10 @@ pub struct Assembly {
     pub name: String,
     #[serde(default)]
     pub parts: Vec<Part>,
+    /// ★★★ **ASSEMBLIES INSIDE THIS ONE** (docs/71). Empty for everything authored before 2026-08-10,
+    /// so every existing definition is bit-identical.
+    #[serde(default)]
+    pub contains: Vec<Contained>,
     #[serde(default)]
     pub connections: Vec<Connection>,
     /// Free-text provenance — where these dimensions came from. Not decoration: an assembly whose
@@ -441,6 +533,49 @@ impl Assembly {
         self.parts.iter().map(Part::reach_m).fold(0.0, f64::max)
     }
 
+    /// The space this assembly takes up, m³ — its own parts plus everything it contains. Void
+    /// included; this is the ENVELOPE, which is what a packing fraction divides into.
+    pub fn envelope_volume_m3(&self) -> f64 {
+        self.parts.iter().map(Part::envelope_volume_m3).sum::<f64>()
+            + self
+                .contains
+                .iter()
+                .filter_map(|c| compiled::by_id(&c.of).map(|m| c.envelope_volume_m3(&m)))
+                .sum::<f64>()
+    }
+
+    /// The actual substance in it, m³ — its own parts plus everything it contains, **exactly** at
+    /// every resolution (docs/71 §3). A bale weighs what its straws weigh whether or not anything is
+    /// close enough to count them.
+    pub fn matter_volume_m3(&self) -> f64 {
+        self.parts.iter().map(Part::matter_volume_m3).sum::<f64>()
+            + self
+                .contains
+                .iter()
+                .filter_map(|c| compiled::by_id(&c.of).map(|m| c.matter_volume_m3(&m)))
+                .sum::<f64>()
+    }
+
+    /// The material most of this assembly is made of, by matter volume — what a de-resolved pile is
+    /// summarised as. `None` for an assembly with no matter at all.
+    pub fn dominant_material(&self) -> Option<String> {
+        let mut by_mat: std::collections::BTreeMap<String, f64> = Default::default();
+        for p in &self.parts {
+            *by_mat.entry(p.material.clone()).or_default() += p.matter_volume_m3();
+        }
+        for c in &self.contains {
+            if let Some(m) = compiled::by_id(&c.of) {
+                if let Some(id) = m.dominant_material() {
+                    *by_mat.entry(id).or_default() += c.matter_volume_m3(&m);
+                }
+            }
+        }
+        by_mat
+            .into_iter()
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(id, _)| id)
+    }
+
     /// **The ground this assembly's `material` parts cover**, m² — its crown.
     ///
     /// A crown is the footprint of the parts made of one substance: a tree's leaves and not its
@@ -475,6 +610,18 @@ impl Assembly {
         for p in &self.parts {
             total += p.matter_volume_m3() * self.density_of(p, mats)?;
         }
+        // ★ Everything it CONTAINS weighs too, exactly `count` members' worth (docs/71 §3). This is
+        // why mass is not an approximation under de-resolution: a bale weighs what its straws weigh
+        // whether or not anything is close enough to count them.
+        for c in &self.contains {
+            let Some(member) = compiled::by_id(&c.of) else {
+                return Err(format!(
+                    "'{}' contains '{}', which is not an assembly this world holds",
+                    self.id, c.of
+                ));
+            };
+            total += member.mass_kg(mats)? * c.count as f64;
+        }
         Ok(total)
     }
 
@@ -487,6 +634,21 @@ impl Assembly {
             total += m;
             for k in 0..3 {
                 acc[k] += p.at_m[k] * m;
+            }
+        }
+        for c in &self.contains {
+            let Some(member) = compiled::by_id(&c.of) else {
+                continue;
+            };
+            let m = member.mass_kg(mats)? * c.count as f64;
+            // A pile's mass sits at the centre of what holds it; a single placement sits where it says.
+            let at = match &c.arrangement {
+                Arrangement::At { at_m, .. } => *at_m,
+                Arrangement::Pile { .. } => [0.0, 0.0, 0.0],
+            };
+            total += m;
+            for k in 0..3 {
+                acc[k] += at[k] * m;
             }
         }
         if total <= 0.0 {
@@ -537,8 +699,8 @@ impl Assembly {
     pub fn derive(&self, mats: &[Material]) -> Result<Derived, String> {
         Ok(Derived {
             mass_kg: self.mass_kg(mats)?,
-            envelope_volume_m3: self.parts.iter().map(|p| p.envelope_volume_m3()).sum(),
-            matter_volume_m3: self.parts.iter().map(|p| p.matter_volume_m3()).sum(),
+            envelope_volume_m3: self.envelope_volume_m3(),
+            matter_volume_m3: self.matter_volume_m3(),
             centre_of_mass_m: self.centre_of_mass_m(mats)?,
         })
     }
@@ -757,9 +919,25 @@ impl Assembly {
             return met;
         }
         let dir = a.along.normalize_or(glam::DVec3::Y);
+        // ★★ **WHAT IT CONTAINS MEETS THE ENERGY TOO** (docs/71). A pile answers as its own summary —
+        // one part of the pile's shape, made of its members' material, at the packing `count` members
+        // in that envelope actually come to. So a bale of 304,781 blades resists as a bale, and the
+        // number it resists with is not authored anywhere: it is what the rule implies.
+        //
+        // ★ The summary and the resolved answer must AGREE (docs/71 §3), which is what
+        // `a_pile_answers_the_same_summarised_or_resolved` measures. If they ever diverge the SUMMARY
+        // is what is wrong.
+        let mut all_parts: Vec<Part> = self.parts.clone();
+        for c in &self.contains {
+            if let Some(member) = compiled::by_id(&c.of) {
+                if let Some(p) = c.as_part(&member) {
+                    all_parts.push(p);
+                }
+            }
+        }
         // Parts on the path, nearest first — the order energy actually meets them in.
         let mut on_path: Vec<(f64, usize)> = Vec::new();
-        for (i, p) in self.parts.iter().enumerate() {
+        for (i, p) in all_parts.iter().enumerate() {
             let c = glam::DVec3::from(p.at_m);
             let r = p.shape.reach_m();
             let to_c = c - a.at_m;
@@ -778,7 +956,7 @@ impl Assembly {
             if met.remaining_j <= 0.0 {
                 break;
             }
-            let p = &self.parts[i];
+            let p = &all_parts[i];
             let Some(m) = mats.iter().find(|m| m.id == p.material) else {
                 continue; // unknown matter resists nothing rather than resisting infinitely
             };
@@ -992,9 +1170,36 @@ pub mod compiled {
         include_str!("../../../assets/assemblies/compiled/conifer-tree-spruce.json");
     pub const GRASS_TUFT: &str =
         include_str!("../../../assets/assemblies/compiled/grass-tuft.json");
+    /// ONE blade of grass — the member a clump and a haystack are both piles of (docs/71).
+    pub const GRASS_BLADE: &str =
+        include_str!("../../../assets/assemblies/compiled/grass-blade.json");
+    /// The same blade, dried — what a haystack is a pile of.
+    pub const GRASS_BLADE_DRY: &str =
+        include_str!("../../../assets/assemblies/compiled/grass-blade-dry.json");
     /// A round straw bale — the assembly docs/70's compaction channel was built for.
     pub const HAYSTACK_BALE: &str =
         include_str!("../../../assets/assemblies/compiled/haystack-bale.json");
+
+    /// **An assembly by its id** — how a container reaches what it contains (docs/71).
+    ///
+    /// Only the shipped set, and deliberately: a definition that can name any string could name one
+    /// that does not exist, and a pile of nothing weighs nothing while looking fine. `None` here is a
+    /// caller's cue that the world does not hold that type.
+    pub fn by_id(id: &str) -> Option<super::Assembly> {
+        let text = match id {
+            "naval-24pdr-gun" => NAVAL_24PDR_GUN,
+            "charge-24pdr-service" => CHARGE_24PDR_SERVICE,
+            "round-shot-24pdr" => ROUND_SHOT_24PDR,
+            "broadleaf-tree-oak" => BROADLEAF_TREE_OAK,
+            "conifer-tree-spruce" => CONIFER_TREE_SPRUCE,
+            "grass-tuft" => GRASS_TUFT,
+            "grass-blade" => GRASS_BLADE,
+            "grass-blade-dry" => GRASS_BLADE_DRY,
+            "haystack-bale" => HAYSTACK_BALE,
+            _ => return None,
+        };
+        Some(parse(text))
+    }
 
     /// Parse a baked assembly. Panics on malformed input, because a compiled asset that does not parse
     /// is a build error wearing a runtime error's clothes.
@@ -1100,6 +1305,7 @@ mod tests {
     fn an_assemblys_mass_and_balance_come_from_its_parts() {
         let mats = mats();
         let a = Assembly {
+            contains: Vec::new(),
             id: "t".into(),
             name: "t".into(),
             notes: String::new(),
@@ -1161,6 +1367,7 @@ mod tests {
     fn an_assembly_summarises_to_a_material_mixture() {
         let mats = mats();
         let a = Assembly {
+            contains: Vec::new(),
             id: "t".into(),
             name: "t".into(),
             notes: String::new(),
@@ -1796,6 +2003,7 @@ mod reach_tests {
             [0.0, 12.0, 0.0],
         );
         let ship = Assembly {
+            contains: Vec::new(),
             id: "ship".into(),
             name: "ship".into(),
             parts: vec![hull.clone(), mast.clone()],
@@ -2217,11 +2425,29 @@ mod meet_tests {
     #[test]
     fn a_solid_has_no_void_to_close() {
         let mats = crate::materials::load();
-        let bale = compiled::parse(compiled::HAYSTACK_BALE);
-        // The same bale, made solid: one part at packing 1.0.
-        let mut rock = bale.clone();
-        rock.parts[0].packing = 1.0;
-        rock.parts[0].material = "granite".to_string();
+        // A boulder the same size and shape as the bale, but SOLID — one part at packing 1.0. Built
+        // here rather than by editing the bale, because a bale has no parts of its own any more: it is
+        // a pile of blades (docs/71), which is the whole point.
+        let rock = Assembly {
+            id: "solid-boulder".to_string(),
+            name: "Solid boulder".to_string(),
+            parts: vec![Part {
+                name: "rock".to_string(),
+                material: "granite".to_string(),
+                shape: Shape::Cylinder {
+                    r: 0.6,
+                    length: 1.2,
+                },
+                along: [0.0, 1.0, 0.0],
+                at_m: [0.0, 0.6, 0.0],
+                packing: 1.0,
+                in_situ_density: None,
+            }],
+            contains: Vec::new(),
+            connections: Vec::new(),
+            notes: String::new(),
+            derived: None,
+        };
         let met = rock.meet(
             &mats,
             &Arriving {
@@ -2331,5 +2557,110 @@ mod meet_tests {
             plenty.remaining_j > 9.0,
             "a clump of grass does not stop a rock"
         );
+    }
+}
+
+#[cfg(test)]
+mod composition_tests {
+    use super::*;
+
+    /// ★★★ **A BALE IS NOW A PILE OF BLADES, AND WEIGHS THE SAME.** Robin, 2026-08-10: *"a clump of
+    /// grass should be an assembly of multiple 'grass blade' assemblies. A haystack is then a pile of
+    /// 'grass blades' with the 'dry' properties."*
+    ///
+    /// The count is DERIVED, not chosen: a measured bale bulk density of 100 kg/m³ over straw's own
+    /// 1400 kg/m³ cell wall puts 0.0969 m³ of straw in a 1.357 m³ cylinder, and one blade is
+    /// 3.18e-7 m³ — so the bale is 304,781 blades. It must still weigh what a round bale weighs.
+    #[test]
+    fn a_bale_is_a_pile_of_blades_and_still_weighs_136_kg() {
+        let mats = crate::materials::load();
+        let bale = compiled::parse(compiled::HAYSTACK_BALE);
+        assert!(bale.parts.is_empty(), "a bale is not a cylinder of its own");
+        assert_eq!(bale.contains.len(), 1, "it is one pile");
+        assert!(
+            bale.contains[0].count > 100_000,
+            "of a great many blades, not a token few: {}",
+            bale.contains[0].count
+        );
+        let mass = bale.mass_kg(&mats).expect("a bale weighs something");
+        println!(
+            "bale = {} dry blades = {mass:.1} kg",
+            bale.contains[0].count
+        );
+        // A round field bale is 120-160 kg. This is not a tolerance on a guess: it is 304,781 blades
+        // whose own dimensions came out of the grass clump's leaf-area derivation.
+        assert!(
+            (120.0..160.0).contains(&mass),
+            "a round bale weighs 120-160 kg, this one {mass:.1}"
+        );
+        // ★ **A million blades cost one integer.** The point of the whole design.
+        assert!(bale.contains[0].count > 0 && bale.parts.is_empty());
+    }
+
+    /// ★★★ **THE INVARIANT THIS FEATURE LIVES OR DIES BY** (docs/71 §3): what a pile says when it is
+    /// summarised must be what it says when its members are counted.
+    ///
+    /// The de-resolved bale answers as one part of the pile's shape at the packing the rule implies;
+    /// the resolved comparison sums what its members would individually absorb. If these disagree, the
+    /// SUMMARY is what is wrong — never the members.
+    #[test]
+    fn a_pile_answers_the_same_summarised_or_resolved() {
+        let mats = crate::materials::load();
+        let bale = compiled::parse(compiled::HAYSTACK_BALE);
+        let group = &bale.contains[0];
+        let member = compiled::by_id(&group.of).expect("the blade it is a pile of");
+
+        // What the SUMMARY holds.
+        let summary = group.as_part(&member).expect("a pile summarises");
+        let matter_summarised = summary.matter_volume_m3();
+        // What the MEMBERS hold, counted.
+        let matter_resolved = member.matter_volume_m3() * group.count as f64;
+        println!(
+            "matter: summarised {matter_summarised:.6e} m³ · resolved {matter_resolved:.6e} m³ \
+             (packing {:.5})",
+            summary.packing
+        );
+        // Exact, not approximate — the summary's packing is DEFINED as matter over envelope, so this
+        // is the property that makes mass survive de-resolution.
+        assert!(
+            (matter_summarised - matter_resolved).abs() <= matter_resolved * 1e-9,
+            "a pile must hold exactly what its members hold"
+        );
+
+        // And the packing is not authored anywhere: it is what that many blades in that cylinder come
+        // to. A field bale is ~100 kg/m³ of straw at 1400 kg/m³ — 0.0714.
+        assert!(
+            (summary.packing - 100.0 / 1400.0).abs() < 1e-3,
+            "the pile's packing should be the measured bale's, got {:.5}",
+            summary.packing
+        );
+    }
+
+    /// A pile made of a type this world does not hold must FAIL LOUDLY. A pile of nothing weighs
+    /// nothing while looking perfectly well-formed, which is the worst way for this to go wrong.
+    #[test]
+    fn a_pile_of_something_that_does_not_exist_is_an_error() {
+        let mats = crate::materials::load();
+        let mut bad = compiled::parse(compiled::HAYSTACK_BALE);
+        bad.contains[0].of = "unicorn-hair".to_string();
+        assert!(
+            bad.mass_kg(&mats).is_err(),
+            "a pile of a type nobody defines must not quietly weigh zero"
+        );
+    }
+
+    /// Everything authored before composition existed is untouched — `contains` defaults to empty, so
+    /// the cannon's thirteen parts and the oak's two are bit-identical.
+    #[test]
+    fn composition_leaves_every_existing_assembly_alone() {
+        let mats = crate::materials::load();
+        for id in ["naval-24pdr-gun", "broadleaf-tree-oak", "grass-tuft"] {
+            let a = compiled::by_id(id).expect(id);
+            assert!(a.contains.is_empty(), "{id} contains nothing yet");
+            assert!(
+                a.mass_kg(&mats).is_ok(),
+                "{id} still weighs what it weighed"
+            );
+        }
     }
 }
