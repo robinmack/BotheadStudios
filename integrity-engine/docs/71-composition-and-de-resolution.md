@@ -96,8 +96,16 @@ Three things make it affordable, and they are all laws already stated:
   real bale (100 kg/m³). If the simulation says something else, the simulation is wrong — which is a
   far better position than a number nobody can falsify.
 
-★ Until it is built, the packing in `haystack-bale.json` is a COMPUTED stand-in and says so. The IOU
-it defers is named here: settle the members and measure the heap.
+★★ **BUILT 2026-08-10, AND IT DISAGREES WITH REALITY — which is the useful outcome** (docs/46 row 60).
+`pile::settle` drops members and measures the heap. 400 dry blades released in one place settle into a
+0.41 m pile at **packing 0.0024 (3 kg/m³)**, against real loose hay's **0.029 (40 kg/m³)**: an order of
+magnitude too loose. Named causes, in the order worth attacking — a capsule cannot BEND, and a bent
+stem nests along its neighbours instead of propping against them; capsules slide where straw hooks;
+and 400 members is a small heap that is mostly free surface.
+
+So `haystack-bale.json` keeps its COMPUTED packing for now and says so. What the simulation already
+buys is the thing a typed number could never have: **it is falsifiable against a real bulk density**,
+and it is currently falsified. That is a better position than a number nobody can check.
 
 ## 4. What this retires
 

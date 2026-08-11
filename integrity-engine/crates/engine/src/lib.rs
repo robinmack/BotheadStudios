@@ -49,7 +49,7 @@ mod gpu_particles;
 /// docs/50 — THE one GPU particle container: allocation, capacity/count, and the two-phase async
 /// read-back, shared by the granular and SPH pipelines. Their SOLVERS stay specialized (docs/46 §1).
 mod gpu_store;
-mod granular;
+pub mod granular;
 mod grid; // docs/47 §1 — the hierarchical spatial hash: no global cell size
           // WebGPU host for sph_step.wgsl. Compiled on EVERY target, deliberately: it used to be wasm-only, but the
           // only thing that actually required wasm was one `Rc<Cell<bool>>` in a `map_async` callback (see
@@ -61,6 +61,7 @@ mod gpu_sph;
 pub mod gravity;
 mod hydrostatic;
 mod impact;
+pub mod pile;
 mod planet;
 /// docs/33 — scene-agnostic render scaffolding (`GpuMesh`, `UniformSlot`, `Camera`, the uniform PODs and
 /// their helpers). Lifted out of `#[cfg(wasm32)] mod app`: all three scenes use these identically, so
