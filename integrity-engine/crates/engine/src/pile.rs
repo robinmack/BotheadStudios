@@ -143,6 +143,10 @@ pub struct Settled {
 
 /// A deterministic value in `0..1` — the same seed and index always give the same number, so a heap is
 /// reproducible and a test is not at the mercy of an RNG.
+pub fn derived_unit(seed: u64, i: u64, k: u64) -> f64 {
+    unit(seed, i, k)
+}
+
 fn unit(seed: u64, i: u64, k: u64) -> f64 {
     let mut h = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15)
         ^ i.wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
@@ -321,8 +325,12 @@ mod tests {
     /// | field bale | 100 kg/m³ | 0.071 |
     /// | high-density bale | 200 kg/m³ | 0.143 |
     ///
-    /// A heap that settles under GRAVITY ALONE should land near LOOSE HAY, because a bale is
-    /// compressed by a machine. If it comes out at bale density that is suspicious, not good.
+    /// ★★ **THE TARGET IS THE HAYSTACK, NOT THE BALE**, and Robin had to say so twice before I built
+    /// the right object: *"a hay bale is tighter packed than a loose pile of straw (a haystack) in real
+    /// life… in a hay bale, compressing bands are employed… in a hay stack it's all gravity"* — and
+    /// then, when I split them, *"which is why I suggested modelling the haystack."* A heap settling
+    /// under gravity alone IS a haystack; a bale is that plus a machine and twine. Comparing this
+    /// simulation to a bale was comparing gravity against gravity-plus-baling.
     ///
     /// `#[ignore]`: a few hundred rods over four thousand steps is seconds, not milliseconds.
     #[test]

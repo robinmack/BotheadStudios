@@ -467,6 +467,95 @@ fn along_y() -> [f64; 3] {
     [0.0, 1.0, 0.0]
 }
 
+/// ★★★ **A CONTAINED GROUP IS A RULE** — how a pile turns its count into actual members (docs/71).
+///
+/// The gap this closes: `Arrangement` said where members WOULD go and nothing placed them, so a bale
+/// was a number and a shape and never anything you could point at (docs/46 row 59). It implements
+/// `containment::Populates`, which is the same seam a meadow already uses — so `Contents::resolve`
+/// composes rule and exception set for a haystack exactly as it does for flora, with no second path.
+///
+/// ★★ **RESOLVE WHAT IS ASKED FOR, NEVER THE WHOLE PILE.** A bale is 304,781 blades. Nothing may ever
+/// materialise all of them, and the `Region` is what makes that structural rather than remembered:
+/// only members inside it are built. Law III — the minimal necessary matter — with the container
+/// doing the deciding.
+///
+/// **Where each member sits is DERIVED from its index**, never stored and never rolled: asking twice
+/// gives the same pile, and looking away cannot move a blade. That is the same rule
+/// `terra::flora::scatter` uses for a meadow, one level down.
+///
+/// ★ FLAGGED, and it is docs/46 row 60: these positions are a DERIVED arrangement inside the pile's
+/// shape, not the SETTLED one. `pile::settle` computes what a real heap does — and currently produces
+/// a heap ten times too loose, so adopting its positions would mean adopting that error. When the
+/// settling reproduces loose hay, this is where its output belongs.
+pub struct PileRule<'a> {
+    pub group: &'a Contained,
+    pub member: &'a Assembly,
+    /// The container's own id, so a member's placement names what it is inside.
+    pub within: Option<crate::instance::InstanceId>,
+    /// Salt for the derived ids — distinct per container instance, so two bales in a field do not
+    /// share a single set of blade identities.
+    pub salt: u64,
+}
+
+impl PileRule<'_> {
+    /// Where member `i` sits and how it lies, in the container's own frame — derived, not stored.
+    pub fn placement_of(&self, i: u64) -> crate::instance::Placement {
+        let at = match &self.group.arrangement {
+            Arrangement::At { at_m, along } => {
+                let up = glam::DVec3::from(*along).normalize_or(glam::DVec3::Y);
+                return crate::instance::Placement {
+                    at_m: glam::DVec3::from(*at_m),
+                    attitude: glam::DQuat::from_rotation_arc(glam::DVec3::Y, up),
+                    within: self.within,
+                };
+            }
+            Arrangement::Pile { within } => {
+                let h = within.half_extents_m();
+                // Filling the shape by EQUAL VOLUME, so a pile is not denser at its axis than at its
+                // rim purely because of how the index was mapped.
+                let (u1, u2, u3) = (
+                    crate::pile::derived_unit(self.salt, i, 1),
+                    crate::pile::derived_unit(self.salt, i, 2),
+                    crate::pile::derived_unit(self.salt, i, 3),
+                );
+                let r = h.y.max(h.z) * u1.sqrt();
+                let a = u2 * std::f64::consts::TAU;
+                glam::DVec3::new(r * a.cos(), (u3 * 2.0 - 1.0) * h.x, r * a.sin())
+            }
+        };
+        // A dropped member has no preferred direction; the attitude is derived the same way.
+        let z = 2.0 * crate::pile::derived_unit(self.salt, i, 4) - 1.0;
+        let phi = crate::pile::derived_unit(self.salt, i, 5) * std::f64::consts::TAU;
+        let s = (1.0 - z * z).max(0.0).sqrt();
+        let axis = glam::DVec3::new(s * phi.cos(), z, s * phi.sin()).normalize_or(glam::DVec3::Y);
+        crate::instance::Placement {
+            at_m: at,
+            attitude: glam::DQuat::from_rotation_arc(glam::DVec3::Y, axis),
+            within: self.within,
+        }
+    }
+}
+
+impl crate::containment::Populates for PileRule<'_> {
+    fn generate(
+        &mut self,
+        region: &crate::containment::Region,
+        out: &mut Vec<crate::instance::Instance>,
+    ) {
+        for i in 0..self.group.count {
+            let placement = self.placement_of(i);
+            if !region.contains(placement.at_m) {
+                continue; // outside what was asked for: it exists, and nobody needs it built
+            }
+            out.push(crate::instance::Instance::of_type(
+                crate::instance::InstanceId::derived(self.salt, (0, 0), i),
+                &self.group.of,
+                placement,
+            ));
+        }
+    }
+}
+
 /// **An assembly.** Parts, and how they are joined.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Assembly {
@@ -1176,9 +1265,12 @@ pub mod compiled {
     /// The same blade, dried — what a haystack is a pile of.
     pub const GRASS_BLADE_DRY: &str =
         include_str!("../../../assets/assemblies/compiled/grass-blade-dry.json");
-    /// A round straw bale — the assembly docs/70's compaction channel was built for.
-    pub const HAYSTACK_BALE: &str =
-        include_str!("../../../assets/assemblies/compiled/haystack-bale.json");
+    /// ★ **A HAYSTACK — gravity and nothing else**, which is why it is the pile `pile::settle` should
+    /// reproduce (Robin, 2026-08-11: *"in a hay stack it's all gravity"*).
+    pub const HAYSTACK: &str = include_str!("../../../assets/assemblies/compiled/haystack.json");
+    /// **A round hay bale — the same straw, COMPRESSED AND BOUND.** *"In a hay bale, compressing bands
+    /// are employed."* The bands are the whole difference, and they are not modelled yet.
+    pub const HAY_BALE: &str = include_str!("../../../assets/assemblies/compiled/hay-bale.json");
 
     /// **An assembly by its id** — how a container reaches what it contains (docs/71).
     ///
@@ -1195,7 +1287,8 @@ pub mod compiled {
             "grass-tuft" => GRASS_TUFT,
             "grass-blade" => GRASS_BLADE,
             "grass-blade-dry" => GRASS_BLADE_DRY,
-            "haystack-bale" => HAYSTACK_BALE,
+            "haystack" => HAYSTACK,
+            "hay-bale" => HAY_BALE,
             _ => return None,
         };
         Some(parse(text))
@@ -2386,7 +2479,7 @@ mod meet_tests {
     #[test]
     fn a_haystack_absorbs_the_rock_that_a_boulder_would_bounce_off() {
         let mats = crate::materials::load();
-        let bale = compiled::parse(compiled::HAYSTACK_BALE);
+        let bale = compiled::parse(compiled::HAY_BALE);
         // A 20 kg rock dropped 5 m: mgh = 20 × 9.81 × 5 ≈ 981 J.
         let joules = 20.0 * 9.81 * 5.0;
         let met = bale.meet(
@@ -2472,7 +2565,7 @@ mod meet_tests {
     #[test]
     fn compaction_does_not_break_the_ledger() {
         let mats = crate::materials::load();
-        let bale = compiled::parse(compiled::HAYSTACK_BALE);
+        let bale = compiled::parse(compiled::HAY_BALE);
         for j in [1.0, 1.0e3, 1.0e6, 1.0e9] {
             let met = bale.meet(
                 &mats,
@@ -2574,7 +2667,7 @@ mod composition_tests {
     #[test]
     fn a_bale_is_a_pile_of_blades_and_still_weighs_136_kg() {
         let mats = crate::materials::load();
-        let bale = compiled::parse(compiled::HAYSTACK_BALE);
+        let bale = compiled::parse(compiled::HAY_BALE);
         assert!(bale.parts.is_empty(), "a bale is not a cylinder of its own");
         assert_eq!(bale.contains.len(), 1, "it is one pile");
         assert!(
@@ -2606,7 +2699,7 @@ mod composition_tests {
     #[test]
     fn a_pile_answers_the_same_summarised_or_resolved() {
         let mats = crate::materials::load();
-        let bale = compiled::parse(compiled::HAYSTACK_BALE);
+        let bale = compiled::parse(compiled::HAY_BALE);
         let group = &bale.contains[0];
         let member = compiled::by_id(&group.of).expect("the blade it is a pile of");
 
@@ -2641,7 +2734,7 @@ mod composition_tests {
     #[test]
     fn a_pile_of_something_that_does_not_exist_is_an_error() {
         let mats = crate::materials::load();
-        let mut bad = compiled::parse(compiled::HAYSTACK_BALE);
+        let mut bad = compiled::parse(compiled::HAY_BALE);
         bad.contains[0].of = "unicorn-hair".to_string();
         assert!(
             bad.mass_kg(&mats).is_err(),
@@ -2662,5 +2755,96 @@ mod composition_tests {
                 "{id} still weighs what it weighed"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod placement_rule_tests {
+    use super::*;
+    use crate::containment::{Contents, Populates, Region};
+
+    fn bale_rule<'a>(bale: &'a Assembly, blade: &'a Assembly) -> PileRule<'a> {
+        PileRule {
+            group: &bale.contains[0],
+            member: blade,
+            within: None,
+            salt: 20260812,
+        }
+    }
+
+    /// ★★★ **A PILE CAN NOW BE POINTED AT.** Before this, `Arrangement` said where members WOULD go
+    /// and nothing placed them — a bale was a count and a shape (docs/46 row 59).
+    ///
+    /// And the property that makes it affordable: **only what is asked for is built.** A bale is
+    /// 304,781 blades; a region a hand's width across yields a handful, and the rest simply are not
+    /// materialised. Law III, with the container doing the deciding.
+    #[test]
+    fn a_pile_resolves_only_the_members_you_ask_for() {
+        let bale = compiled::parse(compiled::HAY_BALE);
+        let blade = compiled::by_id(&bale.contains[0].of).expect("the blade");
+        let mut rule = bale_rule(&bale, &blade);
+        let total = bale.contains[0].count;
+        assert!(total > 300_000, "a bale is a great many blades: {total}");
+
+        let mut out = Vec::new();
+        rule.generate(&Region::ball(glam::DVec3::ZERO, 0.05), &mut out);
+        println!(
+            "a 5 cm ball inside a {total}-blade bale resolves {} blades",
+            out.len()
+        );
+        assert!(!out.is_empty(), "there is straw where you reached");
+        assert!(
+            out.len() < total as usize / 100,
+            "and reaching into a hand's width must not build the bale: {} of {total}",
+            out.len()
+        );
+        // Everything it built is genuinely inside what was asked for.
+        assert!(out.iter().all(|i| i.placement.at_m.length() <= 0.05 + 1e-9));
+    }
+
+    /// **Derived, never stored, never rolled** — asking twice gives the same pile, and each member's
+    /// id and place are functions of its index. The same property that keeps a meadow's tufts where
+    /// they were when you look away, one level down.
+    #[test]
+    fn the_same_pile_answers_the_same_way_twice() {
+        let bale = compiled::parse(compiled::HAY_BALE);
+        let blade = compiled::by_id(&bale.contains[0].of).expect("the blade");
+        let region = Region::ball(glam::DVec3::new(0.1, 0.0, 0.0), 0.06);
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        bale_rule(&bale, &blade).generate(&region, &mut a);
+        bale_rule(&bale, &blade).generate(&region, &mut b);
+        assert!(!a.is_empty());
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(&b) {
+            assert_eq!(x.id, y.id);
+            assert!((x.placement.at_m - y.placement.at_m).length() < 1e-12);
+        }
+    }
+
+    /// ★★ **THE RULE AND THE EXCEPTION SET COMPOSE**, through the same `Contents::resolve` a meadow
+    /// uses — so a haystack and a field of grass are one mechanism, not two. A blade that something
+    /// destroyed is simply not there the next time you reach in.
+    #[test]
+    fn what_was_destroyed_is_not_there_when_you_reach_back_in() {
+        let bale = compiled::parse(compiled::HAY_BALE);
+        let blade = compiled::by_id(&bale.contains[0].of).expect("the blade");
+        let region = Region::ball(glam::DVec3::ZERO, 0.05);
+
+        let mut before = Vec::new();
+        bale_rule(&bale, &blade).generate(&region, &mut before);
+        let victim = before[0].id;
+
+        let mut contents = Contents::new();
+        contents.forget(victim);
+        let mut after = Vec::new();
+        contents.resolve(&mut bale_rule(&bale, &blade), &region, &mut after);
+
+        assert_eq!(after.len(), before.len() - 1, "one fewer blade");
+        assert!(!after.iter().any(|i| i.id == victim), "and it is that one");
+        assert_eq!(
+            contents.remembered(),
+            1,
+            "for the cost of ONE remembered id"
+        );
     }
 }
