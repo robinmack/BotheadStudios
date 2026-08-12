@@ -154,6 +154,16 @@ impl Contents {
         self.remembered.len()
     }
 
+    /// **What is remembered about this one**, if anything. `Some(None)` means it is GONE; `Some(Some(_))`
+    /// means it diverged and here is how; `None` means the rule's own answer stands untouched.
+    ///
+    /// The read that makes divergences useful to a caller walking the rule's output itself, rather than
+    /// through [`Contents::resolve`] — which is what a renderer building one mesh from many generated
+    /// plants needs, since it never materialises them as `Instance`s at all.
+    pub fn about(&self, id: InstanceId) -> Option<Option<&Instance>> {
+        self.remembered.get(&id).map(|o| o.as_ref())
+    }
+
     /// **Record what happened to one of them.** The first time anything happens to an instance it stops
     /// being derivable and starts costing bytes; this is the only door to that.
     ///

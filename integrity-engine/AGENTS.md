@@ -63,9 +63,14 @@ it silently deleted the subject of a sentence from a merge commit that was alrea
 removes the shell from the path, adds the co-author trailer if missing, and prints `parents=[a b]` so a merge
 commit can be confirmed to still be a merge.
 
-★ **A native `cargo check` is green for code that does not build.** The scene structs live behind
-`#[cfg(target_arch = "wasm32")]`, so they are invisible to it. The full `scripts/test.sh` run compiles them;
-`--fast` skips that, so `--fast` is for the inner loop only.
+★ **The wasm32 gate is still required, but for a smaller reason than it used to be (changed
+2026-08-09).** ~~"A native `cargo check` is green for code that does not build — the scene structs live
+behind `#[cfg(target_arch = "wasm32")]`, so they are invisible to it."~~ That was true for most of this
+project's life and it cost a merge. **The scenes now build on both targets** (`renderer::Target`, docs/69):
+a native check sees `Terra` and `OrbitDemo` in full. What the wasm gate still covers is the browser HOST —
+`create(canvas)`, the swapchain, `wasm_bindgen`'s generated bindings — which native cannot see, and which
+is where the wasm-only code now lives. The full `scripts/test.sh` run compiles it; `--fast` skips that, so
+`--fast` is for the inner loop only.
 
 ★ **Do not tune a threshold to make a test pass.** If a timing assertion goes red because the machine got
 busier, fix the measurement environment, not the number. A number from a contended environment is a number

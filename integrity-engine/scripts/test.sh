@@ -67,7 +67,7 @@ echo "--- test exit ${status} · full log: /tmp/gf-test.log ---"
 # emitting or running wasm-bindgen, so it costs seconds after the first run. Skipped under --fast to keep
 # the edit→test loop tight; the full run IS the deploy gate, so it never ships unchecked.
 if [[ $status -eq 0 && $fast -eq 0 ]]; then
-  echo "--- compiling mod app (wasm32) — the scenes a native check cannot see ---"
+  echo "--- compiling mod app (wasm32) — the browser HOST a native check cannot see ---"
   # Run it BARE and read $? directly. The first version piped straight into `grep` inside an `if !`,
   # which reads the status of the *grep*, not of cargo — so it printed the compiler errors and then
   # reported success. A gate that prints a failure and exits 0 is worse than no gate: it teaches you

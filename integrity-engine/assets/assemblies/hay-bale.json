@@ -1,0 +1,21 @@
+{
+  "id": "hay-bale",
+  "name": "Round hay bale",
+  "notes": "A round field bale \u2014 the same dry grass as `haystack.json`, **compressed and bound**. Robin, 2026-08-11: *\"In a hay bale, compressing bands are employed.\"* That is the entire difference: a bale is a haystack that a machine squeezed and twine holds squeezed.\n\nThe count is derived from a measured field-bale bulk density of 100 kg/m3 over straw's 1400 cell wall: packing 0.0714 \u2014 2.5x the loose stack beside it, from the same blades.\n\n\u2605\u2605 FLAGGED, and it is the honest form of this object (docs/70, docs/71): **the bands are not modelled and the packing is therefore DECLARED.** It should EMERGE \u2014 the baler does work against the straw's own crush resistance (`damage::crush_stress_pa`, already built for the other direction) until the twine tension and the compressed straw balance, and the equilibrium packing is what comes out. The deferred computation is named: band tension against crush resistance. Until it lands, 100 kg/m3 is a measurement standing in for a calculation.\n\n\u2605 No twine PART is declared either, because polypropylene and sisal are not in the catalogue and the SOP is that a substance is sourced before it is used. Adding a band means adding its material first.",
+  "parts": [],
+  "contains": [
+    {
+      "of": "grass-blade-dry",
+      "count": 304781,
+      "arrangement": {
+        "kind": "pile",
+        "within": {
+          "kind": "cylinder",
+          "r": 0.6,
+          "length": 1.2
+        }
+      }
+    }
+  ],
+  "connections": []
+}

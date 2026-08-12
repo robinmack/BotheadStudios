@@ -235,6 +235,7 @@ impl LayeredBody {
             });
         }
         Assembly {
+            contains: Vec::new(),
             id: self.name.to_lowercase().replace(' ', "-"),
             name: self.name.clone(),
             parts,

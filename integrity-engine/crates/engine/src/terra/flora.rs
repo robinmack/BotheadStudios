@@ -457,7 +457,15 @@ mod tests {
         // tighter budget SELECTS from the same meadow rather than re-rolling it — which is the property
         // determinism actually promises, and it still holds.
         let few = scatter(53.1, -9.45, 6.0, &k, &mats, mix, 1.7, 20);
-        assert_eq!(few.len(), 20);
+        // Nearly the budget, not exactly it — see the note in
+        // `the_budget_buys_what_can_be_seen_not_what_is_underfoot`. A sub-millimetre change in a
+        // clump's crown moves the scan's last cell, and demanding an exact count asserts a precision
+        // grass does not have. The property under test is BELOW: the same meadow, selected from.
+        assert!(
+            (18..=20).contains(&few.len()),
+            "a tight budget should be nearly spent, got {}",
+            few.len()
+        );
         for p in &few {
             let same = a
                 .iter()
@@ -491,7 +499,17 @@ mod tests {
         // Maine's mixed forest: 45% broadleaf, 35% grass — the mixture that produced the crater.
         let mix = move |_: f64, _: f64| vec![(leaf, 0.45f32), (grass, 0.35f32)];
         let got = scatter(45.3, -69.0, 60.0, &kinds, &mats, mix, 1.7, 1200);
-        assert_eq!(got.len(), 1200, "the budget is spent");
+        // ★ NOT an exact 1200. Robin, 2026-08-12, when a 0.07 mm change in the clump's crown moved
+        // this to 1198: *"remember there is variance in nature; I think 0.07 mm on a blade of grass may
+        // not be enough to get uptight about."* Right — and `scatter` itself varies every clump's
+        // `scale`, because real stands are not clones. A budget that must land on its exact ceiling is
+        // asserting a precision the thing being measured does not have. What matters is that the budget
+        // is SPENT, not that it is spent to the last plant.
+        assert!(
+            got.len() > 1150 && got.len() <= 1200,
+            "the budget should be spent, got {} of 1200",
+            got.len()
+        );
 
         let trees = got.iter().filter(|s| s.kind == 0).count();
         assert!(

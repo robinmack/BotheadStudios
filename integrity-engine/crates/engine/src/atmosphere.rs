@@ -1313,6 +1313,222 @@ pub fn rayleigh_transmit(mu_v: f64, mu_s: f64, tau: [f64; 3]) -> [f32; 3] {
     ]
 }
 
+/// ★★★ **THE SKY'S OWN LIGHT, FALLING ON A SURFACE** — the fourth consumer of the one integral
+/// (docs/46 row 56, docs/66).
+///
+/// Robin, looking at grass that rendered black in full daylight (2026-08-09): *"one would assume the
+/// light scatter from the atmosphere would make the grass green, no?"* It would, and it did not,
+/// because every surface in this engine received DIRECT SUNLIGHT and nothing else. The atmosphere's
+/// radiance was computed three times over — by the sky pass, by the ground's aerial perspective, by
+/// the star field's extinction — and never came back as irradiance on anything.
+///
+/// A horizontal ground hid it: at Galway with the sun 52° up, ground faces the sun and the direct
+/// term is most of the answer. The first VERTICAL surface at eye level exposed it — a 3 mm blade
+/// standing up presents almost no area to a high sun, so direct light gives it nearly zero, while in
+/// reality it is lit almost entirely by a hemisphere of blue.
+///
+/// This is the honest quantity:
+///
+/// ```text
+/// E(n) = ∫_hemisphere L_sky(ω) · max(n·ω, 0) dω
+/// ```
+///
+/// `L_sky` is [`air_inscatter`] looking along `ω` with no far limit — the same function, at the same
+/// exposure, that draws the pixel of sky in that direction. So a surface cannot be lit by a different
+/// sky from the one above it, which is the Law II failure this would otherwise invite.
+///
+/// **Quadrature, not a constant.** The hemisphere is sampled on a `rings × spokes` grid in
+/// cos-elevation (equal solid angle per ring, so no band is over-weighted) and the result CONVERGES as
+/// the grid refines — pinned by `sky_irradiance_converges`. That is what makes it a declared
+/// computation rather than an ambient dial: **do not replace this with a constant**, which is the
+/// thing docs/46 row 56 explicitly forbids.
+///
+/// Returned at the same exposure as everything else, per band.
+pub fn sky_irradiance(
+    air: &AirColumn,
+    altitude_m: f64,
+    normal_dot_up: f64,
+    sun_dot_up: f64,
+    normal_dot_sun: f64,
+    sun_gain: f64,
+    rings: usize,
+    spokes: usize,
+) -> [f64; 3] {
+    if !air.exists() || rings == 0 || spokes == 0 {
+        return [0.0; 3];
+    }
+    // A local frame in which the geometry is expressible with the three cosines the caller has: `up`
+    // is +Y, the sun lies in the +X half-plane, and the normal is placed to satisfy both of its own
+    // dot products. Everything below is then plain vector algebra, and the caller never has to hand
+    // in a basis it does not have.
+    let up = glam::DVec3::Y;
+    let s_y = sun_dot_up.clamp(-1.0, 1.0);
+    let sun = glam::DVec3::new((1.0 - s_y * s_y).max(0.0).sqrt(), s_y, 0.0);
+    let n_y = normal_dot_up.clamp(-1.0, 1.0);
+    let n_perp = (1.0 - n_y * n_y).max(0.0).sqrt();
+    // n·sun = n_x·sun_x + n_y·sun_y  ⇒  n_x follows, and n_z takes up the slack.
+    let n_x = if sun.x.abs() > 1e-9 {
+        ((normal_dot_sun - n_y * sun.y) / sun.x).clamp(-n_perp, n_perp)
+    } else {
+        0.0
+    };
+    let n_z = (n_perp * n_perp - n_x * n_x).max(0.0).sqrt();
+    let n = glam::DVec3::new(n_x, n_y, n_z);
+
+    let mut acc = [0.0f64; 3];
+    for r in 0..rings {
+        // Equal solid angle per ring: uniform in cos(elevation) from the horizon to the zenith.
+        let cos_e = (r as f64 + 0.5) / rings as f64;
+        let sin_e = (1.0 - cos_e * cos_e).max(0.0).sqrt();
+        for s in 0..spokes {
+            let az = (s as f64 + 0.5) / spokes as f64 * std::f64::consts::TAU;
+            let dir = glam::DVec3::new(sin_e * az.cos(), cos_e, sin_e * az.sin());
+            let cos_i = n.dot(dir);
+            if cos_i <= 0.0 {
+                continue; // below this surface's own horizon; it receives nothing from there
+            }
+            let sky = air_inscatter(
+                air,
+                altitude_m,
+                dir.dot(up),
+                sun.dot(up),
+                dir.dot(sun),
+                f64::INFINITY,
+                sun_gain,
+                SKY_VIEW_STEPS,
+                SKY_SUN_STEPS,
+            );
+            for b in 0..3 {
+                acc[b] += sky.inscatter[b] as f64 * cos_i;
+            }
+        }
+    }
+    // ★ **THE SOLID ANGLE PER SAMPLE, NOT PER ACCEPTED SAMPLE.** Sampling uniformly in cos-elevation
+    // gives every sample the same `dω = 2π/N` over the hemisphere, so the Riemann sum is
+    // `E = dω · Σ L·cosθ` and `N` is the WHOLE grid — including the samples a tilted surface rejects,
+    // because those really do contribute nothing.
+    //
+    // Normalising by the accumulated cosine instead — which is what stood here — divides by a
+    // different number for every orientation, and MEASURED it made a vertical surface receive **1.6×**
+    // what an upward-facing one did. `a_vertical_surface_at_noon_is_lit_by_the_sky` caught it: an
+    // upright face sees half the sky and must get about half the light, and a formula that says
+    // otherwise is describing its own sampling. Isotropic check: uniform `L` gives `πL` facing up and
+    // `πL/2` upright, which is the analytic answer.
+    let k = std::f64::consts::TAU / (rings * spokes) as f64;
+    [acc[0] * k, acc[1] * k, acc[2] * k]
+}
+
+/// **The sky's light in a form a shader can afford** — an ambient term and a gradient, in world axes.
+///
+/// [`sky_irradiance`] is the honest integral and costs a full hemisphere of marches PER NORMAL, which
+/// no fragment shader can pay. This projects the same radiance field onto its first two spherical
+/// harmonic bands once per frame, on the CPU, and hands the shader four numbers per channel:
+///
+/// ```text
+/// L(ω) ≈ a₀ + a₁·ω        ⇒        E(n) = π·a₀ + (2π/3)·a₁·n
+/// ```
+///
+/// which is exact for a linear radiance field and approximate for a real one. **Legitimate under
+/// docs/68 §1b**: it is derived from the real quantity, it is flagged here, and it CONVERGES — adding
+/// a band tightens it, and `the_cheap_basis_tracks_the_honest_integral` measures the error against
+/// [`sky_irradiance`] rather than asserting it is small.
+///
+/// The lower hemisphere contributes nothing because nothing yet reflects light back up. ★ FLAGGED,
+/// with its own name: that is **bounce**, and its absence is why the underside of a canopy will be
+/// darker than life. The deferred computation is the ground's own albedo re-radiating, which this
+/// same projection could carry as a second lobe.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SkyLight {
+    /// The orientation-independent term, per band: `π·a₀`.
+    pub ambient: [f32; 3],
+    /// The gradient, per band, in WORLD axes: `(2π/3)·a₁`. Dot with a surface normal and add.
+    pub gradient: [[f32; 3]; 3],
+}
+
+impl SkyLight {
+    /// What this basis says falls on a surface facing `n` — the shader's own arithmetic, in Rust, so
+    /// a test can hold the two to each other.
+    pub fn on(&self, n: glam::DVec3) -> [f64; 3] {
+        let mut out = [0.0; 3];
+        for b in 0..3 {
+            let g = glam::DVec3::new(
+                self.gradient[b][0] as f64,
+                self.gradient[b][1] as f64,
+                self.gradient[b][2] as f64,
+            );
+            out[b] = (self.ambient[b] as f64 + g.dot(n)).max(0.0);
+        }
+        out
+    }
+}
+
+/// Project the sky above `altitude_m` onto [`SkyLight`], in the world frame `up`/`sun` are given in.
+#[allow(clippy::too_many_arguments)]
+pub fn sky_light(
+    air: &AirColumn,
+    altitude_m: f64,
+    up: glam::DVec3,
+    sun: glam::DVec3,
+    sun_gain: f64,
+    rings: usize,
+    spokes: usize,
+) -> SkyLight {
+    let mut out = SkyLight::default();
+    if !air.exists() || rings == 0 || spokes == 0 {
+        return out;
+    }
+    let up = up.normalize_or(glam::DVec3::Y);
+    let sun = sun.normalize_or(up);
+    // Any basis with `up` as its third axis; the integral does not care which way the other two point.
+    // Sun overhead makes `up × sun` degenerate; any perpendicular does, since the integral is
+    // symmetric about `up` in that case.
+    let fallback = if up.x.abs() < 0.9 {
+        glam::DVec3::X
+    } else {
+        glam::DVec3::Y
+    };
+    let east = up.cross(sun).normalize_or(up.cross(fallback).normalize());
+    let north = east.cross(up);
+
+    // dω is the same for every sample when the elevation cosine is sampled uniformly.
+    let d_omega = std::f64::consts::TAU / (rings * spokes) as f64;
+    let mut c0 = [0.0f64; 3];
+    let mut c1 = [glam::DVec3::ZERO; 3];
+    for r in 0..rings {
+        let cos_e = (r as f64 + 0.5) / rings as f64;
+        let sin_e = (1.0 - cos_e * cos_e).max(0.0).sqrt();
+        for s in 0..spokes {
+            let az = (s as f64 + 0.5) / spokes as f64 * std::f64::consts::TAU;
+            let dir = up * cos_e + (north * az.cos() + east * az.sin()) * sin_e;
+            let sky = air_inscatter(
+                air,
+                altitude_m,
+                dir.dot(up),
+                sun.dot(up),
+                dir.dot(sun),
+                f64::INFINITY,
+                sun_gain,
+                SKY_VIEW_STEPS,
+                SKY_SUN_STEPS,
+            );
+            for b in 0..3 {
+                let l = sky.inscatter[b] as f64 * d_omega;
+                c0[b] += l;
+                c1[b] += dir * l;
+            }
+        }
+    }
+    // The standard band-0/1 projection, then the irradiance those bands imply.
+    for b in 0..3 {
+        let a0 = c0[b] / (4.0 * std::f64::consts::PI);
+        let a1 = c1[b] * (3.0 / (4.0 * std::f64::consts::PI));
+        out.ambient[b] = (std::f64::consts::PI * a0) as f32;
+        let g = a1 * (2.0 * std::f64::consts::PI / 3.0);
+        out.gradient[b] = [g.x as f32, g.y as f32, g.z as f32];
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2741,5 +2957,205 @@ mod assembly_boundary_tests {
             std::f64::consts::FRAC_PI_2,
             "an observer inside the air is inside the assembly"
         );
+    }
+}
+
+#[cfg(test)]
+mod sky_irradiance_tests {
+    use super::*;
+
+    fn earth_air() -> AirColumn {
+        let mats = crate::materials::load();
+        AirColumn::of_body(&crate::planet::earth(), &mats, 288.0)
+    }
+
+    /// ★★ **IT IS A QUADRATURE, SO IT MUST CONVERGE** — the property that separates a computed
+    /// integral from an ambient constant (Law V). Refining the hemisphere grid must stop changing the
+    /// answer; if it did not, the number would be a property of the sampling rather than of the sky.
+    #[test]
+    fn sky_irradiance_converges_as_the_hemisphere_is_refined() {
+        let air = earth_air();
+        // Standing at Galway's latitude with the sun 52° up, looking at a VERTICAL surface — the grass
+        // blade that started this (docs/46 row 56).
+        let sun_up = (52.4f64).to_radians().sin();
+        let coarse = sky_irradiance(&air, 1.0, 0.0, sun_up, 0.5, SUN_GAIN as f64, 4, 8);
+        let fine = sky_irradiance(&air, 1.0, 0.0, sun_up, 0.5, SUN_GAIN as f64, 8, 16);
+        let finer = sky_irradiance(&air, 1.0, 0.0, sun_up, 0.5, SUN_GAIN as f64, 16, 32);
+        let rel = |a: [f64; 3], b: [f64; 3]| {
+            (0..3)
+                .map(|i| (a[i] - b[i]).abs() / b[i].max(1e-12))
+                .fold(0.0f64, f64::max)
+        };
+        let step1 = rel(coarse, fine);
+        let step2 = rel(fine, finer);
+        println!("sky irradiance: 4x8 {coarse:?}\n                8x16 {fine:?}\n                16x32 {finer:?}\n  steps {step1:.4} then {step2:.4}");
+        assert!(
+            step2 < step1,
+            "refining must CONVERGE: first step {step1:.4}, second {step2:.4}"
+        );
+        assert!(
+            step2 < 0.05,
+            "the shipped grid must already be within 5% of a refined one, got {step2:.4}"
+        );
+    }
+
+    /// ★★★ **THE DEFECT THIS EXISTS FOR.** A vertical surface at noon receives almost no DIRECT sun —
+    /// `max(n·l, 0)` is near zero for a blade standing up under a high sun — and yet a lawn is not
+    /// black at midday. The sky is what lights it. So the irradiance on a vertical surface must be a
+    /// substantial fraction of what the ground beneath it receives, and it must be BLUE, because that
+    /// is what Rayleigh scattering makes of sunlight.
+    #[test]
+    fn a_vertical_surface_at_noon_is_lit_by_the_sky_and_the_light_is_blue() {
+        let air = earth_air();
+        let sun_up = (52.4f64).to_radians().sin(); // Galway, local noon
+        let up_facing = sky_irradiance(&air, 1.0, 1.0, sun_up, sun_up, SUN_GAIN as f64, 8, 16);
+        let vertical = sky_irradiance(&air, 1.0, 0.0, sun_up, 0.5, SUN_GAIN as f64, 8, 16);
+
+        assert!(up_facing[2] > 0.0, "the sky lights an upward face at all");
+        // A vertical face sees half the hemisphere, so it gets a real share — not a rounding error.
+        let share = vertical[2] / up_facing[2];
+        println!("vertical/up-facing sky irradiance = {share:.3} (blue band)");
+        assert!(
+            (0.25..0.85).contains(&share),
+            "a vertical surface sees about half the sky, got {share:.3} of the upward face"
+        );
+        // And it is BLUE: Rayleigh goes as 1/λ⁴, so the blue band dominates the red.
+        assert!(
+            vertical[2] > vertical[0] * 1.5,
+            "skylight is blue — got r={:.4} b={:.4}",
+            vertical[0],
+            vertical[2]
+        );
+    }
+
+    /// ★★ **THE CHEAP BASIS IS MEASURED AGAINST THE HONEST INTEGRAL, NOT ASSUMED CLOSE TO IT.**
+    ///
+    /// `sky_light` projects the radiance onto two SH bands so a shader can evaluate it with a dot
+    /// product. That is an approximation of `sky_irradiance`, which is the real hemispherical
+    /// integral — so the error belongs in a test, with a number, where a later session can see what it
+    /// bought and what it cost.
+    #[test]
+    fn the_cheap_basis_tracks_the_honest_integral() {
+        let air = earth_air();
+        let up = glam::DVec3::Y;
+        let el = (52.4f64).to_radians();
+        let sun = glam::DVec3::new(el.cos(), el.sin(), 0.0);
+        let basis = sky_light(&air, 1.0, up, sun, SUN_GAIN as f64, 8, 16);
+
+        // Straight up, and four upright faces around the compass — the orientations a blade of grass
+        // and the ground under it actually take.
+        let normals = [
+            up,
+            glam::DVec3::new(1.0, 0.0, 0.0),
+            glam::DVec3::new(-1.0, 0.0, 0.0),
+            glam::DVec3::new(0.0, 0.0, 1.0),
+            glam::DVec3::new(0.0, 0.0, -1.0),
+        ];
+        let mut worst = 0.0f64;
+        for n in normals {
+            let exact = sky_irradiance(
+                &air,
+                1.0,
+                n.dot(up),
+                sun.dot(up),
+                n.dot(sun),
+                SUN_GAIN as f64,
+                8,
+                16,
+            );
+            let cheap = basis.on(n);
+            for b in 0..3 {
+                let e = (cheap[b] - exact[b]).abs() / exact[b].max(1e-9);
+                worst = worst.max(e);
+            }
+            println!(
+                "n=({:+.0},{:+.0},{:+.0})  exact {:.3?}  basis {:.3?}",
+                n.x, n.y, n.z, exact, cheap
+            );
+        }
+        println!(
+            "worst relative error of the two-band basis: {:.1}%",
+            worst * 100.0
+        );
+        // Two bands cannot represent a hemisphere's hard horizon exactly; this pins what they DO
+        // manage, so a third band can be judged against it rather than added on faith.
+        assert!(
+            worst < 0.35,
+            "the shader basis is {:.0}% off the real integral — too far to call it the same sky",
+            worst * 100.0
+        );
+    }
+
+    /// ★★★ **DOES IT CHANGE WITH THE AMOUNT OF LIGHT?** Robin asked exactly that of the cheap basis
+    /// (2026-08-09), and it is the right question to ask of anything that looks like an ambient term —
+    /// because an ambient CONSTANT would not, and that is the failure this whole row exists to avoid.
+    ///
+    /// It does, because the coefficients are a projection of the actual sky at that moment: the same
+    /// `air_inscatter` with the sun where the sun is. So this measures the day, and prints it.
+    ///
+    /// ★ It also measures the thing worth being honest about: two bands describe a HIGH sun well and a
+    /// low one worse, because at sunrise the radiance piles into a bright band near the horizon and a
+    /// linear function of direction cannot hold an edge. The number is recorded rather than hidden, so
+    /// a third band can be judged against it.
+    #[test]
+    fn the_sky_light_follows_the_sun_from_noon_to_sunrise() {
+        let air = earth_air();
+        let up = glam::DVec3::Y;
+        let mut last_blue = f64::INFINITY;
+        println!("  elev   ambient(r,g,b)                    basis error");
+        for elev_deg in [52.4f64, 30.0, 10.0, 2.0, -2.0] {
+            let e = elev_deg.to_radians();
+            let sun = glam::DVec3::new(e.cos(), e.sin(), 0.0);
+            let basis = sky_light(&air, 1.0, up, sun, SUN_GAIN as f64, 8, 16);
+            // Error of the two-band basis against the honest integral, on an upright face.
+            let n = glam::DVec3::X;
+            let exact = sky_irradiance(
+                &air,
+                1.0,
+                0.0,
+                sun.dot(up),
+                n.dot(sun),
+                SUN_GAIN as f64,
+                8,
+                16,
+            );
+            let cheap = basis.on(n);
+            let err = (0..3)
+                .map(|b| (cheap[b] - exact[b]).abs() / exact[b].max(1e-9))
+                .fold(0.0f64, f64::max);
+            println!(
+                "  {elev_deg:>5.1}°  ({:.3}, {:.3}, {:.3})   {:.0}%",
+                basis.ambient[0],
+                basis.ambient[1],
+                basis.ambient[2],
+                err * 100.0
+            );
+            let blue = basis.ambient[2] as f64;
+            assert!(
+                blue < last_blue,
+                "the sky's light must FADE as the sun sets: {blue:.3} at {elev_deg}° is not below \
+                 {last_blue:.3}. If this ever stops changing, an ambient constant has crept in."
+            );
+            last_blue = blue;
+        }
+        // And below the horizon it is nearly gone, without any branch saying so.
+        assert!(
+            last_blue < 0.2,
+            "past sunset the sky should light almost nothing, got {last_blue:.3}"
+        );
+    }
+
+    /// A body with no air lights nothing, with no branch anywhere — the same negative control the sky
+    /// itself is held to (`worlds/earth-airless`). If this ever returns light, an ambient constant has
+    /// crept in.
+    #[test]
+    fn no_air_means_no_skylight() {
+        let airless = AirColumn {
+            tau: [0.0; 3],
+            scale_height: 0.0,
+            radius: 6_371_000.0,
+        };
+        let e = sky_irradiance(&airless, 1.0, 1.0, 0.8, 0.8, SUN_GAIN as f64, 8, 16);
+        assert_eq!(e, [0.0; 3], "vacuum scatters nothing onto anything");
     }
 }

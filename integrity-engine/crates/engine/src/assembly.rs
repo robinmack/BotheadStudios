@@ -379,6 +379,183 @@ pub struct Connection {
     pub join: Join,
 }
 
+/// **How the members of a contained group are placed** (docs/71).
+///
+/// `count` is a number rather than a list — a million blades cost the same to declare as one — so the
+/// arrangement is what turns that number into positions when something needs the individuals.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Arrangement {
+    /// Exactly where `at_m` says, facing `along`. For `count = 1`: a barrel on a carriage.
+    At {
+        #[serde(default)]
+        at_m: [f64; 3],
+        #[serde(default = "along_x")]
+        along: [f64; 3],
+    },
+    /// **A PILE.** The members fill `within`, at positions and attitudes derived from the group's own
+    /// index — the same rule `terra::flora::scatter` uses for a meadow, one level down: nothing is
+    /// stored, and asking twice gives the same pile.
+    Pile { within: Shape },
+}
+
+/// **Assemblies inside an assembly** (docs/71) — the thing `docs/67` has claimed for days and the type
+/// could not express (docs/46 row 59).
+///
+/// Robin: *"A clump of grass should be an assembly of multiple 'grass blade' assemblies. A haystack is
+/// then a pile of 'grass blades' with the 'dry' properties, no?"*
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct Contained {
+    /// Which assembly type is inside. Resolved through `compiled::by_id`.
+    pub of: String,
+    /// How many. **95,239 is a legal value** — that is a bale's straws, and the whole design is that
+    /// this costs one integer rather than ninety-five thousand records.
+    #[serde(default = "one_member")]
+    pub count: u64,
+    pub arrangement: Arrangement,
+}
+
+fn one_member() -> u64 {
+    1
+}
+
+impl Contained {
+    /// The envelope this group occupies, m³ — the space the pile takes up, void included. For a `Pile`
+    /// that is the containing shape itself; for a single placement it is the member's own envelope.
+    pub fn envelope_volume_m3(&self, member: &Assembly) -> f64 {
+        match &self.arrangement {
+            Arrangement::Pile { within } => within.volume_m3(),
+            Arrangement::At { .. } => member.envelope_volume_m3() * self.count as f64,
+        }
+    }
+
+    /// The actual substance in it, m³ — `count` members' worth, exactly, at every resolution. This is
+    /// why mass is not an approximation under de-resolution (docs/71 §3).
+    pub fn matter_volume_m3(&self, member: &Assembly) -> f64 {
+        member.matter_volume_m3() * self.count as f64
+    }
+
+    /// ★★ **THE SUMMARY: what this group looks like when nobody can afford its members.**
+    ///
+    /// The de-resolved form of a pile is one part of the pile's own shape, made of the member's
+    /// dominant material, at the packing the rule implies — `matter / envelope`. **Nothing here is
+    /// authored**: a bale's 0.071 stops being a number somebody typed and becomes what 95,239 straws
+    /// in a 1.2 m cylinder actually come to (docs/71 §4).
+    pub fn as_part(&self, member: &Assembly) -> Option<Part> {
+        let envelope = self.envelope_volume_m3(member);
+        if envelope <= 0.0 {
+            return None;
+        }
+        // A single placement RESOLVES; only a pile has anything to summarise.
+        let Arrangement::Pile { within } = &self.arrangement else {
+            return None;
+        };
+        let (shape, at_m, along) = (*within, [0.0, 0.0, 0.0], along_y());
+        Some(Part {
+            name: format!("{} x{}", self.of, self.count),
+            material: member.dominant_material()?,
+            shape,
+            along,
+            at_m,
+            packing: (self.matter_volume_m3(member) / envelope).clamp(0.0, 1.0),
+            in_situ_density: None,
+        })
+    }
+}
+
+fn along_y() -> [f64; 3] {
+    [0.0, 1.0, 0.0]
+}
+
+/// ★★★ **A CONTAINED GROUP IS A RULE** — how a pile turns its count into actual members (docs/71).
+///
+/// The gap this closes: `Arrangement` said where members WOULD go and nothing placed them, so a bale
+/// was a number and a shape and never anything you could point at (docs/46 row 59). It implements
+/// `containment::Populates`, which is the same seam a meadow already uses — so `Contents::resolve`
+/// composes rule and exception set for a haystack exactly as it does for flora, with no second path.
+///
+/// ★★ **RESOLVE WHAT IS ASKED FOR, NEVER THE WHOLE PILE.** A bale is 304,781 blades. Nothing may ever
+/// materialise all of them, and the `Region` is what makes that structural rather than remembered:
+/// only members inside it are built. Law III — the minimal necessary matter — with the container
+/// doing the deciding.
+///
+/// **Where each member sits is DERIVED from its index**, never stored and never rolled: asking twice
+/// gives the same pile, and looking away cannot move a blade. That is the same rule
+/// `terra::flora::scatter` uses for a meadow, one level down.
+///
+/// ★ FLAGGED, and it is docs/46 row 60: these positions are a DERIVED arrangement inside the pile's
+/// shape, not the SETTLED one. `pile::settle` computes what a real heap does — and currently produces
+/// a heap ten times too loose, so adopting its positions would mean adopting that error. When the
+/// settling reproduces loose hay, this is where its output belongs.
+pub struct PileRule<'a> {
+    pub group: &'a Contained,
+    pub member: &'a Assembly,
+    /// The container's own id, so a member's placement names what it is inside.
+    pub within: Option<crate::instance::InstanceId>,
+    /// Salt for the derived ids — distinct per container instance, so two bales in a field do not
+    /// share a single set of blade identities.
+    pub salt: u64,
+}
+
+impl PileRule<'_> {
+    /// Where member `i` sits and how it lies, in the container's own frame — derived, not stored.
+    pub fn placement_of(&self, i: u64) -> crate::instance::Placement {
+        let at = match &self.group.arrangement {
+            Arrangement::At { at_m, along } => {
+                let up = glam::DVec3::from(*along).normalize_or(glam::DVec3::Y);
+                return crate::instance::Placement {
+                    at_m: glam::DVec3::from(*at_m),
+                    attitude: glam::DQuat::from_rotation_arc(glam::DVec3::Y, up),
+                    within: self.within,
+                };
+            }
+            Arrangement::Pile { within } => {
+                let h = within.half_extents_m();
+                // Filling the shape by EQUAL VOLUME, so a pile is not denser at its axis than at its
+                // rim purely because of how the index was mapped.
+                let (u1, u2, u3) = (
+                    crate::pile::derived_unit(self.salt, i, 1),
+                    crate::pile::derived_unit(self.salt, i, 2),
+                    crate::pile::derived_unit(self.salt, i, 3),
+                );
+                let r = h.y.max(h.z) * u1.sqrt();
+                let a = u2 * std::f64::consts::TAU;
+                glam::DVec3::new(r * a.cos(), (u3 * 2.0 - 1.0) * h.x, r * a.sin())
+            }
+        };
+        // A dropped member has no preferred direction; the attitude is derived the same way.
+        let z = 2.0 * crate::pile::derived_unit(self.salt, i, 4) - 1.0;
+        let phi = crate::pile::derived_unit(self.salt, i, 5) * std::f64::consts::TAU;
+        let s = (1.0 - z * z).max(0.0).sqrt();
+        let axis = glam::DVec3::new(s * phi.cos(), z, s * phi.sin()).normalize_or(glam::DVec3::Y);
+        crate::instance::Placement {
+            at_m: at,
+            attitude: glam::DQuat::from_rotation_arc(glam::DVec3::Y, axis),
+            within: self.within,
+        }
+    }
+}
+
+impl crate::containment::Populates for PileRule<'_> {
+    fn generate(
+        &mut self,
+        region: &crate::containment::Region,
+        out: &mut Vec<crate::instance::Instance>,
+    ) {
+        for i in 0..self.group.count {
+            let placement = self.placement_of(i);
+            if !region.contains(placement.at_m) {
+                continue; // outside what was asked for: it exists, and nobody needs it built
+            }
+            out.push(crate::instance::Instance::of_type(
+                crate::instance::InstanceId::derived(self.salt, (0, 0), i),
+                &self.group.of,
+                placement,
+            ));
+        }
+    }
+}
+
 /// **An assembly.** Parts, and how they are joined.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Assembly {
@@ -386,6 +563,10 @@ pub struct Assembly {
     pub name: String,
     #[serde(default)]
     pub parts: Vec<Part>,
+    /// ★★★ **ASSEMBLIES INSIDE THIS ONE** (docs/71). Empty for everything authored before 2026-08-10,
+    /// so every existing definition is bit-identical.
+    #[serde(default)]
+    pub contains: Vec<Contained>,
     #[serde(default)]
     pub connections: Vec<Connection>,
     /// Free-text provenance — where these dimensions came from. Not decoration: an assembly whose
@@ -441,6 +622,92 @@ impl Assembly {
         self.parts.iter().map(Part::reach_m).fold(0.0, f64::max)
     }
 
+    /// ★★★ **THIS ASSEMBLY AS MATTER, ONE LEVEL FLAT** (docs/71) — its own parts, plus the parts of
+    /// everything it contains, carried into this frame.
+    ///
+    /// One answer, three consumers: the MESH draws it, `crown_m2` measures its footprint, and `meet`
+    /// spends energy on it. Before containment those three walked `parts` directly; if they each
+    /// learned to see through a `Contained` separately there would be three chances to disagree about
+    /// what an assembly is made of, which is the Law II failure this codebase keeps recording.
+    ///
+    /// **`At` members RESOLVE** — a clump really is its blades, and each one is carried here with its
+    /// own place and attitude. **`Pile` members SUMMARISE** — 304,781 blades become the one part their
+    /// rule implies (`Contained::as_part`), because that is what a pile is when nobody is counting.
+    /// The choice is the arrangement's, not the caller's.
+    pub fn resolved_parts(&self) -> Vec<Part> {
+        let mut out = self.parts.clone();
+        for c in &self.contains {
+            let Some(member) = compiled::by_id(&c.of) else {
+                continue;
+            };
+            match &c.arrangement {
+                Arrangement::At { at_m, along } => {
+                    let up = glam::DVec3::from(*along).normalize_or(glam::DVec3::Y);
+                    let rot = glam::DQuat::from_rotation_arc(glam::DVec3::Y, up);
+                    let base = glam::DVec3::from(*at_m);
+                    for p in member.resolved_parts() {
+                        let at = base + rot * glam::DVec3::from(p.at_m);
+                        let dir = rot * glam::DVec3::from(p.along).normalize_or(glam::DVec3::X);
+                        out.push(Part {
+                            at_m: [at.x, at.y, at.z],
+                            along: [dir.x, dir.y, dir.z],
+                            ..p
+                        });
+                    }
+                }
+                Arrangement::Pile { .. } => {
+                    if let Some(p) = c.as_part(&member) {
+                        out.push(p);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The space this assembly takes up, m³ — its own parts plus everything it contains. Void
+    /// included; this is the ENVELOPE, which is what a packing fraction divides into.
+    pub fn envelope_volume_m3(&self) -> f64 {
+        self.parts.iter().map(Part::envelope_volume_m3).sum::<f64>()
+            + self
+                .contains
+                .iter()
+                .filter_map(|c| compiled::by_id(&c.of).map(|m| c.envelope_volume_m3(&m)))
+                .sum::<f64>()
+    }
+
+    /// The actual substance in it, m³ — its own parts plus everything it contains, **exactly** at
+    /// every resolution (docs/71 §3). A bale weighs what its straws weigh whether or not anything is
+    /// close enough to count them.
+    pub fn matter_volume_m3(&self) -> f64 {
+        self.parts.iter().map(Part::matter_volume_m3).sum::<f64>()
+            + self
+                .contains
+                .iter()
+                .filter_map(|c| compiled::by_id(&c.of).map(|m| c.matter_volume_m3(&m)))
+                .sum::<f64>()
+    }
+
+    /// The material most of this assembly is made of, by matter volume — what a de-resolved pile is
+    /// summarised as. `None` for an assembly with no matter at all.
+    pub fn dominant_material(&self) -> Option<String> {
+        let mut by_mat: std::collections::BTreeMap<String, f64> = Default::default();
+        for p in &self.parts {
+            *by_mat.entry(p.material.clone()).or_default() += p.matter_volume_m3();
+        }
+        for c in &self.contains {
+            if let Some(m) = compiled::by_id(&c.of) {
+                if let Some(id) = m.dominant_material() {
+                    *by_mat.entry(id).or_default() += c.matter_volume_m3(&m);
+                }
+            }
+        }
+        by_mat
+            .into_iter()
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(id, _)| id)
+    }
+
     /// **The ground this assembly's `material` parts cover**, m² — its crown.
     ///
     /// A crown is the footprint of the parts made of one substance: a tree's leaves and not its
@@ -452,7 +719,7 @@ impl Assembly {
     /// Robin's rule for where an assembly ends, asked about the ground instead of about space.
     pub fn crown_m2(&self, material: &str) -> f64 {
         let r = self
-            .parts
+            .resolved_parts()
             .iter()
             .filter(|p| p.material == material)
             .map(Part::crown_radius_m)
@@ -475,6 +742,18 @@ impl Assembly {
         for p in &self.parts {
             total += p.matter_volume_m3() * self.density_of(p, mats)?;
         }
+        // ★ Everything it CONTAINS weighs too, exactly `count` members' worth (docs/71 §3). This is
+        // why mass is not an approximation under de-resolution: a bale weighs what its straws weigh
+        // whether or not anything is close enough to count them.
+        for c in &self.contains {
+            let Some(member) = compiled::by_id(&c.of) else {
+                return Err(format!(
+                    "'{}' contains '{}', which is not an assembly this world holds",
+                    self.id, c.of
+                ));
+            };
+            total += member.mass_kg(mats)? * c.count as f64;
+        }
         Ok(total)
     }
 
@@ -487,6 +766,21 @@ impl Assembly {
             total += m;
             for k in 0..3 {
                 acc[k] += p.at_m[k] * m;
+            }
+        }
+        for c in &self.contains {
+            let Some(member) = compiled::by_id(&c.of) else {
+                continue;
+            };
+            let m = member.mass_kg(mats)? * c.count as f64;
+            // A pile's mass sits at the centre of what holds it; a single placement sits where it says.
+            let at = match &c.arrangement {
+                Arrangement::At { at_m, .. } => *at_m,
+                Arrangement::Pile { .. } => [0.0, 0.0, 0.0],
+            };
+            total += m;
+            for k in 0..3 {
+                acc[k] += at[k] * m;
             }
         }
         if total <= 0.0 {
@@ -537,8 +831,8 @@ impl Assembly {
     pub fn derive(&self, mats: &[Material]) -> Result<Derived, String> {
         Ok(Derived {
             mass_kg: self.mass_kg(mats)?,
-            envelope_volume_m3: self.parts.iter().map(|p| p.envelope_volume_m3()).sum(),
-            matter_volume_m3: self.parts.iter().map(|p| p.matter_volume_m3()).sum(),
+            envelope_volume_m3: self.envelope_volume_m3(),
+            matter_volume_m3: self.matter_volume_m3(),
             centre_of_mass_m: self.centre_of_mass_m(mats)?,
         })
     }
@@ -603,11 +897,31 @@ impl Assembly {
     /// Cylinders and tubes lie along the assembly's +X, which is the axis a barrel runs on. `segments`
     /// is a RESOLUTION choice, not physics (docs/44): the same shape sampled more finely.
     pub fn mesh(&self, mats: &[Material], segments: usize) -> crate::mesher::Mesh {
+        self.mesh_damaged(mats, segments, None)
+    }
+
+    /// ★★ **THE SAME MESH, MINUS WHAT IS GONE** (docs/70). `integrity[i] <= 0` means that part no
+    /// longer exists, so it is not drawn — the render REPORTING the model's damage, which is Law VI in
+    /// the direction it is meant to run. A shorter slice than `parts` leaves the rest pristine, exactly
+    /// as `instance::Damage` defines it.
+    ///
+    /// Partial damage still draws the whole part today. ★ FLAGGED with its name: a blade 40% broken
+    /// should be drawn 40% shorter, and the honest version is the part's own geometry scaled along its
+    /// `along` axis — cheap, and worth doing once something can break a part part-way and be looked at.
+    pub fn mesh_damaged(
+        &self,
+        mats: &[Material],
+        segments: usize,
+        integrity: Option<&[f64]>,
+    ) -> crate::mesher::Mesh {
         let mut out = crate::mesher::Mesh {
             vertices: Vec::new(),
             indices: Vec::new(),
         };
-        for p in &self.parts {
+        for (pi, p) in self.resolved_parts().iter().enumerate() {
+            if integrity.and_then(|v| v.get(pi)).is_some_and(|&i| i <= 0.0) {
+                continue;
+            }
             let Some(mi) = mats.iter().position(|m| m.id == p.material) else {
                 continue; // an unknown material draws nothing rather than drawing a lie
             };
@@ -664,6 +978,179 @@ impl Assembly {
                 .extend(part.indices.into_iter().map(|i| i + base));
         }
         out
+    }
+}
+
+/// **What arrives at a piece of matter** (docs/70). Energy, where it entered, and where it is going —
+/// in the assembly's own frame, in metres and joules.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Arriving {
+    pub energy_j: f64,
+    /// Where the event enters the assembly's frame, metres.
+    pub at_m: glam::DVec3,
+    /// Unit direction of travel.
+    pub along: glam::DVec3,
+}
+
+/// What one part did with it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PartHit {
+    /// Index into `Assembly::parts`.
+    pub part: usize,
+    /// Joules this part took out of the event.
+    pub spent_j: f64,
+    /// How much of it was broken, `0..=1`. This is what `instance::Damage::part_integrity` holds:
+    /// `integrity = 1 - broken`.
+    pub broken: f64,
+    /// ★ How much of its VOID was closed, `0..=1` — compaction (docs/70). A haystack stops a rock by
+    /// this and never by `broken`; a solid part has no void and so can never spend anything here.
+    pub compacted: f64,
+}
+
+/// The whole answer: the debit, and what happened on the way.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Met {
+    pub spent_j: f64,
+    /// What continues past this assembly — to the next thing, or to the ground.
+    pub remaining_j: f64,
+    pub hits: Vec<PartHit>,
+}
+
+impl Assembly {
+    /// ★★★ **WHAT THIS MUCH ENERGY DOES TO ME** (docs/70) — the verb that makes an assembly matter
+    /// rather than scenery.
+    ///
+    /// Robin, on being told the plants were decoration (2026-08-09): *"Each impact with each assembly
+    /// can be debited from the total energy of a collision for zero loss… but that way we could have a
+    /// rock fall on a haystack, unsettle the hay (dry grass), but the impact could be absorbed."* This
+    /// is that debit. Energy enters, every part on its path takes what it costs to break, and the
+    /// remainder leaves. **Spent + remaining = arriving, exactly** — conservation is a property of the
+    /// arithmetic here, not something checked afterwards.
+    ///
+    /// ★ **It is the engine's OWN law at a different scale.** `damage::crater_volume(E, σ) = E/σ` is
+    /// what decides a meteor's crater on a planet (`interaction::respond`); read backwards it says what
+    /// a PART costs to destroy, `E = σ·V`. This calls that function rather than restating the ratio, so
+    /// a grass blade and a continent are the same arithmetic (Law II).
+    ///
+    /// ★★ **FLAGGED — FRACTURE IS THE ONLY CHANNEL OPEN** (docs/70 §4). Energy arriving at matter can
+    /// also DISPLACE it (½mv²), COMPACT it (crushing porosity, which is what a haystack really does),
+    /// or HEAT it (`oxidation::apply_heat`, `damage::classify`). Those are named IOUs with their real
+    /// quantities, not omissions: a rock through straw is under-resisted here until compaction lands,
+    /// and this is said plainly because that is precisely the case that prompted the design.
+    ///
+    /// Geometry is a ray against each part's bounding sphere — coarse, and honest about it: a part is
+    /// either on the path or it is not, and a blade's exact silhouette does not change the energy
+    /// arithmetic by more than the ordering of two neighbours.
+    pub fn meet(&self, mats: &[Material], a: &Arriving) -> Met {
+        let mut met = Met {
+            spent_j: 0.0,
+            remaining_j: a.energy_j.max(0.0),
+            hits: Vec::new(),
+        };
+        if met.remaining_j <= 0.0 {
+            return met;
+        }
+        let dir = a.along.normalize_or(glam::DVec3::Y);
+        // ★★ **WHAT IT CONTAINS MEETS THE ENERGY TOO** (docs/71). A pile answers as its own summary —
+        // one part of the pile's shape, made of its members' material, at the packing `count` members
+        // in that envelope actually come to. So a bale of 304,781 blades resists as a bale, and the
+        // number it resists with is not authored anywhere: it is what the rule implies.
+        //
+        // ★ The summary and the resolved answer must AGREE (docs/71 §3), which is what
+        // `a_pile_answers_the_same_summarised_or_resolved` measures. If they ever diverge the SUMMARY
+        // is what is wrong.
+        let all_parts: Vec<Part> = self.resolved_parts();
+        // Parts on the path, nearest first — the order energy actually meets them in.
+        let mut on_path: Vec<(f64, usize)> = Vec::new();
+        for (i, p) in all_parts.iter().enumerate() {
+            let c = glam::DVec3::from(p.at_m);
+            let r = p.shape.reach_m();
+            let to_c = c - a.at_m;
+            let t = to_c.dot(dir);
+            // Behind the entry point is behind the event; it meets nothing there.
+            if t < -r {
+                continue;
+            }
+            if (to_c - dir * t).length() <= r {
+                on_path.push((t, i));
+            }
+        }
+        on_path.sort_by(|x, y| x.0.total_cmp(&y.0));
+
+        for (_, i) in on_path {
+            if met.remaining_j <= 0.0 {
+                break;
+            }
+            let p = &all_parts[i];
+            let Some(m) = mats.iter().find(|m| m.id == p.material) else {
+                continue; // unknown matter resists nothing rather than resisting infinitely
+            };
+            let volume = p.matter_volume_m3();
+            if volume <= 0.0 {
+                continue;
+            }
+            let mut spent = 0.0;
+
+            // ★★★ **COMPACTION FIRST** (docs/70 §4), because that is the order it happens in: an impact
+            // closes a body's VOID before it breaks the substance around it. This is why a haystack
+            // stops a rock and a granite boulder of the same size does not — Robin's own example:
+            // *"a rock fall on a haystack, unsettle the hay (dry grass), but the impact could be
+            // absorbed."*
+            //
+            // Same law as fracture, read with the other strength and the other volume:
+            // `E = σ_compressive · V_void`. The void is the part's envelope minus its matter, which is
+            // exactly what `packing` already says — so a field that existed to get a powder charge's
+            // mass right now also decides what a bale of straw absorbs.
+            let void = (p.envelope_volume_m3() - volume).max(0.0);
+            // ★ The crush stress is a property of the ARRANGEMENT, so it follows this part's own
+            // packing rather than being read flat off the catalogue — see `damage::crush_stress_pa`.
+            // Without this a loose haystack and a high-density bale resist identically, which is the
+            // "sand versus sandstone" conflation in a different coat.
+            let crush = crate::damage::crush_stress_pa(
+                m.compressive_strength as f64,
+                p.packing,
+                crate::damage::BALE_REFERENCE_PACKING,
+            );
+            let mut compacted = 0.0;
+            if void > 0.0 && crush > 0.0 {
+                let closable = crate::damage::crater_volume(met.remaining_j, crush);
+                compacted = (closable / void).min(1.0);
+                let cost = if closable >= void {
+                    crush * void
+                } else {
+                    met.remaining_j
+                };
+                spent += cost;
+                met.remaining_j = (met.remaining_j - cost).max(0.0);
+            }
+
+            // Then FRACTURE, with whatever is left — the substance itself.
+            let strength = m.fracture_strength as f64;
+            let breakable = crate::damage::crater_volume(met.remaining_j, strength);
+            let broken = if volume > 0.0 {
+                (breakable / volume).min(1.0)
+            } else {
+                0.0
+            };
+            if met.remaining_j > 0.0 {
+                let cost = if breakable >= volume {
+                    strength * volume
+                } else {
+                    met.remaining_j
+                };
+                spent += cost;
+                met.remaining_j = (met.remaining_j - cost).max(0.0);
+            }
+
+            met.spent_j += spent;
+            met.hits.push(PartHit {
+                part: i,
+                spent_j: spent,
+                broken,
+                compacted,
+            });
+        }
+        met
     }
 }
 
@@ -808,6 +1295,40 @@ pub mod compiled {
         include_str!("../../../assets/assemblies/compiled/conifer-tree-spruce.json");
     pub const GRASS_TUFT: &str =
         include_str!("../../../assets/assemblies/compiled/grass-tuft.json");
+    /// ONE blade of grass — the member a clump and a haystack are both piles of (docs/71).
+    pub const GRASS_BLADE: &str =
+        include_str!("../../../assets/assemblies/compiled/grass-blade.json");
+    /// The same blade, dried — what a haystack is a pile of.
+    pub const GRASS_BLADE_DRY: &str =
+        include_str!("../../../assets/assemblies/compiled/grass-blade-dry.json");
+    /// ★ **A HAYSTACK — gravity and nothing else**, which is why it is the pile `pile::settle` should
+    /// reproduce (Robin, 2026-08-11: *"in a hay stack it's all gravity"*).
+    pub const HAYSTACK: &str = include_str!("../../../assets/assemblies/compiled/haystack.json");
+    /// **A round hay bale — the same straw, COMPRESSED AND BOUND.** *"In a hay bale, compressing bands
+    /// are employed."* The bands are the whole difference, and they are not modelled yet.
+    pub const HAY_BALE: &str = include_str!("../../../assets/assemblies/compiled/hay-bale.json");
+
+    /// **An assembly by its id** — how a container reaches what it contains (docs/71).
+    ///
+    /// Only the shipped set, and deliberately: a definition that can name any string could name one
+    /// that does not exist, and a pile of nothing weighs nothing while looking fine. `None` here is a
+    /// caller's cue that the world does not hold that type.
+    pub fn by_id(id: &str) -> Option<super::Assembly> {
+        let text = match id {
+            "naval-24pdr-gun" => NAVAL_24PDR_GUN,
+            "charge-24pdr-service" => CHARGE_24PDR_SERVICE,
+            "round-shot-24pdr" => ROUND_SHOT_24PDR,
+            "broadleaf-tree-oak" => BROADLEAF_TREE_OAK,
+            "conifer-tree-spruce" => CONIFER_TREE_SPRUCE,
+            "grass-tuft" => GRASS_TUFT,
+            "grass-blade" => GRASS_BLADE,
+            "grass-blade-dry" => GRASS_BLADE_DRY,
+            "haystack" => HAYSTACK,
+            "hay-bale" => HAY_BALE,
+            _ => return None,
+        };
+        Some(parse(text))
+    }
 
     /// Parse a baked assembly. Panics on malformed input, because a compiled asset that does not parse
     /// is a build error wearing a runtime error's clothes.
@@ -913,6 +1434,7 @@ mod tests {
     fn an_assemblys_mass_and_balance_come_from_its_parts() {
         let mats = mats();
         let a = Assembly {
+            contains: Vec::new(),
             id: "t".into(),
             name: "t".into(),
             notes: String::new(),
@@ -974,6 +1496,7 @@ mod tests {
     fn an_assembly_summarises_to_a_material_mixture() {
         let mats = mats();
         let a = Assembly {
+            contains: Vec::new(),
             id: "t".into(),
             name: "t".into(),
             notes: String::new(),
@@ -1544,8 +2067,11 @@ mod plant_tests {
             ("grass-tuft", "10", "grassland"),
         ] {
             let a = shipped::load(plant);
-            let foliage: Vec<&str> = a
-                .parts
+            // `resolved_parts`, not `parts`: a clump is 32 blade ASSEMBLIES now (docs/71), so what a
+            // plant is MADE OF is one level down. The invariant is unchanged — it still has to be
+            // made of the foliage its land-cover class contributes to the ground's colour.
+            let resolved = a.resolved_parts();
+            let foliage: Vec<&str> = resolved
                 .iter()
                 .map(|p| p.material.as_str())
                 .filter(|m| m.contains("foliage") || *m == "grass")
@@ -1609,6 +2135,7 @@ mod reach_tests {
             [0.0, 12.0, 0.0],
         );
         let ship = Assembly {
+            contains: Vec::new(),
             id: "ship".into(),
             name: "ship".into(),
             parts: vec![hull.clone(), mast.clone()],
@@ -1723,18 +2250,22 @@ mod placement_tests {
     fn a_grass_clump_weighs_exactly_what_the_cylinder_it_replaced_weighed() {
         let mats = crate::materials::load();
         let clump = compiled::parse(compiled::GRASS_TUFT);
-        assert_eq!(clump.parts.len(), 32, "a clump is blades, not one column");
+        // 32 blade ASSEMBLIES (docs/71), which `resolved_parts` flattens back to 32 pieces of matter.
+        assert!(clump.parts.is_empty(), "a clump has no matter of its own");
+        assert_eq!(clump.contains.len(), 32, "it IS its blades");
+        let resolved = clump.resolved_parts();
+        assert_eq!(resolved.len(), 32, "a clump is blades, not one column");
 
         // What the single cylinder held: envelope × packing.
         let cylinder_matter = std::f64::consts::PI * 0.06f64.powi(2) * 0.35 * 0.002_571_43;
-        let got: f64 = clump.parts.iter().map(Part::matter_volume_m3).sum();
+        let got: f64 = resolved.iter().map(Part::matter_volume_m3).sum();
         assert!(
             (got - cylinder_matter).abs() / cylinder_matter < 1e-4,
             "the clump must be the same matter: {got:.6e} m³ vs the cylinder's {cylinder_matter:.6e}"
         );
 
         // And every blade is solid: with the strands resolved there is no arrangement left to summarise.
-        assert!(clump.parts.iter().all(|p| p.packing == 1.0));
+        assert!(resolved.iter().all(|p| p.packing == 1.0));
 
         // The crown it reports is the crown it was defined with — the leaf-area derivation divided by
         // this same radius, so the two cannot be allowed to drift apart.
@@ -1888,6 +2419,481 @@ mod placement_tests {
         assert!(
             height_m > 0.25,
             "the tuft stands up (0.35 m of blade), it does not lie flat: {height_m:.3} m"
+        );
+    }
+}
+
+#[cfg(test)]
+mod meet_tests {
+    use super::*;
+
+    fn falling_rock(joules: f64, from_above: bool) -> Arriving {
+        Arriving {
+            energy_j: joules,
+            at_m: if from_above {
+                glam::DVec3::new(0.0, 20.0, 0.0)
+            } else {
+                glam::DVec3::new(-20.0, 0.5, 0.0)
+            },
+            along: if from_above {
+                glam::DVec3::NEG_Y
+            } else {
+                glam::DVec3::X
+            },
+        }
+    }
+
+    /// ★★★ **THE TEST THAT MAKES THE OTHER TWO TRUSTWORTHY** (docs/70 §6). Robin's mechanism was
+    /// *"debited from the total energy of a collision for ZERO LOSS"*, so conservation is not a nice
+    /// property here — it is the definition. Spent plus remaining must equal what arrived, to the last
+    /// float, for every material and every energy.
+    #[test]
+    fn spent_plus_remaining_is_exactly_what_arrived() {
+        let mats = crate::materials::load();
+        let clump = compiled::parse(compiled::GRASS_TUFT);
+        let oak = compiled::parse(compiled::BROADLEAF_TREE_OAK);
+        for a in [&clump, &oak] {
+            for j in [1.0e-3, 1.0, 1.0e3, 1.0e6, 1.0e12] {
+                let met = a.meet(&mats, &falling_rock(j, true));
+                let total = met.spent_j + met.remaining_j;
+                assert!(
+                    (total - j).abs() <= j * 1e-12,
+                    "{}: {j:.3e} J in, {total:.6e} J accounted for",
+                    a.id
+                );
+                // And no part may claim more than it cost, or less than nothing.
+                let summed: f64 = met.hits.iter().map(|h| h.spent_j).sum();
+                assert!((summed - met.spent_j).abs() <= met.spent_j * 1e-12);
+                assert!(met.hits.iter().all(|h| (0.0..=1.0).contains(&h.broken)));
+            }
+        }
+    }
+
+    /// ★★ **A ROCK ONTO GRASS CARRIES ON; THE SAME ROCK INTO AN OAK STOPS.** The picture Robin drew of
+    /// what an assembly obeying physics would mean, and the reason it belongs to the assembly: the two
+    /// answers differ only by the matter, not by any code that knows what a tree is.
+    #[test]
+    fn grass_barely_slows_a_rock_and_an_oak_stops_it() {
+        let mats = crate::materials::load();
+        let clump = compiled::parse(compiled::GRASS_TUFT);
+        let oak = compiled::parse(compiled::BROADLEAF_TREE_OAK);
+        // A 5 kg rock at 10 m/s — a stone dropped from about five metres.
+        let joules = 0.5 * 5.0 * 10.0f64.powi(2);
+
+        let through_grass = clump.meet(&mats, &falling_rock(joules, true));
+        let into_oak = oak.meet(&mats, &falling_rock(joules, false));
+        println!(
+            "250 J rock: grass takes {:.3} J ({:.4}%), oak takes {:.1} J ({:.1}%)",
+            through_grass.spent_j,
+            through_grass.spent_j / joules * 100.0,
+            into_oak.spent_j,
+            into_oak.spent_j / joules * 100.0
+        );
+
+        assert!(
+            through_grass.spent_j / joules < 0.05,
+            "a clump of grass should barely notice a falling rock, it took {:.1}%",
+            through_grass.spent_j / joules * 100.0
+        );
+        assert!(
+            !through_grass.hits.is_empty(),
+            "but it must MEET it — the whole point of row 57"
+        );
+        assert!(
+            into_oak.spent_j / joules > 0.9,
+            "an oak should stop it, it took only {:.1}%",
+            into_oak.spent_j / joules * 100.0
+        );
+        assert!(
+            into_oak.remaining_j < joules * 0.1,
+            "and little should continue past the trunk"
+        );
+    }
+
+    /// ★★★ **THE HAYSTACK** — Robin's own example, and the reason the compaction channel exists
+    /// (docs/70 §4): *"we could have a rock fall on a haystack, unsettle the hay (dry grass), but the
+    /// impact could be absorbed."*
+    ///
+    /// A bale is **92.9% air** — measured bulk density 100 kg/m³ over straw's own 1400 — and an impact
+    /// closes that void before it snaps a single stem. `E = σ_compressive · V_void` is the same law as
+    /// fracture with the other strength and the other volume, so nothing new was invented to make this
+    /// work: `packing`, a field that existed to get a powder charge's mass right, is what decides how
+    /// much a bale can swallow.
+    #[test]
+    fn a_haystack_absorbs_the_rock_that_a_boulder_would_bounce_off() {
+        let mats = crate::materials::load();
+        let bale = compiled::parse(compiled::HAY_BALE);
+        // A 20 kg rock dropped 5 m: mgh = 20 × 9.81 × 5 ≈ 981 J.
+        let joules = 20.0 * 9.81 * 5.0;
+        let met = bale.meet(
+            &mats,
+            &Arriving {
+                energy_j: joules,
+                at_m: glam::DVec3::new(0.0, 4.0, 0.0),
+                along: glam::DVec3::NEG_Y,
+            },
+        );
+        let hit = met.hits.first().expect("the rock meets the bale");
+        println!(
+            "{joules:.0} J onto a bale: {:.0}% absorbed, void closed {:.2}%, straw broken {:.4}%, \
+             {:.1} J continues",
+            met.spent_j / joules * 100.0,
+            hit.compacted * 100.0,
+            hit.broken * 100.0,
+            met.remaining_j
+        );
+        assert!(
+            met.spent_j >= joules * 0.999,
+            "a haystack must absorb a dropped rock, it took only {:.1}%",
+            met.spent_j / joules * 100.0
+        );
+        assert!(
+            hit.compacted > 0.0 && hit.compacted < 1.0,
+            "it absorbs by CLOSING ITS VOID part-way, got {:.3}",
+            hit.compacted
+        );
+        assert_eq!(hit.broken, 0.0, "and without snapping a single stem");
+    }
+
+    /// The other half of the same claim: a solid has no void, so it can spend nothing on compaction and
+    /// the energy goes straight to breaking it. Nothing branches on what the object IS — granite simply
+    /// has `packing = 1`.
+    #[test]
+    fn a_solid_has_no_void_to_close() {
+        let mats = crate::materials::load();
+        // A boulder the same size and shape as the bale, but SOLID — one part at packing 1.0. Built
+        // here rather than by editing the bale, because a bale has no parts of its own any more: it is
+        // a pile of blades (docs/71), which is the whole point.
+        let rock = Assembly {
+            id: "solid-boulder".to_string(),
+            name: "Solid boulder".to_string(),
+            parts: vec![Part {
+                name: "rock".to_string(),
+                material: "granite".to_string(),
+                shape: Shape::Cylinder {
+                    r: 0.6,
+                    length: 1.2,
+                },
+                along: [0.0, 1.0, 0.0],
+                at_m: [0.0, 0.6, 0.0],
+                packing: 1.0,
+                in_situ_density: None,
+            }],
+            contains: Vec::new(),
+            connections: Vec::new(),
+            notes: String::new(),
+            derived: None,
+        };
+        let met = rock.meet(
+            &mats,
+            &Arriving {
+                energy_j: 981.0,
+                at_m: glam::DVec3::new(0.0, 4.0, 0.0),
+                along: glam::DVec3::NEG_Y,
+            },
+        );
+        let hit = met.hits.first().expect("it meets the boulder");
+        assert_eq!(hit.compacted, 0.0, "a solid has no void");
+        println!(
+            "981 J onto solid granite of the same size: {:.4}% broken, {:.0} J continues",
+            hit.broken * 100.0,
+            met.remaining_j
+        );
+        // 981 J against granite's tensile strength barely marks it, and almost everything continues.
+        assert!(hit.broken < 0.01, "it barely scratches granite");
+        assert!(met.remaining_j < 981.0, "but it still costs something");
+    }
+
+    /// Conservation must survive the second channel — the property the whole design rests on.
+    #[test]
+    fn compaction_does_not_break_the_ledger() {
+        let mats = crate::materials::load();
+        let bale = compiled::parse(compiled::HAY_BALE);
+        for j in [1.0, 1.0e3, 1.0e6, 1.0e9] {
+            let met = bale.meet(
+                &mats,
+                &Arriving {
+                    energy_j: j,
+                    at_m: glam::DVec3::new(0.0, 4.0, 0.0),
+                    along: glam::DVec3::NEG_Y,
+                },
+            );
+            let total = met.spent_j + met.remaining_j;
+            assert!(
+                (total - j).abs() <= j * 1e-12,
+                "{j:.1e} J in, {total:.6e} accounted for"
+            );
+        }
+    }
+
+    /// Energy that meets nothing passes through untouched — the airless-control equivalent. If this
+    /// ever spends anything, the debit has acquired an opinion of its own.
+    #[test]
+    fn a_miss_costs_nothing() {
+        let mats = crate::materials::load();
+        let clump = compiled::parse(compiled::GRASS_TUFT);
+        let past = Arriving {
+            energy_j: 1000.0,
+            at_m: glam::DVec3::new(50.0, 20.0, 0.0), // fifty metres to the side
+            along: glam::DVec3::NEG_Y,
+        };
+        let met = clump.meet(&mats, &past);
+        assert_eq!(met.spent_j, 0.0);
+        assert_eq!(met.remaining_j, 1000.0);
+        assert!(met.hits.is_empty());
+    }
+
+    /// ★ **A BLADE IS BROKEN BEFORE THE WHOLE CLUMP IS.** Damage is per PART, which is what makes
+    /// `instance::Damage::part_integrity` meaningful: a clump a boot has stepped on is not a clump that
+    /// no longer exists.
+    ///
+    /// Each blade costs `σ·V` = 15 kPa × 3.18e-7 m³ ≈ **4.8 mJ** to break, so the energies here are
+    /// derived from the matter rather than picked: a millijoule cannot finish even one, and 50 mJ
+    /// finishes about ten and leaves one part-way through.
+    #[test]
+    fn energy_breaks_blades_one_at_a_time_and_stops_when_it_runs_out() {
+        let mats = crate::materials::load();
+        let clump = compiled::parse(compiled::GRASS_TUFT);
+
+        // A millijoule cannot break a single blade — it is spent part-way through the first one, and
+        // NOTHING continues. That is the debit working, not a miss.
+        let tiny = clump.meet(&mats, &falling_rock(1.0e-3, true));
+        assert_eq!(tiny.hits.len(), 1, "it stops at the first blade it meets");
+        assert!(tiny.hits[0].broken > 0.0 && tiny.hits[0].broken < 1.0);
+        assert_eq!(tiny.remaining_j, 0.0, "and nothing passes through");
+
+        // Fifty millijoules gets through about ten blades and is caught by the next.
+        let some = clump.meet(&mats, &falling_rock(0.05, true));
+        let fully = some.hits.iter().filter(|h| h.broken >= 1.0).count();
+        let partly = some
+            .hits
+            .iter()
+            .filter(|h| h.broken > 0.0 && h.broken < 1.0)
+            .count();
+        println!(
+            "50 mJ into a clump: {fully} blades broken through, {partly} part-way, {} met, {:.4} J left",
+            some.hits.len(),
+            some.remaining_j
+        );
+        assert!(
+            fully >= 5,
+            "50 mJ should get through several blades, got {fully}"
+        );
+        let blades = clump.resolved_parts().len();
+        assert!(
+            fully < blades,
+            "but not the whole clump — {fully} of {blades}"
+        );
+        assert!(partly <= 1, "at most one blade is caught mid-break");
+
+        // And enough energy levels the clump and carries on, which is the rock in the test above.
+        let plenty = clump.meet(&mats, &falling_rock(10.0, true));
+        assert!(plenty.hits.iter().all(|h| h.broken >= 1.0));
+        assert!(
+            plenty.remaining_j > 9.0,
+            "a clump of grass does not stop a rock"
+        );
+    }
+}
+
+#[cfg(test)]
+mod composition_tests {
+    use super::*;
+
+    /// ★★★ **A BALE IS NOW A PILE OF BLADES, AND WEIGHS THE SAME.** Robin, 2026-08-10: *"a clump of
+    /// grass should be an assembly of multiple 'grass blade' assemblies. A haystack is then a pile of
+    /// 'grass blades' with the 'dry' properties."*
+    ///
+    /// The count is DERIVED, not chosen: a measured bale bulk density of 100 kg/m³ over straw's own
+    /// 1400 kg/m³ cell wall puts 0.0969 m³ of straw in a 1.357 m³ cylinder, and one blade is
+    /// 3.18e-7 m³ — so the bale is 304,781 blades. It must still weigh what a round bale weighs.
+    #[test]
+    fn a_bale_is_a_pile_of_blades_and_still_weighs_136_kg() {
+        let mats = crate::materials::load();
+        let bale = compiled::parse(compiled::HAY_BALE);
+        assert!(bale.parts.is_empty(), "a bale is not a cylinder of its own");
+        assert_eq!(bale.contains.len(), 1, "it is one pile");
+        assert!(
+            bale.contains[0].count > 100_000,
+            "of a great many blades, not a token few: {}",
+            bale.contains[0].count
+        );
+        let mass = bale.mass_kg(&mats).expect("a bale weighs something");
+        println!(
+            "bale = {} dry blades = {mass:.1} kg",
+            bale.contains[0].count
+        );
+        // A round field bale is 120-160 kg. This is not a tolerance on a guess: it is 304,781 blades
+        // whose own dimensions came out of the grass clump's leaf-area derivation.
+        assert!(
+            (120.0..160.0).contains(&mass),
+            "a round bale weighs 120-160 kg, this one {mass:.1}"
+        );
+        // ★ **A million blades cost one integer.** The point of the whole design.
+        assert!(bale.contains[0].count > 0 && bale.parts.is_empty());
+    }
+
+    /// ★★★ **THE INVARIANT THIS FEATURE LIVES OR DIES BY** (docs/71 §3): what a pile says when it is
+    /// summarised must be what it says when its members are counted.
+    ///
+    /// The de-resolved bale answers as one part of the pile's shape at the packing the rule implies;
+    /// the resolved comparison sums what its members would individually absorb. If these disagree, the
+    /// SUMMARY is what is wrong — never the members.
+    #[test]
+    fn a_pile_answers_the_same_summarised_or_resolved() {
+        let mats = crate::materials::load();
+        let bale = compiled::parse(compiled::HAY_BALE);
+        let group = &bale.contains[0];
+        let member = compiled::by_id(&group.of).expect("the blade it is a pile of");
+
+        // What the SUMMARY holds.
+        let summary = group.as_part(&member).expect("a pile summarises");
+        let matter_summarised = summary.matter_volume_m3();
+        // What the MEMBERS hold, counted.
+        let matter_resolved = member.matter_volume_m3() * group.count as f64;
+        println!(
+            "matter: summarised {matter_summarised:.6e} m³ · resolved {matter_resolved:.6e} m³ \
+             (packing {:.5})",
+            summary.packing
+        );
+        // Exact, not approximate — the summary's packing is DEFINED as matter over envelope, so this
+        // is the property that makes mass survive de-resolution.
+        assert!(
+            (matter_summarised - matter_resolved).abs() <= matter_resolved * 1e-9,
+            "a pile must hold exactly what its members hold"
+        );
+
+        // And the packing is not authored anywhere: it is what that many blades in that cylinder come
+        // to. A field bale is ~100 kg/m³ of straw at 1400 kg/m³ — 0.0714.
+        assert!(
+            (summary.packing - 100.0 / 1400.0).abs() < 1e-3,
+            "the pile's packing should be the measured bale's, got {:.5}",
+            summary.packing
+        );
+    }
+
+    /// A pile made of a type this world does not hold must FAIL LOUDLY. A pile of nothing weighs
+    /// nothing while looking perfectly well-formed, which is the worst way for this to go wrong.
+    #[test]
+    fn a_pile_of_something_that_does_not_exist_is_an_error() {
+        let mats = crate::materials::load();
+        let mut bad = compiled::parse(compiled::HAY_BALE);
+        bad.contains[0].of = "unicorn-hair".to_string();
+        assert!(
+            bad.mass_kg(&mats).is_err(),
+            "a pile of a type nobody defines must not quietly weigh zero"
+        );
+    }
+
+    /// Everything authored before composition existed is untouched — `contains` defaults to empty, so
+    /// the cannon's thirteen parts and the oak's two are bit-identical.
+    #[test]
+    fn composition_leaves_every_existing_assembly_alone() {
+        let mats = crate::materials::load();
+        // ★ `grass-tuft` is NOT in this list any more, and that is the point: it moved to contained
+        // blade assemblies on purpose (docs/71). Everything that did NOT move must be untouched.
+        for id in [
+            "naval-24pdr-gun",
+            "broadleaf-tree-oak",
+            "conifer-tree-spruce",
+        ] {
+            let a = compiled::by_id(id).expect(id);
+            assert!(a.contains.is_empty(), "{id} contains nothing yet");
+            assert!(
+                a.mass_kg(&mats).is_ok(),
+                "{id} still weighs what it weighed"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod placement_rule_tests {
+    use super::*;
+    use crate::containment::{Contents, Populates, Region};
+
+    fn bale_rule<'a>(bale: &'a Assembly, blade: &'a Assembly) -> PileRule<'a> {
+        PileRule {
+            group: &bale.contains[0],
+            member: blade,
+            within: None,
+            salt: 20260812,
+        }
+    }
+
+    /// ★★★ **A PILE CAN NOW BE POINTED AT.** Before this, `Arrangement` said where members WOULD go
+    /// and nothing placed them — a bale was a count and a shape (docs/46 row 59).
+    ///
+    /// And the property that makes it affordable: **only what is asked for is built.** A bale is
+    /// 304,781 blades; a region a hand's width across yields a handful, and the rest simply are not
+    /// materialised. Law III, with the container doing the deciding.
+    #[test]
+    fn a_pile_resolves_only_the_members_you_ask_for() {
+        let bale = compiled::parse(compiled::HAY_BALE);
+        let blade = compiled::by_id(&bale.contains[0].of).expect("the blade");
+        let mut rule = bale_rule(&bale, &blade);
+        let total = bale.contains[0].count;
+        assert!(total > 300_000, "a bale is a great many blades: {total}");
+
+        let mut out = Vec::new();
+        rule.generate(&Region::ball(glam::DVec3::ZERO, 0.05), &mut out);
+        println!(
+            "a 5 cm ball inside a {total}-blade bale resolves {} blades",
+            out.len()
+        );
+        assert!(!out.is_empty(), "there is straw where you reached");
+        assert!(
+            out.len() < total as usize / 100,
+            "and reaching into a hand's width must not build the bale: {} of {total}",
+            out.len()
+        );
+        // Everything it built is genuinely inside what was asked for.
+        assert!(out.iter().all(|i| i.placement.at_m.length() <= 0.05 + 1e-9));
+    }
+
+    /// **Derived, never stored, never rolled** — asking twice gives the same pile, and each member's
+    /// id and place are functions of its index. The same property that keeps a meadow's tufts where
+    /// they were when you look away, one level down.
+    #[test]
+    fn the_same_pile_answers_the_same_way_twice() {
+        let bale = compiled::parse(compiled::HAY_BALE);
+        let blade = compiled::by_id(&bale.contains[0].of).expect("the blade");
+        let region = Region::ball(glam::DVec3::new(0.1, 0.0, 0.0), 0.06);
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        bale_rule(&bale, &blade).generate(&region, &mut a);
+        bale_rule(&bale, &blade).generate(&region, &mut b);
+        assert!(!a.is_empty());
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(&b) {
+            assert_eq!(x.id, y.id);
+            assert!((x.placement.at_m - y.placement.at_m).length() < 1e-12);
+        }
+    }
+
+    /// ★★ **THE RULE AND THE EXCEPTION SET COMPOSE**, through the same `Contents::resolve` a meadow
+    /// uses — so a haystack and a field of grass are one mechanism, not two. A blade that something
+    /// destroyed is simply not there the next time you reach in.
+    #[test]
+    fn what_was_destroyed_is_not_there_when_you_reach_back_in() {
+        let bale = compiled::parse(compiled::HAY_BALE);
+        let blade = compiled::by_id(&bale.contains[0].of).expect("the blade");
+        let region = Region::ball(glam::DVec3::ZERO, 0.05);
+
+        let mut before = Vec::new();
+        bale_rule(&bale, &blade).generate(&region, &mut before);
+        let victim = before[0].id;
+
+        let mut contents = Contents::new();
+        contents.forget(victim);
+        let mut after = Vec::new();
+        contents.resolve(&mut bale_rule(&bale, &blade), &region, &mut after);
+
+        assert_eq!(after.len(), before.len() - 1, "one fewer blade");
+        assert!(!after.iter().any(|i| i.id == victim), "and it is that one");
+        assert_eq!(
+            contents.remembered(),
+            1,
+            "for the cost of ONE remembered id"
         );
     }
 }

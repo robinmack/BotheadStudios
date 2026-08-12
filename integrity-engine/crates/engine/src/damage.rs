@@ -119,6 +119,48 @@ pub fn crater_volume(energy: f64, strength: f64) -> f64 {
     energy / strength
 }
 
+/// **What it takes to crush an ARRANGEMENT, from how densely it is packed** (docs/70).
+///
+/// Robin, on being shown a haystack built as one cylinder with a packing fraction (2026-08-10):
+/// *"Haystack should be created as an assembly of grass blades (dry)… is it?"* It is not — a 136 kg
+/// bale is **95,239 straws**, 1.14 million triangles, so the blades are a DECLARED summary today
+/// (`Part::packing`) rather than resolved geometry. This is the part of that summary which must not
+/// also be declared.
+///
+/// A catalogued `compressive_strength` for straw is measured on a BALE, so it describes an
+/// arrangement and not the substance. Used directly it says a loose haystack and a high-density bale
+/// resist identically, which is false and is exactly the "sand versus sandstone" conflation Robin
+/// named: the same grains at different packing behave differently.
+///
+/// So the stress SCALES with relative density, by the cellular-solids law for an open-cell structure
+/// (Gibson & Ashby): plastic collapse goes as `(ρ*/ρs)^1.5`. Anchored on the measurement rather than
+/// derived from it, because the measurement is the trustworthy end:
+///
+/// ```text
+/// σ(p) = σ_ref · (p / p_ref)^1.5
+/// ```
+///
+/// ★ FLAGGED, with the check that shows the size of the gap: Gibson & Ashby's own prefactor form,
+/// `σ ≈ 0.3·σ_yield·(ρ*/ρs)^1.5`, gives **143 kPa** for a standard bale against a measured 30–75 kPa.
+/// Same order, two to four times high — which is why the measurement anchors this and the theory only
+/// supplies the exponent. Tuning the prefactor to match would be a dial; naming the discrepancy is not.
+///
+/// The reference pair is the bale the catalogue's number was measured on: `p_ref = 0.0714`
+/// (100 kg/m³ bulk over straw's 1400 kg/m³ cell wall).
+pub fn crush_stress_pa(reference_pa: f64, packing: f64, reference_packing: f64) -> f64 {
+    if reference_pa <= 0.0 || packing <= 0.0 || reference_packing <= 0.0 {
+        return 0.0;
+    }
+    // A solid has no arrangement left to collapse; it is simply the substance, which fracture answers.
+    let p = packing.min(1.0);
+    reference_pa * (p / reference_packing).powf(1.5)
+}
+
+/// The packing the catalogue's bale-scale `compressive_strength` figures were measured at — a standard
+/// field bale, 100 kg/m³ of straw whose own cell wall is 1400. Named here so the one number that ties
+/// the measurement to the scaling law is not a literal in the middle of an expression.
+pub const BALE_REFERENCE_PACKING: f64 = 100.0 / 1400.0;
+
 /// Radius (m) of a hemispherical crater of `volume` m³: `V = (2/3)π R³`.
 pub fn crater_radius(volume: f64) -> f64 {
     (volume * 3.0 / (2.0 * std::f64::consts::PI)).cbrt()

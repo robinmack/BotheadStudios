@@ -184,6 +184,197 @@ impl Readback {
     }
 }
 
+/// ★★★ **WHERE THE FINISHED FRAME GOES** — the one browser-shaped question in eight and a half
+/// thousand lines of scene code, behind two answers (docs/69 §3, docs/52).
+///
+/// Robin, 2026-08-09: *"I think we need to achieve feature parity then with the native renderer;
+/// seems a vital part of the rig, no?"* — after docs/69 admitted that the viewer is the one role in
+/// the engine that is barely tested, because both scene structs lived behind
+/// `#[cfg(target_arch = "wasm32")]` and a native run could not see them. Everything else was a
+/// photograph judged by eye, and the flora defect survived weeks inside exactly that blind spot.
+///
+/// ★ **MEASURED, and it is the reason this is small**: lifting the `cfg` off `mod app` produced
+/// **two** compiler errors, both `SurfaceTarget::Canvas`, which exists only on wasm. `wasm_bindgen`,
+/// `web_sys::HtmlCanvasElement` and `JsValue` all compile natively — they are extern declarations.
+/// The scenes were already portable; only the swapchain was not. So this is not a port of the
+/// renderer, it is one question with a second answer.
+///
+/// Which is also the shape docs/52 already argued for: *"the engine is not a browser program that
+/// happens to compile elsewhere; it is a standalone engine of which the browser is one host."*
+pub enum Target {
+    /// A swapchain that is PRESENTED to something a human looks at — the browser canvas today, a
+    /// native window when one exists.
+    Surface(wgpu::Surface<'static>),
+    /// An offscreen texture. Nothing to present, and — the point — **readable**, so a native test can
+    /// assert on the pixels a scene actually drew instead of a rig photographing them.
+    Offscreen(wgpu::Texture),
+}
+
+impl Target {
+    /// Make an offscreen target of this size and format. `RENDER_ATTACHMENT | COPY_SRC`: drawn into,
+    /// then copied out.
+    pub fn offscreen(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+    ) -> Target {
+        Target::Offscreen(device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("offscreen-frame"),
+            size: wgpu::Extent3d {
+                width: width.max(1),
+                height: height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        }))
+    }
+
+    /// Point the target at a new size/format. A surface reconfigures its swapchain; an offscreen
+    /// texture is replaced, because a texture cannot be resized in place.
+    pub fn configure(&mut self, device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) {
+        match self {
+            Target::Surface(s) => s.configure(device, config),
+            Target::Offscreen(_) => {
+                *self = Target::offscreen(device, config.width, config.height, config.format)
+            }
+        }
+    }
+
+    /// The next frame to draw into. `Err` only where a swapchain can fail (lost, out of date); an
+    /// offscreen target has no such state and never fails, which is itself useful in a test.
+    pub fn acquire(&self) -> Result<Frame, wgpu::SurfaceError> {
+        match self {
+            Target::Surface(s) => s.get_current_texture().map(Frame::Swapchain),
+            Target::Offscreen(t) => Ok(Frame::Offscreen(t.clone())),
+        }
+    }
+
+    /// The swapchain, when there is one — what `request_adapter` wants as `compatible_surface`, and
+    /// `None` offscreen, which is the correct answer rather than a missing one.
+    pub fn surface(&self) -> Option<&wgpu::Surface<'static>> {
+        match self {
+            Target::Surface(s) => Some(s),
+            Target::Offscreen(_) => None,
+        }
+    }
+
+    /// The colour format and alpha mode to draw in. A swapchain is asked what it can do; an offscreen
+    /// texture already knows, because it was made that way.
+    pub fn formats(
+        &self,
+        adapter: &wgpu::Adapter,
+    ) -> (wgpu::TextureFormat, wgpu::CompositeAlphaMode) {
+        match self {
+            Target::Surface(s) => {
+                let caps = s.get_capabilities(adapter);
+                let format = caps
+                    .formats
+                    .iter()
+                    .copied()
+                    .find(|f| f.is_srgb())
+                    .unwrap_or(caps.formats[0]);
+                (format, caps.alpha_modes[0])
+            }
+            Target::Offscreen(t) => (t.format(), wgpu::CompositeAlphaMode::Auto),
+        }
+    }
+
+    /// Is this the readable kind? A native test wants to know before it asks for pixels.
+    pub fn texture(&self) -> Option<&wgpu::Texture> {
+        match self {
+            Target::Offscreen(t) => Some(t),
+            Target::Surface(_) => None,
+        }
+    }
+}
+
+/// One frame in flight. Holds the texture being drawn into and knows what "done" means for it.
+pub enum Frame {
+    Swapchain(wgpu::SurfaceTexture),
+    Offscreen(wgpu::Texture),
+}
+
+impl Frame {
+    pub fn view(&self) -> wgpu::TextureView {
+        let t = match self {
+            Frame::Swapchain(s) => &s.texture,
+            Frame::Offscreen(t) => t,
+        };
+        t.create_view(&wgpu::TextureViewDescriptor::default())
+    }
+
+    /// Finish the frame. A swapchain presents; an offscreen texture simply stays where it is, which
+    /// is exactly why it can be read afterwards.
+    pub fn present(self) {
+        if let Frame::Swapchain(s) = self {
+            s.present()
+        }
+    }
+}
+
+/// ★★ **WHAT THE SCENE ACTUALLY DREW**, as bytes on the CPU — the instrument docs/69 §3 says is
+/// missing, and the whole reason `Target::Offscreen` exists.
+///
+/// Native only, and it BLOCKS, which is exactly what a test wants and what a browser cannot have
+/// (`Readback` above is the deferred form for that reason). Returns tightly packed RGBA rows: wgpu
+/// requires a 256-byte row alignment on the copy, so the padding is stripped here rather than left
+/// for every caller to remember.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_frame(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture) -> Vec<u8> {
+    let (w, h) = (texture.width(), texture.height());
+    let unpadded = (w * 4) as usize;
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
+    let padded = unpadded.div_ceil(align) * align;
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("read-frame"),
+        size: (padded * h as usize) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("read-frame"),
+    });
+    enc.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded as u32),
+                rows_per_image: Some(h),
+            },
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(std::iter::once(enc.finish()));
+    let slice = buffer.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    let _ = device.poll(wgpu::Maintain::Wait);
+    let view = slice.get_mapped_range();
+    let mut out = Vec::with_capacity(unpadded * h as usize);
+    for row in 0..h as usize {
+        out.extend_from_slice(&view[row * padded..row * padded + unpadded]);
+    }
+    drop(view);
+    buffer.unmap();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

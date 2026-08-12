@@ -223,6 +223,7 @@
       "packing": 0.00015
     }
   ],
+  "contains": [],
   "connections": [
     {
       "a": "bole_0",

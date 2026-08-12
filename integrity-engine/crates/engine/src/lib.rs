@@ -49,7 +49,7 @@ mod gpu_particles;
 /// docs/50 — THE one GPU particle container: allocation, capacity/count, and the two-phase async
 /// read-back, shared by the granular and SPH pipelines. Their SOLVERS stay specialized (docs/46 §1).
 mod gpu_store;
-mod granular;
+pub mod granular;
 mod grid; // docs/47 §1 — the hierarchical spatial hash: no global cell size
           // WebGPU host for sph_step.wgsl. Compiled on EVERY target, deliberately: it used to be wasm-only, but the
           // only thing that actually required wasm was one `Rc<Cell<bool>>` in a `map_async` callback (see
@@ -61,6 +61,7 @@ mod gpu_sph;
 pub mod gravity;
 mod hydrostatic;
 mod impact;
+pub mod pile;
 mod planet;
 /// docs/33 — scene-agnostic render scaffolding (`GpuMesh`, `UniformSlot`, `Camera`, the uniform PODs and
 /// their helpers). Lifted out of `#[cfg(wasm32)] mod app`: all three scenes use these identically, so
@@ -379,7 +380,6 @@ fn live_resolution_crossing(
     None
 }
 
-#[cfg(target_arch = "wasm32")]
 mod app {
     use crate::mesher::{self, Mesh, Vertex};
     use crate::{materials, matter, texture};
@@ -935,7 +935,23 @@ mod app {
         /// (m above the surface), w = metres per display unit. The shader's positions are display units
         /// and the integral is metres; this is the one place they meet.
         air2: [f32; 4],
+        /// ★★ **THE SKY'S OWN LIGHT ON THIS SURFACE** (docs/46 row 56) — `atmosphere::SkyLight`,
+        /// projected onto two spherical-harmonic bands once per frame on the CPU because the honest
+        /// integral costs a hemisphere of marches per normal. `sky_ambient.xyz` is the
+        /// orientation-independent term; `sky_grad_r/g/b.xyz` dot with the surface normal.
+        ///
+        /// Appended at the END on purpose: `CRATER_UNIFORM_OFFSET` names a byte offset into this
+        /// struct, so anything inserted above it moves the crater and nothing says so.
+        sky_ambient: [f32; 4],
+        sky_grad_r: [f32; 4],
+        sky_grad_g: [f32; 4],
+        sky_grad_b: [f32; 4],
     }
+
+    /// Byte offset of `SpaceUniforms::sky_ambient` — 2 mat4 (128) + 9 vec4 (144). Patched in like the
+    /// crater below, for the same reason: it is one per-frame fact that every lit surface wants and
+    /// no call site should have to thread through.
+    const SKYLIGHT_UNIFORM_OFFSET: u64 = 272;
 
     /// Byte offset of `SpaceUniforms::crater` — 2 mat4 (128) + 5 vec4 (80). The globe patches just these
     /// 32 bytes after `write_space_uniform`, so the crater does not have to be threaded through all 14
@@ -997,7 +1013,9 @@ mod app {
         /// birth-of-the-Moon scene is proto-Earth while Terra is this afternoon, and both draw the
         /// same Earth (docs/65: time is part of the setting, not part of the body).
         scene_epoch: Option<f64>,
-        surface: wgpu::Surface<'static>,
+        /// Where this scene's finished frames go — a canvas swapchain in the browser, an
+        /// offscreen texture natively (`renderer::Target`, docs/69 §3).
+        surface: crate::renderer::Target,
         device: wgpu::Device,
         queue: wgpu::Queue,
         config: wgpu::SurfaceConfiguration,
@@ -1282,28 +1300,73 @@ mod app {
         /// Initialize the space band: acquire the GPU, build a unit sphere, seed the Earth + `num_moons`
         /// moons. `num_moons == 1` is the standard scene; `2` places moons on opposite sides of the same
         /// orbit (the de-orbit-both stress test).
+        /// **The browser host**: a canvas and its swapchain. Everything after it is shared with the
+        /// headless host below — one scene, two answers to *where does the frame go*.
+        #[cfg(target_arch = "wasm32")]
         pub async fn create(
             canvas: HtmlCanvasElement,
             num_moons: u32,
         ) -> Result<OrbitDemo, JsValue> {
             console_error_panic_hook::set_once();
             let _ = console_log::init_with_level(log::Level::Info);
-
             let width = canvas.width().max(1);
             let height = canvas.height().max(1);
-
             let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
                 backends: wgpu::Backends::BROWSER_WEBGPU,
                 ..Default::default()
             });
-            let surface = instance
-                .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
-                .map_err(|e| JsValue::from_str(&format!("create_surface failed: {e}")))?;
+            let surface = crate::renderer::Target::Surface(
+                instance
+                    .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+                    .map_err(|e| JsValue::from_str(&format!("create_surface failed: {e}")))?,
+            );
+            OrbitDemo::create_on(instance, surface, width, height, num_moons).await
+        }
+
+        /// **The headless host** — the space band drawing into a texture, for native tests. See
+        /// `Terra::headless` for why this exists (docs/69 §3).
+        #[cfg(not(target_arch = "wasm32"))]
+        pub async fn headless(
+            width: u32,
+            height: u32,
+            num_moons: u32,
+        ) -> Result<OrbitDemo, JsValue> {
+            let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
             let adapter = instance
                 .request_adapter(&wgpu::RequestAdapterOptions {
                     power_preference: wgpu::PowerPreference::HighPerformance,
                     force_fallback_adapter: false,
-                    compatible_surface: Some(&surface),
+                    compatible_surface: None,
+                })
+                .await
+                .ok_or_else(|| JsValue::from_str("no suitable GPU adapter found"))?;
+            let (device, _q) = adapter
+                .request_device(&wgpu::DeviceDescriptor::default(), None)
+                .await
+                .map_err(|e| JsValue::from_str(&format!("request_device failed: {e}")))?;
+            let target = crate::renderer::Target::offscreen(
+                &device,
+                width,
+                height,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+            );
+            drop(device);
+            OrbitDemo::create_on(instance, target, width.max(1), height.max(1), num_moons).await
+        }
+
+        /// Everything after the host: one body, whichever target it draws into.
+        async fn create_on(
+            instance: wgpu::Instance,
+            mut surface: crate::renderer::Target,
+            width: u32,
+            height: u32,
+            num_moons: u32,
+        ) -> Result<OrbitDemo, JsValue> {
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    force_fallback_adapter: false,
+                    compatible_surface: surface.surface(),
                 })
                 .await
                 .ok_or_else(|| JsValue::from_str("no suitable GPU adapter found"))?;
@@ -1320,20 +1383,14 @@ mod app {
                 .await
                 .map_err(|e| JsValue::from_str(&format!("request_device failed: {e}")))?;
 
-            let caps = surface.get_capabilities(&adapter);
-            let format = caps
-                .formats
-                .iter()
-                .copied()
-                .find(|f| f.is_srgb())
-                .unwrap_or(caps.formats[0]);
+            let (format, alpha_mode) = surface.formats(&adapter);
             let config = wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 format,
                 width,
                 height,
                 present_mode: wgpu::PresentMode::Fifo,
-                alpha_mode: caps.alpha_modes[0],
+                alpha_mode,
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
             };
@@ -4977,11 +5034,9 @@ mod app {
 
             let output = self
                 .surface
-                .get_current_texture()
-                .map_err(|e| JsValue::from_str(&format!("get_current_texture failed: {e}")))?;
-            let view = output
-                .texture
-                .create_view(&wgpu::TextureViewDescriptor::default());
+                .acquire()
+                .map_err(|e| JsValue::from_str(&format!("acquire frame failed: {e}")))?;
+            let view = output.view();
             let mut encoder = self
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -5300,6 +5355,11 @@ mod app {
         up: [f32; 3],
         alt_m: f32,
         metres_per_display: f32,
+        /// ★★ **What this air SHINES on things** (docs/46 row 56) — `atmosphere::sky_light`, projected
+        /// once per frame. It rides on `Air` because it IS a property of the air seen from the eye,
+        /// exactly like the optical depth beside it: put anywhere else, a surface could be lit by a
+        /// different sky from the one drawn above it.
+        sky: crate::atmosphere::SkyLight,
     }
 
     impl Air {
@@ -5328,6 +5388,10 @@ mod app {
     const NO_GLOW: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
 
     const AIRLESS: Air = Air {
+        sky: crate::atmosphere::SkyLight {
+            ambient: [0.0; 3],
+            gradient: [[0.0; 3]; 3],
+        },
         tau: [0.0; 3],
         gain: crate::atmosphere::SUN_GAIN,
         twilight: 0.0,
@@ -5378,6 +5442,7 @@ mod app {
                 scale_height_m: self.air_column.scale_height as f32,
                 radius_m: self.air_column.radius as f32,
                 top_m: self.air_column.top() as f32,
+                sky: self.sky_light,
                 ..AIRLESS
             }
         }
@@ -5494,6 +5559,30 @@ mod app {
                 air.radius_m,
                 air.top_m,
                 air.metres_per_display,
+            ],
+            sky_ambient: [
+                air.sky.ambient[0],
+                air.sky.ambient[1],
+                air.sky.ambient[2],
+                0.0,
+            ],
+            sky_grad_r: [
+                air.sky.gradient[0][0],
+                air.sky.gradient[0][1],
+                air.sky.gradient[0][2],
+                0.0,
+            ],
+            sky_grad_g: [
+                air.sky.gradient[1][0],
+                air.sky.gradient[1][1],
+                air.sky.gradient[1][2],
+                0.0,
+            ],
+            sky_grad_b: [
+                air.sky.gradient[2][0],
+                air.sky.gradient[2][1],
+                air.sky.gradient[2][2],
+                0.0,
             ],
         };
         queue.write_buffer(&slot.buf, 0, bytemuck::bytes_of(&u));
@@ -5819,7 +5908,9 @@ mod app {
         /// right distance for the ground cap specifically — anything else drawn in this scene must ask
         /// with its OWN distance, never reuse this one (the spacewalk rule in `surface_detail`).
         detail: crate::resolution::ResolutionController,
-        surface: wgpu::Surface<'static>,
+        /// Where this scene's finished frames go — a canvas swapchain in the browser, an
+        /// offscreen texture natively (`renderer::Target`, docs/69 §3).
+        surface: crate::renderer::Target,
         device: wgpu::Device,
         queue: wgpu::Queue,
         config: wgpu::SurfaceConfiguration,
@@ -5878,6 +5969,17 @@ mod app {
         flora_verified: bool,
         flora_readback: Option<crate::renderer::Readback>,
         flora_readback_begun: bool,
+        /// The sky's light this frame, and what it was computed FOR — a cache that names its own
+        /// inputs, the lesson of `flora::Built` (docs/46 row 52).
+        sky_light: crate::atmosphere::SkyLight,
+        /// ★★★ **WHAT IMPACTS HAVE BROKEN** (docs/70, docs/46 row 57). Divergences from the rule, not
+        /// a list of plants: an untouched meadow costs nothing to remember, and a clump a meteor went
+        /// through is one entry. This is what `containment::Contents` was built for and what
+        /// `instance::Damage` was built to hold.
+        flora_damage: crate::containment::Contents,
+        sky_light_for: Option<(f32, f32, f32, f32)>,
+        /// Negative control for native tests (`set_draw_flora`); always true in the browser.
+        draw_flora: bool,
         segment_verts: Vec<Vertex>,
         /// What the segment's mesh currently HOLDS — the same cache-of-the-view rule the ground tiers use
         /// (`ground_cap::tier_is_current`), on the one mesh instead of a ladder of them. The LIFT term is
@@ -5974,6 +6076,9 @@ mod app {
             Ok(())
         }
 
+        /// **The browser host**: a canvas, its swapchain, and everything else shared with every other
+        /// host below.
+        #[cfg(target_arch = "wasm32")]
         pub async fn create(canvas: HtmlCanvasElement) -> Result<Terra, JsValue> {
             console_error_panic_hook::set_once();
             let _ = console_log::init_with_level(log::Level::Info);
@@ -5983,14 +6088,63 @@ mod app {
                 backends: wgpu::Backends::BROWSER_WEBGPU,
                 ..Default::default()
             });
-            let surface = instance
-                .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
-                .map_err(|e| JsValue::from_str(&format!("create_surface failed: {e}")))?;
+            let surface = crate::renderer::Target::Surface(
+                instance
+                    .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+                    .map_err(|e| JsValue::from_str(&format!("create_surface failed: {e}")))?,
+            );
+            Terra::create_on(instance, surface, width, height).await
+        }
+
+        /// ★★ **THE HEADLESS HOST** — the same scene, drawing into a texture instead of a canvas, so a
+        /// NATIVE test can render a real frame on a real GPU and assert on the pixels (docs/69 §3).
+        ///
+        /// Robin asked for exactly this: *"I think we need to achieve feature parity then with the
+        /// native renderer; seems a vital part of the rig, no?"* The viewer was the one role in the
+        /// engine that no test could see — both scenes lived behind `#[cfg(target_arch = "wasm32")]`,
+        /// so a native run could not build one, and everything else was a photograph judged by eye.
+        /// The flora defect survived weeks inside that gap.
+        ///
+        /// Not a second renderer: the same pipelines, the same shaders, the same frame. Only the
+        /// answer to *where does the finished frame go* differs (`renderer::Target`).
+        #[cfg(not(target_arch = "wasm32"))]
+        pub async fn headless(width: u32, height: u32) -> Result<Terra, JsValue> {
+            let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
             let adapter = instance
                 .request_adapter(&wgpu::RequestAdapterOptions {
                     power_preference: wgpu::PowerPreference::HighPerformance,
                     force_fallback_adapter: false,
-                    compatible_surface: Some(&surface),
+                    compatible_surface: None,
+                })
+                .await
+                .ok_or_else(|| JsValue::from_str("no suitable GPU adapter found"))?;
+            let (device, _q) = adapter
+                .request_device(&wgpu::DeviceDescriptor::default(), None)
+                .await
+                .map_err(|e| JsValue::from_str(&format!("request_device failed: {e}")))?;
+            // sRGB, to match what a browser swapchain picks — the shaders are written for it.
+            let target = crate::renderer::Target::offscreen(
+                &device,
+                width,
+                height,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+            );
+            drop(device);
+            Terra::create_on(instance, target, width.max(1), height.max(1)).await
+        }
+
+        /// Everything after the host: one body, whichever target it draws into.
+        async fn create_on(
+            instance: wgpu::Instance,
+            mut surface: crate::renderer::Target,
+            width: u32,
+            height: u32,
+        ) -> Result<Terra, JsValue> {
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    force_fallback_adapter: false,
+                    compatible_surface: surface.surface(),
                 })
                 .await
                 .ok_or_else(|| JsValue::from_str("no suitable GPU adapter found"))?;
@@ -6006,20 +6160,14 @@ mod app {
                 )
                 .await
                 .map_err(|e| JsValue::from_str(&format!("request_device failed: {e}")))?;
-            let caps = surface.get_capabilities(&adapter);
-            let format = caps
-                .formats
-                .iter()
-                .copied()
-                .find(|f| f.is_srgb())
-                .unwrap_or(caps.formats[0]);
+            let (format, alpha_mode) = surface.formats(&adapter);
             let config = wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 format,
                 width,
                 height,
                 present_mode: wgpu::PresentMode::Fifo,
-                alpha_mode: caps.alpha_modes[0],
+                alpha_mode,
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
             };
@@ -6221,6 +6369,10 @@ mod app {
                 flora_verified: false,
                 flora_readback: None,
                 flora_readback_begun: false,
+                draw_flora: true,
+                sky_light: Default::default(),
+                flora_damage: crate::containment::Contents::new(),
+                sky_light_for: None,
                 segment_uni,
                 segment_built: None,
                 surface_loaded: false,
@@ -7259,6 +7411,36 @@ mod app {
             let sun_dir = crate::orbit::solar_direction_earth_fixed(self.celestial_epoch_s());
             let sun_light = Vec3::new(sun_dir.x as f32, sun_dir.y as f32, sun_dir.z as f32);
 
+            // ★★ **THE SKY'S OWN LIGHT, ONCE PER FRAME** (docs/46 row 56). The honest integral costs a
+            // hemisphere of marches per NORMAL, so it is projected onto two bands here, on the CPU, and
+            // the shader spends a dot product. Recomputed only when an INPUT moves — the sun's place in
+            // the sky, or the eye's height, which is what the column looks like from — because a cache
+            // keyed on anything else is the defect docs/46 row 52 records.
+            {
+                let up = view.eye.normalize_or(glam::DVec3::Y);
+                let key = (
+                    (sun_dir.dot(up) * 512.0).round() as f32,
+                    (sun_dir.x * 256.0).round() as f32,
+                    (sun_dir.z * 256.0).round() as f32,
+                    (self.fly.alt_m.max(0.0).sqrt() * 4.0).round() as f32,
+                );
+                if self.sky_light_for != Some(key) {
+                    self.sky_light_for = Some(key);
+                    // 6x12 = 72 directions. `sky_irradiance_converges_as_the_hemisphere_is_refined`
+                    // measures what refining buys; this is the grid a frame can afford, and the cost
+                    // of being wrong about it is a slightly mis-shaped ambient, never a wrong physics.
+                    self.sky_light = crate::atmosphere::sky_light(
+                        &self.air_column,
+                        self.fly.alt_m.max(0.0),
+                        up,
+                        sun_dir,
+                        crate::atmosphere::SUN_GAIN as f64,
+                        6,
+                        12,
+                    );
+                }
+            }
+
             // docs/43 Phase 5 — build the fine ground cap under the camera and cross-fade it in as we
             // descend. The fade/lift rules live in `terra::ground_cap` (natively tested). The hand-off
             // altitude is DERIVED from the rasters' own resolution against the docs/49 angular budget
@@ -7319,7 +7501,8 @@ mod app {
                     // answering the mouse. (Robin: "we seem to lose camera controls when the engine is
                     // working.")
                     let env = &self.flight_env;
-                    for a in self.flight.step(env, &self.mats, dt) {
+                    let arrivals = self.flight.step(env, &self.mats, dt);
+                    for a in arrivals {
                         log::info!(
                             "arrival: {:.1} kg at {:.1} km/s, {:.0} K = {:.2e} J",
                             a.body.mass_kg,
@@ -7327,6 +7510,7 @@ mod app {
                             a.body.temp_k,
                             a.energy_j
                         );
+                        self.impact_meets_the_plants(&a);
                     }
                     // What the engine is holding, as it must be drawn — mapped once, by the engine's rule,
                     // into buffers that persist across frames.
@@ -7443,11 +7627,9 @@ mod app {
             }
             let output = self
                 .surface
-                .get_current_texture()
-                .map_err(|e| JsValue::from_str(&format!("get_current_texture failed: {e}")))?;
-            let view = output
-                .texture
-                .create_view(&wgpu::TextureViewDescriptor::default());
+                .acquire()
+                .map_err(|e| JsValue::from_str(&format!("acquire frame failed: {e}")))?;
+            let view = output.view();
             let mut encoder = self
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -7556,7 +7738,7 @@ mod app {
                     if let (Some(gpu), Some(uni)) =
                         (self.flora_gpu.as_ref(), self.flora_uni.as_ref())
                     {
-                        if self.flora_at.is_some_and(|b| b.n > 0) {
+                        if self.draw_flora && self.flora_at.is_some_and(|b| b.n > 0) {
                             pass.set_pipeline(&self.globe_pipeline);
                             draw(&mut pass, uni, gpu);
                         }
@@ -7744,6 +7926,123 @@ mod app {
             resolved * ds
         }
 
+        /// ★★★ **THE IMPACT MEETS THE PLANTS** (docs/70, docs/46 row 57).
+        ///
+        /// Robin, on being told the grass was decoration: *"We need a way for grass to… be smashed…
+        /// in a very energetic impact."* This is the call that makes that true. Everything it needs
+        /// already existed and was simply never connected: `flight::Arrival` says where and how much,
+        /// `flora::scatter` says what grows there, `Assembly::meet` says what that energy does to it,
+        /// and `containment::Contents` remembers the divergence.
+        ///
+        /// **The footprint is the engine's own crater law**, not a radius anybody picked:
+        /// `damage::crater_radius(damage::crater_volume(E, σ_ground))` — the same pair of functions
+        /// that size a meteor's crater on a planet. So what an impact touches and how big its hole is
+        /// are one answer.
+        ///
+        /// Plants are met NEAREST FIRST and the energy is debited as it goes, so the far side of a
+        /// stand is sheltered by the near side — Robin's *"debited from the total energy of a
+        /// collision for zero loss"*, at the scale of a meadow.
+        ///
+        /// ★ Only DIVERGENCES are stored (`Contents::diverge`), so an untouched meadow costs nothing
+        /// and the pristine clumps need never exist — the scalability law, doing its job.
+        fn impact_meets_the_plants(&mut self, a: &crate::flight::Arrival) {
+            if a.energy_j <= 0.0 || self.landcover.is_none() || self.flora_kinds.is_empty() {
+                return;
+            }
+            let (lat, lon) = crate::geo::lat_lon_from_dir(a.at.normalize_or(glam::DVec3::Y));
+            // How far this energy reaches, by the law that already sizes craters.
+            let ground = materials::index_of(&self.mats, "dirt");
+            let strength = self.mats[ground].fracture_strength as f64;
+            let volume = crate::damage::crater_volume(a.energy_j, strength);
+            let reach_m = crate::damage::crater_radius(volume).clamp(0.05, 5_000.0);
+
+            let biome_mix = &self.biome_mix;
+            let landcover = self.landcover.as_ref();
+            let sited = crate::terra::flora::scatter(
+                lat,
+                lon,
+                reach_m,
+                &self.flora_kinds,
+                &self.mats,
+                |la, lo| {
+                    let class = landcover.map_or(0, |r| r.biome_at(la, lo) as usize);
+                    biome_mix.get(class).cloned().unwrap_or_default()
+                },
+                0.05,
+                4_000,
+            );
+            if sited.is_empty() {
+                return;
+            }
+            // Nearest first: the energy meets the near side of the stand before the far side.
+            let mut order: Vec<&crate::terra::flora::Sited> = sited.iter().collect();
+            order.sort_by(|x, y| x.dist_m.total_cmp(&y.dist_m));
+
+            let along = a.momentum.normalize_or(glam::DVec3::NEG_Y);
+            let mut budget = a.energy_j;
+            let mut broken = 0usize;
+            for s in order {
+                if budget <= 0.0 {
+                    break;
+                }
+                let txt = match self.flora_kinds[s.kind].assembly_id.as_str() {
+                    "broadleaf-tree-oak" => crate::assembly::compiled::BROADLEAF_TREE_OAK,
+                    "conifer-tree-spruce" => crate::assembly::compiled::CONIFER_TREE_SPRUCE,
+                    _ => crate::assembly::compiled::GRASS_TUFT,
+                };
+                let def = crate::assembly::compiled::parse(txt);
+                // ★ The event enters the plant's frame from WHERE IT CAME FROM, aimed through the
+                // plant's middle — not from above. MEASURED: entering from directly overhead while
+                // travelling the impactor's own direction means a nearly-horizontal shot passes OVER
+                // the clump and meets nothing, which is exactly what the first run of
+                // `a_shot_breaks_the_grass_it_lands_in` reported: the ball landed, and 0 plants
+                // diverged.
+                let mid = glam::DVec3::new(0.0, def.reach_m() * 0.5, 0.0);
+                let met = def.meet(
+                    &self.mats,
+                    &crate::assembly::Arriving {
+                        energy_j: budget,
+                        at_m: mid - along * (def.reach_m() * 1.5),
+                        along,
+                    },
+                );
+                if met.hits.is_empty() {
+                    continue;
+                }
+                let mut integrity = vec![1.0; def.parts.len()];
+                for h in &met.hits {
+                    integrity[h.part] = (1.0 - h.broken).clamp(0.0, 1.0);
+                }
+                let gone = integrity.iter().all(|&i| i <= 0.0);
+                if gone {
+                    // Nothing left of it: the rule says it is there and it is not.
+                    self.flora_damage.forget(s.id);
+                } else {
+                    let mut inst = crate::instance::Instance::of_type(
+                        s.id,
+                        &self.flora_kinds[s.kind].assembly_id,
+                        crate::instance::Placement::inside(None),
+                    );
+                    inst.damage.part_integrity = integrity;
+                    self.flora_damage.diverge(inst);
+                }
+                broken += 1;
+                budget = met.remaining_j;
+            }
+            log::info!(
+                "impact met the plants: {:.2e} J over {:.1} m reached {} of {} plants, {:.2e} J left; \
+                 {} divergences remembered",
+                a.energy_j,
+                reach_m,
+                broken,
+                sited.len(),
+                budget,
+                self.flora_damage.remembered()
+            );
+            // The mesh is a cache of an answer that just changed.
+            self.flora_at = None;
+        }
+
         /// **Resolve the plants standing near the eye into geometry** — the near half of Law IV.
         ///
         /// Robin (2026-08-04): *"These are hues at altitude but must become realistic flora at very low
@@ -7861,7 +8160,30 @@ mod app {
                 })
                 .collect();
             for s in &sited {
-                let m = &meshes[s.kind];
+                // ★★ **WHAT AN IMPACT BROKE IS NOT DRAWN** (docs/70, docs/46 row 57). The renderer asks
+                // the model what it remembers about this plant and shows that — physics driving the
+                // render, never the reverse. A clump nothing has touched is not remembered at all and
+                // costs this lookup and nothing else.
+                let damage = self.flora_damage.about(s.id);
+                if matches!(damage, Some(None)) {
+                    continue; // remembered as GONE
+                }
+                let integrity = damage.flatten().map(|i| &i.damage.part_integrity);
+                // A damaged plant gets its own mesh — only the ones something happened to pay for it.
+                let damaged;
+                let m = match integrity {
+                    None => &meshes[s.kind],
+                    Some(v) => {
+                        let txt = match self.flora_kinds[s.kind].assembly_id.as_str() {
+                            "broadleaf-tree-oak" => crate::assembly::compiled::BROADLEAF_TREE_OAK,
+                            "conifer-tree-spruce" => crate::assembly::compiled::CONIFER_TREE_SPRUCE,
+                            _ => crate::assembly::compiled::GRASS_TUFT,
+                        };
+                        damaged =
+                            crate::assembly::compiled::parse(txt).mesh_damaged(mats, 6, Some(v));
+                        &damaged
+                    }
+                };
                 let ground = r_disp + self.ground_disp_at(s.lat_deg, s.lon_deg);
                 let model = crate::assembly::place_on_surface(
                     s.lat_deg,
@@ -7916,6 +8238,40 @@ mod app {
                 n: sited.len(),
                 ..fresh
             });
+        }
+
+        /// ★★ **Draw the plants, or don't** — native only, and it exists to be a NEGATIVE CONTROL.
+        ///
+        /// A single frame cannot tell you whether the plants reached the picture, because nothing in
+        /// it knows what the ground alone looks like. MEASURED the hard way 2026-08-09: a test that
+        /// compared the near field against the mid field of the SAME frame passed with the flora draw
+        /// suppressed — the control band contained the thing it was controlling for, since grass
+        /// reaches the horizon too. Two frames, one switch, and the question becomes exact: *did
+        /// drawing the plants change the picture?*
+        ///
+        /// Native only, so it cannot become a scene verb (docs/65) or a shipped way to turn the world
+        /// off.
+        #[cfg(not(target_arch = "wasm32"))]
+        pub fn set_draw_flora(&mut self, on: bool) {
+            self.draw_flora = on;
+        }
+
+        /// ★★ **The frame this scene last drew, as RGBA bytes** — native only (docs/69 §3).
+        ///
+        /// The whole point of `renderer::Target::Offscreen`: a test can render a real frame on a real
+        /// GPU and then ASK WHAT IS IN IT, instead of photographing the browser and judging by eye.
+        /// `None` when this scene is drawing into a swapchain, which is the honest answer — a
+        /// presented frame is gone.
+        #[cfg(not(target_arch = "wasm32"))]
+        pub fn frame_pixels(&self) -> Option<Vec<u8>> {
+            let tex = self.surface.texture()?;
+            Some(crate::renderer::read_frame(&self.device, &self.queue, tex))
+        }
+
+        /// How many plants this world remembers something about — divergences from the rule, which is
+        /// the number that must stay small while the population does not (docs/67).
+        pub fn flora_damage_remembered(&self) -> usize {
+            self.flora_damage.remembered()
         }
 
         /// How many plants are standing right now — a read, for rigs and the HUD.
@@ -8618,6 +8974,270 @@ mod tests {
         assert_eq!(
             boundary, 0,
             "mesh must be closed (watertight); found {boundary} boundary edges"
+        );
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod native_render_tests {
+    use super::*;
+
+    /// ★★★ **THE VIEWER, TESTED — a real frame, on a real GPU, with no browser** (docs/69 §3).
+    ///
+    /// Robin, 2026-08-09: *"I think we need to achieve feature parity then with the native renderer;
+    /// seems a vital part of the rig, no?"* This is what that buys. The viewer was the one role in
+    /// the engine no test could see: both scenes lived behind `#[cfg(target_arch = "wasm32")]`, so a
+    /// native run could not build one, and every visual claim rested on a photograph judged by eye.
+    /// **The flora defect survived weeks inside that gap** — `flora_count` said 1,200, the draw said
+    /// 43,200 triangles, the readback said the device held what was sent, and all three were true.
+    ///
+    /// What this asserts is deliberately coarse — that a frame was drawn at all, and that it is not a
+    /// uniform field. Backends differ (native Vulkan here, Dawn in Chrome) and Robin's call on that
+    /// is that it is *"absolutely fine and a deliberate design choice… we do the best approximation
+    /// available in the renderer"* — so a native test asserts STRUCTURE, never bit-equality.
+    ///
+    /// `#[ignore]` because it needs a GPU: `cargo test -- --ignored`. CI has no adapter.
+    #[test]
+    #[ignore]
+    fn a_scene_renders_a_frame_with_no_browser_anywhere() {
+        let mut terra = pollster::block_on(app::Terra::headless(320, 200))
+            .expect("a headless Terra on this box's GPU");
+        terra.render().expect("a frame");
+        let px = terra
+            .frame_pixels()
+            .expect("an offscreen frame is readable");
+        assert_eq!(px.len(), 320 * 200 * 4, "one RGBA texel per pixel");
+
+        // Not blank, and not one flat colour: a scene that drew nothing and a scene that cleared to a
+        // single colour are both failures this would otherwise pass.
+        let lum: Vec<u16> = px
+            .chunks_exact(4)
+            .map(|p| p[0] as u16 + p[1] as u16 + p[2] as u16)
+            .collect();
+        let (lo, hi) = (*lum.iter().min().unwrap(), *lum.iter().max().unwrap());
+        assert!(hi > 0, "the frame is entirely black — nothing was drawn");
+        assert!(
+            hi - lo > 8,
+            "the frame is one flat colour ({lo}..{hi}) — a clear is not a render"
+        );
+    }
+
+    /// Load the SHIPPED Earth, the same bytes the browser is handed — through `raster::shipped`, which
+    /// reads them via the engine's own body definition, so a test cannot drift from what the scene loads.
+    fn shipped_earth() -> (
+        String,
+        crate::terra::raster::Raster,
+        crate::terra::raster::Raster,
+        crate::terra::raster::Raster,
+    ) {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let json = std::fs::read_to_string(root.join("web/public/worlds/earth/world.json"))
+            .expect("the shipped Earth world");
+        let (elevation, _range) = crate::terra::raster::shipped::earth_elevation();
+        let (landcover, _classes) = crate::terra::raster::shipped::earth_landcover();
+        (
+            json,
+            crate::terra::raster::shipped::earth_landmask(),
+            elevation,
+            landcover,
+        )
+    }
+
+    /// ★★★ **STAND AT GALWAY AND CHECK THE GRASS IS IN FRAME — natively, in four seconds** (docs/69).
+    ///
+    /// This is the one-line version of nine deploy-and-photograph cycles. The flora defect (docs/46
+    /// row 50) was that 1,200 plants and 43,200 triangles were drawn 36 m in the air, behind a camera
+    /// pitched down — and every instrument the engine had reported something true and useless:
+    /// `flora_count` said 1,200, the readback said the device held what was sent. **Nothing could ask
+    /// whether the plants were in the picture**, because nothing could see the picture without a
+    /// browser.
+    ///
+    /// The assertion is STRUCTURAL, not a colour match. Resolved plants put high-frequency detail into
+    /// the near ground; bare ground under the same light is a smooth wash. So the test compares the
+    /// row-to-row variation of the bottom of the frame against the middle of it, in the same frame,
+    /// under the same sun — a control that survives any lighting change, including the sky irradiance
+    /// row 56 is still owed. It does not depend on the grass being dark, which today it wrongly is.
+    ///
+    /// `#[ignore]`: needs a GPU. `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn the_grass_at_galway_is_in_the_picture() {
+        const W: u32 = 480;
+        const H: u32 = 320;
+        let (json, lm, ev, lc) = shipped_earth();
+        let mut terra = pollster::block_on(app::Terra::headless(W, H)).expect("headless Terra");
+        terra
+            .load_world(
+                &json,
+                &lm.data,
+                lm.w as u32,
+                lm.h as u32,
+                &ev.data,
+                ev.w as u32,
+                ev.h as u32,
+                &lc.data,
+                lc.w as u32,
+                lc.h as u32,
+            )
+            .expect("the shipped Earth loads");
+        terra.set_alt_bounds(0.05, 8.0e10);
+        terra.set_epoch_sun_over_lon(-9.45); // daylight at Galway
+                                             // Crouched in the meadow, looking just below the horizon — where the plants are.
+        terra.place_camera(53.10, -9.45, 0.4, 0.0, -0.10);
+        // A few frames: the segment mesh and the flora both build on the frame that needs them.
+        for _ in 0..4 {
+            terra.render().expect("a frame");
+        }
+
+        assert!(
+            terra.flora_count() > 0,
+            "no plants resolved at Galway at all"
+        );
+
+        let with_plants = terra
+            .frame_pixels()
+            .expect("an offscreen frame is readable");
+
+        // ★ THE NEGATIVE CONTROL: the identical frame with the plants not drawn. Same camera, same
+        // sun, same ground, same everything — so any pixel that differs differs BECAUSE of a plant.
+        terra.set_draw_flora(false);
+        for _ in 0..2 {
+            terra.render().expect("a control frame");
+        }
+        let without = terra.frame_pixels().expect("the control frame is readable");
+
+        let changed = |y0: u32, y1: u32| -> f64 {
+            let mut n = 0u32;
+            let mut d = 0u32;
+            for y in y0..y1 {
+                for x in 0..W {
+                    let i = ((y * W + x) * 4) as usize;
+                    let diff = (0..3)
+                        .map(|c| (with_plants[i + c] as i32 - without[i + c] as i32).abs())
+                        .max()
+                        .unwrap_or(0);
+                    if diff > 8 {
+                        d += 1;
+                    }
+                    n += 1;
+                }
+            }
+            d as f64 / n.max(1) as f64
+        };
+        let near = changed(H / 2, H); // the ground half of the frame
+        let sky = changed(0, H / 4); // where no plant can be, so it must be ~0
+        println!(
+            "galway: sun {:.1}° up · {} plants · plants changed {:.0}% of the ground half and {:.1}% of the sky",
+            terra.sun_elevation_deg(53.10, -9.45),
+            terra.flora_count(),
+            near * 100.0,
+            sky * 100.0
+        );
+        assert!(
+            near > 0.20,
+            "drawing {} plants changed only {:.1}% of the ground half of the frame — they are \
+             resolved and are not reaching the picture. THAT IS docs/46 row 50, and it cost nine \
+             deploy-and-photograph cycles to see from the outside.",
+            terra.flora_count(),
+            near * 100.0
+        );
+        assert!(
+            sky < 0.02,
+            "the plants changed {:.1}% of the SKY — the control is not controlling for what it thinks",
+            sky * 100.0
+        );
+    }
+
+    /// ★★★ **THE IMPACT MEETS SOMETHING** — the exact sentence docs/46 row 57 said was false.
+    ///
+    /// The chain, end to end, natively: a swarm is released, its fragments fly, one ARRIVES, the
+    /// arrival's energy is debited through the plants standing where it lands, what broke is remembered
+    /// as a divergence, and the next frame does not draw it. Every link existed before today and none
+    /// of them were joined.
+    ///
+    /// This asserts on the MODEL — how many plants the impact broke and how many divergences are
+    /// remembered — rather than on pixels, because that is what the row is about. The picture is the
+    /// rig's job.
+    ///
+    /// `#[ignore]`: needs a GPU.
+    #[test]
+    #[ignore]
+    fn a_shot_breaks_the_grass_it_lands_in() {
+        let (json, lm, ev, lc) = shipped_earth();
+        let mut terra = pollster::block_on(app::Terra::headless(320, 200)).expect("headless Terra");
+        terra
+            .load_world(
+                &json,
+                &lm.data,
+                lm.w as u32,
+                lm.h as u32,
+                &ev.data,
+                ev.w as u32,
+                ev.h as u32,
+                &lc.data,
+                lc.w as u32,
+                lc.h as u32,
+            )
+            .expect("the shipped Earth loads");
+        terra.set_alt_bounds(0.05, 8.0e10);
+        terra.set_epoch_sun_over_lon(-9.45);
+        terra.place_camera(53.10, -9.45, 1.5, 0.0, -0.10);
+        for _ in 0..4 {
+            terra.render().expect("a frame");
+        }
+        let before = terra.flora_count();
+        assert!(before > 0, "there is a meadow to hit");
+        assert_eq!(
+            terra.flora_damage_remembered(),
+            0,
+            "and nothing has happened to it yet"
+        );
+
+        // ★ A CANNON, not a meteor, and the reason is measured: a swarm is released 500 km up and
+        // needs about a minute of flight, while this headless loop advances on WALL-CLOCK dt and covers
+        // roughly two milliseconds a frame — 4,000 frames is eight seconds, so nothing ever arrived. A
+        // 24-pounder at 20° lands in a few seconds and travels the identical `flight::Flight` path to
+        // the identical `flight::Arrival`. The chain under test is the same; only the flight is shorter.
+        terra.emplace_cannon(0.0);
+        // Nearly flat, so the shot is down in ~2 s of flight rather than the ~31 s a 20° arc
+        // takes: this loop advances on wall-clock dt and covers about a second per thousand frames.
+        let muzzle = terra.fire_cannon(0.0, 1.0);
+        assert!(muzzle > 100.0, "the gun fired: {muzzle:.0} m/s");
+        let mut landed = false;
+        for _ in 0..8000 {
+            terra.render().expect("a frame");
+            if terra.flora_damage_remembered() > 0 {
+                landed = true;
+                break;
+            }
+        }
+        assert!(
+            landed,
+            "nothing ever arrived — {} still in flight",
+            terra.flight_count()
+        );
+        let remembered = terra.flora_damage_remembered();
+        println!(
+            "round shot: {remembered} plants remembered as changed; {before} were standing in the \
+             camera's own view when it fired"
+        );
+        assert!(
+            remembered > 0,
+            "the impact must break something it lands in"
+        );
+
+        // ★ THE TWO COUNTS ARE DIFFERENT POPULATIONS, and comparing them is a mistake this test made
+        // first time round. `flora_count` is what the RENDERER resolved near the camera; the shot lands
+        // hundreds of metres away and meets the plants inside ITS OWN footprint, which the engine's
+        // crater law sizes. So `remembered` may exceed `before` without anything being wrong — and
+        // asserting otherwise measured the camera instead of the impact.
+        //
+        // What IS worth pinning is the scalability law: an untouched meadow costs NOTHING (asserted
+        // above, before the gun fired) and only what an impact actually reached is paid for. The
+        // footprint's own scan is bounded, so this is bounded with it.
+        assert!(
+            remembered <= 4_000,
+            "one shot must not make a continent individual: {remembered} remembered"
         );
     }
 }

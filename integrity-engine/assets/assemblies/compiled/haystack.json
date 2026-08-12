@@ -1,0 +1,31 @@
+{
+  "id": "haystack",
+  "name": "Haystack",
+  "parts": [],
+  "contains": [
+    {
+      "of": "grass-blade-dry",
+      "count": 1904883,
+      "arrangement": {
+        "kind": "pile",
+        "within": {
+          "kind": "cylinder",
+          "r": 1.5,
+          "length": 3.0
+        }
+      }
+    }
+  ],
+  "connections": [],
+  "notes": "A loose stack of dry grass — **gravity and nothing else**. Robin, 2026-08-11: *\"A hay bale is tighter packed than a loose pile of straw (a haystack) in real life… in a hay stack it's all gravity.\"*\n\nThat distinction is the whole reason this file exists separately from `hay-bale.json`, and it was a real modelling error to have had one object called `haystack-bale` carrying a BALE's density with no bands on it.\n\nThe count is derived from the measured bulk density of LOOSE hay, 40 kg/m3 over straw's own 1400 kg/m3 cell wall: packing 0.0286.\n\n★ THIS IS THE ONE `pile::settle` SHOULD REPRODUCE, because it is the one that forms under gravity alone. It does not yet — 400 settled blades come to 3 kg/m3 against this 40 (docs/46 row 60), because a capsule cannot bend or tangle. When that closes, this packing stops being read from a table and becomes what the heap does.",
+  "derived": {
+    "mass_kg": 848.2299227892,
+    "envelope_volume_m3": 21.205750411731103,
+    "matter_volume_m3": 0.6058785162779999,
+    "centre_of_mass_m": [
+      0.0,
+      0.0,
+      0.0
+    ]
+  }
+}
