@@ -622,6 +622,49 @@ impl Assembly {
         self.parts.iter().map(Part::reach_m).fold(0.0, f64::max)
     }
 
+    /// ★★★ **THIS ASSEMBLY AS MATTER, ONE LEVEL FLAT** (docs/71) — its own parts, plus the parts of
+    /// everything it contains, carried into this frame.
+    ///
+    /// One answer, three consumers: the MESH draws it, `crown_m2` measures its footprint, and `meet`
+    /// spends energy on it. Before containment those three walked `parts` directly; if they each
+    /// learned to see through a `Contained` separately there would be three chances to disagree about
+    /// what an assembly is made of, which is the Law II failure this codebase keeps recording.
+    ///
+    /// **`At` members RESOLVE** — a clump really is its blades, and each one is carried here with its
+    /// own place and attitude. **`Pile` members SUMMARISE** — 304,781 blades become the one part their
+    /// rule implies (`Contained::as_part`), because that is what a pile is when nobody is counting.
+    /// The choice is the arrangement's, not the caller's.
+    pub fn resolved_parts(&self) -> Vec<Part> {
+        let mut out = self.parts.clone();
+        for c in &self.contains {
+            let Some(member) = compiled::by_id(&c.of) else {
+                continue;
+            };
+            match &c.arrangement {
+                Arrangement::At { at_m, along } => {
+                    let up = glam::DVec3::from(*along).normalize_or(glam::DVec3::Y);
+                    let rot = glam::DQuat::from_rotation_arc(glam::DVec3::Y, up);
+                    let base = glam::DVec3::from(*at_m);
+                    for p in member.resolved_parts() {
+                        let at = base + rot * glam::DVec3::from(p.at_m);
+                        let dir = rot * glam::DVec3::from(p.along).normalize_or(glam::DVec3::X);
+                        out.push(Part {
+                            at_m: [at.x, at.y, at.z],
+                            along: [dir.x, dir.y, dir.z],
+                            ..p
+                        });
+                    }
+                }
+                Arrangement::Pile { .. } => {
+                    if let Some(p) = c.as_part(&member) {
+                        out.push(p);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// The space this assembly takes up, m³ — its own parts plus everything it contains. Void
     /// included; this is the ENVELOPE, which is what a packing fraction divides into.
     pub fn envelope_volume_m3(&self) -> f64 {
@@ -676,7 +719,7 @@ impl Assembly {
     /// Robin's rule for where an assembly ends, asked about the ground instead of about space.
     pub fn crown_m2(&self, material: &str) -> f64 {
         let r = self
-            .parts
+            .resolved_parts()
             .iter()
             .filter(|p| p.material == material)
             .map(Part::crown_radius_m)
@@ -875,7 +918,7 @@ impl Assembly {
             vertices: Vec::new(),
             indices: Vec::new(),
         };
-        for (pi, p) in self.parts.iter().enumerate() {
+        for (pi, p) in self.resolved_parts().iter().enumerate() {
             if integrity.and_then(|v| v.get(pi)).is_some_and(|&i| i <= 0.0) {
                 continue;
             }
@@ -1016,14 +1059,7 @@ impl Assembly {
         // ★ The summary and the resolved answer must AGREE (docs/71 §3), which is what
         // `a_pile_answers_the_same_summarised_or_resolved` measures. If they ever diverge the SUMMARY
         // is what is wrong.
-        let mut all_parts: Vec<Part> = self.parts.clone();
-        for c in &self.contains {
-            if let Some(member) = compiled::by_id(&c.of) {
-                if let Some(p) = c.as_part(&member) {
-                    all_parts.push(p);
-                }
-            }
-        }
+        let all_parts: Vec<Part> = self.resolved_parts();
         // Parts on the path, nearest first — the order energy actually meets them in.
         let mut on_path: Vec<(f64, usize)> = Vec::new();
         for (i, p) in all_parts.iter().enumerate() {
@@ -2031,8 +2067,11 @@ mod plant_tests {
             ("grass-tuft", "10", "grassland"),
         ] {
             let a = shipped::load(plant);
-            let foliage: Vec<&str> = a
-                .parts
+            // `resolved_parts`, not `parts`: a clump is 32 blade ASSEMBLIES now (docs/71), so what a
+            // plant is MADE OF is one level down. The invariant is unchanged — it still has to be
+            // made of the foliage its land-cover class contributes to the ground's colour.
+            let resolved = a.resolved_parts();
+            let foliage: Vec<&str> = resolved
                 .iter()
                 .map(|p| p.material.as_str())
                 .filter(|m| m.contains("foliage") || *m == "grass")
@@ -2211,18 +2250,22 @@ mod placement_tests {
     fn a_grass_clump_weighs_exactly_what_the_cylinder_it_replaced_weighed() {
         let mats = crate::materials::load();
         let clump = compiled::parse(compiled::GRASS_TUFT);
-        assert_eq!(clump.parts.len(), 32, "a clump is blades, not one column");
+        // 32 blade ASSEMBLIES (docs/71), which `resolved_parts` flattens back to 32 pieces of matter.
+        assert!(clump.parts.is_empty(), "a clump has no matter of its own");
+        assert_eq!(clump.contains.len(), 32, "it IS its blades");
+        let resolved = clump.resolved_parts();
+        assert_eq!(resolved.len(), 32, "a clump is blades, not one column");
 
         // What the single cylinder held: envelope × packing.
         let cylinder_matter = std::f64::consts::PI * 0.06f64.powi(2) * 0.35 * 0.002_571_43;
-        let got: f64 = clump.parts.iter().map(Part::matter_volume_m3).sum();
+        let got: f64 = resolved.iter().map(Part::matter_volume_m3).sum();
         assert!(
             (got - cylinder_matter).abs() / cylinder_matter < 1e-4,
             "the clump must be the same matter: {got:.6e} m³ vs the cylinder's {cylinder_matter:.6e}"
         );
 
         // And every blade is solid: with the strands resolved there is no arrangement left to summarise.
-        assert!(clump.parts.iter().all(|p| p.packing == 1.0));
+        assert!(resolved.iter().all(|p| p.packing == 1.0));
 
         // The crown it reports is the crown it was defined with — the leaf-area derivation divided by
         // this same radius, so the two cannot be allowed to drift apart.
@@ -2636,10 +2679,10 @@ mod meet_tests {
             fully >= 5,
             "50 mJ should get through several blades, got {fully}"
         );
+        let blades = clump.resolved_parts().len();
         assert!(
-            fully < clump.parts.len(),
-            "but not the whole clump — {fully} of {}",
-            clump.parts.len()
+            fully < blades,
+            "but not the whole clump — {fully} of {blades}"
         );
         assert!(partly <= 1, "at most one blade is caught mid-break");
 
@@ -2747,7 +2790,13 @@ mod composition_tests {
     #[test]
     fn composition_leaves_every_existing_assembly_alone() {
         let mats = crate::materials::load();
-        for id in ["naval-24pdr-gun", "broadleaf-tree-oak", "grass-tuft"] {
+        // ★ `grass-tuft` is NOT in this list any more, and that is the point: it moved to contained
+        // blade assemblies on purpose (docs/71). Everything that did NOT move must be untouched.
+        for id in [
+            "naval-24pdr-gun",
+            "broadleaf-tree-oak",
+            "conifer-tree-spruce",
+        ] {
             let a = compiled::by_id(id).expect(id);
             assert!(a.contains.is_empty(), "{id} contains nothing yet");
             assert!(
