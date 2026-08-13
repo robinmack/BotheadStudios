@@ -214,6 +214,15 @@ pub struct SurfaceSampler<'a> {
     /// the declared relief exaggeration.
     exag: f64,
     water_idx: usize,
+    /// ★★ **WHAT HAS BEEN DUG OUT OF IT** (docs/46 row 54) — and `r_disp`, because a sink is a
+    /// fraction of the body's radius and an offset is in display units.
+    ///
+    /// This is the whole of the crater as far as any surface is concerned. It lives here rather than in
+    /// a shader so that the ENGINE's answer for "how high is the ground at this direction" has the bowl
+    /// in it — which is what lets something stand in a crater instead of floating at the pristine
+    /// radius (Robin: *"the renderer should be blissfully free of these calculations"*).
+    excavation: crate::damage::Excavation,
+    r_disp: f64,
     /// **When this surface is being drawn**, Unix seconds — so what grows here can answer for the
     /// season it is actually in. `None` means "no clock supplied": every material answers with its
     /// summer self, which is what a body with no orbit should do.
@@ -225,6 +234,14 @@ impl<'a> SurfaceSampler<'a> {
     /// Without it every material answers with its summer self.
     pub fn at_epoch(mut self, unix_s: f64) -> Self {
         self.epoch_s = Some(unix_s);
+        self
+    }
+
+    /// **Tell this surface what has been dug out of it** (docs/46 row 54). `Excavation::NONE` is the
+    /// pristine case and costs nothing, so an unstruck body needs no branch anywhere.
+    pub fn excavated_by(mut self, exc: crate::damage::Excavation, r_disp: f64) -> Self {
+        self.excavation = exc;
+        self.r_disp = r_disp;
         self
     }
 
@@ -241,6 +258,8 @@ impl<'a> SurfaceSampler<'a> {
     ) -> SurfaceSampler<'a> {
         let water_idx = crate::materials::index_of(mats, "water");
         SurfaceSampler {
+            excavation: crate::damage::Excavation::NONE,
+            r_disp: 0.0,
             epoch_s: None,
             mats,
             biome_mix,
@@ -300,6 +319,20 @@ impl<'a> SurfaceSampler<'a> {
     }
 
     pub fn sample(&self, dir: DVec3) -> SurfaceSample {
+        // ★★ **THE BOWL, SUBTRACTED HERE** (docs/46 row 54). Every surface mesh in the engine is built
+        // through this sampler, so stating the excavation once puts it in the globe, the corridor cap
+        // and Terra's segment alike — and, because this is the MODEL's answer, in anything that asks
+        // where the ground is rather than only in what is drawn. `Excavation::NONE` costs nothing.
+        let sunk = self.excavation.sink_at(dir) * self.r_disp;
+        let s = self.sample_pristine(dir);
+        SurfaceSample {
+            offset: s.offset - sunk,
+            ..s
+        }
+    }
+
+    /// The surface as it was before anything struck it.
+    fn sample_pristine(&self, dir: DVec3) -> SurfaceSample {
         let (lat, lon) = crate::geo::lat_lon_from_dir(dir);
         // Fall back to the built-in coarse landmask only when a body ships no raster — never to
         // "re-invent" a surface a scene made up.
@@ -391,9 +424,12 @@ pub fn build_body_globe(
     elevation: Option<&crate::terra::raster::Raster>,
     landcover: Option<&crate::terra::raster::Raster>,
     elev_range: [f64; 2],
+    // What has been dug out of it (docs/46 row 54) — `Excavation::NONE` for a pristine body.
+    excavation: crate::damage::Excavation,
 ) -> Mesh {
     let sampler = SurfaceSampler::new(
         mats, biome_mix, landmask, elevation, landcover, elev_range, ds, exag,
-    );
+    )
+    .excavated_by(excavation, r_disp);
     build_globe(res, r_disp, |dir| sampler.sample(dir))
 }

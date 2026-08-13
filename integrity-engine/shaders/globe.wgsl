@@ -19,11 +19,11 @@ struct U {
     emissive  : vec4<f32>,  // xyz = triplanar anchor (the eye mod the 8 m texture tile, display units)
     atm       : vec4<f32>,  // xyz = Rayleigh optical depth per band (docs/26), w = sun gain
     glow      : vec4<f32>,  // rgb = Planck colour of the surface's own temperature, w = its radiance gain
-    // THE CRATER (docs/39 surface hook, docs/46 row 18). xyz = bowl axis (unit, MODEL space), w = angular
-    // radius (rad). `crater2.x` = depth as a fraction of the surface radius, measured from excavated mass.
-    // w == 0 ⇒ no crater and the vertex is untouched, so an unstruck globe costs nothing.
-    crater    : vec4<f32>,
-    crater2   : vec4<f32>,
+    // KEPT AS PADDING, deliberately: these two carried the crater the vertex shader used to apply
+    // (docs/46 row 54), and `SKYLIGHT_UNIFORM_OFFSET` names a byte offset PAST them. Removing them
+    // would silently move every field below and nothing would say so.
+    _was_crater  : vec4<f32>,
+    _was_crater2 : vec4<f32>,
     // ★ WHERE THE EYE STANDS IN THIS BODY'S AIR (docs/66): xyz = its local zenith from the body's
     // centre (unit), w = its altitude above SEA LEVEL in metres. Formed in f64 on the CPU — a camera at
     // head height is 3e-7 of Earth's radius, and reconstructing that from two f32 radii returns noise.
@@ -60,29 +60,16 @@ struct VOut {
     @location(4) rough      : f32,
 };
 
-// The bowl. A simple crater's profile is a PARABOLOID, so the vertex sinks by depth·(1−(θ/θr)²) inside the
-// opening angle and is untouched outside it. This is the render REPORTING an excavation the sim performed —
-// the depth is measured from the mass actually lifted off the surface (Law VI: physics drives the render).
-// Before this, a cap impact drew the target as a flawless sphere with coherence pinned to 1.0, so a crater
-// could never appear however real it was — the bug Robin reported repeatedly (docs/46 row 18).
-fn crater_sink(dir : vec3<f32>) -> f32 {
-    let theta_r = u.crater.w;
-    if (theta_r <= 0.0) { return 0.0; }
-    let c = clamp(dot(normalize(dir), normalize(u.crater.xyz)), -1.0, 1.0);
-    let theta = acos(c);
-    if (theta >= theta_r) { return 0.0; }
-    let t = theta / theta_r;
-    return u.crater2.x * (1.0 - t * t);
-}
-
 @vertex
 fn vs_main(@location(0) pos : vec3<f32>, @location(1) nrm : vec3<f32>, @location(2) col : vec3<f32>,
            @location(3) mat : u32, @location(4) rough : f32) -> VOut {
     var o : VOut;
-    // Sink the surface into the bowl. `pos` is a unit-sphere position (the model matrix carries the real
-    // radius and the oblateness), so a fractional depth scales the vertex straight along its own radius.
-    let sunk = pos * (1.0 - crater_sink(pos));
-    let world = u.model * vec4<f32>(sunk, 1.0);
+    // ★★★ THE VERTEX IS DRAWN WHERE THE ENGINE PUT IT (docs/46 row 54). A `crater_sink` function stood
+    // here and deformed the surface by a paraboloid excavation profile — real physics, on the wrong
+    // side of the seam, and the engine's own ground answer had no crater in it as a result. The bowl is
+    // now subtracted by `terra::globe_mesh::SurfaceSampler`, so the surface arrives already excavated
+    // and this shader states nothing about what happened to it.
+    let world = u.model * vec4<f32>(pos, 1.0);
     o.clip = u.view_proj * world;
     o.wpos = world.xyz;
     o.normal = (u.model * vec4<f32>(nrm, 0.0)).xyz;

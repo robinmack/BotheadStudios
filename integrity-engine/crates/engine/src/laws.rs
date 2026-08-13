@@ -1858,17 +1858,27 @@ mod separation_tests {
     /// ★ RATCHET, same rules as above: the debt is named and cannot grow.
     #[test]
     fn a_render_shader_does_not_move_matter() {
-        // (shader, function that computes a position the model does not know about)
-        const DEBT: &[(&str, &str)] = &[("globe.wgsl", "crater_sink")];
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../shaders");
-        // Shaders whose entry points are `cs_*`: the engine on the GPU, out of scope for this gate.
-        const COMPUTE: &[&str] = &[
-            "sph_step.wgsl",
-            "particle_step.wgsl",
-            "bh_gravity.wgsl",
-            "gpu_gravity.wgsl",
+        // ★★★ **A LIST OF WHAT IS ALLOWED CANNOT CATCH WHAT IS ADDED.** The first version of this gate
+        // compared a DEBT list against the tree, which worked while the list had an entry in it — and
+        // the moment `crater_sink` was removed and the list went empty, re-adding a matter-moving
+        // function PASSED, because empty equalled empty. Caught by re-running the mutation after
+        // closing the debt, which is the only reason it is not still there.
+        //
+        // So the gate scans for the CONCEPT instead: a render shader must not define a function whose
+        // name says it moves, deforms or excavates matter. Names are a proxy, and an honest one — the
+        // failure mode this guards is somebody writing the physics where it is convenient, and they
+        // will call it what it is.
+        const MATTER_VERBS: &[&str] = &[
+            "crater", "sink", "displace", "excavate", "deform", "erode", "subside", "bulge",
+            "settle", "collapse",
         ];
-        let mut render_shaders = Vec::new();
+        // Declared exceptions, with why. EMPTY as of 2026-08-12: `globe.wgsl::crater_sink` was the last
+        // one and the excavation now comes from `terra::globe_mesh::SurfaceSampler` (docs/46 row 54).
+        const ALLOWED: &[(&str, &str)] = &[];
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../shaders");
+        let mut offenders: Vec<String> = Vec::new();
+        let mut scanned = 0usize;
         for e in std::fs::read_dir(&root).expect("shaders/ exists").flatten() {
             let p = e.path();
             if p.extension().is_none_or(|x| x != "wgsl") {
@@ -1878,33 +1888,40 @@ mod separation_tests {
             let Ok(text) = std::fs::read_to_string(&p) else {
                 continue;
             };
-            if COMPUTE.contains(&name.as_str()) || text.contains("@compute") {
+            // Compute shaders are the ENGINE running on the GPU — a processor, not a renderer — so
+            // they are out of scope. `atmos.wgsl` is light transport, which IS the renderer's realm.
+            if text.contains("@compute") {
                 continue;
             }
-            render_shaders.push((name, text));
-        }
-        assert!(
-            !render_shaders.is_empty(),
-            "no render shaders found — the gate is pointing at the wrong directory."
-        );
-        let mut found: Vec<(String, String)> = Vec::new();
-        for (name, text) in &render_shaders {
-            for (shader, func) in DEBT {
-                if name == shader && text.contains(&format!("fn {func}")) {
-                    found.push((name.clone(), func.to_string()));
+            scanned += 1;
+            for line in text.lines() {
+                let t = line.trim_start();
+                // Only DEFINITIONS, so a comment explaining what used to be here does not trip it.
+                let Some(rest) = t.strip_prefix("fn ") else {
+                    continue;
+                };
+                let fname = rest.split('(').next().unwrap_or("").trim().to_lowercase();
+                if MATTER_VERBS.iter().any(|v| fname.contains(v))
+                    && !ALLOWED.iter().any(|(s, f)| *s == name && *f == fname)
+                {
+                    offenders.push(format!("{name}::{fname}"));
                 }
             }
         }
-        let want: Vec<(String, String)> = DEBT
-            .iter()
-            .map(|(s, f)| (s.to_string(), f.to_string()))
-            .collect();
-        assert_eq!(
-            found, want,
-            "\nThe declared list of matter-moving render shaders no longer matches the tree.\n\
-             If a shader gained one: it belongs in the model — the engine states the surface, the \
-             renderer draws it (docs/46 row 54).\n\
-             If `crater_sink` is gone: excellent, delete its DEBT line.\n"
+        assert!(
+            scanned > 0,
+            "no render shaders scanned — this gate is pointing at the wrong directory, which is worse \
+             than having no gate. Verify a gate by making it fail."
+        );
+        assert!(
+            offenders.is_empty(),
+            "\nThese RENDER shaders define functions that move matter: {offenders:?}\n\
+             The engine states where matter is; the renderer draws it (docs/68 §1b, docs/46 row 54). \
+             `globe.wgsl::crater_sink` was the last of these — the excavation now comes from \
+             `terra::globe_mesh::SurfaceSampler`, so the surface arrives already dug and the vertex \
+             shader states nothing about what happened to it.\n\
+             If this is genuinely light and not matter, rename it so; if it is matter, it belongs in \
+             the model.\n"
         );
     }
 }
