@@ -5893,6 +5893,16 @@ mod app {
     /// budget.
     const TERRA_OCTAVE_BUDGET: f64 = 16.0;
 
+    /// ★★ **THE FINEST GROUND THE MODEL COMMITS TO** (docs/46 row 53) — one centimetre.
+    ///
+    /// The ground's height at a coordinate is a fact about the world, so it cannot be band-limited by
+    /// whatever mesh happens to be drawing it; it needs a length of its OWN. A centimetre is under the
+    /// smallest thing that stands on it (a 0.35 m grass blade, rooted in a 15 mm crown), and the
+    /// relief series converges — amplitude goes as wavelength, so truncating here leaves at most
+    /// ~2.5 mm on the table. That bound is the reason this number is defensible rather than chosen:
+    /// halving it changes the answer by less than the thing being placed.
+    const GROUND_DETAIL_FLOOR_M: f64 = 0.01;
+
     /// (fixed topology) is built once. **One resolution for every scene's SEGMENT** — Terra's descent and
     /// the space band's corridor build the same surface, by the same builder, at the same density
     /// (docs/63). Rings out from under the eye, spokes around it.
@@ -7862,6 +7872,91 @@ mod app {
             })
         }
 
+        /// ★★★ **HOW HIGH IS THE GROUND HERE — THE ONE ANSWER** (docs/46 row 53, docs/67).
+        ///
+        /// Robin predicted this while the flora defect was still being hunted: *"the model needs to own
+        /// ground level at all coordinates and be able to place assemblies there."* It did not. The
+        /// segment mesh displaced its vertices by measured elevation **plus generated sub-raster
+        /// relief**, while `ground_disp_at` — which places every plant, stands the cannon and resolves
+        /// the camera shell — returned the measured term alone. MEASURED at Galway: **+1.19 m** at the
+        /// centre and **12.3 m worst** over the patch before the elevation tiles land. The surface you
+        /// could SEE and the surface you could STAND ON were different surfaces.
+        ///
+        /// ★★ **AND THE MESH'S OWN RESOLUTION WAS IN THE ANSWER.** The generated term was band-limited
+        /// to the mesh's local CELL, so the ground's height depended on how finely it happened to be
+        /// drawn — Law IV inverted, and the reason this is one function with a `finest_m` parameter
+        /// rather than two functions that agree by inspection:
+        ///
+        /// - **The MODEL asks at `GROUND_DETAIL_FLOOR_M`** — a physical length, not a viewport's. That
+        ///   answer is what matter stands on, and it does not change when the camera moves.
+        /// - **The RENDERER asks at its own cell**, which is a band-limited version of the same
+        ///   function and converges to it as the mesh refines. Legitimate under docs/68 §1b: it
+        ///   approximates HOW the ground is shown, never WHAT it is.
+        ///
+        /// An associated function taking its inputs, for the same reason `ground_elev_m` is: the
+        /// segment builder holds pieces of `self` across a mutable borrow and must call THE SAME CODE.
+        #[allow(clippy::too_many_arguments)]
+        fn ground_relief_m(
+            mats: &[materials::Material],
+            detail: &crate::resolution::ResolutionController,
+            octave_budget: f64,
+            material_idx: usize,
+            water_idx: usize,
+            planet_radius: f64,
+            lat: f64,
+            lon: f64,
+            base_feature_m: f64,
+            local_slope: f64,
+            finest_m: f64,
+        ) -> f64 {
+            if material_idx == water_idx || finest_m <= 0.0 || base_feature_m <= 0.0 {
+                return 0.0; // the sea is flat, and there is nothing finer than nothing
+            }
+            let m = &mats[material_idx];
+            let mu = m.friction_coefficient as f64;
+            if mu <= 0.0 {
+                return 0.0;
+            }
+            let h_crit =
+                crate::granular::critical_bank_height(m.fracture_strength, m.density, 9.81) as f64;
+            // Octaves down to `finest_m`, bounded by what the caller can carry and by the budget.
+            let octaves = crate::surface_detail::detail_octaves(detail, finest_m, base_feature_m)
+                .min((base_feature_m / finest_m).max(1.0).log2())
+                .min(octave_budget);
+            if octaves <= 0.0 {
+                return 0.0;
+            }
+            let frac = (local_slope / mu).clamp(0.0, 1.0);
+            let px = lon.to_radians() * planet_radius * lat.to_radians().cos();
+            let pz = lat.to_radians() * planet_radius;
+            crate::surface_detail::micro_relief_m(px, pz, base_feature_m, octaves, mu, h_crit, frac)
+        }
+
+        /// **How steep the ground is at a point**, as a gradient magnitude — the input the relief law
+        /// scales its amplitude by. Sampled from the finest datum covering the point, over a baseline
+        /// of that datum's own size, so the ratio means what its name says.
+        ///
+        /// ★ Per-POINT, not per-segment. The mesh took one slope at the camera and applied it across
+        /// the whole patch, which is fine for a picture and wrong for an answer the model owns: the
+        /// ground's roughness at a coordinate cannot depend on where the camera happens to be.
+        fn local_slope_at(&self, lat: f64, lon: f64) -> f64 {
+            let (lo, hi) = (self.elev_range[0], self.elev_range[1]);
+            let step = self.raster_step_m();
+            let e = |la: f64, lo_: f64| {
+                Self::ground_elev_m(self.elevation.as_ref(), &self.tiles, lo, hi, step, la, lo_).0
+            };
+            let run = self
+                .tiles
+                .pixel_ground_m(lat)
+                .map_or(step, |px| px.max(1.0))
+                .max(1.0);
+            let dlat = run / 111_320.0;
+            let dlon = dlat / lat.to_radians().cos().abs().max(1e-6);
+            let dn = (e(lat + dlat, lon) - e(lat - dlat, lon)) / (2.0 * run);
+            let de = (e(lat, lon + dlon) - e(lat, lon - dlon)) / (2.0 * run);
+            (dn * dn + de * de).sqrt()
+        }
+
         /// [`ground_elev_m`] for callers that hold a plain `&self`, in DISPLAY units above the
         /// sea-level sphere (so relief exaggeration is applied, as the mesh applies it).
         fn ground_disp_at(&self, lat: f64, lon: f64) -> f64 {
@@ -7873,7 +7968,7 @@ mod app {
             if !is_land {
                 return 0.0; // the sea surface is at sea level, and it is flat
             }
-            let (e, _) = Self::ground_elev_m(
+            let (e, base_feature_m) = Self::ground_elev_m(
                 self.elevation.as_ref(),
                 &self.tiles,
                 self.elev_range[0],
@@ -7882,7 +7977,32 @@ mod app {
                 lat,
                 lon,
             );
-            e * display_scale() * self.relief_exag
+            // ★ **PLUS THE GROUND'S OWN SUB-RASTER RELIEF** (row 53). Without this the mesh drew a
+            // surface nobody could stand on: measured +1.19 m at Galway's centre and 12.3 m worst over
+            // the patch. Asked at the MODEL's floor, so the answer is the same however finely the
+            // renderer chooses to draw it.
+            let water_idx = materials::index_of(&self.mats, "water");
+            let sampler_material = self
+                .landcover
+                .as_ref()
+                .map(|r| r.biome_at(lat, lon) as usize)
+                .and_then(|class| self.biome_mix.get(class))
+                .and_then(|mix| mix.first().map(|&(m, _)| m))
+                .unwrap_or(water_idx);
+            let relief = Self::ground_relief_m(
+                &self.mats,
+                &self.detail,
+                self.cap_octave_budget,
+                sampler_material,
+                water_idx,
+                self.planet_radius,
+                lat,
+                lon,
+                base_feature_m,
+                self.local_slope_at(lat, lon),
+                GROUND_DETAIL_FLOOR_M,
+            );
+            (e + relief) * display_scale() * self.relief_exag
         }
 
         /// **The camera is MATTER** — a tiny transparent shell obeying the SAME contact law as a grain
@@ -8433,44 +8553,47 @@ mod app {
                     // sub-raster relief. Both then have their APPEARANCE integrated, because a coastal
                     // cell really is part land and part sea, and point-sampling it as one or the other
                     // is the jagged-coastline bug the integral exists to end.
-                    if mi != water_idx {
-                        let m = &mats[mi];
-                        let mu = m.friction_coefficient as f64;
-                        let h_crit = crate::granular::critical_bank_height(
-                            m.fracture_strength,
-                            m.density,
-                            9.81,
-                        ) as f64;
-                        let octaves =
-                            crate::surface_detail::detail_octaves(detail, cell_m, base_feature_m)
-                                .min((base_feature_m / cell_m).max(1.0).log2())
-                                .min(octave_budget);
-                        let relief = if octaves > 0.0 {
-                            let frac = if mu > 0.0 {
-                                (tier_slope / mu).clamp(0.0, 1.0)
-                            } else {
-                                0.0
-                            };
-                            let px = lon.to_radians() * planet_radius * lat.to_radians().cos();
-                            let pz = lat.to_radians() * planet_radius;
-                            crate::surface_detail::micro_relief_m(
-                                px,
-                                pz,
-                                base_feature_m,
-                                octaves,
-                                mu,
-                                h_crit,
-                                frac,
-                            )
-                        } else {
-                            0.0
-                        };
-                        off += relief * ds * exag;
-                        if a_ang < relief_probe.get().0 {
-                            relief_probe.set((a_ang, elev_m, relief, cell_m));
-                        }
-                        relief_absmax.set(relief_absmax.get().max(relief.abs()));
+                    // ★★ **THE SAME FUNCTION THE MODEL ANSWERS WITH** (docs/46 row 53), band-limited
+                    // to this vertex's own cell. Not a second copy of the relief maths that happens to
+                    // agree: the mesh is a smoothed version of the one answer, and it converges to it
+                    // as the mesh refines. What used to be here computed the octaves, the material's
+                    // slope law and the amplitude itself, beside a `ground_disp_at` that did none of
+                    // it — which is how the drawn surface and the reachable one came to differ by
+                    // 12.3 m.
+                    let relief = Self::ground_relief_m(
+                        mats,
+                        detail,
+                        octave_budget,
+                        mi,
+                        water_idx,
+                        planet_radius,
+                        lat,
+                        lon,
+                        base_feature_m,
+                        tier_slope,
+                        cell_m,
+                    );
+                    off += relief * ds * exag;
+                    if a_ang < relief_probe.get().0 {
+                        // ★ The MODEL's answer at the same point — the same function at its own floor
+                        // rather than this vertex's cell. The difference between the two is exactly the
+                        // band limit the renderer chose, and nothing else (docs/46 row 53).
+                        let model = Self::ground_relief_m(
+                            mats,
+                            detail,
+                            octave_budget,
+                            mi,
+                            water_idx,
+                            planet_radius,
+                            lat,
+                            lon,
+                            base_feature_m,
+                            tier_slope,
+                            GROUND_DETAIL_FLOOR_M,
+                        );
+                        relief_probe.set((a_ang, elev_m, relief, model));
                     }
+                    relief_absmax.set(relief_absmax.get().max(relief.abs()));
                     // **THE APPEARANCE INTEGRAL** (docs/63). The mesh carries this cell's mean shape;
                     // everything finer than the cell — the material MIXTURE and the slope SPREAD — is
                     // integrated here and carried as colour and roughness. Without it those sixteen
@@ -8538,13 +8661,17 @@ mod app {
                 // the camera shell that rests on it, the cannon — asks `ground_disp_at`, which is the
                 // measured term ALONE. `generated` is therefore exactly how far the drawn surface sits
                 // from where the model believes it is, and `worst` is that over the whole patch.
-                let (_, probe_elev, probe_relief, probe_cell) = relief_probe.get();
+                let (_, probe_elev, probe_relief, probe_model) = relief_probe.get();
+                // ★ The probe that FOUND row 53 now reports its closure: the mesh's generated term and
+                // the model's are one function, so the number to watch is the DISAGREEMENT, which
+                // should be the band-limit alone.
                 log::info!(
-                    "ground: {:.2} m measured {:+.3} m generated (cell {:.3} m) — the model sees only the \
-                     first; worst gap {:.3} m over the patch",
+                    "ground: {:.2} m measured · mesh {:+.3} m · model {:+.3} m · DISAGREEMENT \
+                     {:+.4} m (the band limit alone) · worst generated {:.3} m over the patch",
                     probe_elev,
                     probe_relief,
-                    probe_cell,
+                    probe_model,
+                    probe_relief - probe_model,
                     relief_absmax.get(),
                 );
                 // One rebuild is one unit of work: fold its real cost back into the budget. The side
