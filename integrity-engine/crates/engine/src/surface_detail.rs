@@ -164,6 +164,55 @@ pub fn micro_relief_m(
 mod tests {
     use super::*;
 
+    /// ★★★ **THE BAND LIMIT MUST CONVERGE** (docs/46 row 53) — what makes a renderer's smoothed ground
+    /// an approximation rather than a fudge.
+    ///
+    /// The model owns the ground's height at a fixed physical floor; the mesh asks the SAME function
+    /// with its own cell, which drops every octave finer than that cell. Legitimate under docs/68 §1b
+    /// only if the two converge: a finer mesh must approach the model's answer, not merely differ from
+    /// it by a different amount.
+    ///
+    /// MEASURED live at Galway the day this landed: at a 999 m cell the drawn ground sat 0.31 m from
+    /// the model's, at 32 m it was 2.5 mm, and once the streamed tiles covered it was exactly zero.
+    /// Before the two were one function it was **12.3 m** and did not converge at all, because they
+    /// were different computations.
+    #[test]
+    fn a_coarser_band_limit_approaches_the_full_answer_as_it_refines() {
+        let mats = crate::materials::load();
+        let g = &mats[crate::materials::index_of(&mats, "granite")];
+        let mu = g.friction_coefficient as f64;
+        let h_crit =
+            crate::granular::critical_bank_height(g.fracture_strength, g.density, 9.81) as f64;
+        let base: f64 = 2_000.0; // the finest measured datum here
+        let floor: f64 = 0.01; // what the model commits to
+        let full: f64 = (base / floor).log2();
+        // The model's own answer at a point.
+        let at = |octaves: f64| micro_relief_m(1234.5, -678.9, base, octaves, mu, h_crit, 0.4);
+        let truth = at(full);
+
+        let mut last = f64::INFINITY;
+        println!("  cell (m)   octaves   relief      |error|");
+        for cell in [1000.0f64, 100.0, 10.0, 1.0, 0.1] {
+            let octaves = (base / cell).max(1.0).log2().min(full);
+            let err = (at(octaves) - truth).abs();
+            println!(
+                "  {cell:>8.1}   {octaves:>6.2}   {:>8.4}   {err:.5}",
+                at(octaves)
+            );
+            assert!(
+                err <= last + 1e-12,
+                "refining the band limit must not move AWAY from the model's answer: \
+                 {err:.6} at {cell} m against {last:.6} before it"
+            );
+            last = err;
+        }
+        // And the finest band limit is essentially the answer itself.
+        assert!(
+            last < 0.01,
+            "a 0.1 m cell should be within a centimetre of the full answer, off by {last:.4}"
+        );
+    }
+
     /// **WHY THE GROUND FLATTENS ON DESCENT, part 1 of 2: the amplitude law is scale-INVARIANT below
     /// ~2 km, so zooming in cannot reveal more roughness** (docs/46 row 27).
     ///

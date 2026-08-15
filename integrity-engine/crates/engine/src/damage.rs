@@ -166,6 +166,85 @@ pub fn crater_radius(volume: f64) -> f64 {
     (volume * 3.0 / (2.0 * std::f64::consts::PI)).cbrt()
 }
 
+/// ★★★ **WHAT AN IMPACT TOOK OUT OF A SURFACE** — the bowl, as the engine's own statement of it
+/// (docs/46 row 54).
+///
+/// Robin, 2026-08-09: *"The engine understands craters — radius, energy, impact, velocity. The
+/// renderer should be blissfully free of these calculations and just render the world as best it can,
+/// represent what the assemblies/models are telling it."*
+///
+/// This lived in `globe.wgsl`'s VERTEX shader. Every number in it was honest — the depth is measured
+/// from the mass actually lifted off the surface — but it was on the wrong side of the seam, and the
+/// consequence was concrete rather than stylistic: **the engine's own ground answer had no crater in
+/// it**, so the surface you could see inside a bowl and the surface anything stood on differed by the
+/// whole excavation. A tree in a fresh crater floated at the pristine radius.
+///
+/// A simple crater's profile is a PARABOLOID, which is why this is one expression and not a curve
+/// somebody fitted: material thrown out of a point source lands on a ballistic envelope, and the
+/// cavity it leaves goes as `1 − (θ/θ_r)²` in the opening angle.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Excavation {
+    /// Unit axis from the body's centre through the impact point, in the body's own frame.
+    pub axis: glam::DVec3,
+    /// Angular radius of the bowl on the sphere (rad) — `asin(R_bowl / R_surface)`.
+    pub angular_radius: f64,
+    /// Depth as a fraction of the surface radius, from the excavated mass. Never authored.
+    pub depth_frac: f64,
+}
+
+impl Excavation {
+    /// Nothing has happened here — the case a pristine body is in, at no cost and with no branch at
+    /// the call site.
+    pub const NONE: Excavation = Excavation {
+        axis: glam::DVec3::Y,
+        angular_radius: 0.0,
+        depth_frac: 0.0,
+    };
+
+    /// **How much the surface has sunk in this direction**, as a fraction of the surface radius.
+    /// Zero outside the bowl, and zero everywhere for a body nothing has struck.
+    pub fn sink_at(&self, dir: glam::DVec3) -> f64 {
+        if self.angular_radius <= 0.0 || self.depth_frac <= 0.0 {
+            return 0.0;
+        }
+        let axis = self.axis.normalize_or(glam::DVec3::Y);
+        let d = dir.normalize_or(glam::DVec3::Y);
+        let theta = d.dot(axis).clamp(-1.0, 1.0).acos();
+        if theta >= self.angular_radius {
+            return 0.0;
+        }
+        let t = theta / self.angular_radius;
+        self.depth_frac * (1.0 - t * t)
+    }
+
+    /// The bowl a measured excavation leaves in a body of `surface_radius_m`: the volume comes from
+    /// the engine's own `crater_volume`, and the radius and depth follow from it. **A caller cannot
+    /// ask for a bigger crater, only throw a bigger or faster rock.**
+    pub fn from_energy(
+        axis: glam::DVec3,
+        energy_j: f64,
+        strength_pa: f64,
+        surface_radius_m: f64,
+    ) -> Excavation {
+        if surface_radius_m <= 0.0 {
+            return Excavation::NONE;
+        }
+        let volume = crate::damage::crater_volume(energy_j, strength_pa);
+        let r_bowl = crate::damage::crater_radius(volume);
+        if r_bowl <= 0.0 {
+            return Excavation::NONE;
+        }
+        // A hemispherical bowl of that volume: its depth IS its radius, and both are capped by the
+        // body — a crater cannot be wider than the world it is in.
+        let frac = (r_bowl / surface_radius_m).min(0.95);
+        Excavation {
+            axis,
+            angular_radius: frac.asin(),
+            depth_frac: frac.min(0.25),
+        }
+    }
+}
+
 /// The ground-scale verdict for an impact.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum GroundEffect {
@@ -540,5 +619,86 @@ mod tests {
             PhaseChange::Melted,
             "under a kilobar it melts"
         );
+    }
+}
+
+#[cfg(test)]
+mod excavation_tests {
+    use super::*;
+
+    /// ★★★ **THE BOWL IS A PARABOLOID, AND IT IS THE ENGINE'S** (docs/46 row 54). This lived in
+    /// `globe.wgsl`'s vertex shader, where nothing could test it and — worse — where the engine's own
+    /// ground answer had no crater in it, so anything standing in a fresh crater floated at the
+    /// pristine radius.
+    #[test]
+    fn the_bowl_is_deepest_at_its_axis_and_zero_at_its_rim() {
+        let axis = glam::DVec3::new(0.0, 1.0, 0.0);
+        let e = Excavation {
+            axis,
+            angular_radius: 0.2,
+            depth_frac: 0.05,
+        };
+        // Deepest dead centre, exactly the depth it was given.
+        assert!((e.sink_at(axis) - 0.05).abs() < 1e-12);
+        // Zero at the rim and beyond — a crater has an edge.
+        let rim = glam::DQuat::from_rotation_x(0.2) * axis;
+        assert!(e.sink_at(rim).abs() < 1e-9);
+        assert_eq!(e.sink_at(glam::DQuat::from_rotation_x(0.4) * axis), 0.0);
+        assert_eq!(
+            e.sink_at(-axis),
+            0.0,
+            "and nothing on the far side of the world"
+        );
+
+        // A paraboloid: half way out by ANGLE, three quarters of the depth remains.
+        let half = glam::DQuat::from_rotation_x(0.1) * axis;
+        assert!(
+            (e.sink_at(half) - 0.05 * 0.75).abs() < 1e-9,
+            "1 - (θ/θr)² at θ = θr/2 is 0.75, got {}",
+            e.sink_at(half) / 0.05
+        );
+        // Monotone inward.
+        let mut last = 0.0;
+        for k in (0..=20).rev() {
+            let d = e.sink_at(glam::DQuat::from_rotation_x(0.2 * k as f64 / 20.0) * axis);
+            assert!(d >= last - 1e-12, "the bowl must deepen inward");
+            last = d;
+        }
+    }
+
+    /// A pristine body costs nothing and needs no branch at the call site — the same shape as
+    /// `AIRLESS` for a body with no atmosphere.
+    #[test]
+    fn an_unstruck_body_has_no_bowl() {
+        for d in [
+            glam::DVec3::Y,
+            glam::DVec3::X,
+            glam::DVec3::new(1.0, 2.0, 3.0),
+        ] {
+            assert_eq!(Excavation::NONE.sink_at(d), 0.0);
+        }
+    }
+
+    /// **A caller cannot ask for a bigger crater, only throw a bigger or faster rock.** The bowl comes
+    /// from `crater_volume`, which is the same `E/σ` that decides a meteor's crater on a planet.
+    #[test]
+    fn a_bigger_rock_digs_a_bigger_hole_and_nothing_else_can() {
+        let axis = glam::DVec3::Y;
+        let r = 6_371_000.0;
+        let strength = 1.0e7; // rock
+        let small = Excavation::from_energy(axis, 1.0e12, strength, r);
+        let big = Excavation::from_energy(axis, 1.0e15, strength, r);
+        assert!(big.angular_radius > small.angular_radius);
+        assert!(big.depth_frac >= small.depth_frac);
+        assert!(small.sink_at(axis) > 0.0, "a terajoule leaves a mark");
+        // No energy, no hole — and no NaN from an empty crater.
+        assert_eq!(
+            Excavation::from_energy(axis, 0.0, strength, r),
+            Excavation::NONE
+        );
+        // A crater cannot be wider than the world it is in.
+        let absurd = Excavation::from_energy(axis, 1.0e30, strength, r);
+        assert!(absurd.angular_radius < std::f64::consts::FRAC_PI_2);
+        assert!(absurd.depth_frac <= 0.25);
     }
 }

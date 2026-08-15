@@ -923,8 +923,7 @@ mod app {
         /// vector in the globe's MODEL space, w = its angular radius (rad). Zero ⇒ no crater, so every
         /// other consumer of this uniform pays nothing.
         crater: [f32; 4],
-        /// x = bowl depth as a fraction of the surface radius. Derived from the EXCAVATED MASS actually
-        /// lifted above the pristine surface, never authored — see `gpu_crater_depth_frac`.
+        /// **RETIRED, kept as padding** (docs/46 row 54) — see `CRATER_UNIFORM_OFFSET`.
         crater2: [f32; 4],
         /// **Where the EYE stands in this body's air** (docs/66): xyz = its local zenith as seen from
         /// the body's centre (unit), w = its altitude above the body's SEA LEVEL in metres. Computed in
@@ -953,9 +952,13 @@ mod app {
     /// no call site should have to thread through.
     const SKYLIGHT_UNIFORM_OFFSET: u64 = 272;
 
-    /// Byte offset of `SpaceUniforms::crater` — 2 mat4 (128) + 5 vec4 (80). The globe patches just these
-    /// 32 bytes after `write_space_uniform`, so the crater does not have to be threaded through all 14
-    /// call sites of a uniform that only one draw uses.
+    /// ~~Byte offset of `SpaceUniforms::crater`.~~ **RETIRED 2026-08-12 (docs/46 row 54)** — the crater
+    /// is no longer patched into a uniform for a shader to apply, because the shader no longer applies
+    /// it: the excavation is subtracted by `terra::globe_mesh::SurfaceSampler`, so the surface arrives
+    /// already dug. The two `crater` fields remain in the struct AS PADDING and are documented as such,
+    /// because `SKYLIGHT_UNIFORM_OFFSET` names a byte offset past them and removing them would move
+    /// every field below it with nothing saying so.
+    #[allow(dead_code)]
     const CRATER_UNIFORM_OFFSET: u64 = 208;
 
     /// How far (wall-clock seconds) the RENDER runs behind the PHYSICS (docs/13). Humans don't
@@ -1096,6 +1099,8 @@ mod app {
         cap_uni: UniformSlot,
         cap_verts: Vec<Vertex>,
         earth_surface: Option<EarthSurface>,
+        /// The excavation the globe mesh was last built for — a cache keyed on its input (row 52).
+        globe_built_for: Option<crate::damage::Excavation>,
         /// GEOLOGIC time-LOD (docs/27): once the aftermath is quiet, each settled clump IS one body
         /// (orbital elements), evolved by the validated secular tidal law — millennia per real second.
         geologic: bool,
@@ -1668,6 +1673,7 @@ mod app {
                 cap_uni,
                 cap_verts: Vec::new(),
                 earth_surface: None,
+                globe_built_for: None,
                 interior_tint,
                 interior_glow,
                 snaps: std::collections::VecDeque::new(),
@@ -1805,6 +1811,28 @@ mod app {
             };
             // Unit radius: the draw scales it to whichever radius this scene renders Earth at (real, or
             // the sub-scale SPH body during the impact), so one mesh serves both.
+            self.earth_surface = Some(surf);
+            self.rebuild_globe_mesh();
+            Ok(())
+        }
+
+        /// ★★★ **BUILD THE EARTH AS THE ENGINE CURRENTLY SAYS IT IS** — including whatever has been dug
+        /// out of it (docs/46 row 54).
+        ///
+        /// The bowl used to be applied by `globe.wgsl`'s vertex shader, which meant the ENGINE's own
+        /// surface had no crater in it: the ground you could see and the ground anything stood on
+        /// differed by the whole excavation. Robin: *"the engine understands craters… the renderer
+        /// should be blissfully free of these calculations and just represent what the assemblies /
+        /// models are telling it."*
+        ///
+        /// Rebuilt when the excavation changes MATERIALLY rather than per frame — a crater grows a few
+        /// times over an impact, and the mesh is a cache whose input is the excavation (docs/46 row 52,
+        /// keyed on what it was built from).
+        fn rebuild_globe_mesh(&mut self) {
+            let Some(surf) = self.earth_surface.as_ref() else {
+                return;
+            };
+            let exc = self.excavation();
             let mesh = crate::terra::globe_mesh::build_body_globe(
                 192,
                 1.0,
@@ -1816,14 +1844,43 @@ mod app {
                 surf.elevation.as_ref(),
                 surf.landcover.as_ref(),
                 surf.elev_range,
+                exc,
             );
             log::info!(
-                "space: definitive Earth built — {} triangles",
-                mesh.indices.len() / 3
+                "space: Earth built — {} triangles, bowl {:.3} rad x {:.4} deep",
+                mesh.indices.len() / 3,
+                exc.angular_radius,
+                exc.depth_frac
             );
             self.globe_mesh = Some(upload_mesh(&self.device, "earth-globe", &mesh));
-            self.earth_surface = Some(surf);
-            Ok(())
+            self.globe_built_for = Some(exc);
+        }
+
+        /// The crust's current spin, as the draw applies it — named once so the excavation's axis and
+        /// the mesh it deforms cannot disagree about which frame they are in.
+        fn crust_spin(&self) -> glam::DQuat {
+            glam::DQuat::from_axis_angle(
+                self.spin_l.try_normalize().unwrap_or(glam::DVec3::Z),
+                self.spin_angle % (2.0 * std::f64::consts::PI),
+            )
+        }
+
+        /// **What the engine says has been excavated from this body**, from the measured impact — never
+        /// authored. `NONE` until something strikes.
+        fn excavation(&self) -> crate::damage::Excavation {
+            match self.gpu_impact_site {
+                Some(dir) if self.gpu_crater_r_frac > 0.0 && self.gpu_crater_depth_frac > 0.0 => {
+                    crate::damage::Excavation {
+                        // The mesh is drawn in the body's own frame and the model matrix carries the
+                        // spin, so the axis belongs in that frame too — un-rotated by the same spin the
+                        // draw applies, exactly as the uniform patch used to do.
+                        axis: self.crust_spin().inverse() * dir,
+                        angular_radius: self.gpu_crater_r_frac.clamp(0.0, 0.95).asin(),
+                        depth_frac: self.gpu_crater_depth_frac,
+                    }
+                }
+                _ => crate::damage::Excavation::NONE,
+            }
         }
 
         pub fn load_world(&mut self, world_json: &str) -> Result<(), JsValue> {
@@ -4603,47 +4660,28 @@ mod app {
                     },
                 );
 
-                // Patch the measured crater into the globe's uniform (docs/46 row 18). The axis must be in
-                // MODEL space, and the model matrix spins with the crust — so the bowl is un-rotated by the
-                // same spin, exactly as `crater_site` is rotated INTO world space for the shell grains. The
-                // crater and the matter it is cut from must share one frame.
-                let r_surf_now = self
-                    .body_meta
-                    .get(self.planet_idx())
-                    .map_or(earth_radius_m(), |m| m.radius_m);
-                if self.gpu_crater_r_frac > 0.0 && self.gpu_crater_depth_frac > 0.0 {
-                    if let Some(dir) = self.gpu_impact_site {
-                        let axis = spin_rot.inverse() * dir;
-                        // Angular radius of the bowl on the sphere: asin(R_bowl / R_surface).
-                        let theta = self.gpu_crater_r_frac.clamp(0.0, 0.95).asin();
-                        let c: [f32; 4] =
-                            [axis.x as f32, axis.y as f32, axis.z as f32, theta as f32];
-                        let c2: [f32; 4] = [self.gpu_crater_depth_frac as f32, 0.0, 0.0, 0.0];
-                        // DIAGNOSTIC: is the bowl actually reaching the shader, and how big is it? A render
-                        // change cannot be trusted from a screenshot alone when the impact site may be on
-                        // the night side — this reports the numbers behind the picture.
-                        // Report the bowl only when it MEASURABLY changes, not every frame: a render change
-                        // has to be checkable by number as well as by eye, because the impact site may be on
-                        // the night side where no screenshot can settle it.
-                        let stamp = (self.gpu_crater_depth_frac * 200.0).round() as i32;
-                        if stamp != self.gpu_crater_logged {
-                            self.gpu_crater_logged = stamp;
-                            log::info!(
-                                "crater: depth={:.0} km radius={:.0} km (d/r={:.2}) theta={:.3}rad axis=({:.2},{:.2},{:.2})",
-                                self.gpu_crater_depth_frac * r_surf_now / 1e3,
-                                self.gpu_crater_r_frac * r_surf_now / 1e3,
-                                if self.gpu_crater_r_frac > 0.0 { self.gpu_crater_depth_frac / self.gpu_crater_r_frac } else { 0.0 },
-                                theta, axis.x, axis.y, axis.z
-                            );
-                        }
-                        self.queue.write_buffer(
-                            &self.globe_uni.buf,
-                            CRATER_UNIFORM_OFFSET,
-                            bytemuck::cast_slice(&[c, c2]),
-                        );
+                // ★★★ **THE BOWL IS THE ENGINE'S, NOT THE SHADER'S** (docs/46 row 54). This used to
+                // patch an axis, an angular radius and a depth into the uniform, and `globe.wgsl`'s
+                // VERTEX shader sank the surface with them — honest numbers on the wrong side of the
+                // seam, because the engine's own surface then had no crater in it. Now the excavation
+                // goes into the MESH, through the same `SurfaceSampler` every surface is built from,
+                // so what is drawn and what anything stands on are one answer.
+                //
+                // Rebuilt when the bowl changes MATERIALLY, not per frame: a crater grows a handful of
+                // times over an impact, and the mesh is a cache whose input is the excavation.
+                {
+                    let now = self.excavation();
+                    let moved = self.globe_built_for.map_or(true, |was| {
+                        (was.depth_frac - now.depth_frac).abs() > 5.0e-4
+                            || (was.angular_radius - now.angular_radius).abs() > 5.0e-4
+                            || was.axis.dot(now.axis) < 0.9999
+                    });
+                    if moved && self.earth_surface.is_some() {
+                        self.rebuild_globe_mesh();
                     }
                 }
             }
+
             // **The descent corridor picks up Terra's close-range treatment.** Below the DERIVED
             // hand-off altitude the planetary rasters no longer fill the view — one texel exceeds
             // the docs/49 angular budget, the same budget the site materialization threshold uses —
@@ -5892,6 +5930,16 @@ mod app {
     /// **45 ms** before this work — a pre-existing cost nobody had measured. The mesh, not the maths, is the
     /// budget.
     const TERRA_OCTAVE_BUDGET: f64 = 16.0;
+
+    /// ★★ **THE FINEST GROUND THE MODEL COMMITS TO** (docs/46 row 53) — one centimetre.
+    ///
+    /// The ground's height at a coordinate is a fact about the world, so it cannot be band-limited by
+    /// whatever mesh happens to be drawing it; it needs a length of its OWN. A centimetre is under the
+    /// smallest thing that stands on it (a 0.35 m grass blade, rooted in a 15 mm crown), and the
+    /// relief series converges — amplitude goes as wavelength, so truncating here leaves at most
+    /// ~2.5 mm on the table. That bound is the reason this number is defensible rather than chosen:
+    /// halving it changes the answer by less than the thing being placed.
+    const GROUND_DETAIL_FLOOR_M: f64 = 0.01;
 
     /// (fixed topology) is built once. **One resolution for every scene's SEGMENT** — Terra's descent and
     /// the space band's corridor build the same surface, by the same builder, at the same density
@@ -7862,6 +7910,91 @@ mod app {
             })
         }
 
+        /// ★★★ **HOW HIGH IS THE GROUND HERE — THE ONE ANSWER** (docs/46 row 53, docs/67).
+        ///
+        /// Robin predicted this while the flora defect was still being hunted: *"the model needs to own
+        /// ground level at all coordinates and be able to place assemblies there."* It did not. The
+        /// segment mesh displaced its vertices by measured elevation **plus generated sub-raster
+        /// relief**, while `ground_disp_at` — which places every plant, stands the cannon and resolves
+        /// the camera shell — returned the measured term alone. MEASURED at Galway: **+1.19 m** at the
+        /// centre and **12.3 m worst** over the patch before the elevation tiles land. The surface you
+        /// could SEE and the surface you could STAND ON were different surfaces.
+        ///
+        /// ★★ **AND THE MESH'S OWN RESOLUTION WAS IN THE ANSWER.** The generated term was band-limited
+        /// to the mesh's local CELL, so the ground's height depended on how finely it happened to be
+        /// drawn — Law IV inverted, and the reason this is one function with a `finest_m` parameter
+        /// rather than two functions that agree by inspection:
+        ///
+        /// - **The MODEL asks at `GROUND_DETAIL_FLOOR_M`** — a physical length, not a viewport's. That
+        ///   answer is what matter stands on, and it does not change when the camera moves.
+        /// - **The RENDERER asks at its own cell**, which is a band-limited version of the same
+        ///   function and converges to it as the mesh refines. Legitimate under docs/68 §1b: it
+        ///   approximates HOW the ground is shown, never WHAT it is.
+        ///
+        /// An associated function taking its inputs, for the same reason `ground_elev_m` is: the
+        /// segment builder holds pieces of `self` across a mutable borrow and must call THE SAME CODE.
+        #[allow(clippy::too_many_arguments)]
+        fn ground_relief_m(
+            mats: &[materials::Material],
+            detail: &crate::resolution::ResolutionController,
+            octave_budget: f64,
+            material_idx: usize,
+            water_idx: usize,
+            planet_radius: f64,
+            lat: f64,
+            lon: f64,
+            base_feature_m: f64,
+            local_slope: f64,
+            finest_m: f64,
+        ) -> f64 {
+            if material_idx == water_idx || finest_m <= 0.0 || base_feature_m <= 0.0 {
+                return 0.0; // the sea is flat, and there is nothing finer than nothing
+            }
+            let m = &mats[material_idx];
+            let mu = m.friction_coefficient as f64;
+            if mu <= 0.0 {
+                return 0.0;
+            }
+            let h_crit =
+                crate::granular::critical_bank_height(m.fracture_strength, m.density, 9.81) as f64;
+            // Octaves down to `finest_m`, bounded by what the caller can carry and by the budget.
+            let octaves = crate::surface_detail::detail_octaves(detail, finest_m, base_feature_m)
+                .min((base_feature_m / finest_m).max(1.0).log2())
+                .min(octave_budget);
+            if octaves <= 0.0 {
+                return 0.0;
+            }
+            let frac = (local_slope / mu).clamp(0.0, 1.0);
+            let px = lon.to_radians() * planet_radius * lat.to_radians().cos();
+            let pz = lat.to_radians() * planet_radius;
+            crate::surface_detail::micro_relief_m(px, pz, base_feature_m, octaves, mu, h_crit, frac)
+        }
+
+        /// **How steep the ground is at a point**, as a gradient magnitude — the input the relief law
+        /// scales its amplitude by. Sampled from the finest datum covering the point, over a baseline
+        /// of that datum's own size, so the ratio means what its name says.
+        ///
+        /// ★ Per-POINT, not per-segment. The mesh took one slope at the camera and applied it across
+        /// the whole patch, which is fine for a picture and wrong for an answer the model owns: the
+        /// ground's roughness at a coordinate cannot depend on where the camera happens to be.
+        fn local_slope_at(&self, lat: f64, lon: f64) -> f64 {
+            let (lo, hi) = (self.elev_range[0], self.elev_range[1]);
+            let step = self.raster_step_m();
+            let e = |la: f64, lo_: f64| {
+                Self::ground_elev_m(self.elevation.as_ref(), &self.tiles, lo, hi, step, la, lo_).0
+            };
+            let run = self
+                .tiles
+                .pixel_ground_m(lat)
+                .map_or(step, |px| px.max(1.0))
+                .max(1.0);
+            let dlat = run / 111_320.0;
+            let dlon = dlat / lat.to_radians().cos().abs().max(1e-6);
+            let dn = (e(lat + dlat, lon) - e(lat - dlat, lon)) / (2.0 * run);
+            let de = (e(lat, lon + dlon) - e(lat, lon - dlon)) / (2.0 * run);
+            (dn * dn + de * de).sqrt()
+        }
+
         /// [`ground_elev_m`] for callers that hold a plain `&self`, in DISPLAY units above the
         /// sea-level sphere (so relief exaggeration is applied, as the mesh applies it).
         fn ground_disp_at(&self, lat: f64, lon: f64) -> f64 {
@@ -7873,7 +8006,7 @@ mod app {
             if !is_land {
                 return 0.0; // the sea surface is at sea level, and it is flat
             }
-            let (e, _) = Self::ground_elev_m(
+            let (e, base_feature_m) = Self::ground_elev_m(
                 self.elevation.as_ref(),
                 &self.tiles,
                 self.elev_range[0],
@@ -7882,7 +8015,32 @@ mod app {
                 lat,
                 lon,
             );
-            e * display_scale() * self.relief_exag
+            // ★ **PLUS THE GROUND'S OWN SUB-RASTER RELIEF** (row 53). Without this the mesh drew a
+            // surface nobody could stand on: measured +1.19 m at Galway's centre and 12.3 m worst over
+            // the patch. Asked at the MODEL's floor, so the answer is the same however finely the
+            // renderer chooses to draw it.
+            let water_idx = materials::index_of(&self.mats, "water");
+            let sampler_material = self
+                .landcover
+                .as_ref()
+                .map(|r| r.biome_at(lat, lon) as usize)
+                .and_then(|class| self.biome_mix.get(class))
+                .and_then(|mix| mix.first().map(|&(m, _)| m))
+                .unwrap_or(water_idx);
+            let relief = Self::ground_relief_m(
+                &self.mats,
+                &self.detail,
+                self.cap_octave_budget,
+                sampler_material,
+                water_idx,
+                self.planet_radius,
+                lat,
+                lon,
+                base_feature_m,
+                self.local_slope_at(lat, lon),
+                GROUND_DETAIL_FLOOR_M,
+            );
+            (e + relief) * display_scale() * self.relief_exag
         }
 
         /// **The camera is MATTER** — a tiny transparent shell obeying the SAME contact law as a grain
@@ -8433,44 +8591,47 @@ mod app {
                     // sub-raster relief. Both then have their APPEARANCE integrated, because a coastal
                     // cell really is part land and part sea, and point-sampling it as one or the other
                     // is the jagged-coastline bug the integral exists to end.
-                    if mi != water_idx {
-                        let m = &mats[mi];
-                        let mu = m.friction_coefficient as f64;
-                        let h_crit = crate::granular::critical_bank_height(
-                            m.fracture_strength,
-                            m.density,
-                            9.81,
-                        ) as f64;
-                        let octaves =
-                            crate::surface_detail::detail_octaves(detail, cell_m, base_feature_m)
-                                .min((base_feature_m / cell_m).max(1.0).log2())
-                                .min(octave_budget);
-                        let relief = if octaves > 0.0 {
-                            let frac = if mu > 0.0 {
-                                (tier_slope / mu).clamp(0.0, 1.0)
-                            } else {
-                                0.0
-                            };
-                            let px = lon.to_radians() * planet_radius * lat.to_radians().cos();
-                            let pz = lat.to_radians() * planet_radius;
-                            crate::surface_detail::micro_relief_m(
-                                px,
-                                pz,
-                                base_feature_m,
-                                octaves,
-                                mu,
-                                h_crit,
-                                frac,
-                            )
-                        } else {
-                            0.0
-                        };
-                        off += relief * ds * exag;
-                        if a_ang < relief_probe.get().0 {
-                            relief_probe.set((a_ang, elev_m, relief, cell_m));
-                        }
-                        relief_absmax.set(relief_absmax.get().max(relief.abs()));
+                    // ★★ **THE SAME FUNCTION THE MODEL ANSWERS WITH** (docs/46 row 53), band-limited
+                    // to this vertex's own cell. Not a second copy of the relief maths that happens to
+                    // agree: the mesh is a smoothed version of the one answer, and it converges to it
+                    // as the mesh refines. What used to be here computed the octaves, the material's
+                    // slope law and the amplitude itself, beside a `ground_disp_at` that did none of
+                    // it — which is how the drawn surface and the reachable one came to differ by
+                    // 12.3 m.
+                    let relief = Self::ground_relief_m(
+                        mats,
+                        detail,
+                        octave_budget,
+                        mi,
+                        water_idx,
+                        planet_radius,
+                        lat,
+                        lon,
+                        base_feature_m,
+                        tier_slope,
+                        cell_m,
+                    );
+                    off += relief * ds * exag;
+                    if a_ang < relief_probe.get().0 {
+                        // ★ The MODEL's answer at the same point — the same function at its own floor
+                        // rather than this vertex's cell. The difference between the two is exactly the
+                        // band limit the renderer chose, and nothing else (docs/46 row 53).
+                        let model = Self::ground_relief_m(
+                            mats,
+                            detail,
+                            octave_budget,
+                            mi,
+                            water_idx,
+                            planet_radius,
+                            lat,
+                            lon,
+                            base_feature_m,
+                            tier_slope,
+                            GROUND_DETAIL_FLOOR_M,
+                        );
+                        relief_probe.set((a_ang, elev_m, relief, model));
                     }
+                    relief_absmax.set(relief_absmax.get().max(relief.abs()));
                     // **THE APPEARANCE INTEGRAL** (docs/63). The mesh carries this cell's mean shape;
                     // everything finer than the cell — the material MIXTURE and the slope SPREAD — is
                     // integrated here and carried as colour and roughness. Without it those sixteen
@@ -8538,13 +8699,17 @@ mod app {
                 // the camera shell that rests on it, the cannon — asks `ground_disp_at`, which is the
                 // measured term ALONE. `generated` is therefore exactly how far the drawn surface sits
                 // from where the model believes it is, and `worst` is that over the whole patch.
-                let (_, probe_elev, probe_relief, probe_cell) = relief_probe.get();
+                let (_, probe_elev, probe_relief, probe_model) = relief_probe.get();
+                // ★ The probe that FOUND row 53 now reports its closure: the mesh's generated term and
+                // the model's are one function, so the number to watch is the DISAGREEMENT, which
+                // should be the band-limit alone.
                 log::info!(
-                    "ground: {:.2} m measured {:+.3} m generated (cell {:.3} m) — the model sees only the \
-                     first; worst gap {:.3} m over the patch",
+                    "ground: {:.2} m measured · mesh {:+.3} m · model {:+.3} m · DISAGREEMENT \
+                     {:+.4} m (the band limit alone) · worst generated {:.3} m over the patch",
                     probe_elev,
                     probe_relief,
-                    probe_cell,
+                    probe_model,
+                    probe_relief - probe_model,
                     relief_absmax.get(),
                 );
                 // One rebuild is one unit of work: fold its real cost back into the budget. The side
