@@ -1252,6 +1252,8 @@
         "compressive_strength": 50000.0,
         "tensile_strength": 15000.0,
         "tensile_strength_blade": 150000000.0,
+        "youngs_modulus_culm": 5550000000.0,
+        "youngs_modulus_blade": null,
         "cohesion": 12000.0,
         "friction_angle": 30,
         "hardness_mohs": null,
@@ -1465,6 +1467,10 @@
           500000.0,
           15000000.0
         ],
+        "youngs_modulus_culm_pa": [
+          2600000000.0,
+          8500000000.0
+        ],
         "cohesion": [
           1000.0,
           20000.0
@@ -1474,12 +1480,15 @@
           35
         ]
       },
-      "notes": "Two stiffnesses coexist: soft soil mat (~MPa) vs stiff strong blades (blade tensile ~108-294 MPa, GPa modulus). Signature property is added ROOT cohesion ~1-20 kPa over few-kPa base soil. Restitution near zero. Fragile, shreds easily. Highly variable. ★ 2026-08-04: the albedo is no longer three chosen numbers — it DERIVES from a measured spectrum (was [0.1, 0.22, 0.08], now the CIE convolution of 17 NEON graminoid spectra at 10.1 mg/g chlorophyll, 6 taxa). It also gained a senescent state from the same campaign's low-chlorophyll bin (2.26 mg/g, n=10, 7 taxa) — a real but MILD difference, because that campaign sampled the growing season and does not contain fully cured grass. Temperate grass curing is under-stated as a result; flagged, not tuned.",
+      "notes": "Two stiffnesses coexist: soft soil mat (~MPa) vs stiff strong blades (blade tensile ~108-294 MPa, GPa modulus). ★★ 2026-08-15, docs/46 row 60: that sentence had been true and UNRECORDED — the note said \"GPa modulus\" in prose while `youngs_modulus` (5 MPa, the soil mat) was the only stiffness field, so anything computing a blade's bending stiffness from this entry would have been ~1000x too soft and would have looked sourced. `youngs_modulus_culm` = 5.55 GPa is the grass-family CULM, midpoint of 2.6-8.5 GPa measured on grass hedge stems by cantilever deflection (tall fescue, Festuca arundinacea, among the species), independently bracketed by maize rind at 6-16 GPa and wheat straw at 4.76-6.58 GPa. ★ `youngs_modulus_blade` is deliberately NULL: a living LEAF BLADE is not a culm — thinner, unlignified, and expected to be markedly more compliant — and no isolated leaf-blade modulus was found in the literature searched. An unknown stays unknown at the boundary; do not substitute the culm figure for it without saying so. Signature property is added ROOT cohesion ~1-20 kPa over few-kPa base soil. Restitution near zero. Fragile, shreds easily. Highly variable. ★ 2026-08-04: the albedo is no longer three chosen numbers — it DERIVES from a measured spectrum (was [0.1, 0.22, 0.08], now the CIE convolution of 17 NEON graminoid spectra at 10.1 mg/g chlorophyll, 6 taxa). It also gained a senescent state from the same campaign's low-chlorophyll bin (2.26 mg/g, n=10, 7 taxa) — a real but MILD difference, because that campaign sampled the growing season and does not contain fully cured grass. Temperate grass curing is under-stated as a result; flagged, not tuned.",
       "sources": [
         "https://onlinelibrary.wiley.com/doi/10.1155/2020/8825828",
         "https://www.geotechdata.info/parameter/soil-young-s-modulus",
         "https://www.researchgate.net/publication/275513020_Tensile_Strength_and_Shear_Strength_of_Switchgrass_Before_and_After_Frost",
-        "https://www.sciencedirect.com/science/article/abs/pii/S0168192321001623"
+        "https://www.sciencedirect.com/science/article/abs/pii/S0168192321001623",
+        "https://elibrary.asabe.org/abstract.asp?aid=27580",
+        "https://plantmethods.biomedcentral.com/articles/10.1186/s13007-018-0279-6",
+        "https://colab.ws/articles/10.1006/jaer.1995.1072"
       ]
     },
     {
@@ -2706,6 +2715,8 @@
         "compressive_strength": 45000.0,
         "tensile_strength": 8000.0,
         "tensile_strength_stem": 25000000.0,
+        "youngs_modulus_stem": 5670000000.0,
+        "rigidity_modulus_stem": 407000000.0,
         "cohesion": 6000.0,
         "friction_angle": 35,
         "hardness_mohs": null,
@@ -2747,15 +2758,26 @@
         "youngs_modulus_pa": [
           83000,
           350000
+        ],
+        "youngs_modulus_stem_pa": [
+          4760000000.0,
+          6580000000.0
+        ],
+        "rigidity_modulus_stem_pa": [
+          267000000.0,
+          547000000.0
         ]
       },
-      "notes": "Added 2026-08-10 for docs/70 compaction — the haystack Robin named: *\"a rock fall on a haystack, unsettle the hay (dry grass), but the impact could be absorbed.\"* Straw absorbs by CRUSHING ITS VOID, not by snapping, so `compressive_strength` is the number that matters and it is ~3x LOWER than grass turf's. FLAGGED: the compressive figure is a bale-scale test at 20% strain, so it is a crush stress for the ARRANGEMENT more than for the fibre; the fibre's own is the tensile entry.",
+      "notes": "Added 2026-08-10 for docs/70 compaction — the haystack Robin named: *\"a rock fall on a haystack, unsettle the hay (dry grass), but the impact could be absorbed.\"* Straw absorbs by CRUSHING ITS VOID, not by snapping, so `compressive_strength` is the number that matters and it is ~3x LOWER than grass turf's. FLAGGED: the compressive figure is a bale-scale test at 20% strain, so it is a crush stress for the ARRANGEMENT more than for the fibre; the fibre's own is the tensile entry. ★★ 2026-08-15, docs/46 row 60: the SAME split now exists for STIFFNESS, and it had to, because it is four to five orders of magnitude wide. `youngs_modulus` 150 kPa is a BALE being squashed; `youngs_modulus_stem` 5.67 GPa is a single straw in BENDING — O'Dogherty et al. 1995, four-point loading transversely to the stem, wheat cv. Mercia internodes over 8-22% moisture w.b., which brackets this entry's declared ~15%. Computing a blade's bending stiffness from the bale figure would have been wrong by ~38,000x and would have looked sourced. Midpoints of the measured ranges are recorded here, the ranges in `ranges`. Two consistency checks passed: the same paper's tensile 21.2-31.2 MPa contains this entry's pre-existing `tensile_strength_stem` of 25 MPa, and E/G = 5670/407 = 13.9 against ~2.6 for an isotropic solid, which is the strong axial anisotropy a fibre composite must show. Independently bracketed by grass-family culms at 2.6-8.5 GPa (tall fescue among them) and maize rind at 6-16 GPa.",
       "sources": [
         "https://www.sciencedirect.com/science/article/abs/pii/S1537511013002018",
         "https://people.bath.ac.uk/abspw/straw%20bale%20test%20report.pdf",
         "https://tallerconco.org/wp-content/uploads/2017/05/LoadBearingTestsWorldWide-BruceKing.pdf",
         "https://www.sciencedirect.com/science/article/pii/S0950061823021505",
-        "https://www.sciencedirect.com/science/article/abs/pii/S0378778821008434"
+        "https://www.sciencedirect.com/science/article/abs/pii/S0378778821008434",
+        "https://colab.ws/articles/10.1006/jaer.1995.1072",
+        "https://elibrary.asabe.org/abstract.asp?aid=27580",
+        "https://plantmethods.biomedcentral.com/articles/10.1186/s13007-018-0279-6"
       ]
     },
     {

@@ -3,6 +3,212 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-16 — the floor could not push up; and my explanation of why that mattered was wrong
+
+★★★ **`pile::settle`'s floor was a 12.245 m/s² downward magnet with zero support.** It modelled the
+ground by handing `granular::contact_accel` a ghost particle at `p − ŷ·2r` — a **fixed offset, not a
+reflection** — so `|p − ghost|` was exactly `2r`, exactly `touch`, no matter how deep the rod had
+sunk. `overlap` was therefore zero to within rounding, the repulsive spring is gated on
+`overlap > 0.0`, and `coh_range = 0.15·radius > 0` kept the early-out from firing, so the ADHESION
+term ran at full strength and pulled **down**. Measured directly:
+
+```
+rod sunk to 0.000269 m (radius 0.000538 m), gravity is -9.81 m/s²:
+  ghost at a fixed 2r offset  -> a = -12.245 m/s²   (overlap 0.000e0)
+  ghost REFLECTED through y=0 -> a = +85.197 m/s²   (overlap 5.378e-4 m)
+```
+
+The reflected control passing is what proves `contact_accel` itself was innocent: the fault was
+entirely in how the ghost was built. The pull is `σ/(ρ·L)` = 6000/(1400 × 0.35) exactly, independent
+of cross-section, and the same call also applied `μ·cohesion` = 9.80 m/s² of horizontal Coulomb
+brake. Worst of all, the force triggered on the rod's lowest END while the position clamp acted on
+its CENTRE, so an unsupported near-vertical blade sank its whole 0.175 m half-length — **325 contact
+radii** — through the floor in 0.126 s with nothing under it.
+
+**The fix is the engine's own law, not a second one.** `pile::floor_contact` now calls
+`granular::terrain_contact_resolve` with `h = 0` and zero gradient — the same non-injecting
+velocity/position constraint the grains and the camera shell already use, whose own doc names the
+settling-storm history this module repeated — and the `centre.y = radius` clamp is deleted. Measured
+after: `vel −1.0000 → +0.0000 m/s` (removed, never reversed), `dpos +2.689e-4 m` outward, energy
+**monotone (rise from minimum 0.0%)**, and a 200-blade heap comes to rest in **0.80 s** where it
+previously never did at all — the traced test went from 144 s to 5 s.
+
+### ★★ Three adversarial audits confirmed the bug and refuted my reason for it
+
+Worth recording in full, because the refuted reasoning is the kind that reads as rigorous:
+
+- **"The position clamp does positive work every step; that is the pump."** No. Over one step the
+  clamp's `+mgA·dt²` of position work is *exactly* the potential energy gravity removed in that same
+  step, and its velocity zeroing removes *exactly* the kinetic energy the same step's velocity update
+  added — net identically zero for any `A` (checked at 5, 9.81, 22.05, 50 → `0.000e+00`). In the
+  regime in question it is a net **sink**: break-even is `V = 2g·dt` = 4.61 mm/s and the rod arrives
+  at 5.18 mm/s. The magnitude never reached either — the ceiling with every rod clamped every step at
+  the optimum is ~1.0e-3 J/s against a required gross of ~9.6e-3.
+- **"The floor can never push up."** Wrong at the bit level, and the truth is uglier. `f_rep` is
+  gated on `overlap > 0.0` but *dominated by its damping term*, not its spring. `overlap` is zero
+  only in exact arithmetic; in f64 it lands ±1..30 ulp and comes out positive on 5–8% of in-zone
+  steps, and the damper then fires at up to **+1320 m/s²**, ~100× the cohesion. A constant pull with
+  a bit-randomised one-sided damper on top.
+- ★★★ **The 9.1% energy rise was substantially a meter artifact.** `Sample::energy_j` is KE + `mgy`
+  and nothing else, so the image cohesion — conservative per rod, since `axis` never changes and
+  `lowest` is affine in `centre.y` — was an unaccounted potential well up to **9.54e-4 J deep per
+  rod** against a mean per-rod traced energy of 1.3e-4 J. A rod merely *sinking* raised the trace with
+  nothing created anywhere, and a single **isolated** rod with no neighbours showed a 10.2% rise from
+  that alone. `Sample::energy_j`'s doc now says so: read a rise as evidence, never as proof.
+
+The fix stands for the simpler reason that a floor which cannot push up is not a floor.
+
+### ★★★ Necessary, and not sufficient — the residual scales with member count
+
+```
+ 100 rods   settles 1.44 s
+ 200 rods   settles 0.80 s
+ 400 rods   still running at the 20 s cap, peak 0.384 m/s
+```
+
+Count-dependence is the signature of a rod-**rod** problem, which is exactly what the audits
+predicted from a fact I had misread: the late rise happened while the heap's height *rose*, and
+sinking into the cohesion well *raises* the trace while climbing out *lowers* it — so the floor bug
+has the wrong sign to explain that window. Something really was lifting the top of the heap.
+
+★ **And the statistic I was judging this by was too weak to see it.** "Rise from the minimum" is
+`end − min`, which is **0.0% by construction whenever the run ends at its lowest point** — however
+far the curve climbed in between. The 400-rod run did exactly that. Replaced with the worst DRAWUP,
+the largest rise from any running minimum to any later sample:
+
+```
+end-vs-minimum +0.00%   ·   WORST DRAWUP +0.177%  (peaking at t = 18.77 s)
+```
+
+So the floor fix took the excursion from 9.1% to 0.177%, a ~50× reduction, and did not take it to
+zero. Height still climbs 0.441 → 0.462 m over that window while mean speed decays, which is what
+stored contact overlap converting into height looks like — the rod-rod spring potential is not in the
+meter either. A statistic that can only report good news is not a measurement.
+
+**And the rod-rod contact is running at bale softness.** `granular::contact_from_material` derives
+stiffness as `E·r/m` from `mat.youngs_modulus`, which for straw is the **150 kPa BALE** figure — the
+very category error the previous day's entry catalogued `youngs_modulus_stem` = 5.67 GPa to fix, now
+shown to have a *live consumer* rather than only a future one. A hunt lens measured the heap running
+at 99% of the speed at which a pair passes **through** itself: ~650× too compliant for the mass it
+must stop, so blades tunnel instead of stopping each other. Using the fibre modulus makes the contact
+**37,800× stiffer** and needs a **194× smaller timestep** (16.5 M steps per 20 s against 85 k), which
+`granular.rs` already anticipates — *"a stiff contact is kept stable by implicit integration, not by
+clamping"*. So it is blocked on an implicit contact solve, not on a constant.
+
+Also flagged, open: `vel *= 1 − 2·dt` is a body drag applied to rods in **free flight**, a dial tuned
+by outcome (Law V), and the native path lacks the `|v_t|/dt` friction clamp the GPU path has.
+
+### ★★★ And the largest finding is not about the pile at all — docs/46 row 62
+
+**No grain-grain contact in this engine reproduces its material's restitution.**
+`granular::damping_for_restitution` returns `c = 2ζ√k`, and its own doc states the intent: *"This
+makes how bouncy a contact is a material property, not a dial — the source of truth is
+`Material::restitution`."* That calibration is for a grain against a **fixed wall**. `contact_accel`
+applies `+a` to *i* and `−a` to *j*, so an equal-mass **pair**'s relative coordinate obeys
+`ẍ + 2c·ẋ + 2k·x = 0` — natural frequency `√(2k)`, critical damping `2√(2k)` — and the realised
+damping ratio is `4ζ√k / (2√(2k))` = **√2·ζ**. Every pair contact, every scene.
+
+Measured twice independently (a workflow lens, then reproduced from scratch against the shipped
+constants), on a dt-refinement ladder because a single-dt reading is off by 5%:
+
+```
+                                 e @ dt    dt/4     dt/16    dt/64
+shipped (no-tension cutoff)      0.1476   0.1415   0.1402   0.1399
+sqrt2 fixed ONLY                 0.2244   0.2161   0.2143   0.2138
+sqrt2 fixed + tension allowed    0.0414   0.0481   0.0497   0.0498
+                                                straw asks for 0.0500
+```
+
+**2.8× too bouncy — and the obvious fix makes it worse.** Correcting the √2 alone takes it to 0.2138,
+because the dominant error is not the calibration but the `.max(0.0)` no-tension cutoff at
+`granular.rs:203`, which truncates the dashpot's tensile phase and detaches the contact early. Both
+corrections together land on 0.0498.
+
+Every number is **dt-independent**, so this is not the integrator's fault and costs nothing in
+performance to fix. It also exonerates the timestep as an energy source: refining dt makes the
+contact *bouncier*, so the production dt is a net damper worth ~9% of outgoing speed, and a pump you
+could remove by halving dt cannot exist here.
+
+`granular.rs:24-26` claims *"grain-grain contact conserves energy… verified on real hardware"* — but
+that is the **GPU** path, whose implicit directional solve and `|v_t|/dt` friction clamp the native
+path does not have. The native force law is labelled the *physics of record* and was never held to
+the same measurement.
+
+## 2026-08-15 — the heap never settled, and the four-second clock was hiding it
+
+★★★ **`pile::settle` had no rest criterion, and the number it reported for a haystack was a snapshot
+of a heap still in the air.** docs/46 row 60 recorded a settled packing of **0.0024 (3 kg/m³)**
+against real loose hay's 0.029, named three reasons for the gap, and asserted the first — that a
+capsule cannot BEND — was dominant. Measuring that assertion retired the headline instead.
+
+**The module already claimed the check it could not perform.** Its doc said *"if a heap is still
+moving at the end its packing is not a settled packing"*, and `Settled` carried no field that could
+show it. The loop ran for a flat 4.0 simulated seconds and called whatever it had a heap.
+
+**The engine already owned the answer.** `recohere::SettleGauge` is *the ONE settling gauge*
+(docs/61): sustained quiet for `t_q = √(2Δ/g)`, with quiet meaning every member below
+`v_q = √(2gΔ)`. Neither number is a dial. It had one flaw for this use — it hardcoded the voxel
+world's 1 m cell, at which a 0.35 m grass blade counts as *quiet* below **4.4 m/s** — so the cell is
+now a field (`SettleGauge::for_cell`), `new()` still means the voxel world's own cell, and
+`site::fold_site` stopped mirroring `recohere`'s private constant with a hardcoded `1.0`.
+
+**Asked properly, the heap does not settle.** 400 blades run the full twenty-second cap without
+accumulating one `t_q` of quiet. `settle_traced` shows what they do instead:
+
+```
+   t_s    peak m/s    mean m/s   height m      energy J
+  0.00     0.0830     0.02280      0.850     3.1177e-1
+ 12.01     0.6402     0.08031      0.270     ~2.60e-2   <- minimum
+ 20.00     0.3575     0.05654      0.306     2.8325e-2
+```
+
+Height bottoms out and **climbs back**; mean speed stops decaying and plateaus. Total mechanical
+energy falls to 2.60e-2 J and then **rises 9.1%**.
+
+> ★★ **CORRECTED THE NEXT DAY — see the 2026-08-16 entry above.** What this paragraph went on to say
+> — *"gravity is the only thing doing work and every contact dissipates, so a dissipative pile that
+> re-expands is proof the solver is manufacturing energy"* — **is not sound, and three adversarial
+> audits killed it.** The trace omits any potential but gravity's, and the floor bug below was itself
+> an unaccounted potential well, so a rod merely SINKING raised the number with nothing created. A
+> single isolated rod showed a 10.2% rise on its own. The defect was real; this was not proof of it.
+> Left in place rather than edited away, because the reasoning is the kind that reads as rigorous.
+
+**And rods cannot rotate.** `Rod::axis` is written once at construction and never again — no angular
+velocity, no torque, no moment of inertia, and a contact force found at an off-centre closest
+approach is applied as pure translation. A dropped straw rotates to lie flat, which is the principal
+way a rod heap densifies. Neither injection nor rotation was on row 60's list of three causes, and
+both outrank bending, which cannot be measured through either.
+
+**Bending is unblocked on data, though.** The catalogue was silent on the only stiffness that
+matters here: `straw.youngs_modulus` is **150 kPa**, a bale being squashed, and the entry's own notes
+already flagged that category error for `compressive_strength` and solved it once with a separate
+`tensile_strength_stem`. Now `youngs_modulus_stem` = **5.67 GPa** and `rigidity_modulus_stem` =
+407 MPa, from O'Dogherty et al. 1995 (four-point loading transversely to the stem, wheat cv. Mercia,
+8–22% moisture w.b., which brackets this entry's declared ~15%). Two checks passed: the same paper's
+tensile 21.2–31.2 MPa contains the pre-existing 25 MPa entry, and E/G = 13.9 against ~2.6 for an
+isotropic solid, which is the axial anisotropy a fibre composite must show. `grass` gained
+`youngs_modulus_culm` = 5.55 GPa (grass hedge stems, tall fescue among them, 2.6–8.5 GPa) and keeps
+`youngs_modulus_blade` **NULL**, because a leaf blade is not a culm and none was found — an unknown
+stays unknown at the boundary. Computing a blade's bending stiffness from the bale figure would have
+been wrong by ~38,000× and would have looked sourced.
+
+**Verified.** `recohere` 4 → 5 tests, its new one pinning that a finer gauge is stricter in both
+halves by exactly √(Δ₁/Δ₂). All four `SettleGauge` consumers green (`recohere`, `site`, `matter`,
+`simulation`). Materials 19/19, JSON valid. The row-60 tests now pin what the simulation SAYS: the
+heap does NOT come to rest, and that assertion is written to fail upward when the injection is fixed.
+
+**Two traps paid, both mine, and the second survived the fix for the first.** An un-armed gauge fed a
+population released AT REST fires at exactly `t_q` — free fall from rest reaches `v_q` in exactly
+`√(2Δ/g)`, so the criterion's two halves are the same two numbers and it is a dead heat decided by
+rounding. Three of four ladder rungs reported "settled" at 0.09 s against a required 0.0947 s, and
+the packing they reported was the release cloud's. Arming on first motion fixed that and did **not**
+fix the next one: at the 0.044 m envelope cell `v_q` = 0.93 m/s sits *inside* the range of speeds a
+falling heap has, so a 200-blade heap was declared settled at 0.34 s with its top still descending
+and its mean speed still rising. The gauge must be asked at the scale the simulation RESOLVES — the
+contact radius — not the coarser cell the envelope is reported on. The negative control that catches
+both is physical and has no dial in it: **a heap cannot have settled before its highest member has
+landed**, `√(2h/g)`.
+
 ## 2026-08-09 — the plants were behind the camera, and the negative control that said so
 
 ★★★ **Terra's flora draws.** 1,200 plants, 43,200 triangles and ZERO fragments — at every altitude,

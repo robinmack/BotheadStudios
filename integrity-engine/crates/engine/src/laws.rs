@@ -819,6 +819,29 @@ pub(crate) const UNWIRED_MATERIAL_PROPERTIES: &[(&str, &str)] = &[
          distinction `grass` records, and it is what a RESOLVED pile of blades would spend instead of \
          the bale-scale figure (docs/46 row 59)",
     ),
+    // ★★ The FIBRE's own stiffness, added 2026-08-15 for docs/46 row 60. Same blade-vs-bale split as
+    // `tensile_strength_stem` above, and it had to be made because the gap is four to five orders of
+    // magnitude: `youngs_modulus` on `straw` is 150 kPa (a BALE being squashed) and a single straw in
+    // bending is 5.67 GPa. A pile of blades that could BEND would spend these; the reason nothing
+    // reads them yet is that the pile's rods are rigid AND cannot rotate AND its contact injects
+    // energy, so bending is not yet the measurable term (row 60).
+    (
+        "youngs_modulus_stem",
+        "a single straw in BENDING (5.67 GPa) against the 150 kPa bale figure — O'Dogherty et al. \
+         1995, four-point loading transverse to the stem; the EI a flexible blade would nest with \
+         (docs/46 row 60)",
+    ),
+    (
+        "rigidity_modulus_stem",
+        "a single straw in TORSION (407 MPa, same source) — E/G = 13.9 is the axial anisotropy a \
+         fibre composite must show, and it is what a twisting blade would spend (docs/46 row 60)",
+    ),
+    (
+        "youngs_modulus_culm",
+        "a living grass culm (5.55 GPa) against the 5 MPa soil-mat figure the same entry records — \
+         the stiffness a standing stem bends and waves with. Its sibling `youngs_modulus_blade` is \
+         deliberately NULL, because a leaf blade is not a culm and none was sourced (docs/46 row 60)",
+    ),
     // Anisotropic failure — docs/46 row 30. The set that makes wood splinter along its grain, and
     // rolled steel and composite layup tear along theirs.
     (

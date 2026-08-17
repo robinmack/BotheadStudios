@@ -9,6 +9,50 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★★ **No grain-grain contact reproduced its material's restitution** (docs/46 row 62, OPEN).
+  `granular::damping_for_restitution` calibrates `c = 2ζ√k` for a grain against a FIXED WALL, but
+  `contact_accel` applies `+a` to one body and `−a` to the other, so an equal-mass pair's relative
+  coordinate rings at `√(2k)` and realises **√2·ζ**. Straw asks for `e = 0.05`; the shipped contact
+  delivers **0.1399** dt-converged — 2.8× too bouncy — in every scene, not just the pile. Correcting
+  the √2 *alone* makes it worse (0.2138); the dominant error is the `.max(0.0)` no-tension cutoff
+  truncating the dashpot's tensile phase. Both together give 0.0498. All dt-independent, so it costs
+  nothing in performance. Not yet fixed — `Material::restitution` is documented as "a material
+  property, not a dial", and today no contact reproduces it.
+
+- ★★ **The pile's floor could not push up** (docs/46 row 60). It handed `contact_accel` a ghost
+  particle at a FIXED `2r` offset instead of reflecting through the floor plane, so `overlap` was zero
+  to within rounding, the repulsive spring never fired, and the adhesion term ran at full strength —
+  a **12.245 m/s² downward magnet**, 1.248× gravity, plus 9.80 m/s² of horizontal Coulomb brake. An
+  unsupported near-vertical rod sank its whole 0.175 m half-length through the ground. `floor_contact`
+  now uses `granular::terrain_contact_resolve` (the engine's existing non-injecting constraint) and
+  the `centre.y` position clamp is deleted. Energy went monotone and a 200-blade heap now comes to
+  rest in 0.80 s where it never did before — but 400 still runs the cap, and the residual scales with
+  member count, which is a rod-rod signature.
+
+- ★★★ **A settled heap must now PROVE it settled, and the haystack does not** (docs/46 row 60).
+  `pile::settle` ran for a flat 4.0 simulated seconds and reported whatever it had, while its own module
+  doc claimed *"if a heap is still moving at the end its packing is not a settled packing"* and `Settled`
+  carried no field that could show it. It now runs against `recohere::SettleGauge` — the ONE settling
+  gauge — and reports `quiet`, `elapsed_s` and `peak_speed_ms`. Asked properly, **400 blades never come to
+  rest**, so the previously recorded 0.0024 packing was a snapshot of a heap still in the air.
+  - **`recohere::SettleGauge::for_cell(Δ)`** — the gauge carries the scale it is asked at instead of
+    hardcoding the voxel world's 1 m, at which a 0.35 m grass blade counts as quiet below **4.4 m/s**.
+    `new()` is unchanged for existing consumers; `needed_s`/`moving_above`/`cell_m` are new, and
+    `site::fold_site` now asks the gauge for its own interval instead of mirroring a private constant.
+  - **`pile::settle_traced` + `pile::Sample`** — a heap can be asked what it did on the way down (peak and
+    mean speed, height, accumulated quiet, and total mechanical energy).
+  - ★★ **Two defects it found, neither of them on row 60's list.** Total mechanical energy falls and then
+    **rises 9.1%** while the heap re-expands — with gravity the only external work and every contact
+    dissipative, the solver is manufacturing energy, the same defect fixed once on the terrain path and
+    never unified. And **`Rod::axis` is written once at construction and never again**: rods have no
+    angular degree of freedom at all, so they cannot rotate to lie flat, which is the principal way a rod
+    heap densifies. Both outrank the bending term the row had named dominant.
+  - **The fibre's own stiffness is catalogued** — `straw.youngs_modulus_stem` 5.67 GPa and
+    `rigidity_modulus_stem` 407 MPa (O'Dogherty et al. 1995, four-point bending transverse to the stem),
+    against the 150 kPa BALE figure that was the entry's only stiffness; `grass.youngs_modulus_culm`
+    5.55 GPa, with `youngs_modulus_blade` deliberately NULL because a leaf blade is not a culm and none
+    was sourced. All three are declared in `laws::UNWIRED_MATERIAL_PROPERTIES` until a blade can bend.
+
 - ★★★ **Terra's flora draws.** It was uploaded, indexed, drawn and invisible at every altitude; the cause
   was a renderer cache the model could not correct. `build_flora` baked the ground elevation into its mesh
   anchor and asked only *has the camera moved 2 m?* before reusing it — so the elevation tiles that stream
