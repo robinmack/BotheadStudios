@@ -15,9 +15,15 @@ because **we are our own first customers** and pin exact engine versions in our 
   coordinate rings at `√(2k)` and realises **√2·ζ**. Straw asks for `e = 0.05`; the shipped contact
   delivers **0.1399** dt-converged — 2.8× too bouncy — in every scene, not just the pile. Correcting
   the √2 *alone* makes it worse (0.2138); the dominant error is the `.max(0.0)` no-tension cutoff
-  truncating the dashpot's tensile phase. Both together give 0.0498. All dt-independent, so it costs
-  nothing in performance. Not yet fixed — `Material::restitution` is documented as "a material
-  property, not a dial", and today no contact reproduces it.
+  truncating the dashpot's tensile phase — which stays, because a dry surface genuinely cannot pull.
+  Both corrections together give 0.0498, gated by a dt-refinement ladder.
+  - ★★ **It is not free.** Correct damping is ~2× the old value, which halves the coordination at
+    which explicit damping pumps (Z ≈ 14.5 → 7.3). The pile promptly exploded from a 0.46 m heap to a
+    **14.94 m** one (+2075% energy drawup), because `pile::settle` picked its timestep from the SPRING
+    alone. It now takes `min(0.1/√k, 0.1/c)`, ~2.75× more steps. The GPU pays this with its implicit
+    solve; the native path pays it in dt.
+  - ★ Verified on the NATIVE explicit path only. `particle_step.wgsl` integrates the same coefficient
+    through a different scheme, so its realised restitution has shifted and is **not re-measured**.
 
 - ★★ **The pile's floor could not push up** (docs/46 row 60). It handed `contact_accel` a ghost
   particle at a FIXED `2r` offset instead of reflecting through the floor plane, so `overlap` was zero

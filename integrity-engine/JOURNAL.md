@@ -124,8 +124,15 @@ because the dominant error is not the calibration but the `.max(0.0)` no-tension
 `granular.rs:203`, which truncates the dashpot's tensile phase and detaches the contact early. Both
 corrections together land on 0.0498.
 
-Every number is **dt-independent**, so this is not the integrator's fault and costs nothing in
-performance to fix. It also exonerates the timestep as an energy source: refining dt makes the
+Every number is **dt-independent**, so the miscalibration is not the integrator's fault.
+
+★★★ **It is not free, though, and I claimed it was.** Correcting the calibration doubles `c`, and
+`granular.rs`'s own doc warns that *"explicit damping overshoots and pumps energy once `Z·c·dt` nears
+2"* — so doubling `c` halves the coordination at which that bites, from Z ≈ 14.5 to Z ≈ 7.3, which a
+heap reaches easily. Measured: the 400-rod pile at its old timestep went from a 0.46 m heap to a
+**14.94 m** one, peak 4.88 m/s, energy drawup **+2075%**. The pile's timestep rule saw only the
+spring (`0.1/√k`) and was silent about the damper; it now takes `min(0.1/√k, 0.1/c)`, ~2.75× more
+steps for straw, and the trace returns to a **+0.000%** drawup. It also exonerates the timestep as an energy source: refining dt makes the
 contact *bouncier*, so the production dt is a net damper worth ~9% of outgoing speed, and a pump you
 could remove by halving dt cannot exist here.
 

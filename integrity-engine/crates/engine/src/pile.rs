@@ -412,8 +412,27 @@ pub fn settle_traced(
         })
         .collect();
 
-    // A timestep the contact can hold: ω = √stiffness, and a tenth of that period is stable.
-    let dt = (0.1 / contact.stiffness.max(1.0).sqrt()).min(1e-3);
+    // ★★★ **A CONTACT HAS TWO TIMESCALES AND THIS RULE USED TO SEE ONLY ONE.**
+    //
+    // ~~"ω = √stiffness, and a tenth of that period is stable"~~ — true of the SPRING and silent
+    // about the DAMPER, which is a separate explicit term with its own stability limit. An explicit
+    // velocity update `v -= c·v·dt` diverges once `c·dt` approaches 2, and `granular`'s own module
+    // doc names the heap version of exactly this: *"explicit damping overshoots and pumps energy once
+    // `Z·c·dt` nears 2"* — which is why the GPU path moves the damper into an implicit solve.
+    //
+    // MEASURED, 2026-08-16, and it is why this rule is here: correcting the restitution calibration
+    // (docs/46 row 62) roughly DOUBLED `c`, which halved the coordination number at which the
+    // integrator starts pumping — from Z ≈ 14.5 to Z ≈ 7.3, a number a real heap reaches easily. The
+    // 400-rod heap went from a 0.46 m pile to a **14.94 m** one, peak speed 4.88 m/s, with the energy
+    // trace showing a **+2075% drawup**. Nothing was wrong with the new damping; the timestep was
+    // being chosen by a rule that could not see it.
+    //
+    // So the step respects both: a tenth of the spring's period AND a tenth of the damping time
+    // constant `1/c`. Both are derived, neither is chosen, and the heap's own energy trace is what
+    // says whether they are sufficient.
+    let dt_spring = 0.1 / contact.stiffness.max(1.0).sqrt();
+    let dt_damp = 0.1 / contact.normal_damp.max(1.0e-30);
+    let dt = dt_spring.min(dt_damp).min(1e-3);
 
     // ★★★ **IT RUNS UNTIL IT IS QUIET, AND THE ENGINE ALREADY OWNS WHAT QUIET MEANS.**
     //
@@ -532,6 +551,26 @@ pub fn settle_traced(
         if disturbed {
             gauge.observe(peak_speed as f32, gravity_ms2 as f32, dt as f32);
         }
+        // ★★★ **QUIET IS NOT THE SAME AS SUPPORTED, AND DAMPING CAN FAKE THE FIRST.**
+        //
+        // MEASURED 2026-08-16: with the restitution calibration corrected (docs/46 row 62) the
+        // contact damping roughly doubled, and a 400-rod heap reported "settled" at 0.38 s having
+        // fallen 0.054 m — it froze in mid-air. The release drops rod CENTRES ~19x closer together
+        // than a rod is long, so every member starts interpenetrated with many others; under-damped
+        // they blew apart, correctly damped they lock. Both look quiet to a speed threshold.
+        //
+        // But a damping force is proportional to velocity, so it VANISHES at rest: a heap held up by
+        // damping cannot be in equilibrium, and will resume falling the moment it truly stops. The
+        // test that separates the two needs no dial — require the quiet to have held for as long as
+        // an unsupported member would take to fall its OWN LENGTH, `√(2L/g)`. Nothing moving for that
+        // long is being held by something that does not care whether it is moving: the floor, or
+        // another member resting on the floor.
+        //
+        // These are two different questions asked at two different scales, deliberately: *is anything
+        // moving?* is a contact-radius question, and *has that lasted long enough to prove support?*
+        // is a body-length one. Collapsing them into one gauge is what let a frozen cloud pass.
+        let support_s = (2.0 * length / gravity_ms2).sqrt();
+        let supported = gauge.quiet_seconds() as f64 >= support_s;
         if trace_every_s > 0.0 && elapsed_s >= next_sample {
             next_sample = elapsed_s + trace_every_s;
             let mean = rods.iter().map(|r| r.vel.length()).sum::<f64>() / rods.len().max(1) as f64;
@@ -558,13 +597,15 @@ pub fn settle_traced(
                 energy_j: energy,
             });
         }
-        if disturbed && gauge.settled(gravity_ms2 as f32) {
+        if disturbed && gauge.settled(gravity_ms2 as f32) && supported {
             break;
         }
     }
     // Never disturbed at all is not a settled heap either — it is a heap that never fell, which for a
     // release above a floor means something is wrong with the release, not that the answer is ready.
-    let quiet = disturbed && gauge.settled(gravity_ms2 as f32);
+    let quiet = disturbed
+        && gauge.settled(gravity_ms2 as f32)
+        && gauge.quiet_seconds() as f64 >= (2.0 * length / gravity_ms2).sqrt();
 
     // ★ MEASURE THE HEAP. Occupancy on a grid whose cell is the member's own radius scale, so the
     // envelope means "space the heap is in" rather than "box that contains it".
@@ -682,14 +723,31 @@ mod tests {
         // the balance point between energy injection and damping, which is a fact about the
         // integrator. Pinned so the number cannot drift unnoticed, and it should FAIL UPWARD the
         // moment the contact stops injecting — that failure is the goal, not a regression.
+        // ★★★ IT NOW REACHES EQUILIBRIUM — AND IT IS STILL NOT A SETTLED HEAP (2026-08-16).
+        //
+        // With the floor fixed (row 60), the restitution calibrated (row 62) and a damping-aware
+        // timestep, the energy trace is monotone (worst drawup +0.000%) and the gauge fires. What it
+        // fires on is NOT a haystack: the heap ends 0.78 m tall having fallen 0.077 m from a release
+        // that was 0.86 m tall. It did not pile up, it SAGGED.
+        //
+        // The release drops rod CENTRES ~19x closer together than a rod is long, so all 400 members
+        // start interpenetrated with many neighbours. Their repulsive springs balance internally and
+        // the cloud equilibrates as a jammed elastic blob that never rests on the floor. The old
+        // under-damped contact hid this by blowing the cloud apart, which looked like falling.
+        //
+        // So the packing below is STILL NOT a bulk density, for a new and better-understood reason,
+        // and must not be compared with loose hay's 0.029. The fix is the release, and it is Robin's
+        // own original framing (docs/71 §3b): a haystack is built forkful by forkful, so members must
+        // be dropped SEQUENTIALLY onto a settling heap rather than conjured overlapping in one cloud.
         assert!(
-            !settled.quiet,
-            "★ THE HEAP NOW SETTLES — that is the fix landing, not a break. Re-derive the packing \
-             against loose hay's 0.029, invert this assertion, and update docs/46 row 60."
+            settled.height_m > 0.5 * length,
+            "it should stack, not lie flat: {:.3} m",
+            settled.height_m
         );
         assert!(
             (0.0015..0.0025).contains(&settled.packing),
-            "the un-settled heap has moved off its recorded 0.0019: {:.4}",
+            "the heap has moved off its recorded 0.0019: {:.4}. Still not a bulk density — the \
+             release starts interpenetrated (docs/46 row 60).",
             settled.packing
         );
 
@@ -925,6 +983,24 @@ mod tests {
                 ladder.iter().map(|(n, _)| *n).collect::<Vec<_>>()
             );
         }
+        // ★★★ AND EVEN WHEN EVERY RUNG SETTLES, THESE ARE STILL NOT BULK DENSITIES. Said out loud
+        // because the moment the line above stops printing, a reader takes the trend for a
+        // convergence result. The release drops rod CENTRES ~19x closer together than a rod is LONG,
+        // so every member starts interpenetrated with many others; the cloud equilibrates as a jammed
+        // elastic blob that SAGS rather than a heap that FALLS. MEASURED: 400 rods end 0.774 m tall
+        // from a 0.861 m release, having dropped 0.077 m. Until members are released SEQUENTIALLY
+        // onto a settling heap — Robin's forkful-by-forkful framing, docs/71 §3b — the trend below is
+        // a fact about the release, not about straw.
+        let tallest = ladder
+            .iter()
+            .map(|(_, s)| s.height_m)
+            .fold(0.0f64, f64::max);
+        println!(
+            "\n★ STILL NOT A BULK DENSITY, even where every rung came to rest: the release starts \
+             INTERPENETRATED, so these equilibrate by sagging rather than by piling. Tallest rung \
+             {tallest:.3} m against a ~0.861 m release. Fix the release (sequential drop) before \
+             comparing any of this with loose hay's 0.029."
+        );
         for (_, s) in &ladder {
             assert_it_actually_fell(s, length, radius, 9.81);
         }
