@@ -819,6 +819,41 @@ pub(crate) const UNWIRED_MATERIAL_PROPERTIES: &[(&str, &str)] = &[
          distinction `grass` records, and it is what a RESOLVED pile of blades would spend instead of \
          the bale-scale figure (docs/46 row 59)",
     ),
+    // ★★★ The grass LEAF BLADE's own flexure, added 2026-08-17 for docs/46 row 64. Unwired because
+    // the engine has no elastic branch at all yet — docs/18's one deformation process is built for
+    // FAILURE (crater, crush, fragment) and nothing lets a body store elastic strain and give it
+    // back. These are the composable parts a slender-body flexure would read. There is deliberately
+    // NO catalogued `flexural_rigidity`: EI depends on width, on thickness CUBED and on cross-section
+    // shape, so a stored EI is wrong for every blade but the one it was measured on.
+    (
+        "youngs_modulus_blade",
+        "the leaf blade's EFFECTIVE FLAT-SLAB BENDING modulus (1.06 GPa) — derived from the only \
+         directly measured Poaceae blade EI (Wu 2024, wheat) over its flat-slab I. It was NULL until \
+         now, and the culm's 5.55 GPa stood in for it, making the engine 5.23x too STIFF",
+    ),
+    (
+        "youngs_modulus_blade_tensile",
+        "the blade in TENSION (0.552 GPa, Vincent 1982 via Inoue 1992, Lolium perenne) — a different \
+         quantity from the bending modulus above by the sandwich ratio 2.59, and not interchangeable \
+         with it",
+    ),
+    (
+        "transverse_modulus_blade",
+        "the blade ACROSS its fibres (13.9 MPa against 552 MPa along) — a 40:1 anisotropy that makes \
+         a blade an oriented fibrous composite rather than an isotropic slab, and the leaf-scale \
+         sibling of oak's `youngs_modulus_perp` (docs/46 row 30)",
+    ),
+    (
+        "youngs_modulus_sclerenchyma_fibre",
+        "the load-bearing phase inside the blade (22.6 GPa) — ~2-4% of cross-section carrying 90-95% \
+         of the stiffness, which is what a composite flexure model would resolve rather than smear",
+    ),
+    (
+        "density_fresh_blade",
+        "a FRESH leaf's density (710 kg/m3) against `density` 1400, which is the DRY CELL WALL — the \
+         same fibre-vs-arrangement split `straw` records. The modelled blade was 1.97x too heavy \
+         (measured: n~991 Lolium blades, 258 mm / 149 mg)",
+    ),
     // ★★★ The velocity a restitution was MEASURED AT, added 2026-08-17 for docs/46 row 63. Unwired
     // on purpose and it should stay that way until the contact can USE it: the engine's contact is
     // linear, so it returns one restitution at every impact speed, and there is nothing for a
