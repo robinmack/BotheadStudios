@@ -9,6 +9,24 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★★ **The catalogue's restitutions were never sourced, and they were too low** (docs/46 row 63).
+  Only **5 of 32** entries mentioned restitution anywhere in their sources or notes; exactly one
+  (`limestone`) cited anything restitution-specific. The rest were typed alongside citations about
+  density, friction and thermal conductivity, and inherited their credibility. **14 of 23 solids and
+  granulars now carry a MEASURED restitution with the impact velocity it was measured at; 9 are
+  flagged as genuine gaps and keep no invented value.** The uncited numbers were systematically too
+  low — the granular ones by 3–5×: `straw` 0.05 → **0.238 @ 1.17 m/s**, `grass` 0.10 → **0.468**,
+  `sand` 0.20 → **0.75**, `gravel` 0.20 → **0.83**, `ice` 0.40 → **0.88**, `iron` 0.60 → **0.95**,
+  `cast_iron` 0.30 → **0.69**, `snow` 0.10 → **0.30**, `copper` 0.45 → 0.66.
+  - **New field `restitution_at_ms`**, declared unwired: a linear contact has no velocity dependence
+    for a reference velocity to anchor, so it is the input the nonlinear contact needs, recorded now
+    so the sourcing is not repeated. Goldsmith 1960, on the equal-mass sphere pair the engine
+    models: *"a definite value for the coefficient of restitution cannot be assigned … unless their
+    size, material, and impact velocity are specified initially."*
+  - Each sourced entry records its **configuration**, because `e` belongs to a pair: same-material
+    sphere pairs are ideal, sphere-on-same-material-slab is a stated proxy, and a harder impactor on
+    a softer target is labelled an **upper bound**.
+
 - ★★★ **No grain-grain contact reproduced its material's restitution** (docs/46 row 62, OPEN).
   `granular::damping_for_restitution` calibrates `c = 2ζ√k` for a grain against a FIXED WALL, but
   `contact_accel` applies `+a` to one body and `−a` to the other, so an equal-mass pair's relative

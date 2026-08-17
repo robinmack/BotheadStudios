@@ -819,6 +819,19 @@ pub(crate) const UNWIRED_MATERIAL_PROPERTIES: &[(&str, &str)] = &[
          distinction `grass` records, and it is what a RESOLVED pile of blades would spend instead of \
          the bale-scale figure (docs/46 row 59)",
     ),
+    // ★★★ The velocity a restitution was MEASURED AT, added 2026-08-17 for docs/46 row 63. Unwired
+    // on purpose and it should stay that way until the contact can USE it: the engine's contact is
+    // linear, so it returns one restitution at every impact speed, and there is nothing for a
+    // reference velocity to mean until a nonlinear (Hertz-Kuwabara-Kono) contact makes `e` depend on
+    // speed the way real viscoelastic contacts do. Recorded now because it is part of the
+    // measurement — a bare `e` with no velocity is not a number — and because sourcing it was what
+    // revealed that the restitutions themselves had never been cited at all.
+    (
+        "restitution_at_ms",
+        "the impact velocity a catalogued `restitution` was measured at (m/s). Meaningless to a \
+         LINEAR contact, which has no velocity dependence to anchor; the deferred computation is the \
+         nonlinear contact of docs/46 rows 62-63",
+    ),
     // ★★ The FIBRE's own stiffness, added 2026-08-15 for docs/46 row 60. Same blade-vs-bale split as
     // `tensile_strength_stem` above, and it had to be made because the gap is four to five orders of
     // magnitude: `youngs_modulus` on `straw` is 150 kPa (a BALE being squashed) and a single straw in

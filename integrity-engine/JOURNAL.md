@@ -3,6 +3,61 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-17 — the catalogue's restitutions were never sourced, and they were too low
+
+★★★ **27 of 32 restitution values in `data/materials.json` were typed, not measured.** The pass began
+as "recover the impact velocity for each cited restitution" and discovered there was nothing to
+recover from: only **5 of 32** entries mention restitution anywhere in their sources or notes, one of
+those is the prose *"Restitution near zero"*, and exactly **one** material (`limestone`) cites
+anything restitution-specific. Every other entry's citations are about density, friction, thermal
+conductivity or Young's modulus. The restitutions sat among them and inherited their credibility.
+
+**Sourced properly**: six parallel literature agents, each followed by an adversarial verifier that
+went back to the primary documents and read the figures **as images** rather than trusting the first
+agent's prose. That caught real errors — an over-extended read of a curve that stops at 4.1 m/s, and
+a "second dataset" in a figure caption that is actually the author's own analytical model.
+
+**14 of 23 solids and granulars now carry a measured restitution with its impact velocity. Nine are
+flagged as genuine gaps and keep no invented value.** The uncited numbers were systematically too
+low, the granular ones by 3–5×:
+
+```
+straw      0.05 -> 0.238 @ 1.17 m/s        ice        0.40 -> 0.88 @ 0.25 m/s
+grass      0.10 -> 0.468 @ 2.62 m/s        iron       0.60 -> 0.95 @ 0.20 m/s
+sand       0.20 -> 0.75  @ 1.74 m/s        cast_iron  0.30 -> 0.69 @ 3.05 m/s
+gravel     0.20 -> 0.83  @ 1.00 m/s        snow       0.10 -> 0.30 @ 4.12 m/s
+copper     0.45 -> 0.66  @ 0.25 m/s
+aluminium, granite, limestone, pine, rubber: within ~10%, now cited rather than merely lucky
+```
+
+★★ **Straw is the one that stings**: 0.05 was the target I calibrated the whole contact against
+yesterday, and the measured value is **0.238** — nearly five times bouncier. Everything downstream of
+it was tuned to a number nobody had ever measured.
+
+**The velocity is part of the number**, and Goldsmith says so on the exact configuration the engine
+models — two cast-iron spheres of equal size, plotted against relative approach velocity:
+
+> *"data indicate that a definite value for the coefficient of restitution cannot be assigned to the
+> impact of spheres unless their size, material, and impact velocity are specified initially."*
+
+So `restitution_at_ms` is catalogued beside every sourced value and **declared unwired**, because a
+linear contact has no velocity dependence for it to anchor. It is the input the nonlinear contact
+needs, recorded now so the sourcing is not done twice.
+
+**Configuration is recorded too, because `e` belongs to a pair, not a substance.** Same-material
+sphere pairs are ideal (cast_iron); sphere-on-thick-slab of the same material is an accepted proxy
+(copper, ice); a harder impactor onto a softer target is an **upper bound** and is labelled as one —
+aluminium's number comes from a 440c steel sphere roughly 6× harder than the 6061-T6 puck, so the
+plastic work goes into the aluminium.
+
+**And a regression I had introduced the day before, caught here.** Nine entries (7 gases,
+`water`, `crude_oil`) carry `restitution: 0.0` as a placeholder for "a parcel of this does not
+bounce". A linear no-tension contact reaches `e = 0` only as ζ → ∞, so the new inversion clamps at
+**ζ ≈ 50, c ≈ 70.7√k — 38.8× the old damping** — and drives a stable timestep 25× smaller for no
+physical reason. The gas path already sidesteps it (`gas_contact_from_material` sets
+`normal_damp: 0.0` and dissipates viscously); the liquids do not. Flagged in the catalogue, not
+changed — what a liquid parcel's contact should be is a design decision.
+
 ## 2026-08-16 — the floor could not push up; and my explanation of why that mattered was wrong
 
 ★★★ **`pile::settle`'s floor was a 12.245 m/s² downward magnet with zero support.** It modelled the

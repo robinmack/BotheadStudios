@@ -437,6 +437,20 @@ pub fn restitution_of_damping_ratio(zeta: f64) -> f64 {
 /// textbook ζ delivers a contact far bouncier than the material asked for. Measured for straw
 /// (`e = 0.05`): the textbook ζ = 0.690 gives **e = 0.2137**, while ζ = 1.945 gives **e = 0.0500**.
 /// The cutoff is not the bug — a dry surface genuinely cannot pull — the formula applied to it was.
+///
+/// ★★ **`e = 0` IS NOT REACHABLE, AND ASKING FOR IT IS EXPENSIVE.** `restitution_of_damping_ratio`
+/// tends to zero only as ζ → ∞, so a perfectly inelastic linear contact does not exist: the clamp
+/// below turns `e = 0` into ζ ≈ 50, i.e. `c ≈ 70.7·√k`, **38.8× the damping the old textbook
+/// inversion returned for the same input**. That is not a bug in this function — it is what "no
+/// bounce at all" costs a linear dashpot — but it makes the caller's timestep 25× smaller than a
+/// realistic `e` would, because a stable explicit step scales as `1/c`.
+///
+/// It matters because the catalogue currently carries `restitution: 0.0` on **9 materials** — 7 gases
+/// and 2 liquids — where restitution is not a measured property at all but a placeholder for "a
+/// parcel of this does not bounce". The gas path already sidesteps it (`gas_contact_from_material`
+/// sets `normal_damp: 0.0` directly, noting that *"dissipation enters via viscosity later"*); the
+/// liquids do not, and go through here. **The fix belongs in the data**: a liquid's dissipation is
+/// viscous, and `crude_oil`/`water` should say so rather than declare an unreachable restitution.
 pub fn zeta_for_no_tension_restitution(e: f64) -> f64 {
     let target = e.clamp(1.0e-4, 0.9999);
     let (mut lo, mut hi) = (1.0e-6f64, 1.0e3f64);
