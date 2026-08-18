@@ -1,21 +1,61 @@
 {
   "id": "grass-blade",
   "name": "Grass blade",
-  "notes": "ONE blade \u2014 the member a clump and a haystack are both piles of. Robin, 2026-08-10: *\"a clump of grass should be an assembly of multiple 'grass blade' assemblies. A haystack is then a pile of 'grass blades' with the 'dry' properties.\"*\n\nNOTHING NEW IS DECLARED. These are the grass clump's own numbers, lifted out of it: leaf area LAI 3.0 x pi(0.06)^2 over 32 blades of length 0.35 m fixes the width at 3.03 mm, which sits inside the measured 2-3 mm of Lolium perenne. The clump is now 32 of THESE rather than 32 slabs it described itself, and its mass is unchanged because the matter is.\n\nA DRY blade is the same geometry made of `straw` \u2014 that is what a haystack is a pile of, and it is why the material is a property of the blade rather than of the pile.",
+  "notes": "ONE blade — the member a clump and a haystack are both piles of. Robin, 2026-08-10: *\"a clump of grass should be an assembly of multiple 'grass blade' assemblies. A haystack is then a pile of 'grass blades' with the 'dry' properties.\"*\n\nNOTHING NEW IS DECLARED. These are the grass clump's own numbers, lifted out of it: leaf area LAI 3.0 x pi(0.06)^2 over 32 blades of length 0.35 m fixes the width at 3.03 mm, which sits inside the measured 2-3 mm of Lolium perenne. The clump is now 32 of THESE rather than 32 slabs it described itself, and its mass is unchanged because the matter is.\n\nA DRY blade is the same geometry made of `straw` — that is what a haystack is a pile of, and it is why the material is a property of the blade rather than of the pile.\n\n★★★ 2026-08-17 — THE BLADE IS A LAMINA PLUS A MIDRIB, AND THAT IS GEOMETRY, NOT A SHAPE FACTOR (docs/46 row 64). Robin: *\"Render can fudge, physics shouldn't.\"* Its stiffness was about to be modelled as flat_slab x 2.0, with the 2.0 bounded by measurement but not itself measured — a fudge-shaped patch over a geometry this file can simply state. Declared instead: two lamina wings either side of a thicker median band. The MEASURED input is the thickness ratio, Imperata cylindrica midrib 429.66 +/- 41.32 um against lamina 196.47 +/- 14.33 um = 2.187 (Sima et al. 2018); the stiffness recruitment is then a RESULT, I/I_flat = 1.946, which `Assembly::section` computes by the parallel-axis theorem and a test cross-checks against the closed form (1-f) + f*r^3. It lands inside the 1.5-2.4 that two independent routes gave, without anyone choosing it. ★ THE ONE UNMEASURED INPUT IS NOW THE MIDRIB'S WIDTH FRACTION (0.10) — which is progress rather than a fix: a midrib width is a physical dimension somebody can go and measure, whereas a shape factor is a knob. Source it and this file has no free parameter left. ★ MATTER RISES 11.9% against the uniform slab, which is correct: a blade thickened at its midrib holds more substance than a flat one of the same envelope. Leaf AREA is unchanged, so the LAI derivation above still holds. ★ NOT EXPRESSIBLE YET: a V-FOLD. Ellis (1976) classifies Poaceae blades by the angle between the two lamina arms, and `Part` carries `along` (a direction) but no ROLL about it, so folded arms cannot be declared. That is a real gap in `Part`, and the same one docs/46 row 30 names for grain direction.",
   "parts": [
     {
-      "name": "blade",
+      "name": "lamina-left",
       "material": "grass",
       "shape": {
         "kind": "slab",
         "x": 0.35,
         "y": 0.0003,
-        "z": 0.0030292
+        "z": 0.00136314
+      },
+      "at_m": [
+        0.0,
+        0.175,
+        -0.00083303
+      ],
+      "along": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "name": "midrib",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0006560696289509848,
+        "z": 0.00030292000000000003
       },
       "at_m": [
         0.0,
         0.175,
         0.0
+      ],
+      "along": [
+        0.0,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "name": "lamina-right",
+      "material": "grass",
+      "shape": {
+        "kind": "slab",
+        "x": 0.35,
+        "y": 0.0003,
+        "z": 0.00136314
+      },
+      "at_m": [
+        0.0,
+        0.175,
+        0.00083303
       ],
       "along": [
         0.0,

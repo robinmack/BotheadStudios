@@ -601,7 +601,124 @@ pub struct Derived {
     pub centre_of_mass_m: [f64; 3],
 }
 
+/// **The cross-section of a slender assembly**, as a beam sees it (docs/46 row 64).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Section {
+    /// Area of substance in the cross-section, m².
+    pub area_m2: f64,
+    /// Second moment of area for bending that DEFLECTS along the first cross-section axis, m⁴.
+    /// For a flat blade lying in the `w` plane this is the WEAK axis — the one gravity drives.
+    pub i_v_m4: f64,
+    /// Second moment of area for deflection along the second cross-section axis, m⁴.
+    pub i_w_m4: f64,
+    /// Where the composite centroid sits in the cross-section, m, on `(v, w)`. Parts offset from it
+    /// contribute their `A·d²` — which is the whole reason a midrib stiffens a blade.
+    pub centroid_vw_m: (f64, f64),
+}
+
 impl Assembly {
+    /// ★★★ **THE SECOND MOMENT OF AREA OF THIS ASSEMBLY'S CROSS-SECTION — GEOMETRY, NOT A FACTOR.**
+    ///
+    /// Robin, 2026-08-17: *"Render can fudge, physics shouldn't."* This exists so that nothing has to
+    /// carry a **shape factor**. A grass blade's stiffness was going to be modelled as
+    /// `flat_slab × 2.0`, with the 2.0 bounded by measurement but not itself measured — a
+    /// fudge-shaped patch over a geometry the assembly can simply STATE. A blade is not a slab times a
+    /// correction: it is a **lamina plus a midrib**, and once both are declared as parts the second
+    /// moment falls out of the parallel-axis theorem with no factor anywhere.
+    ///
+    /// `I = Σᵢ (Iᵢ_own + Aᵢ·dᵢ²)` over the parts, about the composite centroid. The `A·d²` term is the
+    /// entire mechanism: a thickened strip displaced from the neutral axis buys stiffness in
+    /// proportion to the SQUARE of how far out it sits, which is why a midrib, a keel, an I-beam's
+    /// flanges and a tube's wall all work, and why they are one computation.
+    ///
+    /// ## What this is honest about
+    ///
+    /// - It reduces EXACTLY to `w·t³/12` for a single centred slab — asserted, not assumed, because a
+    ///   composite that does not reproduce the simple case is not measuring the composite.
+    /// - ★ **It assumes the parts share a long axis and are NOT rolled about it.** [`Part`] carries
+    ///   `along` (which way it points) but no roll, so two lamina arms folded to ±φ about the midrib —
+    ///   Ellis's V-shaped blade, the classification a real grass section is scored against — **cannot
+    ///   be expressed today**. That is a real gap in `Part`, recorded rather than worked around: a
+    ///   V-fold needs an orientation, not just a direction, and so do a plank's face, rolled steel and
+    ///   composite layup (`docs/46` row 30 names the same gap for grain direction).
+    /// - Non-box shapes are summarised by their bounding extents, which is wrong for a cylinder by
+    ///   `3π/16` and is why this returns `None` unless every part is a [`Shape::Slab`]. Refusing is
+    ///   better than quietly returning a rectangle's answer for a round bar.
+    pub fn section(&self) -> Option<Section> {
+        if self.parts.is_empty() {
+            return None;
+        }
+        let long = glam::DVec3::from(self.parts[0].along);
+        if long.length_squared() <= 0.0 {
+            return None;
+        }
+        let long = long.normalize();
+        // ★ The cross-section axes are the part's OWN local Y and Z carried into the assembly frame by
+        // the same minimal rotation `along` implies (local X → `long`). They are NOT an arbitrary
+        // perpendicular pair: `Part` has no roll, so local Y *is* the thickness direction of a slab and
+        // local Z *is* its width, and a frame that swaps them silently reports the strong axis as the
+        // weak one. MEASURED the wrong way first — an arbitrary `long.cross(seed)` put `v` on the width
+        // axis while the code indexed `h.y` for it, so a midrib's width offsets leaked into the
+        // weak-axis parallel term and a 1.95× recruitment came out as 85.2×. Caught only because the
+        // test cross-checks against the closed form `(1−f) + f·r³`.
+        let rot = glam::DQuat::from_rotation_arc(glam::DVec3::X, long);
+        let v = rot * glam::DVec3::Y;
+        let w = rot * glam::DVec3::Z;
+
+        struct Rect {
+            a: f64,
+            hv: f64,
+            hw: f64,
+            dv: f64,
+            dw: f64,
+        }
+        let mut rects: Vec<Rect> = Vec::with_capacity(self.parts.len());
+        for p in &self.parts {
+            let Shape::Slab { .. } = p.shape else {
+                return None; // see the doc: a bounding box is not a round bar's section
+            };
+            if (glam::DVec3::from(p.along).normalize_or_zero() - long).length() > 1.0e-9 {
+                return None; // parts must share the beam's axis to share a cross-section
+            }
+            let h = p.shape.half_extents_m();
+            // Local X runs along the beam; the cross-section is local (Y, Z), mapped to (v, w).
+            let (hv, hw) = (h.y, h.z);
+            let at = glam::DVec3::from(p.at_m);
+            let packing = p.packing.clamp(0.0, 1.0);
+            rects.push(Rect {
+                a: 4.0 * hv * hw * packing,
+                hv,
+                hw,
+                dv: at.dot(v),
+                dw: at.dot(w),
+            });
+        }
+        let area: f64 = rects.iter().map(|r| r.a).sum();
+        if area <= 0.0 {
+            return None;
+        }
+        let cv = rects.iter().map(|r| r.a * r.dv).sum::<f64>() / area;
+        let cw = rects.iter().map(|r| r.a * r.dw).sum::<f64>() / area;
+        let mut i_v = 0.0;
+        let mut i_w = 0.0;
+        for r in &rects {
+            // Deflection along v is resisted by the extent along v CUBED — the thin direction of a
+            // blade — times the width across it.
+            i_v += (2.0 * r.hw) * (2.0 * r.hv).powi(3) / 12.0
+                * (r.a / (4.0 * r.hv * r.hw).max(f64::MIN_POSITIVE))
+                + r.a * (r.dv - cv).powi(2);
+            i_w += (2.0 * r.hv) * (2.0 * r.hw).powi(3) / 12.0
+                * (r.a / (4.0 * r.hv * r.hw).max(f64::MIN_POSITIVE))
+                + r.a * (r.dw - cw).powi(2);
+        }
+        Some(Section {
+            area_m2: area,
+            i_v_m4: i_v,
+            i_w_m4: i_w,
+            centroid_vw_m: (cv, cw),
+        })
+    }
+
     /// ★★ **WHERE THIS ASSEMBLY ENDS**, metres from its own origin — the outermost boundary of its
     /// outermost component, and nothing else.
     ///
@@ -2894,6 +3011,163 @@ mod placement_rule_tests {
             contents.remembered(),
             1,
             "for the cost of ONE remembered id"
+        );
+    }
+}
+
+#[cfg(test)]
+mod section_tests {
+    use super::*;
+
+    fn part_of(name: &str, material: &str, shape: Shape, at: [f64; 3]) -> Part {
+        let mut p: Part = serde_json::from_str(&format!(
+            r#"{{"name":"{name}","material":"{material}","shape":{{"kind":"slab","x":1,"y":1,"z":1}}}}"#
+        ))
+        .expect("a part parses");
+        p.shape = shape;
+        p.at_m = at;
+        p.along = [1.0, 0.0, 0.0];
+        p
+    }
+    fn slab(name: &str, x: f64, y: f64, z: f64, at: [f64; 3]) -> Part {
+        part_of(name, "grass", Shape::Slab { x, y, z }, at)
+    }
+    fn of(parts: Vec<Part>) -> Assembly {
+        let mut a: Assembly = serde_json::from_str(r#"{"id":"t","name":"t","parts":[]}"#)
+            .expect("an assembly parses");
+        a.parts = parts;
+        a
+    }
+
+    /// ★★★ **A COMPOSITE THAT CANNOT REPRODUCE THE SIMPLE CASE IS NOT MEASURING THE COMPOSITE.**
+    ///
+    /// One centred slab must give exactly `w·t³/12`. This is the reduction that lets the parallel-axis
+    /// machinery be trusted for the cases where there is nothing to check it against, and it has no
+    /// tolerance to tune: it is an identity, so it holds to floating-point.
+    #[test]
+    fn one_centred_slab_is_exactly_w_t_cubed_over_twelve() {
+        let (t, w, l) = (0.0003, 0.0030292, 0.35);
+        let s = of(vec![slab("blade", l, t, w, [0.0; 3])])
+            .section()
+            .expect("a slab has a section");
+        let want_v = w * t.powi(3) / 12.0;
+        let want_w = t * w.powi(3) / 12.0;
+        assert!(
+            (s.i_v_m4 - want_v).abs() <= want_v * 1e-12,
+            "weak axis: {:.6e} vs {want_v:.6e}",
+            s.i_v_m4
+        );
+        assert!(
+            (s.i_w_m4 - want_w).abs() <= want_w * 1e-12,
+            "strong axis: {:.6e} vs {want_w:.6e}",
+            s.i_w_m4
+        );
+        assert!((s.area_m2 - t * w).abs() <= t * w * 1e-12);
+        // ★ And the ratio that was misquoted as the blade's headline: 102 is the EDGEWISE mode, which
+        // gravity does not drive. Recorded here so the number cannot be reached for again.
+        assert!((s.i_w_m4 / s.i_v_m4 - (w / t).powi(2)).abs() < 1e-6);
+    }
+
+    /// ★★★ **THE MIDRIB STIFFENS THE BLADE BY GEOMETRY, AND NOTHING IS MULTIPLIED BY A FACTOR.**
+    ///
+    /// A blade declared as a lamina PLUS a thickened midrib has a larger second moment than the flat
+    /// slab of the same substance, purely from `Σ A·d²`. The measured input is the thickness ratio —
+    /// *Imperata cylindrica*, midrib 429.66 ± 41.32 µm against lamina 196.47 ± 14.33 µm, so 2.19 — and
+    /// the recruitment it buys is a RESULT, not a chosen shape factor.
+    #[test]
+    fn a_midrib_recruits_stiffness_that_a_flat_slab_does_not_have() {
+        let (t, w, l) = (0.0003, 0.0030292, 0.35);
+        let flat = of(vec![slab("lamina", l, t, w, [0.0; 3])])
+            .section()
+            .expect("flat");
+
+        // Midrib thickness from the measured ratio; it PROJECTS abaxially, so its extra thickness sits
+        // to one side of the lamina's mid-plane — which is what the source describes ("the midrib shape
+        // was more or less conical by projected in abaxial direction") and what puts material off the
+        // neutral axis.
+        let ratio = 429.66 / 196.47;
+        let t_mid = t * ratio;
+        let w_mid = w * 0.10; // ← THE ONE UNMEASURED INPUT; see the assertion at the end.
+                              // ★ The midrib is where the blade IS THICKER, not a strip glued onto a uniform lamina. Declared
+                              // the wrong way first — a full-width lamina plus an added rib — which double-counts the lamina
+                              // under the rib and gave 1.167x where the section arithmetic says 1.95x. A blade is two lamina
+                              // wings either side of a thicker median band, and each spans its own share of the width.
+        let w_wing = 0.5 * (w - w_mid);
+        let keeled = of(vec![
+            slab(
+                "wing-left",
+                l,
+                t,
+                w_wing,
+                [0.0, 0.0, -0.5 * (w_mid + w_wing)],
+            ),
+            slab("midrib", l, t_mid, w_mid, [0.0; 3]),
+            slab(
+                "wing-right",
+                l,
+                t,
+                w_wing,
+                [0.0, 0.0, 0.5 * (w_mid + w_wing)],
+            ),
+        ])
+        .section()
+        .expect("keeled");
+
+        let recruit = keeled.i_v_m4 / flat.i_v_m4;
+        println!(
+            "flat I_v {:.4e}  keeled I_v {:.4e}  recruitment {recruit:.3}x  \
+             (midrib {:.0} um thick over lamina {:.0} um, ratio {ratio:.2})",
+            flat.i_v_m4,
+            keeled.i_v_m4,
+            t_mid * 1e6,
+            t * 1e6
+        );
+        assert!(
+            recruit > 1.0,
+            "a thickened midrib off the neutral axis must ADD second moment, got {recruit:.3}"
+        );
+        // The blade must not bury its own tip: the elastica needs I_real/I_flat >= 1.15 at an 80 deg
+        // ligule angle for the tip to reach ground level. That bound is derived, not chosen.
+        assert!(
+            recruit >= 1.15,
+            "below the tip-not-buried bound: {recruit:.3} < 1.15"
+        );
+        // ★ INDEPENDENT CHECK on the composition, from the section arithmetic rather than from this
+        // code: a median band of width fraction f at thickness ratio r contributes r^3 per unit width,
+        // so I/I_flat = (1 - f) + f*r^3 exactly. If `section()` disagrees with that, one of them is
+        // wrong — and it is the kind of disagreement a shape FACTOR could never have surfaced.
+        let f = w_mid / w;
+        let closed_form = (1.0 - f) + f * ratio.powi(3);
+        assert!(
+            (recruit - closed_form).abs() < 1e-9,
+            "composite {recruit:.6} vs closed form {closed_form:.6}"
+        );
+    }
+
+    /// A section is refused rather than guessed where the shapes are not boxes, or where the parts do
+    /// not share a beam axis — a bounding box is not a round bar, and two parts pointing different ways
+    /// do not have one cross-section between them.
+    #[test]
+    fn a_section_is_refused_where_it_would_have_to_be_invented() {
+        let round = of(vec![part_of(
+            "bar",
+            "iron",
+            Shape::Cylinder {
+                r: 0.01,
+                length: 1.0,
+            },
+            [0.0; 3],
+        )]);
+        assert!(round.section().is_none(), "a cylinder is not a rectangle");
+
+        let mut crossed = of(vec![
+            slab("a", 1.0, 0.01, 0.02, [0.0; 3]),
+            slab("b", 1.0, 0.01, 0.02, [0.0; 3]),
+        ]);
+        crossed.parts[1].along = [0.0, 1.0, 0.0];
+        assert!(
+            crossed.section().is_none(),
+            "parts pointing different ways share no cross-section"
         );
     }
 }
