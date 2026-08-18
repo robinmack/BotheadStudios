@@ -202,6 +202,8 @@ impl LayeredBody {
                     r_outer: l.outer_r,
                 },
                 along: [0.0, 1.0, 0.0], // a layer has no long axis; the spin axis is the honest default
+                // A spherical shell is roll-invariant: twisting it about its own axis changes nothing.
+                roll_rad: 0.0,
                 at_m: [0.0; 3],
                 packing: 1.0,
                 // MEASURED (PREM for Earth), and the reason a planet needs this at all: the catalogue's
@@ -229,6 +231,7 @@ impl LayeredBody {
                 material: "air".into(),
                 shape: shell,
                 along: [0.0, 1.0, 0.0],
+                roll_rad: 0.0, // a shell is roll-invariant
                 at_m: [0.0; 3],
                 packing: 1.0,
                 in_situ_density: (v > 0.0).then(|| self.atmosphere_mass / v),
