@@ -62,6 +62,12 @@ struct RawMechanical {
     /// Pa. Resistance to being pulled apart; null for liquids. Drives fracture (Phase 3).
     #[serde(default)]
     tensile_strength: Option<f32>,
+    /// Pa. **Bending failure of a beam or plank** — the stress in the outermost fibre at which a
+    /// slender body breaks rather than springs back. Read by `flexure`, which is its first consumer
+    /// (docs/46 row 64); catalogued on only 2 of 37 materials, so most things cannot yet be broken by
+    /// bending and `flexure::rupture_stress_pa` says so rather than guessing.
+    #[serde(default)]
+    modulus_of_rupture: Option<f32>,
     /// Pa. Fallback bonding strength where tensile isn't given.
     #[serde(default)]
     cohesion: Option<f32>,
@@ -375,6 +381,10 @@ pub struct Material {
     /// silent, which is conservative in the direction that matters — it makes a thing HARDER to crush
     /// than it is, never softer.
     pub compressive_strength: f32,
+    /// Pa. **Bending failure of a beam or plank**, or `None` where the catalogue is silent — which it
+    /// is for 35 of 37 materials. The stress at which a slender body in bending breaks instead of
+    /// springing back; `flexure` is its first reader.
+    pub modulus_of_rupture: Option<f32>,
     /// Pa. Young's (elastic) modulus — how stiffly the material resists deformation. A solid is rigid
     /// because its bonds are stiff; the cohesive-aggregate bond stiffness derives from this (`docs/23`).
     /// 0 where not characterized (falls back to a soft default at the call site).
@@ -548,6 +558,7 @@ pub fn load() -> Vec<Material> {
                     .mechanical
                     .compressive_strength
                     .unwrap_or(fracture_strength),
+                modulus_of_rupture: m.mechanical.modulus_of_rupture,
                 youngs_modulus: m.mechanical.youngs_modulus.unwrap_or(0.0),
                 friction_coefficient: m.mechanical.friction_coefficient.unwrap_or(0.6),
                 restitution: m.mechanical.restitution.unwrap_or(0.5),

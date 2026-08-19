@@ -904,7 +904,6 @@ pub(crate) const UNWIRED_MATERIAL_PROPERTIES: &[(&str, &str)] = &[
         "compressive_strength_perp",
         "anisotropic compression across the grain",
     ),
-    ("modulus_of_rupture", "bending failure of a beam or plank"),
     (
         "shear_strength",
         "shear failure, the mode a rivet and a bolted joint fail in",
