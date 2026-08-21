@@ -68,6 +68,12 @@ struct RawMechanical {
     /// bending and `flexure::rupture_stress_pa` says so rather than guessing.
     #[serde(default)]
     modulus_of_rupture: Option<f32>,
+    /// Pa. **Where the ELASTIC branch ends** — the stress past which deformation is permanent. Read by
+    /// `flexure` for the plastic rung. Distinct from `compressive_strength`, which carries yield for
+    /// ductile metals and a genuine crushing strength for brittle and porous solids; nothing in that
+    /// field told a reader which, so yield is named separately (docs/46 row 65).
+    #[serde(default)]
+    yield_strength: Option<f32>,
     /// Pa. Fallback bonding strength where tensile isn't given.
     #[serde(default)]
     cohesion: Option<f32>,
@@ -385,6 +391,10 @@ pub struct Material {
     /// is for 35 of 37 materials. The stress at which a slender body in bending breaks instead of
     /// springing back; `flexure` is its first reader.
     pub modulus_of_rupture: Option<f32>,
+    /// Pa. Where the elastic branch ends, or `None` where the catalogue does not say. Only materials
+    /// whose entry explicitly identifies a yield carry one — a number that merely looks like a yield
+    /// is not one.
+    pub yield_strength: Option<f32>,
     /// Pa. Young's (elastic) modulus — how stiffly the material resists deformation. A solid is rigid
     /// because its bonds are stiff; the cohesive-aggregate bond stiffness derives from this (`docs/23`).
     /// 0 where not characterized (falls back to a soft default at the call site).
@@ -559,6 +569,7 @@ pub fn load() -> Vec<Material> {
                     .compressive_strength
                     .unwrap_or(fracture_strength),
                 modulus_of_rupture: m.mechanical.modulus_of_rupture,
+                yield_strength: m.mechanical.yield_strength,
                 youngs_modulus: m.mechanical.youngs_modulus.unwrap_or(0.0),
                 friction_coefficient: m.mechanical.friction_coefficient.unwrap_or(0.6),
                 restitution: m.mechanical.restitution.unwrap_or(0.5),

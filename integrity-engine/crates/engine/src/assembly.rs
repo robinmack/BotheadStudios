@@ -758,6 +758,88 @@ impl Assembly {
         })
     }
 
+    /// ★★★ **THE PLASTIC SECTION MODULUS**, m³ — the same declared parts, integrated a different way.
+    ///
+    /// `Z = I/c` (elastic) is the section's capacity when only the OUTERMOST fibre has reached yield.
+    /// `S = ∫|y − y_pna| dA` (plastic) is its capacity when EVERY fibre has. The ratio `S/Z` is the
+    /// **shape factor**, and it is pure geometry: exactly **1.5** for a rectangle, ~1.7 for a solid
+    /// circle, ~1.15 for an I-beam whose material is out at the flanges. That a beam carries half as
+    /// much again after first yield is a fact about its cross-section, not about its material.
+    ///
+    /// The axis is the EQUAL-AREA axis, not the centroid. They coincide for a symmetric section and
+    /// diverge otherwise, and using the centroid for an asymmetric section is a quiet error — at full
+    /// plasticity the stress block is uniform, so it is area that must balance, not first moment.
+    ///
+    /// ★ REFUSES where it would have to invent: non-box shapes (a bounding box is not a round bar) and
+    /// **rolled parts**, because `∫|y| dA` over a rotated rectangle has no elementary form and
+    /// approximating it here would hide the approximation inside a number that looks exact. A V-folded
+    /// blade therefore has an elastic section and no plastic one yet, which is honest — it is also not
+    /// a thing that goes plastic, being grass.
+    pub fn plastic_modulus_v_m3(&self) -> Option<f64> {
+        if self.parts.is_empty() {
+            return None;
+        }
+        let long = glam::DVec3::from(self.parts[0].along);
+        if long.length_squared() <= 0.0 {
+            return None;
+        }
+        let long = long.normalize();
+        let rot = glam::DQuat::from_rotation_arc(glam::DVec3::X, long);
+        let v = rot * glam::DVec3::Y;
+        // (width across, low edge, high edge) in the v direction.
+        let mut strips: Vec<(f64, f64, f64)> = Vec::with_capacity(self.parts.len());
+        for p in &self.parts {
+            let Shape::Slab { .. } = p.shape else {
+                return None;
+            };
+            if p.roll_rad != 0.0 {
+                return None; // see the doc: no elementary |y| integral for a rotated rectangle
+            }
+            if (glam::DVec3::from(p.along).normalize_or_zero() - long).length() > 1.0e-9 {
+                return None;
+            }
+            let h = p.shape.half_extents_m();
+            let c = glam::DVec3::from(p.at_m).dot(v);
+            let b = 2.0 * h.z * p.packing.clamp(0.0, 1.0);
+            strips.push((b, c - h.y, c + h.y));
+        }
+        let area: f64 = strips.iter().map(|(b, lo, hi)| b * (hi - lo)).sum();
+        if area <= 0.0 {
+            return None;
+        }
+        // The equal-area axis, by bisection over the section's own extent.
+        let below = |a: f64| -> f64 {
+            strips
+                .iter()
+                .map(|(b, lo, hi)| b * (a.clamp(*lo, *hi) - lo))
+                .sum()
+        };
+        let (mut alo, mut ahi) = (
+            strips.iter().fold(f64::INFINITY, |m, s| m.min(s.1)),
+            strips.iter().fold(f64::NEG_INFINITY, |m, s| m.max(s.2)),
+        );
+        for _ in 0..200 {
+            let mid = 0.5 * (alo + ahi);
+            if below(mid) < 0.5 * area {
+                alo = mid;
+            } else {
+                ahi = mid;
+            }
+        }
+        let a = 0.5 * (alo + ahi);
+        // S = Σ ∫|y − a| b dy, splitting any strip that straddles the axis.
+        let arm = |b: f64, lo: f64, hi: f64| -> f64 {
+            if hi <= a {
+                b * (hi - lo) * (a - 0.5 * (lo + hi))
+            } else if lo >= a {
+                b * (hi - lo) * (0.5 * (lo + hi) - a)
+            } else {
+                b * 0.5 * ((a - lo).powi(2) + (hi - a).powi(2))
+            }
+        };
+        Some(strips.iter().map(|(b, lo, hi)| arm(*b, *lo, *hi)).sum())
+    }
+
     /// ★★ **WHERE THIS ASSEMBLY ENDS**, metres from its own origin — the outermost boundary of its
     /// outermost component, and nothing else.
     ///

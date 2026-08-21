@@ -215,9 +215,100 @@ pub fn greenhill_critical_length_m(ei_nm2: f64, weight_per_m: f64) -> f64 {
     (7.8373 * ei_nm2 / weight_per_m).cbrt()
 }
 
+/// ★★★ **WHERE THE ELASTIC BRANCH ENDS AND THE PLASTIC ONE BEGINS** — the bent nail.
+///
+/// Robin's example, and the rung above [`solve`]: a nail bent past its yield **stays bent**. Grass in
+/// wind and a tree swaying are elastic and recover; a nail does not, and the difference is a single
+/// comparison of stress against the material's yield.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Yielding {
+    /// Moment at which the OUTERMOST fibre first reaches yield, N·m — `σ_y·Z`, `Z = I/c`.
+    pub first_yield_nm: f64,
+    /// Moment at which EVERY fibre has yielded, N·m — `σ_y·S`. A plastic hinge.
+    pub fully_plastic_nm: f64,
+    /// `S/Z`, pure geometry: how much more the section carries after first yield. **Exactly 1.5 for a
+    /// rectangle**, ~1.7 for a solid circle, ~1.15 for an I-beam.
+    pub shape_factor: f64,
+}
+
+/// The moments that bound the plastic rung, from the section's geometry and the material's yield.
+pub fn yielding(
+    yield_pa: f64,
+    i_m4: f64,
+    extreme_fibre_m: f64,
+    plastic_modulus_m3: f64,
+) -> Yielding {
+    let z = if extreme_fibre_m > 0.0 {
+        i_m4 / extreme_fibre_m
+    } else {
+        0.0
+    };
+    Yielding {
+        first_yield_nm: yield_pa * z,
+        fully_plastic_nm: yield_pa * plastic_modulus_m3,
+        shape_factor: if z > 0.0 { plastic_modulus_m3 / z } else { 0.0 },
+    }
+}
+
+/// ★★★ **WHAT IS LEFT AFTER YOU LET GO** — the permanent curvature, 1/m.
+///
+/// **Unloading is always elastic**, whatever the loading did: releasing a bent body removes `M/EI` of
+/// curvature and no more. So the set that remains is `κ_applied − M/EI`, and that statement is
+/// SECTION-INDEPENDENT — it is the one part of the plastic rung that needs no shape at all.
+///
+/// Below first yield `κ = M/EI` exactly, so the residual is zero and the body springs back
+/// completely: **the elastic branch is the special case where this returns nothing**, which is the
+/// reduction that ties the two rungs together.
+pub fn residual_curvature_per_m(applied_curvature_per_m: f64, moment_nm: f64, ei_nm2: f64) -> f64 {
+    if ei_nm2 <= 0.0 {
+        return 0.0;
+    }
+    let sprung = applied_curvature_per_m - moment_nm / ei_nm2;
+    // Springback cannot push curvature past straight, nor reverse its sign.
+    if applied_curvature_per_m >= 0.0 {
+        sprung.max(0.0)
+    } else {
+        sprung.min(0.0)
+    }
+}
+
+/// The curvature an **elastic–perfectly-plastic RECTANGLE** reaches under a given moment, 1/m.
+///
+/// `M/M_y = 1.5·(1 − ⅓(κ_y/κ)²)` for `κ ≥ κ_y`, inverted to `κ/κ_y = 1/√(3 − 2M/M_y)`. Below first
+/// yield it is simply `M/EI`. As `M → M_p = 1.5·M_y` the curvature runs away — that IS the plastic
+/// hinge, not a numerical failure.
+///
+/// ★ **FLAGGED (Law V): this relation is RECTANGLE-SPECIFIC.** The shape factor and the residual above
+/// are general; this moment–curvature curve is not, because it integrates the stress block over a
+/// particular section. A general form needs the section's own `M(κ)`, which is owed. Rectangles cover
+/// every `Slab` the catalogue currently builds from, so it is the honest first case rather than the
+/// only one that could exist.
+pub fn rectangle_curvature_per_m(moment_nm: f64, ei_nm2: f64, first_yield_nm: f64) -> f64 {
+    if ei_nm2 <= 0.0 || first_yield_nm <= 0.0 {
+        return 0.0;
+    }
+    let m = moment_nm.abs();
+    let sign = if moment_nm < 0.0 { -1.0 } else { 1.0 };
+    if m <= first_yield_nm {
+        return moment_nm / ei_nm2;
+    }
+    let ky = first_yield_nm / ei_nm2;
+    let ratio = m / first_yield_nm;
+    let denom = 3.0 - 2.0 * ratio;
+    if denom <= 0.0 {
+        return sign * f64::INFINITY; // the hinge: M has reached 1.5·M_y and curvature is unbounded
+    }
+    sign * ky / denom.sqrt()
+}
+
 /// What a material's catalogue says about where the elastic branch ENDS, Pa. `None` where the
 /// catalogue is silent — which for `modulus_of_rupture` is 35 of 37 materials, so most things cannot
 /// yet be broken by bending and must say so rather than guess.
+pub fn yield_stress_pa(m: &Material) -> Option<f64> {
+    m.yield_strength.filter(|v| *v > 0.0).map(|v| v as f64)
+}
+
+/// What a material's catalogue says about where it BREAKS in bending, Pa.
 pub fn rupture_stress_pa(m: &Material) -> Option<f64> {
     m.modulus_of_rupture.filter(|v| *v > 0.0).map(|v| v as f64)
 }
@@ -351,5 +442,125 @@ mod tests {
             rupture_stress_pa(water).is_none(),
             "a material with no modulus of rupture must not acquire one"
         );
+    }
+}
+
+#[cfg(test)]
+mod plastic_tests {
+    use super::*;
+    use crate::assembly::{Assembly, Shape};
+
+    fn bar(t: f64, w: f64) -> Assembly {
+        let mut a: Assembly =
+            serde_json::from_str(r#"{"id":"bar","name":"bar","parts":[]}"#).expect("parses");
+        let mut p: crate::assembly::Part = serde_json::from_str(
+            r#"{"name":"b","material":"iron","shape":{"kind":"slab","x":1,"y":1,"z":1}}"#,
+        )
+        .expect("parses");
+        p.shape = Shape::Slab { x: 1.0, y: t, z: w };
+        p.along = [1.0, 0.0, 0.0];
+        a.parts = vec![p];
+        a
+    }
+
+    /// ★★★ **THE SHAPE FACTOR IS EXACTLY 1.5 FOR A RECTANGLE — PURE GEOMETRY, NO TOLERANCE TO TUNE.**
+    ///
+    /// `Z = bt²/6`, `S = bt²/4`, so `S/Z = 3/2` identically, for every rectangle at every scale and in
+    /// every material. That a beam carries half as much again after its outermost fibre yields is a
+    /// fact about its cross-section. If this ever drifts, the plastic modulus is not a plastic modulus.
+    #[test]
+    fn a_rectangles_shape_factor_is_exactly_three_halves() {
+        for (t, w) in [(0.02, 0.10), (0.0003, 0.003), (1.0, 1.0), (0.5, 3.0)] {
+            let a = bar(t, w);
+            let sec = a.section().expect("a slab has a section");
+            let s = a.plastic_modulus_v_m3().expect("and a plastic modulus");
+            let z = sec.i_v_m4 / (0.5 * t);
+            assert!(
+                (s - w * t * t / 4.0).abs() <= (w * t * t / 4.0) * 1e-12,
+                "S should be bt²/4: {s:.6e}"
+            );
+            assert!(
+                (s / z - 1.5).abs() < 1e-12,
+                "shape factor for {t}x{w}: {:.12}",
+                s / z
+            );
+        }
+    }
+
+    /// ★★★ **AN ELASTIC BEND LEAVES NOTHING — THE REDUCTION THAT TIES THE TWO RUNGS TOGETHER.**
+    ///
+    /// Below first yield the residual curvature is identically zero: the body springs all the way
+    /// back. Above it, something stays. That transition is the whole plastic rung, and it needs no
+    /// threshold because yield supplies it.
+    #[test]
+    fn below_yield_it_springs_back_and_above_yield_it_stays_bent() {
+        let mats = crate::materials::load();
+        let iron = mats.iter().find(|m| m.id == "iron").expect("iron");
+        let sy = yield_stress_pa(iron).expect("iron records a yield");
+        println!("iron yield {:.0} MPa", sy / 1.0e6);
+
+        // A nail: 3 mm square section, bent about its own axis.
+        let (t, w) = (0.003f64, 0.003f64);
+        let a = bar(t, w);
+        let sec = a.section().expect("section");
+        let sp = a.plastic_modulus_v_m3().expect("plastic modulus");
+        let ei = iron.youngs_modulus as f64 * sec.i_v_m4;
+        let y = yielding(sy, sec.i_v_m4, 0.5 * t, sp);
+        println!(
+            "  first yield {:.4} N·m · fully plastic {:.4} N·m · shape factor {:.3}",
+            y.first_yield_nm, y.fully_plastic_nm, y.shape_factor
+        );
+        assert!((y.shape_factor - 1.5).abs() < 1e-12);
+
+        // Below yield: springs back completely.
+        let m_elastic = 0.9 * y.first_yield_nm;
+        let k_elastic = rectangle_curvature_per_m(m_elastic, ei, y.first_yield_nm);
+        let left = residual_curvature_per_m(k_elastic, m_elastic, ei);
+        println!("  at 0.9x first yield: residual curvature {left:.3e} /m");
+        assert!(
+            left == 0.0,
+            "an elastic bend must leave nothing: {left:.3e}"
+        );
+
+        // Past yield: it stays bent, and more so the harder it is bent.
+        let mut prev = 0.0;
+        for f in [1.05, 1.2, 1.35, 1.45] {
+            let m = f * y.first_yield_nm;
+            let k = rectangle_curvature_per_m(m, ei, y.first_yield_nm);
+            let res = residual_curvature_per_m(k, m, ei);
+            println!(
+                "  at {f:.2}x first yield: residual {res:.4} /m  (radius {:.3} m)",
+                1.0 / res
+            );
+            assert!(res > prev, "bending it further must leave MORE set");
+            prev = res;
+        }
+
+        // ★ And the hinge: at the fully plastic moment the curvature is unbounded, which is what a
+        // plastic hinge IS — not a solver failure.
+        let k_hinge = rectangle_curvature_per_m(y.fully_plastic_nm, ei, y.first_yield_nm);
+        assert!(
+            k_hinge.is_infinite(),
+            "M_p must be the hinge: {k_hinge:.3e}"
+        );
+    }
+
+    /// A brittle material has no plastic rung to climb, and the catalogue says so rather than the code
+    /// guessing. Grey cast iron's `compressive_strength` is a real crushing strength — 930 MPa against
+    /// 295 MPa in tension — not a yield, so it carries none.
+    #[test]
+    fn a_brittle_material_has_no_yield_to_read() {
+        let mats = crate::materials::load();
+        for id in ["cast_iron", "nickel", "oak", "water"] {
+            let m = mats.iter().find(|m| m.id == id).expect(id);
+            assert!(
+                yield_stress_pa(m).is_none(),
+                "{id} must not acquire a yield it was never measured to have"
+            );
+        }
+        for id in ["iron", "copper", "aluminium"] {
+            let m = mats.iter().find(|m| m.id == id).expect(id);
+            assert!(yield_stress_pa(m).is_some(), "{id} states its yield");
+        }
     }
 }
