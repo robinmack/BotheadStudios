@@ -1995,3 +1995,140 @@ mod separation_tests {
         );
     }
 }
+
+/// ★★★ **THE RULES, APPLIED TO EVERY MATERIAL** (Robin, 2026-08-21: *"all of these rules should be
+/// applied to all materials in the engine"*).
+///
+/// Each of these started as a defect found by hand in one or two materials while building something
+/// else. A defect found by hand is found once; a defect found by a gate is found forever, and in the
+/// 897 numeric properties nobody has looked at yet. They are stated as laws over the WHOLE catalogue
+/// rather than fixed where they were noticed.
+#[cfg(test)]
+mod catalogue_tests {
+    use serde_json::Value;
+
+    fn catalogue() -> Vec<Value> {
+        let json: Value = serde_json::from_str(crate::materials::MATERIALS_JSON).expect("parses");
+        json["materials"].as_array().expect("array").clone()
+    }
+    fn num(m: &Value, block: &str, key: &str) -> Option<f64> {
+        m.get(block)?.get(key)?.as_f64()
+    }
+
+    /// ★★ **A VALUE MUST LIE INSIDE ITS OWN DECLARED RANGE.**
+    ///
+    /// Where an entry records both `mechanical.x` and `ranges.x`, the value has to be in the range it
+    /// claims for itself. Catches unit slips and transcription errors — the class that produced a
+    /// 38,000x error elsewhere in this catalogue — with no judgement and no threshold.
+    #[test]
+    fn every_value_lies_inside_the_range_its_own_entry_declares() {
+        let mats = catalogue();
+        let mut checked = 0;
+        let mut bad = Vec::new();
+        for m in &mats {
+            let Some(ranges) = m.get("ranges").and_then(|r| r.as_object()) else {
+                continue;
+            };
+            for (k, v) in ranges {
+                let Some(arr) = v.as_array() else { continue };
+                if arr.len() != 2 {
+                    continue;
+                }
+                let (Some(a), Some(b)) = (arr[0].as_f64(), arr[1].as_f64()) else {
+                    continue;
+                };
+                // `ranges` keys sometimes carry a unit suffix the property itself does not.
+                let mut base = k.as_str();
+                for suf in ["_pa", "_kg_m3", "_m3", "_ms"] {
+                    base = base.strip_suffix(suf).unwrap_or(base);
+                }
+                let Some(val) = ["mechanical", "thermal", "optical"]
+                    .iter()
+                    .find_map(|blk| num(m, blk, base))
+                else {
+                    continue;
+                };
+                checked += 1;
+                let (lo, hi) = (a.min(b), a.max(b));
+                if val < lo || val > hi {
+                    bad.push(format!(
+                        "  {} :: {base} = {val:.6e} outside [{lo:.6e}, {hi:.6e}]",
+                        m["id"].as_str().unwrap_or("?")
+                    ));
+                }
+            }
+        }
+        assert!(
+            checked > 50,
+            "expected a rich catalogue, checked only {checked}"
+        );
+        assert!(
+            bad.is_empty(),
+            "a value must lie inside the range its own entry declares:\n{}",
+            bad.join("\n")
+        );
+    }
+
+    /// ★★★ **BEAM PROPERTIES ONLY ON THINGS THAT CAN BE A BEAM.**
+    ///
+    /// `modulus_of_rupture` is *"bending failure of a beam or plank"* and `yield_strength` is where a
+    /// SOLID stops being elastic. A gas, a liquid and a granular bed have no bending strength at all —
+    /// a heap of sand cannot be a cantilever. Back-filling either onto them would let `flexure` compute
+    /// a stress that means nothing and compare it against a limit that means nothing, and the result
+    /// would look like physics.
+    #[test]
+    fn only_things_that_can_be_a_beam_carry_beam_strengths() {
+        let mut bad = Vec::new();
+        for m in catalogue() {
+            let phase = m["phase"].as_str().unwrap_or("");
+            if !matches!(phase, "gas" | "liquid" | "granular") {
+                continue;
+            }
+            for k in ["modulus_of_rupture", "yield_strength"] {
+                if num(&m, "mechanical", k).is_some_and(|v| v > 0.0) {
+                    bad.push(format!(
+                        "  {} (phase {phase}) carries {k}",
+                        m["id"].as_str().unwrap_or("?")
+                    ));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "a gas, a liquid and a granular bed cannot be a beam:\n{}",
+            bad.join("\n")
+        );
+    }
+
+    /// ★★★ **A YIELD STRENGTH MUST BE JUSTIFIED BY ITS OWN ENTRY.**
+    ///
+    /// `yield_strength` was PROMOTED, not sourced (docs/46 row 65): the catalogue's
+    /// `compressive_strength` carries the yield for a ductile metal and a genuine crushing strength for
+    /// a brittle one, and nothing in the field told a reader which. Three entries said so in their own
+    /// notes and got a `yield_strength`; `cast_iron` and `nickel` did not and did not.
+    ///
+    /// This keeps that honest: a material may carry a yield only if its notes say why. It is the rule
+    /// that stopped `nickel` acquiring one because its number merely LOOKED like a published yield —
+    /// which is the pattern-match this catalogue exists to prevent.
+    #[test]
+    fn a_yield_strength_is_only_carried_where_the_entry_says_why() {
+        let mut bad = Vec::new();
+        for m in catalogue() {
+            if num(&m, "mechanical", "yield_strength").is_none() {
+                continue;
+            }
+            let notes = m["notes"].as_str().unwrap_or("").to_lowercase();
+            if !notes.contains("yield") {
+                bad.push(format!(
+                    "  {} carries a yield_strength and never says why",
+                    m["id"].as_str().unwrap_or("?")
+                ));
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "a promoted number must carry its justification:\n{}",
+            bad.join("\n")
+        );
+    }
+}
