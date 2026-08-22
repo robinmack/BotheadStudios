@@ -760,28 +760,25 @@ mod failure_tests {
             "a slender oak beam is bending-governed and must SNAP across: {slender:?}"
         );
 
-        // ★★ A body with no grain to split along SHATTERS instead of snapping. Exercised on a
-        // SYNTHETIC material, deliberately: as of today `modulus_of_rupture` is catalogued on oak and
-        // pine ONLY, and both have a grain — so **no material in the catalogue can currently reach the
-        // shatter branch at all**. Writing this against `concrete` and letting an `if let` skip it
-        // would have left the path untested while looking tested, which is the failure this whole
-        // session keeps finding. Rock, concrete and ice are being sourced; when they land, this
-        // becomes a real material and the synthetic one can go.
-        let mut grainless = oak.clone();
-        grainless.tensile_strength_perp = None; // no grain to split along
-        grainless.shear_strength = None;
-        assert!(
-            orthotropy(&grainless).is_none(),
-            "the synthetic control must have no grain"
+        // ★★★ A body with no grain to split along SHATTERS instead of snapping — and this now runs
+        // against a REAL material. The synthetic grainless clone of oak that stood here has retired:
+        // when this was written `modulus_of_rupture` was catalogued on oak and pine only, both grained,
+        // so nothing in the catalogue could reach `Shatters` at all. Sourcing added basalt, granite,
+        // limestone, sandstone, concrete, ice and cast iron — none of which records an across-grain
+        // strength, because none of them has a grain.
+        let granite = mats.iter().find(|m| m.id == "granite").expect("granite");
+        let g_lim = rupture_stress_pa(granite).expect("granite ruptures now");
+        let shattered = fails(granite, g_lim * 1.1, 0.0);
+        println!(
+            "  granite at 1.1x its {:.1} MPa limit: {shattered:?}",
+            g_lim / 1e6
         );
-        let f = fails(&grainless, mor * 1.1, 0.0);
-        println!("  a grainless solid at 1.1x its bending limit: {f:?}");
         assert!(
-            matches!(f, Failure::Shatters { .. }),
-            "no grain means fragments, not a clean break: {f:?}"
+            matches!(shattered, Failure::Shatters { .. }),
+            "no grain means fragments, not a clean break: {shattered:?}"
         );
-        // And the SAME overload on the real, grained oak snaps rather than shattering — the only
-        // difference between the two calls is whether an across-grain strength exists.
+        // The ONLY difference between shattering and snapping is whether a grain exists: the same
+        // fractional overload on grained oak snaps.
         assert!(
             matches!(fails(oak, mor * 1.1, 0.0), Failure::Snaps { .. }),
             "grain is the only thing that separates a snap from a shatter"

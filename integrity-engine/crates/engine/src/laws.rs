@@ -2051,11 +2051,27 @@ mod catalogue_tests {
 
     /// ★★★ **BEAM PROPERTIES ONLY ON THINGS THAT CAN BE A BEAM.**
     ///
-    /// `modulus_of_rupture` is *"bending failure of a beam or plank"* and `yield_strength` is where a
-    /// SOLID stops being elastic. A gas, a liquid and a granular bed have no bending strength at all —
-    /// a heap of sand cannot be a cantilever. Back-filling either onto them would let `flexure` compute
-    /// a stress that means nothing and compare it against a limit that means nothing, and the result
-    /// would look like physics.
+    /// ★★ **CORRECTED 2026-08-22: the outcome was right and the stated reason was FALSE.** This gate
+    /// used to justify itself with *"a granular bed has no bending strength at all — a heap of sand
+    /// cannot be a cantilever."* An adversarial audit of the exclusions killed that: **soil-cement has
+    /// an ASTM standard for exactly this** (D1635, flexural strength of a simple soil-cement beam under
+    /// third-point loading), and snow-slab mechanics measures a snow slab's bending and tensile
+    /// strength. A cemented granular medium genuinely IS a beam.
+    ///
+    /// The criterion that actually decides comes from the Wood Handbook's own definition:
+    ///
+    /// > *"Modulus of rupture … is not a true stress because the formula by which it is computed is
+    /// > valid only to the elastic limit."*
+    ///
+    /// MoR is `σ = M·c/I` evaluated at the COLLAPSE moment. It is a fiction, and only a SMALL fiction
+    /// for a material that **stays nearly elastic to failure**. That is the real test, and it excludes
+    /// a ductile metal (which yields extensively first, making `Mc/I` a large fiction) for a quite
+    /// different reason than it excludes a fluid (which supports no static shear, so there is no
+    /// bending moment and no outer fibre at all).
+    ///
+    /// Phase remains the right PROXY for this catalogue, because every granular entry here is LOOSE —
+    /// sand, gravel, clay, dirt, snow. It would be the wrong proxy the moment a cemented one is added,
+    /// and whoever adds it should widen this gate rather than delete it.
     #[test]
     fn only_things_that_can_be_a_beam_carry_beam_strengths() {
         let mut bad = Vec::new();
