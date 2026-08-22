@@ -301,6 +301,119 @@ pub fn rectangle_curvature_per_m(moment_nm: f64, ei_nm2: f64, first_yield_nm: f6
     sign * ky / denom.sqrt()
 }
 
+/// ★★★ **HOW A SLENDER BODY FAILS — a rock shatters, a tree snaps or splinters.**
+///
+/// Robin, 2026-08-21: *"a rock should be able to shatter, a tree should snap or splinter, etc."*
+/// Rupture is not one event. WHAT happens is decided by the material's own structure, and the
+/// catalogue already holds what decides it — those numbers simply had no reader.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Failure {
+    /// Below every limit it holds, and the worst utilisation says by how much.
+    Holds { worst_utilisation: f64 },
+    /// **Bending stress reached the rupture limit** — it breaks ACROSS, a clean snap.
+    Snaps { stress_pa: f64, limit_pa: f64 },
+    /// **Longitudinal shear reached the across-grain limit FIRST** — the layers slide and it splits
+    /// ALONG the grain. That is what a splinter is.
+    Splinters { shear_pa: f64, limit_pa: f64 },
+    /// **Isotropic and brittle**: no grain to split along, so it fragments. `damage::disrupt` is the
+    /// law that makes the pieces — this is its second trigger, alongside atmospheric break-up.
+    Shatters { stress_pa: f64, limit_pa: f64 },
+}
+
+/// **Is this material orthotropic**, and by how much? The ratio of along-grain to across-grain tensile
+/// strength: 1.0 for something with no grain, **16.4 for oak, 33.3 for pine**. `None` where the
+/// catalogue records no across-grain strength, which is most things.
+pub fn orthotropy(m: &Material) -> Option<f64> {
+    let perp = m.tensile_strength_perp.filter(|v| *v > 0.0)? as f64;
+    let along = m.fracture_strength.max(m.compressive_strength) as f64;
+    (along > 0.0).then_some(along / perp)
+}
+
+/// **The across-grain stiffness**, Pa — 2.0 GPa for oak against 12.3 along, 0.66 against 8.5 for pine.
+/// A plank bent the other way is several times floppier, and this is the number that says so.
+pub fn modulus_across_grain_pa(m: &Material) -> Option<f64> {
+    m.youngs_modulus_perp.filter(|v| *v > 0.0).map(|v| v as f64)
+}
+
+/// **A grass BLADE's own tensile limit**, Pa — 150 MPa, against the turf mat's 15 kPa. A factor of ten
+/// thousand, and the same fibre-vs-arrangement split `straw` records for its stem: the blade is the
+/// substance, the turf is an arrangement of it. A blade that burns and breaks spends THIS one.
+pub fn blade_tensile_pa(m: &Material) -> Option<f64> {
+    m.tensile_strength_blade
+        .filter(|v| *v > 0.0)
+        .map(|v| v as f64)
+}
+
+/// ★★★ **WHICH LIMIT IS REACHED FIRST DECIDES THE MODE — nothing here is declared.**
+///
+/// A bent beam carries BOTH a bending stress `σ = M·c/I` along its length and a longitudinal shear
+/// `τ = 3V/2A` between its layers. Each has its own limit, and failure is whichever utilisation
+/// reaches 1 first:
+///
+/// - `σ/MoR` first, with no grain → **shatters**; with a grain → **snaps**.
+/// - `τ/τ_perp` first → **splinters**, because the layers part before the fibres do.
+///
+/// ★★ **The mode therefore depends on the body's PROPORTIONS, not on a label.** For a rectangular
+/// cantilever `σ/τ = 4L/t`, so bending governs once `L/t > MoR/(4·τ_limit)` — **1.90 for oak, 2.38 for
+/// pine**. A slender plank snaps; a stubby one splits along the grain. That a tree does one and a
+/// twig the other is a consequence, and nobody had to say which.
+///
+/// ★ Wood's across-grain limit is used for the shear check because that is the plane a splinter opens
+/// on. Where a material records a `shear_strength` it is preferred, being the directly measured
+/// quantity; `tensile_strength_perp` is the fallback and is flagged as such by returning the limit it
+/// actually used.
+pub fn fails(m: &Material, bending_stress_pa: f64, shear_stress_pa: f64) -> Failure {
+    let sigma = bending_stress_pa.abs();
+    let tau = shear_stress_pa.abs();
+    let bend_limit = rupture_stress_pa(m);
+    let shear_limit = m
+        .shear_strength
+        .filter(|v| *v > 0.0)
+        .map(|v| v as f64)
+        .or_else(|| {
+            m.tensile_strength_perp
+                .filter(|v| *v > 0.0)
+                .map(|v| v as f64)
+        });
+
+    let u_bend = bend_limit.map_or(0.0, |l| sigma / l);
+    let u_shear = shear_limit.map_or(0.0, |l| tau / l);
+
+    if u_shear >= 1.0 && u_shear >= u_bend {
+        return Failure::Splinters {
+            shear_pa: tau,
+            limit_pa: shear_limit.unwrap_or(0.0),
+        };
+    }
+    if u_bend >= 1.0 {
+        let limit = bend_limit.unwrap_or(0.0);
+        // No across-grain strength recorded means no grain to split along: it fragments.
+        return if orthotropy(m).is_some() {
+            Failure::Snaps {
+                stress_pa: sigma,
+                limit_pa: limit,
+            }
+        } else {
+            Failure::Shatters {
+                stress_pa: sigma,
+                limit_pa: limit,
+            }
+        };
+    }
+    Failure::Holds {
+        worst_utilisation: u_bend.max(u_shear),
+    }
+}
+
+/// The longitudinal shear stress in a rectangular section carrying shear force `v_n`, Pa — `3V/2A`.
+/// Peak at the neutral axis, which is exactly where a plank splits.
+pub fn shear_stress_pa(shear_force_n: f64, area_m2: f64) -> f64 {
+    if area_m2 <= 0.0 {
+        return 0.0;
+    }
+    1.5 * shear_force_n.abs() / area_m2
+}
+
 /// What a material's catalogue says about where the elastic branch ENDS, Pa. `None` where the
 /// catalogue is silent — which for `modulus_of_rupture` is 35 of 37 materials, so most things cannot
 /// yet be broken by bending and must say so rather than guess.
@@ -562,5 +675,121 @@ mod plastic_tests {
             let m = mats.iter().find(|m| m.id == id).expect(id);
             assert!(yield_stress_pa(m).is_some(), "{id} states its yield");
         }
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+
+    /// ★★★ **THE SEVEN ORPHANS READ AT LAST.** `docs/46` row 30 records wood's orthotropic set as
+    /// catalogued with ZERO readers, and names the blocker: *"a PART has no grain DIRECTION at all, so
+    /// even a reader of those fields would not know which way the plank runs."* `Part::roll_rad`
+    /// removed that, and these are the numbers it unblocked.
+    #[test]
+    fn the_orthotropic_properties_have_a_reader() {
+        let mats = crate::materials::load();
+        for (id, want) in [("oak", 16.4), ("pine", 33.3)] {
+            let m = mats.iter().find(|m| m.id == id).expect(id);
+            let r = orthotropy(m).expect("wood records an across-grain strength");
+            let e = modulus_across_grain_pa(m).expect("and an across-grain stiffness");
+            println!(
+                "{id}: orthotropy {r:.1}x · across-grain modulus {:.2} GPa",
+                e / 1e9
+            );
+            assert!(
+                (r - want).abs() < 0.2,
+                "{id} orthotropy {r:.2} vs expected ~{want}"
+            );
+            assert!(
+                e < m.youngs_modulus as f64,
+                "across the grain must be floppier"
+            );
+        }
+        // A grass BLADE is not the turf mat it grows in — a factor of ten thousand.
+        let grass = mats.iter().find(|m| m.id == "grass").expect("grass");
+        let blade = blade_tensile_pa(grass).expect("a blade has its own limit");
+        println!(
+            "grass: blade {:.0} MPa vs turf mat {:.4} MPa — {:.0}x",
+            blade / 1e6,
+            grass.fracture_strength as f64 / 1e6,
+            blade / grass.fracture_strength as f64
+        );
+        assert!(blade > 100.0 * grass.fracture_strength as f64);
+        // Something with no grain has no orthotropy to report, rather than a default of 1.
+        let granite = mats.iter().find(|m| m.id == "granite").expect("granite");
+        assert!(orthotropy(granite).is_none(), "granite has no grain");
+    }
+
+    /// ★★★ **A ROCK SHATTERS; A TREE SNAPS OR SPLINTERS — AND WHICH ONE IS A CONSEQUENCE.**
+    ///
+    /// Nothing here labels a material with a failure mode. Both a bending stress and a longitudinal
+    /// shear are computed, each compared against its own limit, and whichever reaches 1 first decides.
+    /// Because `σ/τ = 4L/t` for a rectangular cantilever, the answer depends on the body's PROPORTIONS:
+    /// slender snaps, stubby splits.
+    #[test]
+    fn the_failure_mode_falls_out_of_proportions_and_grain() {
+        let mats = crate::materials::load();
+        let oak = mats.iter().find(|m| m.id == "oak").expect("oak");
+        let mor = rupture_stress_pa(oak).expect("oak ruptures");
+        let tau_lim = oak.shear_strength.expect("oak records shear") as f64;
+        let crossover = mor / (4.0 * tau_lim);
+        println!(
+            "oak: MoR {:.0} MPa, shear {:.1} MPa -> bending governs above L/t = {crossover:.2}",
+            mor / 1e6,
+            tau_lim / 1e6
+        );
+
+        // Load each plank right to its own limit, and see which limit that is.
+        let probe = |l_over_t: f64| {
+            // sigma/tau = 4L/t exactly; scale so the LARGER utilisation is exactly 1.
+            let (sigma, tau) = (4.0 * l_over_t, 1.0);
+            let k = 1.0 / (sigma / mor).max(tau / tau_lim);
+            fails(oak, sigma * k, tau * k)
+        };
+        let stubby = probe(crossover * 0.5);
+        let slender = probe(crossover * 2.0);
+        println!("  L/t = {:.2}: {stubby:?}", crossover * 0.5);
+        println!("  L/t = {:.2}: {slender:?}", crossover * 2.0);
+        assert!(
+            matches!(stubby, Failure::Splinters { .. }),
+            "a stubby oak beam is shear-governed and must SPLIT along the grain: {stubby:?}"
+        );
+        assert!(
+            matches!(slender, Failure::Snaps { .. }),
+            "a slender oak beam is bending-governed and must SNAP across: {slender:?}"
+        );
+
+        // ★★ A body with no grain to split along SHATTERS instead of snapping. Exercised on a
+        // SYNTHETIC material, deliberately: as of today `modulus_of_rupture` is catalogued on oak and
+        // pine ONLY, and both have a grain — so **no material in the catalogue can currently reach the
+        // shatter branch at all**. Writing this against `concrete` and letting an `if let` skip it
+        // would have left the path untested while looking tested, which is the failure this whole
+        // session keeps finding. Rock, concrete and ice are being sourced; when they land, this
+        // becomes a real material and the synthetic one can go.
+        let mut grainless = oak.clone();
+        grainless.tensile_strength_perp = None; // no grain to split along
+        grainless.shear_strength = None;
+        assert!(
+            orthotropy(&grainless).is_none(),
+            "the synthetic control must have no grain"
+        );
+        let f = fails(&grainless, mor * 1.1, 0.0);
+        println!("  a grainless solid at 1.1x its bending limit: {f:?}");
+        assert!(
+            matches!(f, Failure::Shatters { .. }),
+            "no grain means fragments, not a clean break: {f:?}"
+        );
+        // And the SAME overload on the real, grained oak snaps rather than shattering — the only
+        // difference between the two calls is whether an across-grain strength exists.
+        assert!(
+            matches!(fails(oak, mor * 1.1, 0.0), Failure::Snaps { .. }),
+            "grain is the only thing that separates a snap from a shatter"
+        );
+
+        // And below every limit it simply holds, reporting how close it came.
+        let safe = fails(oak, 0.25 * mor, 0.1 * tau_lim);
+        println!("  a lightly loaded oak plank: {safe:?}");
+        assert!(matches!(safe, Failure::Holds { .. }));
     }
 }

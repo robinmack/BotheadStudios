@@ -892,26 +892,6 @@ pub(crate) const UNWIRED_MATERIAL_PROPERTIES: &[(&str, &str)] = &[
     ),
     // Anisotropic failure — docs/46 row 30. The set that makes wood splinter along its grain, and
     // rolled steel and composite layup tear along theirs.
-    (
-        "youngs_modulus_perp",
-        "anisotropic stiffness across the grain (docs/46 row 30)",
-    ),
-    (
-        "tensile_strength_perp",
-        "anisotropic tension — 16x weaker across oak's grain than along it",
-    ),
-    (
-        "compressive_strength_perp",
-        "anisotropic compression across the grain",
-    ),
-    (
-        "shear_strength",
-        "shear failure, the mode a rivet and a bolted joint fail in",
-    ),
-    (
-        "tensile_strength_blade",
-        "a turbine blade's own direction-dependent limit",
-    ),
     // Bulk elasticity and strength the contact law does not yet ask for.
     (
         "bulk_modulus",
