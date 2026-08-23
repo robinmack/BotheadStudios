@@ -2128,3 +2128,95 @@ mod catalogue_tests {
         );
     }
 }
+
+/// ★★★ **THE EARTH IS NOT TILTED, AND NOTHING COULD TELL** (docs/46 row 39).
+///
+/// These tests are written BEFORE the fix, and they FAIL. That is deliberate. Row 39 has been open
+/// since 2026-08-04 with the seasonal tests passing the whole time, and it records exactly why they
+/// could not catch it: *"the seasonal tests in `solar` all pass BECAUSE they read the orbit-side
+/// value — they would pass identically with the body upright."*
+///
+/// The body IS upright. `lib.rs` builds the spin as `DVec3::new(0.0, 0.0, 1.0)` and says so in its own
+/// comment: *"spin axis ⊥ the orbital (x-y) plane."* So tilting it now would be unverifiable in either
+/// direction, because no test asks. Fix the instrument first.
+#[cfg(test)]
+mod obliquity_tests {
+    use super::material_property_tests::collect_rs;
+
+    fn engine_src() -> String {
+        let mut blob = String::new();
+        collect_rs(
+            &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut blob,
+        );
+        assert!(blob.len() > 100_000, "the source scan found almost nothing");
+        blob
+    }
+
+    /// ★★★ **ONE OBLIQUITY, ONE OWNER.**
+    ///
+    /// Earth's axial tilt is the reason there are seasons, and the engine currently states it in FOUR
+    /// places that cannot disagree loudly enough to be noticed:
+    ///
+    /// - `orbit.rs` — `23.439` with the secular term, inside a local `let`
+    /// - `solar.rs` — `23.44`, twice, one of them under a comment claiming it *"keeps ONE source for
+    ///   the obliquity"*, which is the opposite of what it does
+    /// - `lib.rs` — `0.0`, implicitly, by building the spin axis perpendicular to the orbital plane
+    ///
+    /// A number stated four times is four numbers. This scans for the literal rather than for a name,
+    /// because the whole problem is that it has no name — there is no `obliquity_rad()` anywhere to
+    /// grep for, which is why nothing reads it and nothing can contradict it.
+    #[test]
+    fn the_obliquity_is_stated_in_exactly_one_place() {
+        let blob = engine_src();
+        // Count source lines that state Earth's tilt as a bare literal. Test fixtures legitimately
+        // quote the solstice declination, so only non-test statements of the constant count.
+        let sites: Vec<&str> = blob
+            .lines()
+            .filter(|l| {
+                let t = l.trim();
+                !t.starts_with("//")
+                    && !t.starts_with("///")
+                    && (t.contains("23.439") || t.contains("23.44"))
+                    // a fixture asserting the solstice declination is data, not a statement of tilt
+                    && !t.contains("solstice")
+            })
+            .collect();
+        assert_eq!(
+            sites.len(),
+            1,
+            "Earth's obliquity is stated in {} places; a number stated more than once is more than \
+             one number. Give it a single public owner and have every site read it.\n{}",
+            sites.len(),
+            sites
+                .iter()
+                .map(|l| format!("  {}", l.trim()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    /// ★★★ **THE BODY MUST BE TILTED BY IT — not just the ephemeris.**
+    ///
+    /// `orbit::solar_declination_ra` computes the sun's declination from an obliquity of its own, so
+    /// the SEASONS come out right while the EARTH stands upright. That is two different Earths: one
+    /// the ephemeris believes in and one the scene builds. Law II, and the reason a rig shot of a
+    /// solstice looks correct while the globe it is drawn on is not tilted at all.
+    ///
+    /// The scene builds its spin axis as `DVec3::new(0.0, 0.0, 1.0)` — exactly the orbital normal.
+    /// Once the obliquity has an owner, that construction must read it, and this test says so by
+    /// refusing to accept an untilted body.
+    #[test]
+    fn the_earth_body_is_tilted_and_not_merely_the_ephemeris() {
+        let blob = engine_src();
+        let upright = blob
+            .lines()
+            .any(|l| l.contains("DVec3::new(0.0, 0.0, 1.0)") && l.contains("spin_l"));
+        assert!(
+            !upright,
+            "the Earth's spin axis is built perpendicular to the orbital plane — the body has ZERO \
+             obliquity while `orbit::solar_declination_ra` uses 23.439 for the same planet. The \
+             seasons are computed from an Earth the scene does not build (docs/46 row 39)."
+        );
+    }
+}
