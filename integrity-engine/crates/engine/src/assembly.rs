@@ -226,6 +226,20 @@ pub struct Part {
     /// Centre of the part, in the assembly's own frame, metres.
     #[serde(default)]
     pub at_m: [f64; 3],
+    /// ★★ **HOW THE PART IS TWISTED ABOUT ITS OWN `along`**, radians. Default `0.0`, which leaves every
+    /// existing assembly bit-identical — the same promise `along` made when it was added.
+    ///
+    /// `along` is a DIRECTION, and a direction is two degrees of freedom. An orientation is three. The
+    /// missing one is roll, and its absence was not cosmetic: a grass blade is classified by Ellis
+    /// (1976) on the ANGLE BETWEEN ITS TWO LAMINA ARMS folded about the midrib, and two arms at ±φ
+    /// cannot be declared with a direction alone — both arms point the same way. So the whole V-shaped
+    /// class of Poaceae blades was inexpressible, and the engine could only model the flat case.
+    ///
+    /// It is the same gap `docs/46` row 30 names for wood: a plank has a grain direction AND a face,
+    /// and orthotropic strength needs both. Rolled steel and composite layup are the same again — a
+    /// laminate's plies are defined by their angles about the lay-up axis.
+    #[serde(default)]
+    pub roll_rad: f64,
     /// **How much of this part's SHAPE is actually matter**, 0..1. `1.0` (the default) is solid.
     ///
     /// ★ The shape is the ENVELOPE — the space the part occupies. Packing says how much of that
@@ -313,6 +327,21 @@ impl Part {
     /// the ground out to this. Reading one for the other is what made a 0.35 m grass blade claim a
     /// 0.35 m crown, which through `plants per m² = cover ÷ crown` would have thinned a pasture by
     /// thirty-fold.
+    /// ★★★ **THE PART'S FULL ORIENTATION, AND THE ONLY PLACE IT IS BUILT.**
+    ///
+    /// `from_rotation_arc(+X, along)` swings the primitive's build axis onto the direction the part
+    /// says it points; `roll_rad` then twists it about that axis. Roll is applied FIRST, in the part's
+    /// own frame, so it means "twist about my own length" whichever way the part ends up pointing.
+    ///
+    /// One owner because there were already two copies of the arc rotation — the mesher's and the
+    /// cross-section's — and a third would have been where they started to disagree. Anything that
+    /// needs to know which way a part faces asks here.
+    pub fn orientation(&self) -> glam::DQuat {
+        let along = glam::DVec3::from(self.along).normalize_or(glam::DVec3::X);
+        glam::DQuat::from_rotation_arc(glam::DVec3::X, along)
+            * glam::DQuat::from_rotation_x(self.roll_rad)
+    }
+
     /// ★ Exact per shape, not via a bounding box. A box's horizontal corner over-reads a SPHERE by
     /// √2 — measured: the oak's 18 m crown reported 509 m² of ground instead of 254, which would have
     /// halved the trees in every forest on the planet.
@@ -456,6 +485,9 @@ impl Contained {
             material: member.dominant_material()?,
             shape,
             along,
+            // The summary of a CROWD of members has no single roll; the members' own rolls are lost
+            // in the de-resolution, which is what a summary is.
+            roll_rad: 0.0,
             at_m,
             packing: (self.matter_volume_m3(member) / envelope).clamp(0.0, 1.0),
             in_situ_density: None,
@@ -601,7 +633,213 @@ pub struct Derived {
     pub centre_of_mass_m: [f64; 3],
 }
 
+/// **The cross-section of a slender assembly**, as a beam sees it (docs/46 row 64).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Section {
+    /// Area of substance in the cross-section, m².
+    pub area_m2: f64,
+    /// Second moment of area for bending that DEFLECTS along the first cross-section axis, m⁴.
+    /// For a flat blade lying in the `w` plane this is the WEAK axis — the one gravity drives.
+    pub i_v_m4: f64,
+    /// Second moment of area for deflection along the second cross-section axis, m⁴.
+    pub i_w_m4: f64,
+    /// Where the composite centroid sits in the cross-section, m, on `(v, w)`. Parts offset from it
+    /// contribute their `A·d²` — which is the whole reason a midrib stiffens a blade.
+    pub centroid_vw_m: (f64, f64),
+}
+
 impl Assembly {
+    /// ★★★ **THE SECOND MOMENT OF AREA OF THIS ASSEMBLY'S CROSS-SECTION — GEOMETRY, NOT A FACTOR.**
+    ///
+    /// Robin, 2026-08-17: *"Render can fudge, physics shouldn't."* This exists so that nothing has to
+    /// carry a **shape factor**. A grass blade's stiffness was going to be modelled as
+    /// `flat_slab × 2.0`, with the 2.0 bounded by measurement but not itself measured — a
+    /// fudge-shaped patch over a geometry the assembly can simply STATE. A blade is not a slab times a
+    /// correction: it is a **lamina plus a midrib**, and once both are declared as parts the second
+    /// moment falls out of the parallel-axis theorem with no factor anywhere.
+    ///
+    /// `I = Σᵢ (Iᵢ_own + Aᵢ·dᵢ²)` over the parts, about the composite centroid. The `A·d²` term is the
+    /// entire mechanism: a thickened strip displaced from the neutral axis buys stiffness in
+    /// proportion to the SQUARE of how far out it sits, which is why a midrib, a keel, an I-beam's
+    /// flanges and a tube's wall all work, and why they are one computation.
+    ///
+    /// ## What this is honest about
+    ///
+    /// - It reduces EXACTLY to `w·t³/12` for a single centred slab — asserted, not assumed, because a
+    ///   composite that does not reproduce the simple case is not measuring the composite.
+    /// - ★ **It assumes the parts share a long axis and are NOT rolled about it.** [`Part`] carries
+    ///   `along` (which way it points) but no roll, so two lamina arms folded to ±φ about the midrib —
+    ///   Ellis's V-shaped blade, the classification a real grass section is scored against — **cannot
+    ///   be expressed today**. That is a real gap in `Part`, recorded rather than worked around: a
+    ///   V-fold needs an orientation, not just a direction, and so do a plank's face, rolled steel and
+    ///   composite layup (`docs/46` row 30 names the same gap for grain direction).
+    /// - Non-box shapes are summarised by their bounding extents, which is wrong for a cylinder by
+    ///   `3π/16` and is why this returns `None` unless every part is a [`Shape::Slab`]. Refusing is
+    ///   better than quietly returning a rectangle's answer for a round bar.
+    pub fn section(&self) -> Option<Section> {
+        if self.parts.is_empty() {
+            return None;
+        }
+        let long = glam::DVec3::from(self.parts[0].along);
+        if long.length_squared() <= 0.0 {
+            return None;
+        }
+        let long = long.normalize();
+        // ★ The cross-section axes are the part's OWN local Y and Z carried into the assembly frame by
+        // the same minimal rotation `along` implies (local X → `long`). They are NOT an arbitrary
+        // perpendicular pair: `Part` has no roll, so local Y *is* the thickness direction of a slab and
+        // local Z *is* its width, and a frame that swaps them silently reports the strong axis as the
+        // weak one. MEASURED the wrong way first — an arbitrary `long.cross(seed)` put `v` on the width
+        // axis while the code indexed `h.y` for it, so a midrib's width offsets leaked into the
+        // weak-axis parallel term and a 1.95× recruitment came out as 85.2×. Caught only because the
+        // test cross-checks against the closed form `(1−f) + f·r³`.
+        let rot = glam::DQuat::from_rotation_arc(glam::DVec3::X, long);
+        let v = rot * glam::DVec3::Y;
+        let w = rot * glam::DVec3::Z;
+
+        struct Rect {
+            a: f64,
+            /// The part's own second moments, about its OWN cross-section axes, before roll.
+            i_own_v: f64,
+            i_own_w: f64,
+            /// This part's twist about the beam axis, radians.
+            roll: f64,
+            dv: f64,
+            dw: f64,
+        }
+        let mut rects: Vec<Rect> = Vec::with_capacity(self.parts.len());
+        for p in &self.parts {
+            let Shape::Slab { .. } = p.shape else {
+                return None; // see the doc: a bounding box is not a round bar's section
+            };
+            if (glam::DVec3::from(p.along).normalize_or_zero() - long).length() > 1.0e-9 {
+                return None; // parts must share the beam's axis to share a cross-section
+            }
+            let h = p.shape.half_extents_m();
+            // Local X runs along the beam; the cross-section is local (Y, Z), mapped to (v, w).
+            let (hv, hw) = (h.y, h.z);
+            let at = glam::DVec3::from(p.at_m);
+            let packing = p.packing.clamp(0.0, 1.0);
+            rects.push(Rect {
+                a: 4.0 * hv * hw * packing,
+                i_own_v: (2.0 * hw) * (2.0 * hv).powi(3) / 12.0 * packing,
+                i_own_w: (2.0 * hv) * (2.0 * hw).powi(3) / 12.0 * packing,
+                roll: p.roll_rad,
+                dv: at.dot(v),
+                dw: at.dot(w),
+            });
+        }
+        let area: f64 = rects.iter().map(|r| r.a).sum();
+        if area <= 0.0 {
+            return None;
+        }
+        let cv = rects.iter().map(|r| r.a * r.dv).sum::<f64>() / area;
+        let cw = rects.iter().map(|r| r.a * r.dw).sum::<f64>() / area;
+        let mut i_v = 0.0;
+        let mut i_w = 0.0;
+        for r in &rects {
+            // ★★ ROLL ROTATES THE PART'S OWN MOMENTS INTO THE BEAM'S FRAME — the principal-axis
+            // transform `I' = I_v·cos²φ + I_w·sin²φ`. This is what makes a V-FOLD expressible: two
+            // lamina arms at ±φ about the midrib each contribute `(t·b³/12)sin²φ + (b·t³/12)cos²φ`,
+            // the standard folded-section result, reducing to the flat slab at φ = 0. Before `Part`
+            // carried roll both arms pointed the same way, so the entire V-shaped class of Poaceae
+            // blades — Ellis's classification, which is how a real grass section is scored — could not
+            // be declared at all.
+            let (sn, cs) = r.roll.sin_cos();
+            let (s2, c2) = (sn * sn, cs * cs);
+            i_v += r.i_own_v * c2 + r.i_own_w * s2 + r.a * (r.dv - cv).powi(2);
+            i_w += r.i_own_w * c2 + r.i_own_v * s2 + r.a * (r.dw - cw).powi(2);
+        }
+        Some(Section {
+            area_m2: area,
+            i_v_m4: i_v,
+            i_w_m4: i_w,
+            centroid_vw_m: (cv, cw),
+        })
+    }
+
+    /// ★★★ **THE PLASTIC SECTION MODULUS**, m³ — the same declared parts, integrated a different way.
+    ///
+    /// `Z = I/c` (elastic) is the section's capacity when only the OUTERMOST fibre has reached yield.
+    /// `S = ∫|y − y_pna| dA` (plastic) is its capacity when EVERY fibre has. The ratio `S/Z` is the
+    /// **shape factor**, and it is pure geometry: exactly **1.5** for a rectangle, ~1.7 for a solid
+    /// circle, ~1.15 for an I-beam whose material is out at the flanges. That a beam carries half as
+    /// much again after first yield is a fact about its cross-section, not about its material.
+    ///
+    /// The axis is the EQUAL-AREA axis, not the centroid. They coincide for a symmetric section and
+    /// diverge otherwise, and using the centroid for an asymmetric section is a quiet error — at full
+    /// plasticity the stress block is uniform, so it is area that must balance, not first moment.
+    ///
+    /// ★ REFUSES where it would have to invent: non-box shapes (a bounding box is not a round bar) and
+    /// **rolled parts**, because `∫|y| dA` over a rotated rectangle has no elementary form and
+    /// approximating it here would hide the approximation inside a number that looks exact. A V-folded
+    /// blade therefore has an elastic section and no plastic one yet, which is honest — it is also not
+    /// a thing that goes plastic, being grass.
+    pub fn plastic_modulus_v_m3(&self) -> Option<f64> {
+        if self.parts.is_empty() {
+            return None;
+        }
+        let long = glam::DVec3::from(self.parts[0].along);
+        if long.length_squared() <= 0.0 {
+            return None;
+        }
+        let long = long.normalize();
+        let rot = glam::DQuat::from_rotation_arc(glam::DVec3::X, long);
+        let v = rot * glam::DVec3::Y;
+        // (width across, low edge, high edge) in the v direction.
+        let mut strips: Vec<(f64, f64, f64)> = Vec::with_capacity(self.parts.len());
+        for p in &self.parts {
+            let Shape::Slab { .. } = p.shape else {
+                return None;
+            };
+            if p.roll_rad != 0.0 {
+                return None; // see the doc: no elementary |y| integral for a rotated rectangle
+            }
+            if (glam::DVec3::from(p.along).normalize_or_zero() - long).length() > 1.0e-9 {
+                return None;
+            }
+            let h = p.shape.half_extents_m();
+            let c = glam::DVec3::from(p.at_m).dot(v);
+            let b = 2.0 * h.z * p.packing.clamp(0.0, 1.0);
+            strips.push((b, c - h.y, c + h.y));
+        }
+        let area: f64 = strips.iter().map(|(b, lo, hi)| b * (hi - lo)).sum();
+        if area <= 0.0 {
+            return None;
+        }
+        // The equal-area axis, by bisection over the section's own extent.
+        let below = |a: f64| -> f64 {
+            strips
+                .iter()
+                .map(|(b, lo, hi)| b * (a.clamp(*lo, *hi) - lo))
+                .sum()
+        };
+        let (mut alo, mut ahi) = (
+            strips.iter().fold(f64::INFINITY, |m, s| m.min(s.1)),
+            strips.iter().fold(f64::NEG_INFINITY, |m, s| m.max(s.2)),
+        );
+        for _ in 0..200 {
+            let mid = 0.5 * (alo + ahi);
+            if below(mid) < 0.5 * area {
+                alo = mid;
+            } else {
+                ahi = mid;
+            }
+        }
+        let a = 0.5 * (alo + ahi);
+        // S = Σ ∫|y − a| b dy, splitting any strip that straddles the axis.
+        let arm = |b: f64, lo: f64, hi: f64| -> f64 {
+            if hi <= a {
+                b * (hi - lo) * (a - 0.5 * (lo + hi))
+            } else if lo >= a {
+                b * (hi - lo) * (0.5 * (lo + hi) - a)
+            } else {
+                b * 0.5 * ((a - lo).powi(2) + (hi - a).powi(2))
+            }
+        };
+        Some(strips.iter().map(|(b, lo, hi)| arm(*b, *lo, *hi)).sum())
+    }
+
     /// ★★ **WHERE THIS ASSEMBLY ENDS**, metres from its own origin — the outermost boundary of its
     /// outermost component, and nothing else.
     ///
@@ -960,8 +1198,7 @@ impl Assembly {
             // **Point the part the way it says it points.** The primitives are all built along +X
             // (the cannon's barrel came first), so this rotates +X onto `along` before placing. A tree
             // whose trunk runs along +Y was otherwise a stick lying flat on the ground.
-            let along = glam::DVec3::from(p.along).normalize_or(glam::DVec3::X);
-            let rot = glam::DMat3::from_quat(glam::DQuat::from_rotation_arc(glam::DVec3::X, along));
+            let rot = glam::DMat3::from_quat(p.orientation());
             let base = out.vertices.len() as u32;
             for mut v in part.vertices {
                 let q = rot * glam::DVec3::new(v.pos[0] as f64, v.pos[1] as f64, v.pos[2] as f64);
@@ -1450,6 +1687,7 @@ mod tests {
                         length: 0.5,
                     },
                     at_m: [-1.0, 0.0, 0.0],
+                    roll_rad: 0.0,
                     packing: 1.0,
                     in_situ_density: None,
                 },
@@ -1463,6 +1701,7 @@ mod tests {
                         length: 1.5,
                     },
                     at_m: [0.5, 0.0, 0.0],
+                    roll_rad: 0.0,
                     packing: 1.0,
                     in_situ_density: None,
                 },
@@ -1512,6 +1751,7 @@ mod tests {
                         length: 1.0,
                     },
                     at_m: [0.0; 3],
+                    roll_rad: 0.0,
                     packing: 1.0,
                     in_situ_density: None,
                 },
@@ -1525,6 +1765,7 @@ mod tests {
                         z: 0.6,
                     },
                     at_m: [0.0; 3],
+                    roll_rad: 0.0,
                     packing: 1.0,
                     in_situ_density: None,
                 },
@@ -2105,6 +2346,7 @@ mod reach_tests {
             shape,
             along: [1.0, 0.0, 0.0],
             at_m: at,
+            roll_rad: 0.0,
             packing: 1.0,
             in_situ_density: None,
         }
@@ -2576,6 +2818,7 @@ mod meet_tests {
                 },
                 along: [0.0, 1.0, 0.0],
                 at_m: [0.0, 0.6, 0.0],
+                roll_rad: 0.0,
                 packing: 1.0,
                 in_situ_density: None,
             }],
@@ -2895,5 +3138,296 @@ mod placement_rule_tests {
             1,
             "for the cost of ONE remembered id"
         );
+    }
+}
+
+#[cfg(test)]
+mod section_tests {
+    use super::*;
+
+    fn part_of(name: &str, material: &str, shape: Shape, at: [f64; 3]) -> Part {
+        let mut p: Part = serde_json::from_str(&format!(
+            r#"{{"name":"{name}","material":"{material}","shape":{{"kind":"slab","x":1,"y":1,"z":1}}}}"#
+        ))
+        .expect("a part parses");
+        p.shape = shape;
+        p.at_m = at;
+        p.along = [1.0, 0.0, 0.0];
+        p
+    }
+    fn slab(name: &str, x: f64, y: f64, z: f64, at: [f64; 3]) -> Part {
+        part_of(name, "grass", Shape::Slab { x, y, z }, at)
+    }
+    fn of(parts: Vec<Part>) -> Assembly {
+        let mut a: Assembly = serde_json::from_str(r#"{"id":"t","name":"t","parts":[]}"#)
+            .expect("an assembly parses");
+        a.parts = parts;
+        a
+    }
+
+    /// ★★★ **A COMPOSITE THAT CANNOT REPRODUCE THE SIMPLE CASE IS NOT MEASURING THE COMPOSITE.**
+    ///
+    /// One centred slab must give exactly `w·t³/12`. This is the reduction that lets the parallel-axis
+    /// machinery be trusted for the cases where there is nothing to check it against, and it has no
+    /// tolerance to tune: it is an identity, so it holds to floating-point.
+    #[test]
+    fn one_centred_slab_is_exactly_w_t_cubed_over_twelve() {
+        let (t, w, l) = (0.0003, 0.0030292, 0.35);
+        let s = of(vec![slab("blade", l, t, w, [0.0; 3])])
+            .section()
+            .expect("a slab has a section");
+        let want_v = w * t.powi(3) / 12.0;
+        let want_w = t * w.powi(3) / 12.0;
+        assert!(
+            (s.i_v_m4 - want_v).abs() <= want_v * 1e-12,
+            "weak axis: {:.6e} vs {want_v:.6e}",
+            s.i_v_m4
+        );
+        assert!(
+            (s.i_w_m4 - want_w).abs() <= want_w * 1e-12,
+            "strong axis: {:.6e} vs {want_w:.6e}",
+            s.i_w_m4
+        );
+        assert!((s.area_m2 - t * w).abs() <= t * w * 1e-12);
+        // ★ And the ratio that was misquoted as the blade's headline: 102 is the EDGEWISE mode, which
+        // gravity does not drive. Recorded here so the number cannot be reached for again.
+        assert!((s.i_w_m4 / s.i_v_m4 - (w / t).powi(2)).abs() < 1e-6);
+    }
+
+    /// ★★★ **THE MIDRIB STIFFENS THE BLADE BY GEOMETRY, AND NOTHING IS MULTIPLIED BY A FACTOR.**
+    ///
+    /// A blade declared as a lamina PLUS a thickened midrib has a larger second moment than the flat
+    /// slab of the same substance, purely from `Σ A·d²`. The measured input is the thickness ratio —
+    /// *Imperata cylindrica*, midrib 429.66 ± 41.32 µm against lamina 196.47 ± 14.33 µm, so 2.19 — and
+    /// the recruitment it buys is a RESULT, not a chosen shape factor.
+    #[test]
+    fn a_midrib_recruits_stiffness_that_a_flat_slab_does_not_have() {
+        let (t, w, l) = (0.0003, 0.0030292, 0.35);
+        let flat = of(vec![slab("lamina", l, t, w, [0.0; 3])])
+            .section()
+            .expect("flat");
+
+        // Midrib thickness from the measured ratio; it PROJECTS abaxially, so its extra thickness sits
+        // to one side of the lamina's mid-plane — which is what the source describes ("the midrib shape
+        // was more or less conical by projected in abaxial direction") and what puts material off the
+        // neutral axis.
+        let ratio = 429.66 / 196.47;
+        let t_mid = t * ratio;
+        let w_mid = w * 0.10; // ← THE ONE UNMEASURED INPUT; see the assertion at the end.
+                              // ★ The midrib is where the blade IS THICKER, not a strip glued onto a uniform lamina. Declared
+                              // the wrong way first — a full-width lamina plus an added rib — which double-counts the lamina
+                              // under the rib and gave 1.167x where the section arithmetic says 1.95x. A blade is two lamina
+                              // wings either side of a thicker median band, and each spans its own share of the width.
+        let w_wing = 0.5 * (w - w_mid);
+        let keeled = of(vec![
+            slab(
+                "wing-left",
+                l,
+                t,
+                w_wing,
+                [0.0, 0.0, -0.5 * (w_mid + w_wing)],
+            ),
+            slab("midrib", l, t_mid, w_mid, [0.0; 3]),
+            slab(
+                "wing-right",
+                l,
+                t,
+                w_wing,
+                [0.0, 0.0, 0.5 * (w_mid + w_wing)],
+            ),
+        ])
+        .section()
+        .expect("keeled");
+
+        let recruit = keeled.i_v_m4 / flat.i_v_m4;
+        println!(
+            "flat I_v {:.4e}  keeled I_v {:.4e}  recruitment {recruit:.3}x  \
+             (midrib {:.0} um thick over lamina {:.0} um, ratio {ratio:.2})",
+            flat.i_v_m4,
+            keeled.i_v_m4,
+            t_mid * 1e6,
+            t * 1e6
+        );
+        assert!(
+            recruit > 1.0,
+            "a thickened midrib off the neutral axis must ADD second moment, got {recruit:.3}"
+        );
+        // The blade must not bury its own tip: the elastica needs I_real/I_flat >= 1.15 at an 80 deg
+        // ligule angle for the tip to reach ground level. That bound is derived, not chosen.
+        assert!(
+            recruit >= 1.15,
+            "below the tip-not-buried bound: {recruit:.3} < 1.15"
+        );
+        // ★ INDEPENDENT CHECK on the composition, from the section arithmetic rather than from this
+        // code: a median band of width fraction f at thickness ratio r contributes r^3 per unit width,
+        // so I/I_flat = (1 - f) + f*r^3 exactly. If `section()` disagrees with that, one of them is
+        // wrong — and it is the kind of disagreement a shape FACTOR could never have surfaced.
+        let f = w_mid / w;
+        let closed_form = (1.0 - f) + f * ratio.powi(3);
+        assert!(
+            (recruit - closed_form).abs() < 1e-9,
+            "composite {recruit:.6} vs closed form {closed_form:.6}"
+        );
+    }
+
+    /// A section is refused rather than guessed where the shapes are not boxes, or where the parts do
+    /// not share a beam axis — a bounding box is not a round bar, and two parts pointing different ways
+    /// do not have one cross-section between them.
+    #[test]
+    fn a_section_is_refused_where_it_would_have_to_be_invented() {
+        let round = of(vec![part_of(
+            "bar",
+            "iron",
+            Shape::Cylinder {
+                r: 0.01,
+                length: 1.0,
+            },
+            [0.0; 3],
+        )]);
+        assert!(round.section().is_none(), "a cylinder is not a rectangle");
+
+        let mut crossed = of(vec![
+            slab("a", 1.0, 0.01, 0.02, [0.0; 3]),
+            slab("b", 1.0, 0.01, 0.02, [0.0; 3]),
+        ]);
+        crossed.parts[1].along = [0.0, 1.0, 0.0];
+        assert!(
+            crossed.section().is_none(),
+            "parts pointing different ways share no cross-section"
+        );
+    }
+}
+
+#[cfg(test)]
+mod roll_tests {
+    use super::*;
+
+    fn blade_part(name: &str, t: f64, w: f64, roll: f64, at: [f64; 3]) -> Part {
+        let mut p: Part = serde_json::from_str(&format!(
+            r#"{{"name":"{name}","material":"grass","shape":{{"kind":"slab","x":1,"y":1,"z":1}}}}"#
+        ))
+        .expect("a part parses");
+        p.shape = Shape::Slab {
+            x: 0.35,
+            y: t,
+            z: w,
+        };
+        p.along = [1.0, 0.0, 0.0];
+        p.roll_rad = roll;
+        p.at_m = at;
+        p
+    }
+    fn of(parts: Vec<Part>) -> Assembly {
+        let mut a: Assembly =
+            serde_json::from_str(r#"{"id":"t","name":"t","parts":[]}"#).expect("assembly parses");
+        a.parts = parts;
+        a
+    }
+
+    /// ★★★ **ROLL DEFAULTS TO ZERO AND CHANGES NOTHING** — the same promise `along` made.
+    /// Every assembly in `assets/` omits the field, so it must deserialize to a no-op.
+    #[test]
+    fn roll_is_absent_from_every_shipped_assembly_and_defaults_to_a_no_op() {
+        let blade = compiled::parse(compiled::GRASS_BLADE);
+        assert!(
+            blade.parts.iter().all(|p| p.roll_rad == 0.0),
+            "a shipped assembly must not silently acquire a twist"
+        );
+        // An orientation with zero roll is exactly the bare arc rotation the mesher used before.
+        for along in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.3, -0.5, 0.81]] {
+            let p = {
+                let mut q = blade_part("x", 1.0, 1.0, 0.0, [0.0; 3]);
+                q.along = along;
+                q
+            };
+            let bare = glam::DQuat::from_rotation_arc(
+                glam::DVec3::X,
+                glam::DVec3::from(along).normalize(),
+            );
+            assert!(
+                (p.orientation().xyz() - bare.xyz()).length() < 1e-15
+                    && (p.orientation().w - bare.w).abs() < 1e-15,
+                "zero roll must be bit-identical to the old rotation for along={along:?}"
+            );
+        }
+    }
+
+    /// ★★★ **A V-FOLD, WHICH COULD NOT BE DECLARED AT ALL BEFORE.**
+    ///
+    /// Ellis (1976) classifies a Poaceae blade by the angle θ between its two lamina arms folded about
+    /// the midrib. Two arms at ±φ (φ = (180° − θ)/2) give the standard folded-section result
+    ///
+    /// ```text
+    /// I_V = 2·[ (t·b³/12)·sin²φ + (b·t³/12)·cos²φ ],   b = w/2
+    /// ```
+    ///
+    /// which `section()` must now reproduce from geometry alone. The parallel-axis term legitimately
+    /// vanishes here because both arms' centroids sit at the same height, so this isolates the roll
+    /// transform. It reduces EXACTLY to the flat slab at θ = 180°, which is the reduction that proves
+    /// the fold is not inventing stiffness.
+    #[test]
+    fn a_v_fold_reproduces_the_standard_folded_section() {
+        let (t, w) = (0.0003, 0.0030292);
+        let b = 0.5 * w;
+        let flat = of(vec![blade_part("flat", t, w, 0.0, [0.0; 3])])
+            .section()
+            .expect("flat");
+
+        println!("  theta      I_V/I_flat   closed form");
+        for theta_deg in [180.0_f64, 150.0, 120.0, 90.0, 60.0, 45.0] {
+            let phi = (180.0 - theta_deg).to_radians() / 2.0;
+            // Both arms are half-width, rolled to ±φ, their centroids on the neutral axis.
+            let folded = of(vec![
+                blade_part("arm-l", t, b, phi, [0.0; 3]),
+                blade_part("arm-r", t, b, -phi, [0.0; 3]),
+            ])
+            .section()
+            .expect("folded");
+            let want = 2.0
+                * ((t * b.powi(3) / 12.0) * phi.sin().powi(2)
+                    + (b * t.powi(3) / 12.0) * phi.cos().powi(2));
+            let ratio = folded.i_v_m4 / flat.i_v_m4;
+            println!(
+                "  {theta_deg:5.0}°     {ratio:8.3}     {:8.3}",
+                want / flat.i_v_m4
+            );
+            assert!(
+                (folded.i_v_m4 - want).abs() <= want * 1e-12,
+                "θ={theta_deg}: {:.6e} vs {want:.6e}",
+                folded.i_v_m4
+            );
+        }
+        // The reduction: a "fold" of 180° IS the flat slab, exactly.
+        let unfolded = of(vec![
+            blade_part("arm-l", t, b, 0.0, [0.0; 3]),
+            blade_part("arm-r", t, b, 0.0, [0.0; 3]),
+        ])
+        .section()
+        .expect("unfolded");
+        assert!(
+            (unfolded.i_v_m4 - flat.i_v_m4).abs() <= flat.i_v_m4 * 1e-12,
+            "an unfolded pair of half-width arms is the whole slab"
+        );
+    }
+
+    /// A quarter turn swaps which axis is weak — the simplest statement that roll is real and is being
+    /// applied in the right sense.
+    #[test]
+    fn a_quarter_turn_swaps_the_weak_and_strong_axes() {
+        let (t, w) = (0.0003, 0.0030292);
+        let up = of(vec![blade_part("flat", t, w, 0.0, [0.0; 3])])
+            .section()
+            .expect("flat");
+        let over = of(vec![blade_part(
+            "turned",
+            t,
+            w,
+            std::f64::consts::FRAC_PI_2,
+            [0.0; 3],
+        )])
+        .section()
+        .expect("turned");
+        assert!((over.i_v_m4 - up.i_w_m4).abs() <= up.i_w_m4 * 1e-12);
+        assert!((over.i_w_m4 - up.i_v_m4).abs() <= up.i_v_m4 * 1e-12);
     }
 }

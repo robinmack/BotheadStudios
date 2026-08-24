@@ -819,6 +819,41 @@ pub(crate) const UNWIRED_MATERIAL_PROPERTIES: &[(&str, &str)] = &[
          distinction `grass` records, and it is what a RESOLVED pile of blades would spend instead of \
          the bale-scale figure (docs/46 row 59)",
     ),
+    // ★★★ The grass LEAF BLADE's own flexure, added 2026-08-17 for docs/46 row 64. Unwired because
+    // the engine has no elastic branch at all yet — docs/18's one deformation process is built for
+    // FAILURE (crater, crush, fragment) and nothing lets a body store elastic strain and give it
+    // back. These are the composable parts a slender-body flexure would read. There is deliberately
+    // NO catalogued `flexural_rigidity`: EI depends on width, on thickness CUBED and on cross-section
+    // shape, so a stored EI is wrong for every blade but the one it was measured on.
+    (
+        "youngs_modulus_blade",
+        "the leaf blade's EFFECTIVE FLAT-SLAB BENDING modulus (1.06 GPa) — derived from the only \
+         directly measured Poaceae blade EI (Wu 2024, wheat) over its flat-slab I. It was NULL until \
+         now, and the culm's 5.55 GPa stood in for it, making the engine 5.23x too STIFF",
+    ),
+    (
+        "youngs_modulus_blade_tensile",
+        "the blade in TENSION (0.552 GPa, Vincent 1982 via Inoue 1992, Lolium perenne) — a different \
+         quantity from the bending modulus above by the sandwich ratio 2.59, and not interchangeable \
+         with it",
+    ),
+    (
+        "transverse_modulus_blade",
+        "the blade ACROSS its fibres (13.9 MPa against 552 MPa along) — a 40:1 anisotropy that makes \
+         a blade an oriented fibrous composite rather than an isotropic slab, and the leaf-scale \
+         sibling of oak's `youngs_modulus_perp` (docs/46 row 30)",
+    ),
+    (
+        "youngs_modulus_sclerenchyma_fibre",
+        "the load-bearing phase inside the blade (22.6 GPa) — ~2-4% of cross-section carrying 90-95% \
+         of the stiffness, which is what a composite flexure model would resolve rather than smear",
+    ),
+    (
+        "density_fresh_blade",
+        "a FRESH leaf's density (710 kg/m3) against `density` 1400, which is the DRY CELL WALL — the \
+         same fibre-vs-arrangement split `straw` records. The modelled blade was 1.97x too heavy \
+         (measured: n~991 Lolium blades, 258 mm / 149 mg)",
+    ),
     // ★★★ The velocity a restitution was MEASURED AT, added 2026-08-17 for docs/46 row 63. Unwired
     // on purpose and it should stay that way until the contact can USE it: the engine's contact is
     // linear, so it returns one restitution at every impact speed, and there is nothing for a
@@ -857,27 +892,6 @@ pub(crate) const UNWIRED_MATERIAL_PROPERTIES: &[(&str, &str)] = &[
     ),
     // Anisotropic failure — docs/46 row 30. The set that makes wood splinter along its grain, and
     // rolled steel and composite layup tear along theirs.
-    (
-        "youngs_modulus_perp",
-        "anisotropic stiffness across the grain (docs/46 row 30)",
-    ),
-    (
-        "tensile_strength_perp",
-        "anisotropic tension — 16x weaker across oak's grain than along it",
-    ),
-    (
-        "compressive_strength_perp",
-        "anisotropic compression across the grain",
-    ),
-    ("modulus_of_rupture", "bending failure of a beam or plank"),
-    (
-        "shear_strength",
-        "shear failure, the mode a rivet and a bolted joint fail in",
-    ),
-    (
-        "tensile_strength_blade",
-        "a turbine blade's own direction-dependent limit",
-    ),
     // Bulk elasticity and strength the contact law does not yet ask for.
     (
         "bulk_modulus",
@@ -1958,6 +1972,159 @@ mod separation_tests {
              shader states nothing about what happened to it.\n\
              If this is genuinely light and not matter, rename it so; if it is matter, it belongs in \
              the model.\n"
+        );
+    }
+}
+
+/// ★★★ **THE RULES, APPLIED TO EVERY MATERIAL** (Robin, 2026-08-21: *"all of these rules should be
+/// applied to all materials in the engine"*).
+///
+/// Each of these started as a defect found by hand in one or two materials while building something
+/// else. A defect found by hand is found once; a defect found by a gate is found forever, and in the
+/// 897 numeric properties nobody has looked at yet. They are stated as laws over the WHOLE catalogue
+/// rather than fixed where they were noticed.
+#[cfg(test)]
+mod catalogue_tests {
+    use serde_json::Value;
+
+    fn catalogue() -> Vec<Value> {
+        let json: Value = serde_json::from_str(crate::materials::MATERIALS_JSON).expect("parses");
+        json["materials"].as_array().expect("array").clone()
+    }
+    fn num(m: &Value, block: &str, key: &str) -> Option<f64> {
+        m.get(block)?.get(key)?.as_f64()
+    }
+
+    /// ★★ **A VALUE MUST LIE INSIDE ITS OWN DECLARED RANGE.**
+    ///
+    /// Where an entry records both `mechanical.x` and `ranges.x`, the value has to be in the range it
+    /// claims for itself. Catches unit slips and transcription errors — the class that produced a
+    /// 38,000x error elsewhere in this catalogue — with no judgement and no threshold.
+    #[test]
+    fn every_value_lies_inside_the_range_its_own_entry_declares() {
+        let mats = catalogue();
+        let mut checked = 0;
+        let mut bad = Vec::new();
+        for m in &mats {
+            let Some(ranges) = m.get("ranges").and_then(|r| r.as_object()) else {
+                continue;
+            };
+            for (k, v) in ranges {
+                let Some(arr) = v.as_array() else { continue };
+                if arr.len() != 2 {
+                    continue;
+                }
+                let (Some(a), Some(b)) = (arr[0].as_f64(), arr[1].as_f64()) else {
+                    continue;
+                };
+                // `ranges` keys sometimes carry a unit suffix the property itself does not.
+                let mut base = k.as_str();
+                for suf in ["_pa", "_kg_m3", "_m3", "_ms"] {
+                    base = base.strip_suffix(suf).unwrap_or(base);
+                }
+                let Some(val) = ["mechanical", "thermal", "optical"]
+                    .iter()
+                    .find_map(|blk| num(m, blk, base))
+                else {
+                    continue;
+                };
+                checked += 1;
+                let (lo, hi) = (a.min(b), a.max(b));
+                if val < lo || val > hi {
+                    bad.push(format!(
+                        "  {} :: {base} = {val:.6e} outside [{lo:.6e}, {hi:.6e}]",
+                        m["id"].as_str().unwrap_or("?")
+                    ));
+                }
+            }
+        }
+        assert!(
+            checked > 50,
+            "expected a rich catalogue, checked only {checked}"
+        );
+        assert!(
+            bad.is_empty(),
+            "a value must lie inside the range its own entry declares:\n{}",
+            bad.join("\n")
+        );
+    }
+
+    /// ★★★ **BEAM PROPERTIES ONLY ON THINGS THAT CAN BE A BEAM.**
+    ///
+    /// ★★ **CORRECTED 2026-08-22: the outcome was right and the stated reason was FALSE.** This gate
+    /// used to justify itself with *"a granular bed has no bending strength at all — a heap of sand
+    /// cannot be a cantilever."* An adversarial audit of the exclusions killed that: **soil-cement has
+    /// an ASTM standard for exactly this** (D1635, flexural strength of a simple soil-cement beam under
+    /// third-point loading), and snow-slab mechanics measures a snow slab's bending and tensile
+    /// strength. A cemented granular medium genuinely IS a beam.
+    ///
+    /// The criterion that actually decides comes from the Wood Handbook's own definition:
+    ///
+    /// > *"Modulus of rupture … is not a true stress because the formula by which it is computed is
+    /// > valid only to the elastic limit."*
+    ///
+    /// MoR is `σ = M·c/I` evaluated at the COLLAPSE moment. It is a fiction, and only a SMALL fiction
+    /// for a material that **stays nearly elastic to failure**. That is the real test, and it excludes
+    /// a ductile metal (which yields extensively first, making `Mc/I` a large fiction) for a quite
+    /// different reason than it excludes a fluid (which supports no static shear, so there is no
+    /// bending moment and no outer fibre at all).
+    ///
+    /// Phase remains the right PROXY for this catalogue, because every granular entry here is LOOSE —
+    /// sand, gravel, clay, dirt, snow. It would be the wrong proxy the moment a cemented one is added,
+    /// and whoever adds it should widen this gate rather than delete it.
+    #[test]
+    fn only_things_that_can_be_a_beam_carry_beam_strengths() {
+        let mut bad = Vec::new();
+        for m in catalogue() {
+            let phase = m["phase"].as_str().unwrap_or("");
+            if !matches!(phase, "gas" | "liquid" | "granular") {
+                continue;
+            }
+            for k in ["modulus_of_rupture", "yield_strength"] {
+                if num(&m, "mechanical", k).is_some_and(|v| v > 0.0) {
+                    bad.push(format!(
+                        "  {} (phase {phase}) carries {k}",
+                        m["id"].as_str().unwrap_or("?")
+                    ));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "a gas, a liquid and a granular bed cannot be a beam:\n{}",
+            bad.join("\n")
+        );
+    }
+
+    /// ★★★ **A YIELD STRENGTH MUST BE JUSTIFIED BY ITS OWN ENTRY.**
+    ///
+    /// `yield_strength` was PROMOTED, not sourced (docs/46 row 65): the catalogue's
+    /// `compressive_strength` carries the yield for a ductile metal and a genuine crushing strength for
+    /// a brittle one, and nothing in the field told a reader which. Three entries said so in their own
+    /// notes and got a `yield_strength`; `cast_iron` and `nickel` did not and did not.
+    ///
+    /// This keeps that honest: a material may carry a yield only if its notes say why. It is the rule
+    /// that stopped `nickel` acquiring one because its number merely LOOKED like a published yield —
+    /// which is the pattern-match this catalogue exists to prevent.
+    #[test]
+    fn a_yield_strength_is_only_carried_where_the_entry_says_why() {
+        let mut bad = Vec::new();
+        for m in catalogue() {
+            if num(&m, "mechanical", "yield_strength").is_none() {
+                continue;
+            }
+            let notes = m["notes"].as_str().unwrap_or("").to_lowercase();
+            if !notes.contains("yield") {
+                bad.push(format!(
+                    "  {} carries a yield_strength and never says why",
+                    m["id"].as_str().unwrap_or("?")
+                ));
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "a promoted number must carry its justification:\n{}",
+            bad.join("\n")
         );
     }
 }

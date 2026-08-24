@@ -62,6 +62,36 @@ struct RawMechanical {
     /// Pa. Resistance to being pulled apart; null for liquids. Drives fracture (Phase 3).
     #[serde(default)]
     tensile_strength: Option<f32>,
+    /// Pa. **Bending failure of a beam or plank** — the stress in the outermost fibre at which a
+    /// slender body breaks rather than springs back. Read by `flexure`, which is its first consumer
+    /// (docs/46 row 64); catalogued on only 2 of 37 materials, so most things cannot yet be broken by
+    /// bending and `flexure::rupture_stress_pa` says so rather than guessing.
+    #[serde(default)]
+    modulus_of_rupture: Option<f32>,
+    /// Pa. **Where the ELASTIC branch ends** — the stress past which deformation is permanent. Read by
+    /// `flexure` for the plastic rung. Distinct from `compressive_strength`, which carries yield for
+    /// ductile metals and a genuine crushing strength for brittle and porous solids; nothing in that
+    /// field told a reader which, so yield is named separately (docs/46 row 65).
+    #[serde(default)]
+    yield_strength: Option<f32>,
+    /// Pa. Shear failure — the mode a rivet, a bolted joint and a SPLINTERING plank fail in. Read by
+    /// `flexure::fails` to decide whether a bent body snaps across or splits along (docs/46 row 66).
+    #[serde(default)]
+    shear_strength: Option<f32>,
+    /// Pa. Tension ACROSS the grain — 16x weaker than along it for oak, 33x for pine. The number that
+    /// makes wood wood.
+    #[serde(default)]
+    tensile_strength_perp: Option<f32>,
+    /// Pa. Compression across the grain.
+    #[serde(default)]
+    compressive_strength_perp: Option<f32>,
+    /// Pa. Stiffness across the grain.
+    #[serde(default)]
+    youngs_modulus_perp: Option<f32>,
+    /// Pa. A grass BLADE in tension (150 MPa) against the turf mat's 15 kPa — a fibre-vs-arrangement
+    /// split, not an anisotropy, and a factor of ten thousand.
+    #[serde(default)]
+    tensile_strength_blade: Option<f32>,
     /// Pa. Fallback bonding strength where tensile isn't given.
     #[serde(default)]
     cohesion: Option<f32>,
@@ -375,6 +405,24 @@ pub struct Material {
     /// silent, which is conservative in the direction that matters — it makes a thing HARDER to crush
     /// than it is, never softer.
     pub compressive_strength: f32,
+    /// Pa. **Bending failure of a beam or plank**, or `None` where the catalogue is silent — which it
+    /// is for 35 of 37 materials. The stress at which a slender body in bending breaks instead of
+    /// springing back; `flexure` is its first reader.
+    pub modulus_of_rupture: Option<f32>,
+    /// Pa. Where the elastic branch ends, or `None` where the catalogue does not say. Only materials
+    /// whose entry explicitly identifies a yield carry one — a number that merely looks like a yield
+    /// is not one.
+    pub yield_strength: Option<f32>,
+    /// Pa. Shear failure — how a plank splinters rather than snapping. `None` where unmeasured.
+    pub shear_strength: Option<f32>,
+    /// Pa. Tension across the grain; its ratio to `tensile_strength` IS the material's orthotropy.
+    pub tensile_strength_perp: Option<f32>,
+    /// Pa. Compression across the grain.
+    pub compressive_strength_perp: Option<f32>,
+    /// Pa. Stiffness across the grain.
+    pub youngs_modulus_perp: Option<f32>,
+    /// Pa. A grass blade's own tensile limit, as distinct from the turf mat's.
+    pub tensile_strength_blade: Option<f32>,
     /// Pa. Young's (elastic) modulus — how stiffly the material resists deformation. A solid is rigid
     /// because its bonds are stiff; the cohesive-aggregate bond stiffness derives from this (`docs/23`).
     /// 0 where not characterized (falls back to a soft default at the call site).
@@ -548,6 +596,13 @@ pub fn load() -> Vec<Material> {
                     .mechanical
                     .compressive_strength
                     .unwrap_or(fracture_strength),
+                modulus_of_rupture: m.mechanical.modulus_of_rupture,
+                yield_strength: m.mechanical.yield_strength,
+                shear_strength: m.mechanical.shear_strength,
+                tensile_strength_perp: m.mechanical.tensile_strength_perp,
+                compressive_strength_perp: m.mechanical.compressive_strength_perp,
+                youngs_modulus_perp: m.mechanical.youngs_modulus_perp,
+                tensile_strength_blade: m.mechanical.tensile_strength_blade,
                 youngs_modulus: m.mechanical.youngs_modulus.unwrap_or(0.0),
                 friction_coefficient: m.mechanical.friction_coefficient.unwrap_or(0.6),
                 restitution: m.mechanical.restitution.unwrap_or(0.5),

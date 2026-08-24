@@ -33,6 +33,7 @@ pub mod clock;
 mod damage;
 mod emission;
 mod eos;
+pub mod flexure; // docs/46 row 64 — the ELASTIC branch of docs/18: a slender body bends
 mod geo; // THE lat/lon <-> direction conversion (one place, so the world cannot be mirrored in six)
 /// GPU direct-sum self-gravity: the exact per-particle N-body force on the GPU, dispatched to when a
 /// foreseen collision materialises particles above the CPU/GPU knee.
