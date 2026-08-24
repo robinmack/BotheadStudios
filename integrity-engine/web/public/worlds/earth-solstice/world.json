@@ -1,0 +1,65 @@
+{
+  "name": "Earth at the June solstice",
+  "type": "planet",
+  "planet": {
+    "rotation_period_s": 86400,
+    "profile": "earth"
+  },
+  "atmosphere": {
+    "profile": "rayleigh",
+    "mass_kg": 5.15e+18,
+    "composition": [
+      [
+        "air",
+        1.0
+      ]
+    ]
+  },
+  "camera": {
+    "mode": "fly",
+    "lat": 20,
+    "lon": 0,
+    "alt_m": 8000000,
+    "look": {
+      "yaw": 0,
+      "pitch": -1.2
+    },
+    "min_alt_m": 2,
+    "max_alt_m": 40000000
+  },
+  "controls": {
+    "keys": [
+      {
+        "code": "KeyW",
+        "action": "forward"
+      },
+      {
+        "code": "KeyS",
+        "action": "back"
+      },
+      {
+        "code": "KeyA",
+        "action": "left"
+      },
+      {
+        "code": "KeyD",
+        "action": "right"
+      },
+      {
+        "code": "KeyR",
+        "action": "up"
+      },
+      {
+        "code": "KeyF",
+        "action": "down"
+      }
+    ]
+  },
+  "time": {
+    "rotation": false,
+    "scale": 1,
+    "epoch": 1718916660.0
+  },
+  "body": "earth",
+  "$comment": "A PINNED-EPOCH Earth: identical to `earth` in every way except that it names WHEN it is set, so a rig renders the same instant every run. Created 2026-08-24 because nothing could be verified in a picture otherwise. Two shots of the same build differed by 3.95% while a real change measured 1.61% — the scene ran on the wall clock, so the sun moved between runs and swamped everything. Any visual claim about light, season, shadow or colour needs a world like this to be checkable at all.\n\nThe epoch is 1718916660 = 2024-06-20 20:51 UTC, the June solstice, and it is NOT a number chosen here: `orbit.rs`'s own test fixtures already pin it as the solstice with the sun over the Tropic of Cancer (declination +23.44 deg). Reusing a verified fixture rather than inventing one means the date itself cannot be quietly wrong.\n\nWhy the solstice: it is the extreme of the axial tilt, so it is where a tilted Earth looks most different from an upright one — the terminator leans hardest and the poles are most asymmetrically lit. `time.rotation` stays false so the only thing pinned is the season, not the hour."
+}
