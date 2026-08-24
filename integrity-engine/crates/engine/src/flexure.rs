@@ -426,6 +426,148 @@ pub fn rupture_stress_pa(m: &Material) -> Option<f64> {
     m.modulus_of_rupture.filter(|v| *v > 0.0).map(|v| v as f64)
 }
 
+/// **Where a bent body's tip ended up, and how hard its base was worked.** The three things a
+/// de-resolved patch has to answer without the shape that produced them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Leaning {
+    /// Tip displacement across the base direction, m — how far it leans.
+    pub lean_m: f64,
+    /// Tip displacement along the base direction, m — how tall it still stands.
+    pub height_m: f64,
+    /// The largest moment anywhere along it, N·m — what decides whether it yields or breaks.
+    pub peak_moment_nm: f64,
+}
+
+/// ★★★ **THE DE-RESOLVED FORM OF BENDING** — what a patch of ten billion blades does, without
+/// solving ten billion elasticas.
+///
+/// `solve` costs thousands of relaxation sweeps. A meadow holds ~10¹² blades and a forest ~10¹⁰
+/// branches, and Law III says the un-resolved world is still *computed*, just cheaply. This is that
+/// cheap computation, and Law 8 supplies its acceptance test: **it must converge to the resolved
+/// answer as the budget grows.** `entries` is the budget knob.
+///
+/// ★★ **The obvious de-resolution is WRONG, and this type exists because of that.** The elastica is
+/// nonlinear in load — a body already laid over bends far less for the next newton than it did for
+/// the first — so the mean of the responses is NOT the response of the mean. A patch model that
+/// pushes the average wind through one elastica reports a lean the patch does not have, and it is
+/// wrong in a *consistent direction*, which is exactly what lets it survive inspection. That is
+/// Jensen's inequality doing physics, and `flexure::tests` keeps it as a negative control so this
+/// type cannot quietly decay back into it.
+///
+/// **The honest form comes from the scalability law** (`docs/67`): *identical until damaged*. The
+/// TYPE tabulates its own compliance once; every instance reads it. Cost then scales with how many
+/// distinct LOADS the patch sees, not with how many bodies stand in it — and the table is amortised
+/// over every instance of that type that will ever exist.
+///
+/// **Nothing here is about grass.** The inputs are flexural rigidity, length and self weight, so a
+/// wheat stem, a sapling, a fence post, a mast and a bent nail are the same call. One law, every
+/// scale.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Compliance {
+    load_per_m: Vec<f64>,
+    leaning: Vec<Leaning>,
+}
+
+impl Compliance {
+    /// **Tabulate a type's bending response once**, from zero load to `max_load_per_m`, at `entries`
+    /// evenly spaced loads. `weight_per_m` is the body's own weight per unit length, applied along
+    /// −(base direction); the tabulated load acts across it.
+    pub fn tabulate(
+        ei_nm2: f64,
+        length_m: f64,
+        base_angle_rad: f64,
+        stations: usize,
+        weight_per_m: f64,
+        max_load_per_m: f64,
+        entries: usize,
+    ) -> Compliance {
+        let entries = entries.max(2);
+        let mut load_per_m = Vec::with_capacity(entries);
+        let mut leaning = Vec::with_capacity(entries);
+        for i in 0..entries {
+            let w = max_load_per_m * i as f64 / (entries - 1) as f64;
+            let bent = solve(ei_nm2, length_m, base_angle_rad, stations, &|_| {
+                (w, -weight_per_m)
+            });
+            let (x, y) = bent.tip();
+            load_per_m.push(w);
+            leaning.push(Leaning {
+                lean_m: x,
+                height_m: y,
+                peak_moment_nm: bent.peak_moment_nm(),
+            });
+        }
+        Compliance {
+            load_per_m,
+            leaning,
+        }
+    }
+
+    /// **What one body of this type does under one load** — a table lookup, not an elastica.
+    ///
+    /// Beyond the tabulated range it returns the end entry rather than extrapolating: a linear
+    /// extrapolation of a saturating curve runs away, and a body already flat cannot lean further.
+    /// The honest thing is still for the caller to tabulate a range that covers its winds, so
+    /// `max_load_per_m` reports what this table actually knows.
+    pub fn at(&self, load_per_m: f64) -> Leaning {
+        let n = self.leaning.len();
+        if n == 0 {
+            return Leaning::default();
+        }
+        if load_per_m <= self.load_per_m[0] {
+            return self.leaning[0];
+        }
+        if load_per_m >= self.load_per_m[n - 1] {
+            return self.leaning[n - 1];
+        }
+        let j = self
+            .load_per_m
+            .partition_point(|&l| l <= load_per_m)
+            .clamp(1, n - 1);
+        let (l0, l1) = (self.load_per_m[j - 1], self.load_per_m[j]);
+        let t = if l1 > l0 {
+            (load_per_m - l0) / (l1 - l0)
+        } else {
+            0.0
+        };
+        let (a, b) = (self.leaning[j - 1], self.leaning[j]);
+        Leaning {
+            lean_m: a.lean_m + t * (b.lean_m - a.lean_m),
+            height_m: a.height_m + t * (b.height_m - a.height_m),
+            peak_moment_nm: a.peak_moment_nm + t * (b.peak_moment_nm - a.peak_moment_nm),
+        }
+    }
+
+    /// ★ **THE PATCH** — the mean response of many bodies of this type over the loads they each see.
+    ///
+    /// This is the whole de-resolution: **the load field is sampled, not the population.** Ten
+    /// billion blades standing in one gust are a single lookup; ten billion blades in a hundred
+    /// different gusts are a hundred. Neither is ten billion elasticas.
+    pub fn over(&self, loads_per_m: &[f64]) -> Leaning {
+        if loads_per_m.is_empty() {
+            return Leaning::default();
+        }
+        let n = loads_per_m.len() as f64;
+        let mut acc = Leaning::default();
+        for &l in loads_per_m {
+            let r = self.at(l);
+            acc.lean_m += r.lean_m / n;
+            acc.height_m += r.height_m / n;
+            acc.peak_moment_nm += r.peak_moment_nm / n;
+        }
+        acc
+    }
+
+    /// How many elasticas this table cost — the price paid once per type, not once per instance.
+    pub fn entries(&self) -> usize {
+        self.leaning.len()
+    }
+
+    /// The largest load this table actually knows about; above it, `at` stops answering new things.
+    pub fn max_load_per_m(&self) -> f64 {
+        self.load_per_m.last().copied().unwrap_or(0.0)
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -788,5 +930,155 @@ mod failure_tests {
         let safe = fails(oak, 0.25 * mor, 0.1 * tau_lim);
         println!("  a lightly loaded oak plank: {safe:?}");
         assert!(matches!(safe, Failure::Holds { .. }));
+    }
+
+    /// ★★★ **THE DE-RESOLVED FORM OF BENDING MUST CONVERGE TO THE BODIES IT REPLACES.**
+    ///
+    /// Law III: a meadow holds ~10¹² blades and the elastica costs thousands of sweeps each, so a
+    /// patch CANNOT be resolved and must still be answered. Law 8 supplies the test — *"is this the
+    /// most physical thing this budget can buy, and does it converge as the budget grows?"*
+    ///
+    /// ★★ **The trap this test exists to catch is that the obvious de-resolution is WRONG.** The
+    /// elastica is nonlinear in load: a body already laid over bends far less for the next newton
+    /// than the first did. So the mean of the responses is NOT the response of the mean, and a patch
+    /// model that pushes the average wind through one elastica reports a lean the patch does not
+    /// have. That is Jensen's inequality doing physics, and it is invisible without a control.
+    ///
+    /// ★★★ **AND EVERY SOLVE IS CHECKED FOR CONVERGENCE, because the first version of this test was
+    /// not.** `solve` reports `converged` rather than asserting it, deliberately — a body that will
+    /// not settle is a result. This test read the tip position anyway and compared two numbers that
+    /// were the 20,000th iterate of something diverging. Consuming a solver's answer without reading
+    /// the flag it sets to say *this is not an answer* is the same defect as a gate that exits 0.
+    ///
+    /// **Nothing here is about grass.** The inputs are rigidity, length and self weight, so a stem, a
+    /// sapling, a fence post and a bent nail are the same call.
+    #[test]
+    fn a_de_resolved_patch_bends_like_the_bodies_it_replaces() {
+        let mats = crate::materials::load();
+        let blade = crate::assembly::compiled::by_id("grass-blade").expect("a shipped type");
+        let sec = blade
+            .section()
+            .expect("a blade is a slab and has a section");
+        let mat = mats
+            .iter()
+            .find(|m| m.id == blade.parts[0].material)
+            .expect("the blade's material is catalogued");
+
+        // ★ The blade's OWN sourced properties, not the sward's — see the note below on why the
+        // generic `youngs_modulus` cannot be used here.
+        let e_pa = 1.06e9f64;
+        let rho = 710.0f64;
+        let ei = e_pa * sec.i_v_m4;
+        let q = rho * sec.area_m2 * 9.81;
+
+        // ★★ STAY INSIDE THE SOLVER'S VALID REGIME. Above Greenhill's critical length the fixed-point
+        // relaxation is not contractive and `solve` says so; a full-length 0.35 m blade is 1.7x it and
+        // converges at NO non-zero load. This is a young blade, comfortably below critical.
+        let l_crit = greenhill_critical_length_m(ei, q);
+        let length = 0.5 * l_crit;
+        println!(
+            "grass blade: EI {ei:.3e} N·m² · q {q:.3e} N/m · Greenhill L_crit {l_crit:.4} m · using {length:.4} m ({:.2}x critical)",
+            length / l_crit
+        );
+
+        let solve_one = |w: f64| {
+            let b = solve(ei, length, std::f64::consts::FRAC_PI_2, 48, &|_| (w, -q));
+            assert!(
+                b.converged,
+                "the elastica did not converge at {w:.4e} N/m ({} sweeps) — reading its tip would be \
+                 reading the 20,000th iterate of something diverging",
+                b.sweeps
+            );
+            let (x, y) = b.tip();
+            (x, y, b.peak_moment_nm())
+        };
+
+        // A GUSTY patch: drag on a blade broadside, f' = ½·ρ_air·C_d·w·v², over a real wind range.
+        let slab = |p: &crate::assembly::Part| match p.shape {
+            crate::assembly::Shape::Slab { x: _, y: _, z } => z,
+            _ => panic!("a blade's parts are slabs"),
+        };
+        let w_m: f64 = blade.parts.iter().map(slab).sum();
+        let (rho_air, cd) = (1.225f64, 1.98f64);
+        let drag = |v: f64| 0.5 * rho_air * cd * w_m * v * v;
+        // ★ 1–6 m/s, an ordinary breeze. The top of the range is deliberate: `solve` is contractive
+        // only while the tip lean stays under ~85% of the length (measured, and constant across
+        // lengths — it is a DEFLECTION limit, not a load one). At this length that ceiling is ~25x
+        // self weight, and 6 m/s sits inside it. A patch in a gale is outside what this solver can
+        // answer, and that is a stated limit rather than a silent one.
+        let loads: Vec<f64> = (0..24).map(|i| drag(1.0 + 5.0 * i as f64 / 23.0)).collect();
+        let mean_load = loads.iter().sum::<f64>() / loads.len() as f64;
+        let max_load = loads.iter().cloned().fold(0.0f64, f64::max);
+
+        // RESOLVED: one elastica per blade.
+        let n = loads.len() as f64;
+        let mut resolved = (0.0, 0.0, 0.0);
+        for &l in &loads {
+            let (x, y, m) = solve_one(l);
+            resolved = (resolved.0 + x / n, resolved.1 + y / n, resolved.2 + m / n);
+        }
+        println!(
+            "  RESOLVED   ({} elasticas): lean {:.5} m · height {:.5} m · peak moment {:.3e} N·m",
+            loads.len(),
+            resolved.0,
+            resolved.1,
+            resolved.2
+        );
+
+        // DE-RESOLVED: the type tabulates once, the patch reads the table.
+        let table =
+            Compliance::tabulate(ei, length, std::f64::consts::FRAC_PI_2, 48, q, max_load, 12);
+        let patch = table.over(&loads);
+        println!(
+            "  DE-RESOLVED ({} elasticas, amortised over every blade of this type ever): lean {:.5} m · height {:.5} m · peak {:.3e} N·m",
+            table.entries(),
+            patch.lean_m,
+            patch.height_m,
+            patch.peak_moment_nm
+        );
+
+        // ★ THE NEGATIVE CONTROL: the obvious de-resolution, one elastica at the mean wind.
+        let (nx, ny, nm) = solve_one(mean_load);
+        let naive_err = (nx - resolved.0).abs() / resolved.0.abs().max(1e-12);
+        let good_err = (patch.lean_m - resolved.0).abs() / resolved.0.abs().max(1e-12);
+        println!("  NAIVE (elastica at the mean wind): lean {nx:.5} m · height {ny:.5} m · peak {nm:.3e} N·m");
+        println!(
+            "  lean error — de-resolved {:.4}% · naive {:.4}%",
+            100.0 * good_err,
+            100.0 * naive_err
+        );
+
+        assert!(
+            good_err < 0.01,
+            "the de-resolved patch must match the bodies it replaces: {:.4}% off",
+            100.0 * good_err
+        );
+        assert!(
+            naive_err > 10.0 * good_err.max(1e-6),
+            "WITHOUT this control the test would pass for a patch model that just solves the mean \
+             wind — and that model is wrong by construction. naive {:.4}% vs de-resolved {:.4}%",
+            100.0 * naive_err,
+            100.0 * good_err
+        );
+
+        // ★★ AND IT MUST CONVERGE AS THE BUDGET GROWS (Law 8). A finer table is a better answer.
+        let mut prev = f64::INFINITY;
+        for k in [4usize, 8, 16, 32, 64] {
+            let e =
+                (Compliance::tabulate(ei, length, std::f64::consts::FRAC_PI_2, 48, q, max_load, k)
+                    .over(&loads)
+                    .lean_m
+                    - resolved.0)
+                    .abs()
+                    / resolved.0.abs();
+            println!("    {k:3} table entries -> {:.5}% off", 100.0 * e);
+            assert!(
+                e <= prev * 1.05,
+                "refining the table must not make it worse: {k} entries {:.5}% vs previous {:.5}%",
+                100.0 * e,
+                100.0 * prev
+            );
+            prev = e;
+        }
     }
 }

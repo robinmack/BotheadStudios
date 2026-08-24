@@ -9,6 +9,17 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★★ **`flexure::Compliance` — the de-resolved form of bending** (Law III). A type tabulates its own
+  load→deflection response once; every instance reads the table, so cost scales with how many distinct
+  loads a patch sees rather than how many bodies stand in it. **0.476% off the resolved answer with 12
+  elasticas, against 21.9% for the obvious "one elastica at the mean load"** — the elastica is nonlinear,
+  so the mean of the responses is not the response of the mean. Error quarters with each doubling of the
+  table (O(h²)). Material-agnostic: a stem, a sapling, a fence post and a bent nail are the same call.
+- **Two limits now stated rather than latent** (docs/46 rows 67, 68): a grass blade is currently built
+  from the sward's modulus (5.0e6 Pa) because the sourced `youngs_modulus_blade` (1.06e9) has no reader,
+  making it 212× too floppy; and `flexure::solve` is contractive only to ~85% tip lean, so a full-length
+  blade in wind is outside what it can answer.
+
 - ★★★ **The catalogue's restitutions were never sourced, and they were too low** (docs/46 row 63).
   Only **5 of 32** entries mentioned restitution anywhere in their sources or notes; exactly one
   (`limestone`) cited anything restitution-specific. The rest were typed alongside citations about
