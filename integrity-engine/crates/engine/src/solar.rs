@@ -431,7 +431,10 @@ mod signal_tests {
 /// the tropics barely senesce (day length hardly varies there, so the fraction stays near zero — and
 /// tropical broadleaf forest is indeed evergreen), and the far north turns early and hard.
 pub fn annual_day_length_range_h(lat_deg: f64) -> f64 {
-    let tilt = 23.44_f64.to_radians();
+    // ★ The tilt is asked for, not restated. This used to hold its own `23.44` literal while `orbit`
+    // held `23.439` with a secular term — two answers to "how tilted is the Earth" (docs/46 row 39).
+    // J2000 is the honest epoch for a question with no date in it, and the drift is 0.47"/yr.
+    let tilt = crate::orbit::obliquity_rad(946_728_000.0);
     (day_length_hours(lat_deg, tilt) - day_length_hours(lat_deg, -tilt)).abs()
 }
 
@@ -454,8 +457,9 @@ pub fn senescence_phase(lat_deg: f64, unix_s: f64) -> (f64, f64) {
 pub fn senescence_fraction(lat_deg: f64, unix_s: f64) -> f64 {
     let (dec_now, _) = crate::orbit::solar_declination_ra(unix_s);
     // The extremes of the local day length are set by the extremes of the declination — the axial
-    // tilt itself. Asking for them this way keeps ONE source for the obliquity.
-    let tilt = 23.44_f64.to_radians();
+    // tilt itself. ★ This comment used to claim it "keeps ONE source for the obliquity" while
+    // hardcoding a second one; now it actually does, at the epoch being asked about.
+    let tilt = crate::orbit::obliquity_rad(unix_s);
     let summer = day_length_hours(lat_deg, if lat_deg >= 0.0 { tilt } else { -tilt });
     let winter = day_length_hours(lat_deg, if lat_deg >= 0.0 { -tilt } else { tilt });
     let now = day_length_hours(lat_deg, dec_now);

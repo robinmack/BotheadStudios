@@ -2196,27 +2196,47 @@ mod obliquity_tests {
         );
     }
 
-    /// ★★★ **THE BODY MUST BE TILTED BY IT — not just the ephemeris.**
+    /// ★★★ **THE BODY IS TILTED BY IT — not just the ephemeris.**
     ///
-    /// `orbit::solar_declination_ra` computes the sun's declination from an obliquity of its own, so
-    /// the SEASONS come out right while the EARTH stands upright. That is two different Earths: one
-    /// the ephemeris believes in and one the scene builds. Law II, and the reason a rig shot of a
-    /// solstice looks correct while the globe it is drawn on is not tilted at all.
-    ///
-    /// The scene builds its spin axis as `DVec3::new(0.0, 0.0, 1.0)` — exactly the orbital normal.
-    /// Once the obliquity has an owner, that construction must read it, and this test says so by
-    /// refusing to accept an untilted body.
+    /// Written first as a source scan, because there was nothing to assert against: the tilt had no
+    /// NAME, which is exactly why nothing read it and nothing could contradict it.
+    /// `orbit::obliquity_rad` now owns it and `orbit::spin_axis_for_obliquity` builds the axis from
+    /// it, so this is a physics assertion rather than a grep.
     #[test]
     fn the_earth_body_is_tilted_and_not_merely_the_ephemeris() {
-        let blob = engine_src();
-        let upright = blob
-            .lines()
-            .any(|l| l.contains("DVec3::new(0.0, 0.0, 1.0)") && l.contains("spin_l"));
+        let eps = crate::orbit::obliquity_rad(946_728_000.0); // J2000
+        let axis = crate::orbit::spin_axis_for_obliquity(eps);
+        let orbital_normal = glam::DVec3::Z; // the orbital plane is x-y
+
+        let tilt_deg = axis.angle_between(orbital_normal).to_degrees();
         assert!(
-            !upright,
-            "the Earth's spin axis is built perpendicular to the orbital plane — the body has ZERO \
-             obliquity while `orbit::solar_declination_ra` uses 23.439 for the same planet. The \
-             seasons are computed from an Earth the scene does not build (docs/46 row 39)."
+            (tilt_deg - 23.439).abs() < 1.0e-6,
+            "the spin axis must lean from the orbital normal by the obliquity: {tilt_deg:.6}"
+        );
+        assert!(
+            (axis.length() - 1.0).abs() < 1.0e-12,
+            "a direction is a unit vector"
+        );
+
+        // ★ THE NEGATIVE CONTROL, and it is the whole point: at zero obliquity the axis IS the
+        // orbital normal — exactly the `DVec3::new(0.0, 0.0, 1.0)` the scene used to hardcode. The
+        // untilted Earth was not a different model, it was THIS model with the tilt left out, which
+        // is precisely why no test could see the difference.
+        let upright = crate::orbit::spin_axis_for_obliquity(0.0);
+        assert!(
+            (upright - orbital_normal).length() < 1.0e-15,
+            "zero tilt must reproduce the old hardcoded axis exactly, or this is a different model"
+        );
+
+        // ★★ IT DRIFTS, which is why the owner takes a time. 0.47 arcsec/yr is small, real, and
+        // impossible to express with the constant this replaced.
+        let millennium = 946_728_000.0 + 1000.0 * 365.25 * 86_400.0;
+        let then = crate::orbit::obliquity_rad(millennium).to_degrees();
+        let now = eps.to_degrees();
+        println!("obliquity: {now:.5} deg at J2000 -> {then:.5} deg a millennium later");
+        assert!(
+            then < now && (now - then) > 0.1,
+            "the obliquity must decrease measurably over a millennium: {now:.5} -> {then:.5}"
         );
     }
 }

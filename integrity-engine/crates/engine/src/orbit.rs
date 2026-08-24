@@ -763,9 +763,53 @@ mod tests {
 /// earth's tilt and position relative to the sun"*, and *"the model should be able to calculate amount
 /// of daylight in each area of biomes based on the tilt/season"*. Both of those are this one number
 /// plus a latitude, so it must not be re-derived anywhere else (Law II).
+/// **Days since J2000.0** (2000-01-01 12:00 UTC = Unix 946_728_000) — the epoch every ephemeris term
+/// in this module is measured from, stated once.
+///
+/// ★ Extracted 2026-08-24 while giving the obliquity a single owner: adding `obliquity_rad` made this
+/// epoch appear in THREE places, which is exactly the defect being fixed one line up. A number stated
+/// three times is three numbers, whether it is a tilt or a date.
+pub fn days_since_j2000(unix_seconds: f64) -> f64 {
+    (unix_seconds - 946_728_000.0) / 86_400.0
+}
+
+/// ★★★ **EARTH'S AXIAL TILT — THE ONE PLACE IT IS STATED.**
+///
+/// The angle between the spin axis and the orbital plane's normal, radians. It is *the reason there
+/// are seasons*, and until 2026-08-24 the engine said so in three places at once (docs/46 row 39):
+/// `23.439` with its secular term here, `23.44` twice in `solar`, one of those under a comment
+/// claiming it *"keeps ONE source for the obliquity"* — and, silently, `0.0` in the scene, which
+/// built the spin axis perpendicular to the orbital plane. **A number stated three times is three
+/// numbers**, and the fourth was the one that mattered: the Earth was not tilted at all.
+///
+/// It DRIFTS. The mean obliquity decreases by about 0.47 arcsec per year as the other planets tug on
+/// Earth's axis, which is the `4.0e-7` per day here (IAU/Meeus). That secular term is why this is a
+/// function of time and not a constant: a constant would be a different, quietly-wrong answer for any
+/// epoch but J2000, and the engine runs across geological time.
+///
+/// Everything that needs the tilt asks here — the ephemeris, the day-length extremes that set
+/// senescence, and the body's own spin axis via [`spin_axis_for_obliquity`].
+pub fn obliquity_rad(unix_seconds: f64) -> f64 {
+    let n = days_since_j2000(unix_seconds);
+    (23.439 - 4.0e-7 * n).to_radians()
+}
+
+/// ★★★ **THE SPIN AXIS OF A BODY WITH THIS OBLIQUITY**, unit vector in the orbital frame.
+///
+/// The orbital plane is x–y so its normal is +z, and a tilt of `ε` leans the axis by `ε` toward the
+/// vernal equinox direction (+x): `(sin ε, 0, cos ε)`. At `ε = 0` it returns exactly `+z`, which is
+/// what the scene used to hardcode — so the untilted Earth was not a different model, it was **this
+/// model with the tilt left out**.
+///
+/// This exists so the tilt is TESTABLE. It was previously a local `let` inside a scene constructor,
+/// which is why no test could reach it and why row 39 stayed open for twenty days while the seasonal
+/// tests passed.
+pub fn spin_axis_for_obliquity(obliquity_rad: f64) -> glam::DVec3 {
+    glam::DVec3::new(obliquity_rad.sin(), 0.0, obliquity_rad.cos())
+}
+
 pub fn solar_declination_ra(unix_seconds: f64) -> (f64, f64) {
-    // Days since the J2000.0 epoch (2000-01-01 12:00 UTC = Unix 946_728_000).
-    let n = (unix_seconds - 946_728_000.0) / 86_400.0;
+    let n = days_since_j2000(unix_seconds);
     let mean_longitude = (280.460 + 0.985_647_4 * n).to_radians();
     let mean_anomaly = (357.528 + 0.985_600_3 * n).to_radians();
     // Ecliptic longitude: the mean longitude plus the equation of centre (Earth's orbit is an ellipse,
@@ -773,14 +817,14 @@ pub fn solar_declination_ra(unix_seconds: f64) -> (f64, f64) {
     let ecliptic = mean_longitude
         + (1.915_f64.to_radians()) * mean_anomaly.sin()
         + (0.020_f64.to_radians()) * (2.0 * mean_anomaly).sin();
-    let obliquity = (23.439 - 4.0e-7 * n).to_radians(); // Earth's axial tilt — the reason there are seasons
+    let obliquity = obliquity_rad(unix_seconds);
     let declination = (obliquity.sin() * ecliptic.sin()).asin();
     let right_ascension = (obliquity.cos() * ecliptic.sin()).atan2(ecliptic.cos());
     (declination, right_ascension)
 }
 
 pub fn solar_direction_earth_fixed(unix_seconds: f64) -> glam::DVec3 {
-    let n = (unix_seconds - 946_728_000.0) / 86_400.0;
+    let n = days_since_j2000(unix_seconds);
     let (declination, right_ascension) = solar_declination_ra(unix_seconds);
     // Greenwich mean sidereal time — how far Earth has turned under the stars. The subsolar longitude is
     // the Sun's right ascension measured from the Greenwich meridian.
