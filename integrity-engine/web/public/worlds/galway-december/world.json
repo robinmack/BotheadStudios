@@ -1,0 +1,65 @@
+{
+  "name": "Galway, December solstice",
+  "type": "planet",
+  "planet": {
+    "rotation_period_s": 86400,
+    "profile": "earth"
+  },
+  "atmosphere": {
+    "profile": "rayleigh",
+    "mass_kg": 5.15e+18,
+    "composition": [
+      [
+        "air",
+        1.0
+      ]
+    ]
+  },
+  "camera": {
+    "mode": "fly",
+    "lat": 53.27,
+    "lon": -9.05,
+    "alt_m": 1.6,
+    "look": {
+      "yaw": 0.0,
+      "pitch": -0.25
+    },
+    "min_alt_m": 2,
+    "max_alt_m": 40000000
+  },
+  "controls": {
+    "keys": [
+      {
+        "code": "KeyW",
+        "action": "forward"
+      },
+      {
+        "code": "KeyS",
+        "action": "back"
+      },
+      {
+        "code": "KeyA",
+        "action": "left"
+      },
+      {
+        "code": "KeyD",
+        "action": "right"
+      },
+      {
+        "code": "KeyR",
+        "action": "up"
+      },
+      {
+        "code": "KeyF",
+        "action": "down"
+      }
+    ]
+  },
+  "time": {
+    "rotation": false,
+    "scale": 1,
+    "epoch": 1734772800.0
+  },
+  "body": "earth",
+  "$comment": "Galway at the December solstice, eye at 1.6 m — a PAIR with the other galway-* world, identical in every respect but the date. Built 2026-08-24 to make docs/46 row 58 checkable in a picture: the plants now read `solar::senescence_fraction`, and the only way to see whether that reaches the screen is two shots that differ ONLY in when they are set.\n\nBoth epochs are verified fixtures from `orbit.rs`'s own solstice tests (declination +23.44 and -23.44), not dates chosen here. 53.27N is far enough north that the model predicts a real turn; the tropics barely senesce, which is why Galway rather than the equator."
+}
