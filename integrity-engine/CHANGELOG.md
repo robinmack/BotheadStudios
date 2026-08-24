@@ -9,6 +9,16 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★ **The plants know what month it is** (docs/46 row 58). `Assembly::mesh_in_season` /
+  `mesh_seasoned` hand a mesh the season, and `build_flora` gets it from `solar::senescence_fraction`
+  — so a leaf and the ground it stands on can no longer disagree about the date. `mesh` and
+  `mesh_damaged` delegate with `turned = 0.0` and are bit-identical, so existing callers are
+  unaffected. **The colour change is verified in test and NOT yet visible in a rig shot**: at Galway
+  the two solstices differ by +61% brightness (sun elevation) and only 2.6% in hue, in the wrong
+  direction — recorded rather than claimed.
+- **Pinned-epoch worlds** `galway-june`, `galway-december` and `earth-solstice`, so a seasonal or
+  celestial claim can be photographed under a fixed clock instead of `now`.
+
 - ★★★ **The catalogue's restitutions were never sourced, and they were too low** (docs/46 row 63).
   Only **5 of 32** entries mentioned restitution anywhere in their sources or notes; exactly one
   (`limestone`) cited anything restitution-specific. The rest were typed alongside citations about
