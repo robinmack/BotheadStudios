@@ -455,11 +455,21 @@ pub fn senescence_phase(lat_deg: f64, unix_s: f64) -> (f64, f64) {
 }
 
 pub fn senescence_fraction(lat_deg: f64, unix_s: f64) -> f64 {
-    let (dec_now, _) = crate::orbit::solar_declination_ra(unix_s);
+    senescence_fraction_at_obliquity(lat_deg, unix_s, crate::orbit::obliquity_rad(unix_s))
+}
+
+/// ★★★ **THE SEASON, ASKED AT A HYPOTHETICAL TILT.**
+///
+/// [`senescence_fraction`] is this at Earth's real obliquity. It exists so row 39's third claim can be
+/// stated as a test at all: **the seasonal signal must VANISH when the tilt does.** A function that
+/// looks the tilt up for itself leaves the counterfactual nowhere to enter — which is exactly how an
+/// upright Earth went unnoticed for twenty days while every seasonal test passed.
+pub fn senescence_fraction_at_obliquity(lat_deg: f64, unix_s: f64, obliquity_rad: f64) -> f64 {
+    let (dec_now, _) = crate::orbit::solar_declination_ra_at_obliquity(unix_s, obliquity_rad);
     // The extremes of the local day length are set by the extremes of the declination — the axial
     // tilt itself. ★ This comment used to claim it "keeps ONE source for the obliquity" while
     // hardcoding a second one; now it actually does, at the epoch being asked about.
-    let tilt = crate::orbit::obliquity_rad(unix_s);
+    let tilt = obliquity_rad;
     let summer = day_length_hours(lat_deg, if lat_deg >= 0.0 { tilt } else { -tilt });
     let winter = day_length_hours(lat_deg, if lat_deg >= 0.0 { -tilt } else { tilt });
     let now = day_length_hours(lat_deg, dec_now);

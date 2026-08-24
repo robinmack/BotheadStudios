@@ -809,6 +809,17 @@ pub fn spin_axis_for_obliquity(obliquity_rad: f64) -> glam::DVec3 {
 }
 
 pub fn solar_declination_ra(unix_seconds: f64) -> (f64, f64) {
+    solar_declination_ra_at_obliquity(unix_seconds, obliquity_rad(unix_seconds))
+}
+
+/// ★★★ **THE SAME EPHEMERIS, ASKED AT A HYPOTHETICAL TILT** — so the seasons can be interrogated.
+///
+/// [`solar_declination_ra`] is this with the real obliquity. Splitting it out is what makes row 39's
+/// third claim expressible at all: *the seasonal signal must vanish when the tilt does.* You cannot
+/// test that against a function which looks the tilt up for itself — the counterfactual has nowhere to
+/// enter, which is precisely why an untilted Earth went unnoticed for twenty days while the seasonal
+/// tests passed.
+pub fn solar_declination_ra_at_obliquity(unix_seconds: f64, obliquity: f64) -> (f64, f64) {
     let n = days_since_j2000(unix_seconds);
     let mean_longitude = (280.460 + 0.985_647_4 * n).to_radians();
     let mean_anomaly = (357.528 + 0.985_600_3 * n).to_radians();
@@ -817,7 +828,6 @@ pub fn solar_declination_ra(unix_seconds: f64) -> (f64, f64) {
     let ecliptic = mean_longitude
         + (1.915_f64.to_radians()) * mean_anomaly.sin()
         + (0.020_f64.to_radians()) * (2.0 * mean_anomaly).sin();
-    let obliquity = obliquity_rad(unix_seconds);
     let declination = (obliquity.sin() * ecliptic.sin()).asin();
     let right_ascension = (obliquity.cos() * ecliptic.sin()).atan2(ecliptic.cos());
     (declination, right_ascension)

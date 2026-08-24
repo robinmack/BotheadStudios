@@ -2239,4 +2239,62 @@ mod obliquity_tests {
             "the obliquity must decrease measurably over a millennium: {now:.5} -> {then:.5}"
         );
     }
+
+    /// ★★★ **THE SEASONS MUST VANISH WHEN THE TILT DOES** — the claim row 39 has wanted since
+    /// 2026-08-04 and that could not be WRITTEN until now.
+    ///
+    /// This is the real physics statement, and it is a counterfactual: an Earth with no obliquity has
+    /// no seasons anywhere, at any latitude, on any date. Until `orbit` and `solar` could be handed a
+    /// hypothetical tilt, there was nowhere for that counterfactual to enter — every seasonal function
+    /// looked the tilt up for itself, so no test could ask "and what if it were zero?" That is exactly
+    /// how an upright Earth survived twenty days of a passing suite.
+    #[test]
+    fn the_seasons_vanish_when_the_tilt_does() {
+        // Four dates across a year, and latitudes from equator to well inside the Arctic.
+        const JAN: f64 = 1_704_067_200.0; // 2024-01-01
+        const APR: f64 = 1_711_929_600.0;
+        const JUL: f64 = 1_719_792_000.0;
+        const OCT: f64 = 1_727_740_800.0;
+
+        for lat in [0.0, 23.5, 45.0, 60.0, 70.0] {
+            for t in [JAN, APR, JUL, OCT] {
+                // ★ AN UPRIGHT EARTH: the sun sits on the equator all year, every day is 12 hours
+                // everywhere, and there is no season to be part-way through.
+                let (dec, _) = crate::orbit::solar_declination_ra_at_obliquity(t, 0.0);
+                assert!(
+                    dec.abs() < 1.0e-12,
+                    "with no tilt the sun must never leave the equator: dec {dec:.3e} rad at \
+                     lat {lat}, t {t}"
+                );
+                let flat = crate::solar::senescence_fraction_at_obliquity(lat, t, 0.0);
+                assert!(
+                    flat.abs() < 1.0e-9,
+                    "an untilted Earth has no season anywhere: senescence {flat:.6} at lat {lat}"
+                );
+            }
+        }
+
+        // ★★ AND THE REAL EARTH DOES HAVE ONE — otherwise the assertion above would be satisfied by a
+        // function that always returns zero, which is the failure mode this whole row is about.
+        let eps = crate::orbit::obliquity_rad(JUL);
+        let north_summer = crate::solar::senescence_fraction_at_obliquity(60.0, JUL, eps);
+        let north_winter = crate::solar::senescence_fraction_at_obliquity(60.0, JAN, eps);
+        println!(
+            "lat 60: senescence {north_summer:.3} in July vs {north_winter:.3} in January \
+             (tilt {:.3} deg)",
+            eps.to_degrees()
+        );
+        assert!(
+            north_winter - north_summer > 0.5,
+            "a tilted Earth must show a real season at 60 deg: {north_summer:.3} -> {north_winter:.3}"
+        );
+
+        // ★ The tropics barely senesce even WITH the tilt, which the model predicts for free and is
+        // why the counterfactual above is a meaningful control rather than a tautology.
+        let tropics = crate::solar::senescence_fraction_at_obliquity(0.0, JAN, eps);
+        assert!(
+            tropics.abs() < 1.0e-9,
+            "the equator has no season either way: {tropics:.6}"
+        );
+    }
 }
