@@ -776,11 +776,13 @@ pub fn fold_site(
     g_ms2: f32,
 ) -> Result<FoldReport, SiteRefusal> {
     if !gauge.settled(g_ms2) {
-        // 1.0 m is recohere's own binning cell (its private CELL_M): the interval quoted in the
-        // refusal is the same one the gauge is waiting out.
+        // ★ The gauge is asked what IT requires. This used to hardcode `1.0` to mirror `recohere`'s
+        // PRIVATE binning cell — correct at the time and a duplicate of a constant this module
+        // cannot see, so a gauge at any other scale would have refused with a window it was not
+        // being judged against.
         return Err(SiteRefusal::NotSettled {
             quiet_s: gauge.quiet_seconds(),
-            needed_s: crate::recohere::quiescent_interval_s(g_ms2, 1.0),
+            needed_s: gauge.needed_s(g_ms2),
         });
     }
     let audit = refine::audit(&site.particles);

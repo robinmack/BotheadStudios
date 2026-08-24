@@ -97,8 +97,9 @@
         "friction_angle": null,
         "hardness_mohs": 2.75,
         "ductility": 0.85,
-        "restitution": 0.7,
-        "friction_coefficient": 0.61
+        "restitution": 0.72,
+        "friction_coefficient": 0.61,
+        "restitution_at_ms": 0.45
       },
       "optical": {
         "albedo": [
@@ -126,13 +127,14 @@
           320000000.0
         ]
       },
-      "notes": "6061-T6 temper. Soft 1100-O far weaker (tensile ~8.8e7, Brinell 23). compressive_strength = yield. Brinell 93-95 HB. friction_coefficient Al-on-mild-steel static (kinetic ~0.47); Al-on-Al galls 1.05-1.4. Albedo ~92% neutral silver.",
+      "notes": "6061-T6 temper. Soft 1100-O far weaker (tensile ~8.8e7, Brinell 23). compressive_strength = yield. Brinell 93-95 HB. friction_coefficient Al-on-mild-steel static (kinetic ~0.47); Al-on-Al galls 1.05-1.4. Albedo ~92% neutral silver. ★★★ 2026-08-17 RESTITUTION SOURCED (docs/46 row 63). Was 0.7 and UNCITED — no source in this entry ever mentioned restitution. Now 0.72 MEASURED AT 0.45 m/s, range 0.03 – 1.05 m/s (12 pendulum drop heights). Restitution is NOT a material constant: it falls with impact speed, so the velocity is part of the number. Velocity dependence observed: VERIFIED against Figure 23 as an image, not the prose: e ≈ 0.85–0.95 (cluster centre ~0.88) at 0.05–0.15 m/s → 0.72–0.82 at 0.22–0.25 → 0.78 at 0.33–0.35 → 0.70–0.74 at 0.45 → 0.66–0.77 at 0.65 → 0.68–0.75 with outliers to 0.57 at 0.85 → 0.55–0.60 with one point at 0.69 at 1.05. Monotone fall, scatter widening with velocity. The prior… CONFIGURATION: CATEGORY 3 — MIXED PAIR, honestly labelled as such by the prior report and confirmed. A 440c grade-100 wear-resistant stainless sphere, 3/8 in (9.5 mm), swung on a long pendulum into a 1 inch diameter 6061-T6 aluminium puck bolted to a heavy inertial block. Sandia Table 9 for Aluminum 6061 reads EXACTLY as claimed: E 71.47 GPa, Yield… Confidence: high.",
       "sources": [
         "https://www.makeitfrom.com/material-properties/6061-T6-Aluminum",
         "https://en.wikipedia.org/wiki/6061_aluminium_alloy",
         "https://laserbeamproducts.wordpress.com/2014/06/19/reflectivity-of-aluminium-uv-visible-and-infrared/",
         "https://engineeringlibrary.org/reference/coefficient-of-friction",
-        "CRC Handbook of Chemistry and Physics, 97th ed., 'Thermal Conductivity of Metals and Alloys' (300 K)"
+        "CRC Handbook of Chemistry and Physics, 97th ed., 'Thermal Conductivity of Metals and Alloys' (300 K)",
+        "Baca, R.N., Reu, P.L., Aragon, D.S., Brake, M.R.W., VanGoethem, D.J., Bejarano, M.V., Sumali, H., \"A Novel Experimental Method for Measuring Coefficients of Restitution\", SAND2016-5693, Sandia National Laboratories, June 2016. https://www.osti.gov/servlets/purl/1561711/ — COR data Fig. 23 p.39; material properties Table 9 p.37; impactor Table 10 p.38. Peer-reviewed companion VERIFIED via Crossref: Brake, Reu, Aragon, \"A Comprehensive Set of Impact Data for Common Aerospace Metals\", Journal of Computational and Nonlinear Dynamics 12(6), 2017, doi:10.1115/1.4036760 — title, all three authors, journal, volume and issue all match."
       ],
       "thermal": {
         "specific_heat": 897.0,
@@ -166,7 +168,8 @@
         "hardness_mohs": 6.0,
         "ductility": 0.02,
         "restitution": 0.4,
-        "friction_coefficient": 0.7
+        "friction_coefficient": 0.7,
+        "restitution_at_ms": null
       },
       "optical": {
         "albedo": [
@@ -225,7 +228,7 @@
           66000000.0
         ]
       },
-      "notes": "Vesicular scoria much lighter (500-2200). Rock-mass strength far below intact. Polished slab roughness ~0.3.",
+      "notes": "Vesicular scoria much lighter (500-2200). Rock-mass strength far below intact. Polished slab roughness ~0.3. ★★ 2026-08-17 RESTITUTION IS UNSOURCED AND STAYS THAT WAY (docs/46 row 63). Its value here was typed, not measured — no citation in this entry has ever mentioned restitution — and a literature pass plus an adversarial re-check FAILED to find a usable measurement. An unknown stays unknown at the boundary rather than being back-filled with a plausible number. What was searched and what exists instead: REJECTION UPHELD — I re-checked each of the prior report's rejections against the primary documents rather than trusting them, and all three hold. (1) Bogdan et al.: I extracted the arXiv PDF (1811.02905) myself. Abstract, verbatim: 'In laboratory experiments, spherical 1 mm-wide glass and basalt particles are heated, and the hot particles collide at about 1 m/s with a flat glass target that is at room temperature. When the particles are heated below 900 K, the collisions are essentially elastic with coefficients of restitution of about 0.9'. Figure 5 caption, verbatim: 'Coefficients of restitution for 1 mm…",
       "sources": [
         "https://link.springer.com/article/10.1007/BF01024770",
         "https://hal.science/hal-03547484/file/Villeneuve-Heap_2021_Volcanica.pdf.pdf",
@@ -543,8 +546,9 @@
         "compressive_strength": 930000000.0,
         "hardness_mohs": 4.0,
         "ductility": 0.01,
-        "restitution": 0.3,
-        "friction_coefficient": 0.4
+        "restitution": 0.69,
+        "friction_coefficient": 0.4,
+        "restitution_at_ms": 3.05
       },
       "optical": {
         "albedo": [
@@ -572,11 +576,12 @@
         "thermal_conductivity": 53.0,
         "conductivity_note": "53 W/m/K for ASTM A48 grey iron"
       },
-      "notes": "The cheap gun metal, and the dangerous one. ★★ THE NUMBER THAT MATTERS IS THE ASYMMETRY: tensile 295 MPa against compressive ~930 MPa, so it is roughly THREE TIMES stronger in compression than in tension. A pressurised barrel's hoop stress is TENSILE, which is precisely the direction this material is weakest in — and combined with `ductility` 0.01 (it is brittle; it does not yield before it parts) that is the whole reason iron guns burst without warning where bronze ones bulge first. The catalogue is not being asked to know that story; it emerges from those two numbers. SOURCED: density 7.5 g/cm3, tensile 295 MPa and Young's modulus 124 GPa (Class 40), specific heat 490 J/kg/K, thermal conductivity 53 W/m/K, melting ~1260 C. Compressive strength is quoted across grades as 570-1290 MPa; 930 is a representative Class 40 value and the range is recorded here rather than hidden. `ductility` 0.01 is an estimate expressing 'essentially none', not a measurement. NOT CHARACTERIZED and left at 0: latent heats, boiling behaviour, shear strength.",
+      "notes": "The cheap gun metal, and the dangerous one. ★★ THE NUMBER THAT MATTERS IS THE ASYMMETRY: tensile 295 MPa against compressive ~930 MPa, so it is roughly THREE TIMES stronger in compression than in tension. A pressurised barrel's hoop stress is TENSILE, which is precisely the direction this material is weakest in — and combined with `ductility` 0.01 (it is brittle; it does not yield before it parts) that is the whole reason iron guns burst without warning where bronze ones bulge first. The catalogue is not being asked to know that story; it emerges from those two numbers. SOURCED: density 7.5 g/cm3, tensile 295 MPa and Young's modulus 124 GPa (Class 40), specific heat 490 J/kg/K, thermal conductivity 53 W/m/K, melting ~1260 C. Compressive strength is quoted across grades as 570-1290 MPa; 930 is a representative Class 40 value and the range is recorded here rather than hidden. `ductility` 0.01 is an estimate expressing 'essentially none', not a measurement. NOT CHARACTERIZED and left at 0: latent heats, boiling behaviour, shear strength. ★★★ 2026-08-17 RESTITUTION SOURCED (docs/46 row 63). Was 0.3 and UNCITED — no source in this entry ever mentioned restitution. Now 0.69 MEASURED AT 3.05 m/s, range 1.22 – 6.7 m/s (4 – 22 ft/s, read off the plotted data extent). Restitution is NOT a material constant: it falls with impact speed, so the velocity is part of the number. Velocity dependence observed: CORRECTED after reading Figure 168 as an image. At 10 ft/s (3.05 m/s) the three curves read: .27 lb ≈ 0.73, 3.811 lb ≈ 0.685, 20 lb ≈ 0.665 — so the honest value at 3.05 m/s is a MASS-DEPENDENT BAND 0.66–0.73, not a single number. Full curves: .27 lb ≈ 0.752 at 4.3 ft/s (1.3 m/s) → 0.732 at 6.3 ft/s → 0.727 at 10 ft/s → 0.690 at 13.5… CONFIGURATION: CATEGORY 1 — TRUE SAME-MATERIAL SPHERE PAIR, verified, and it is the engine's exact case. Two cast iron spheres of equal size colliding, plotted against the RELATIVE initial velocity (Goldsmith: 'Measured values of the coefficient of restitution for the impact of two spheres are portrayed in a sequence of curves as a function of the… Confidence: medium.",
       "sources": [
         "https://www.nuclear-power.com/nuclear-engineering/metals-what-are-metals/cast-iron/gray-iron-gray-cast-iron/properties-of-gray-cast-iron/ (ASTM A48 Class 40: UTS 295 MPa, E 124 GPa, specific heat 490 J/kg/K, k 53 W/m/K, melting ~1260 C)",
         "https://www.makeitfrom.com/material-properties/Grey-Cast-Iron/ (density ~7.5 g/cm3)",
-        "https://tubingchina.com/Mechanical-Properties-of-Gray-Cast-Iron.htm (compressive strength range 570-1290 MPa across grades)"
+        "https://tubingchina.com/Mechanical-Properties-of-Gray-Cast-Iron.htm (compressive strength range 570-1290 MPa across grades)",
+        "W. Goldsmith, \"Impact: The Theory and Physical Behaviour of Colliding Solids\", Edward Arnold, London, 1960, Figure 168, printed p.259. Verified first-hand from the full scan: archive.org item in.ernet.dli.2015.133946, metadata title \"Impact The Theory And Physical Behaviour Of Colliding Solids\", creator \"Goldsmith,werner\", date 1960; figure on PDF page 275 of the _text.pdf. The superscript 172 on the caption resolves in Goldsmith's own bibliography to, verbatim: \"172. Haughton, S., 'On the Dynamical Coefficient of Elasticity of Steel, Iron, Brass, Oak, and Teak', Proc. Roy. Irish Acad., Dublin, 8, 1864, 86.\""
       ]
     },
     {
@@ -650,7 +655,8 @@
         "hardness_mohs": null,
         "ductility": 0.8,
         "restitution": 0.08,
-        "friction_coefficient": 0.36
+        "friction_coefficient": 0.36,
+        "restitution_at_ms": null
       },
       "thermal": {
         "specific_heat": 900,
@@ -697,7 +703,7 @@
           30
         ]
       },
-      "notes": "Most moisture-sensitive common soil. Undrained cohesion c_u ~= UCS/2. Effective drained friction ~20 (undrained ~0). Desiccated clay becomes brittle (ductility ~0.2, cracks). Wet clay slippery (friction ~0.25). Dry hardness ~Mohs 1-2.",
+      "notes": "Most moisture-sensitive common soil. Undrained cohesion c_u ~= UCS/2. Effective drained friction ~20 (undrained ~0). Desiccated clay becomes brittle (ductility ~0.2, cracks). Wet clay slippery (friction ~0.25). Dry hardness ~Mohs 1-2. ★★ 2026-08-17 RESTITUTION IS UNSOURCED AND STAYS THAT WAY (docs/46 row 63). Its value here was typed, not measured — no citation in this entry has ever mentioned restitution — and a literature pass plus an adversarial re-check FAILED to find a usable measurement. An unknown stays unknown at the boundary rather than being back-filled with a plausible number. What was searched and what exists instead: GAP CONFIRMED HONEST — I re-searched independently and reached the same conclusion; this entry should stand as a flagged unknown. No measured coefficient of restitution for clay-on-clay, or for a clay grain/aggregate against any slab, at a stated impact velocity, could be found. I searched: clay/soil grain-on-grain and grain-on-block COR; kaolin/bentonite/clay pellet rebound; DEM parameter papers for clay, clay-loam and paddy soils; rockfall onto soil slopes; agricultural seed-on-soil impact studies; and low-velocity aggregate-collision literature. WHAT EXISTS INSTEAD, none of it usable, and I verified the…",
       "sources": [
         "https://www.geotechdata.info/parameter/cohesion",
         "https://redfame.com/journal/index.php/set/article/download/5149/5347",
@@ -723,7 +729,8 @@
         "hardness_mohs": 6.0,
         "ductility": 0.05,
         "restitution": 0.4,
-        "friction_coefficient": 0.6
+        "friction_coefficient": 0.6,
+        "restitution_at_ms": null
       },
       "optical": {
         "albedo": [
@@ -755,7 +762,7 @@
           12000000.0
         ]
       },
-      "notes": "Plain concrete near-brittle (failure strain ~0.0035); ductility comes from rebar, not concrete. Paste hardness ~2-3, aggregate 6-7 (composite). Rubble friction_angle 26-42.",
+      "notes": "Plain concrete near-brittle (failure strain ~0.0035); ductility comes from rebar, not concrete. Paste hardness ~2-3, aggregate 6-7 (composite). Rubble friction_angle 26-42. ★★ 2026-08-17 RESTITUTION IS UNSOURCED AND STAYS THAT WAY (docs/46 row 63). Its value here was typed, not measured — no citation in this entry has ever mentioned restitution — and a literature pass plus an adversarial re-check FAILED to find a usable measurement. An unknown stays unknown at the boundary rather than being back-filled with a plausible number. What was searched and what exists instead: ADVERSARIAL VERDICT: the found:false STANDS, and I am RAISING confidence from low to high — 'high' here means high confidence that the gap is real and that the leads recorded below are accurate, NOT that a value was found. No value should be entered for concrete. I independently checked every citation in the original researcher's notes and every one is real and correctly described; nothing was fabricated. VERIFIED CITATIONS: (1) Asteriou, P. & Tsiambaos, G. (2018), 'Effect of impact velocity, block mass and hardness on the coefficients of restitution for rockfall analysis', Int. J. Rock Mech. Min. Sci.…",
       "sources": [
         "https://eurocodeapplied.com/design/en1992/concrete-design-properties",
         "https://www.engineeringtoolbox.com/concrete-properties-d_1223.html",
@@ -953,8 +960,9 @@
         "friction_angle": null,
         "hardness_mohs": 3.0,
         "ductility": 0.95,
-        "restitution": 0.45,
-        "friction_coefficient": 1.0
+        "restitution": 0.66,
+        "friction_coefficient": 1.0,
+        "restitution_at_ms": 0.25
       },
       "optical": {
         "albedo": [
@@ -982,12 +990,13 @@
           330000000.0
         ]
       },
-      "notes": "Annealed (soft) temper; strength rises sharply when work-hardened. compressive_strength = yield. Brinell ~40 HB, Vickers ~50 HV. friction_coefficient is Cu-on-Cu (galls); Cu-on-steel ~0.53. color_variance rises with patina.",
+      "notes": "Annealed (soft) temper; strength rises sharply when work-hardened. compressive_strength = yield. Brinell ~40 HB, Vickers ~50 HV. friction_coefficient is Cu-on-Cu (galls); Cu-on-steel ~0.53. color_variance rises with patina. ★★★ 2026-08-17 RESTITUTION SOURCED (docs/46 row 63). Was 0.45 and UNCITED — no source in this entry ever mentioned restitution. Now 0.66 MEASURED AT 0.25 m/s, range ≈0.15 – 1.32 m/s (successive bounces of a single 89 mm drop). Restitution is NOT a material constant: it falls with impact speed, so the velocity is part of the number. Velocity dependence observed: VERIFIED by reading Figure 3(c) as an image; the prior report's read-off is accurate to ~0.01. Room temperature, in vacuum: e ≈ 0.655 at 0.15 m/s, 0.66 at 0.20, 0.665 at 0.28, 0.625 at 0.36, 0.54 at 0.61, 0.415 at 1.32 m/s. Liquid-nitrogen temperature: 0.755 at 0.15 → 0.70 at 0.20 → 0.635 at 0.36 → 0.565 at 0.61 → 0.45 at 1.32. Internal… CONFIGURATION: CATEGORY 2 — sphere on a thick slab of the SAME material (the prior report's 'Category 1/2' is slightly generous; it is a sphere-on-slab, not a free pair). A 0.19 in (5 mm) diameter COPPER ball dropped onto a 0.50 in (13 mm) thick COPPER target plate in a sealed vacuum chamber; e from the time intervals between successive bounces… Confidence: high.",
       "sources": [
         "https://www.makeitfrom.com/material-properties/Annealed-OS050-C11000-Copper",
         "https://www.roymech.co.uk/Useful_Tables/Tribology/co_of_frict.htm",
         "https://helpx.adobe.com/substance-3d-designer/substance-compositing-graphs/nodes-reference-for-substance-compositing-graphs/node-library/material-filters/pbr-utilities/pbr-metal-reflectance.html",
-        "CRC Handbook of Chemistry and Physics, 97th ed., 'Thermal Conductivity of Metals and Alloys' (300 K)"
+        "CRC Handbook of Chemistry and Physics, 97th ed., 'Thermal Conductivity of Metals and Alloys' (300 K)",
+        "K.C. Radil and A.B. Palazzolo, \"Influence of Temperature and Impact Velocity on the Coefficient of Restitution\", NASA Technical Memorandum 106485 / Army Research Laboratory Memorandum Report ARL-MR-135, July 1994. https://ntrs.nasa.gov/api/citations/19950004401/downloads/19950004401.pdf — copper-on-copper is Figure 3(c) on printed p.10; Table I gives the 5 mm ball / 13 mm plate / Rockwell B 14."
       ],
       "thermal": {
         "specific_heat": 385.0,
@@ -1053,7 +1062,7 @@
           0.05
         ]
       },
-      "notes": "Liquid. Game-relevant contrast with water: less dense (~850) yet ~6-10x more viscous, optically much darker/less translucent. Viscosity falls sharply as it warms. F0 ~0.02-0.025 (n~1.45-1.5).",
+      "notes": "Liquid. Game-relevant contrast with water: less dense (~850) yet ~6-10x more viscous, optically much darker/less translucent. Viscosity falls sharply as it warms. F0 ~0.02-0.025 (n~1.45-1.5). ★★ 2026-08-17 (docs/46 row 62): `restitution: 0.0` here is a PLACEHOLDER meaning \"a parcel of this does not bounce\", NOT a measurement — and it is now expensive. A linear no-tension contact reaches e = 0 only as its damping ratio goes to infinity, so `granular::zeta_for_no_tension_restitution` clamps and returns zeta ~ 50, i.e. c ~ 70.7*sqrt(k) — 38.8x what the old (wrong) textbook inversion gave — which drives a stable explicit timestep 25x smaller for no physical reason. The gas path already sidesteps this: `atmosphere::gas_contact_from_material` sets `normal_damp: 0.0` directly and notes that dissipation enters via VISCOSITY. A liquid is the same case and should do the same; `dynamic_viscosity` is already catalogued here. Flagged rather than changed, because what a liquid parcel's contact should be is a design decision, not a typo.",
       "sources": [
         "https://www.engineeringtoolbox.com/api-gravity-d_1212.html",
         "https://en.wikipedia.org/wiki/API_gravity",
@@ -1094,7 +1103,8 @@
         "hardness_mohs": null,
         "ductility": 0.3,
         "restitution": 0.1,
-        "friction_coefficient": 0.55
+        "friction_coefficient": 0.55,
+        "restitution_at_ms": null
       },
       "thermal": {
         "specific_heat": 900,
@@ -1141,7 +1151,7 @@
           35
         ]
       },
-      "notes": "Varies 2-3x+ with moisture/organics/compaction. Dry sandy dirt -> ~0 cohesion, brittle; compacted clayey -> stronger, plastic. Hardness N/A (loose aggregate). Wet friction ~0.40, wet albedo ~40-50% darker. Angle of repose ~35 moist.",
+      "notes": "Varies 2-3x+ with moisture/organics/compaction. Dry sandy dirt -> ~0 cohesion, brittle; compacted clayey -> stronger, plastic. Hardness N/A (loose aggregate). Wet friction ~0.40, wet albedo ~40-50% darker. Angle of repose ~35 moist. ★★ 2026-08-17 RESTITUTION IS UNSOURCED AND STAYS THAT WAY (docs/46 row 63). Its value here was typed, not measured — no citation in this entry has ever mentioned restitution — and a literature pass plus an adversarial re-check FAILED to find a usable measurement. An unknown stays unknown at the boundary rather than being back-filled with a plausible number. What was searched and what exists instead: GAP CONFIRMED HONEST — and the supporting citations check out exactly, which raises rather than lowers my trust in this entry. No measured COR for a topsoil grain/aggregate against topsoil (or any slab) at a stated impact velocity exists that I could find. I VERIFIED THE CLOSEST MEASURED THING against the primary source and the original report's numbers are correct to the digit: Li, Zhou, Yi, Chen, Zhang & Wang (2025), 'Analysis measurements of millet collision coefficient of restitution for mechanized seeding', PLoS One, PMC12119000 — 'COR values between Black soil and Zhang Zagu 13, Tuogu, and Shuangyu are…",
       "sources": [
         "https://extension.okstate.edu/fact-sheets/basics-of-soil-bulk-density",
         "https://www.geotechdata.info/parameter/cohesion",
@@ -1165,8 +1175,9 @@
         "friction_angle": 45,
         "hardness_mohs": 6.5,
         "ductility": 0.05,
-        "restitution": 0.8,
-        "friction_coefficient": 0.6
+        "restitution": 0.83,
+        "friction_coefficient": 0.6,
+        "restitution_at_ms": 1
       },
       "optical": {
         "albedo": [
@@ -1229,13 +1240,14 @@
           55
         ]
       },
-      "notes": "Cohesion is intact rock; for fractured/granular state use cohesion~0 and friction_angle~40. Rejected bad MatWeb UCS (2200 MPa). Polished roughness ~0.05-0.15.",
+      "notes": "Cohesion is intact rock; for fractured/granular state use cohesion~0 and friction_angle~40. Rejected bad MatWeb UCS (2200 MPa). Polished roughness ~0.05-0.15. ★★★ 2026-08-17 RESTITUTION SOURCED (docs/46 row 63). Was 0.8 and UNCITED — no source in this entry ever mentioned restitution. Now 0.83 MEASURED AT 1 m/s, range ~0.1 to 1.5 (only the UPPER bound is stated in the text; the lower bound is…. Restitution is NOT a material constant: it falls with impact speed, so the velocity is part of the number. Velocity dependence observed: Flat, with a correction to the previous researcher's characterisation. VERIFIED: the authors could not detect a velocity trend — 'A clear speed-dependent trend is not apparent. In fact, the data appears to be scattered enough to suggest that e is independent of impact speed in the range of speeds tested.' The range was rig-limited, not… CONFIGURATION: PREFERENCE 1 CONFIRMED — a true same-material PAIR, verified verbatim from the Icarus PDF (I extracted the text myself with pdftotext, I did not trust the prior quotes). Two ~1-m-diameter G603 granite spheres, weighed on-crane at 1361 and 1225 kg, suspended pendulum-style from two 40-ton cranes and swung into each other at normal… Confidence: high.",
       "sources": [
         "https://www.makeitfrom.com/material-properties/Granite",
         "https://geothermal-energy-journal.springeropen.com/articles/10.1186/s40517-018-0096-1",
         "https://static.rocscience.cloud/assets/resources/learning/hoek/3.-Intact-rock-strength_2023-06-30-120556_xiuv.pdf",
         "https://landslides.usgs.gov/static/lfs/research/rockphysics/Byerlee-1967.pdf",
-        "Clauser, C. & Huenges, E. (1995), 'Thermal Conductivity of Rocks and Minerals', in Rock Physics & Phase Relations: A Handbook of Physical Constants, AGU Reference Shelf 3, Table 3"
+        "Clauser, C. & Huenges, E. (1995), 'Thermal Conductivity of Rocks and Minerals', in Rock Physics & Phase Relations: A Handbook of Physical Constants, AGU Reference Shelf 3, Table 3",
+        "Durda, D.D., Movshovitz, N., Richardson, D.C., Asphaug, E., Morgan, A., Rawlings, A.R., Vest, C. (2011). 'Experimental determination of the coefficient of restitution for meter-scale granite spheres.' Icarus 211(2), 849-855. doi:10.1016/j.icarus.2010.09.003. VERIFIED: paper exists, is indexed at ADS as 2011Icar..211..849D, and I extracted the full text from https://pages.astro.umd.edu/~dcr/reprints/durda_icarus211,849.pdf and rendered p. 854 to read Fig. 4. Every sentence the prior report quoted is present verbatim. ★ ONE FABRICATED CROSS-CHECK QUOTE FOUND AND REMOVED: the prior report attributed to Sandeep et al. (2019) the sentence 'COR values reduced by 0-2% only with the increase in impact velocity from 1.74 to 2.43 m/s'. That sentence does NOT exist in that manuscript — I extracted the full text from https://discovery.ucl.ac.uk/10082944/1/Sandeep_et_al_TRS_Manuscript_Revised_COPY.pdf and grepped it. What the paper actually says is 'For GB and CSB impacting on the surfaces of granite and rubber base blocks with varying the impact velocities, no significant changes were observed in the COR values.' (The '5%, 6%, 6% and 10%' reductions it does quantify are for METAL blocks, not granite.) The other Sandeep quote IS verbatim: 'From Figure 8 it was observed that the lower and higher values of COR were found for CSB impacting on rubber block (average COR=0.42) and granite block (average COR=0.90).' Note this cross-check is chrome-steel-ball-on-granite-block at 1.74-2.43 m/s — a different-material pair, supporting only."
       ]
     },
     {
@@ -1252,12 +1264,15 @@
         "compressive_strength": 50000.0,
         "tensile_strength": 15000.0,
         "tensile_strength_blade": 150000000.0,
+        "youngs_modulus_culm": 5550000000.0,
+        "youngs_modulus_blade": null,
         "cohesion": 12000.0,
         "friction_angle": 30,
         "hardness_mohs": null,
         "ductility": 0.8,
-        "restitution": 0.1,
-        "friction_coefficient": 0.7
+        "restitution": 0.468,
+        "friction_coefficient": 0.7,
+        "restitution_at_ms": 2.62
       },
       "thermal": {
         "specific_heat": 2000,
@@ -1465,6 +1480,10 @@
           500000.0,
           15000000.0
         ],
+        "youngs_modulus_culm_pa": [
+          2600000000.0,
+          8500000000.0
+        ],
         "cohesion": [
           1000.0,
           20000.0
@@ -1474,12 +1493,16 @@
           35
         ]
       },
-      "notes": "Two stiffnesses coexist: soft soil mat (~MPa) vs stiff strong blades (blade tensile ~108-294 MPa, GPa modulus). Signature property is added ROOT cohesion ~1-20 kPa over few-kPa base soil. Restitution near zero. Fragile, shreds easily. Highly variable. ★ 2026-08-04: the albedo is no longer three chosen numbers — it DERIVES from a measured spectrum (was [0.1, 0.22, 0.08], now the CIE convolution of 17 NEON graminoid spectra at 10.1 mg/g chlorophyll, 6 taxa). It also gained a senescent state from the same campaign's low-chlorophyll bin (2.26 mg/g, n=10, 7 taxa) — a real but MILD difference, because that campaign sampled the growing season and does not contain fully cured grass. Temperate grass curing is under-stated as a result; flagged, not tuned.",
+      "notes": "Two stiffnesses coexist: soft soil mat (~MPa) vs stiff strong blades (blade tensile ~108-294 MPa, GPa modulus). ★★ 2026-08-15, docs/46 row 60: that sentence had been true and UNRECORDED — the note said \"GPa modulus\" in prose while `youngs_modulus` (5 MPa, the soil mat) was the only stiffness field, so anything computing a blade's bending stiffness from this entry would have been ~1000x too soft and would have looked sourced. `youngs_modulus_culm` = 5.55 GPa is the grass-family CULM, midpoint of 2.6-8.5 GPa measured on grass hedge stems by cantilever deflection (tall fescue, Festuca arundinacea, among the species), independently bracketed by maize rind at 6-16 GPa and wheat straw at 4.76-6.58 GPa. ★ `youngs_modulus_blade` is deliberately NULL: a living LEAF BLADE is not a culm — thinner, unlignified, and expected to be markedly more compliant — and no isolated leaf-blade modulus was found in the literature searched. An unknown stays unknown at the boundary; do not substitute the culm figure for it without saying so. Signature property is added ROOT cohesion ~1-20 kPa over few-kPa base soil. Restitution near zero. Fragile, shreds easily. Highly variable. ★ 2026-08-04: the albedo is no longer three chosen numbers — it DERIVES from a measured spectrum (was [0.1, 0.22, 0.08], now the CIE convolution of 17 NEON graminoid spectra at 10.1 mg/g chlorophyll, 6 taxa). It also gained a senescent state from the same campaign's low-chlorophyll bin (2.26 mg/g, n=10, 7 taxa) — a real but MILD difference, because that campaign sampled the growing season and does not contain fully cured grass. Temperate grass curing is under-stated as a result; flagged, not tuned. ★★★ 2026-08-17 RESTITUTION SOURCED (docs/46 row 63). Was 0.1 and UNCITED — no source in this entry ever mentioned restitution. Now 0.468 MEASURED AT 2.62 m/s, range 2.43 to 2.80 m/s. Restitution is NOT a material constant: it falls with impact speed, so the velocity is part of the number. Velocity dependence observed: 0.459 at 2.43 m/s, 0.468 at 2.62 m/s, 0.462 at 2.80 m/s — non-monotonic and within scatter, i.e. FLAT over this narrow band; the paper itself states the release height 'had no significant effect on the CR' (and I confirmed that sentence appears in the stalk-STALK section, not only lifted from the stalk-steel section). No wider velocity… CONFIGURATION: Category 2 ONLY — the prior researcher's 'category 1/2' label is too generous and I have corrected it. A single fresh King Grass (Pennisetum americanum x P. purpureum — note the paper gives the cross in this order, the prior researcher reversed it) stalk segment, clamped with tweezers and released from rest, FREE-FALLS onto a flat row of… Confidence: medium.",
       "sources": [
         "https://onlinelibrary.wiley.com/doi/10.1155/2020/8825828",
         "https://www.geotechdata.info/parameter/soil-young-s-modulus",
         "https://www.researchgate.net/publication/275513020_Tensile_Strength_and_Shear_Strength_of_Switchgrass_Before_and_After_Frost",
-        "https://www.sciencedirect.com/science/article/abs/pii/S0168192321001623"
+        "https://www.sciencedirect.com/science/article/abs/pii/S0168192321001623",
+        "https://elibrary.asabe.org/abstract.asp?aid=27580",
+        "https://plantmethods.biomedcentral.com/articles/10.1186/s13007-018-0279-6",
+        "https://colab.ws/articles/10.1006/jaer.1995.1072",
+        "Huan, X., Wang, D., You, Y., Ma, W., Zhu, L., Li, S. (2022). \"Establishment and calibration of discrete element model of King Grass stalk based on throwing test.\" INMATEH - Agricultural Engineering 66(1), 19-30. doi:10.35633/inmateh-66-02 (open access). Verified by downloading and reading the full issue PDF: https://api.inmateh.eu/public/uploads/Vol.66-1-2022-online---FINAL2568717d-e6e7-487d-b8a9-04119f1f5f37.pdf (paper begins p. 18 of the volume)."
       ]
     },
     {
@@ -1499,8 +1522,9 @@
         "friction_angle": 40,
         "hardness_mohs": 6.5,
         "ductility": 0.0,
-        "restitution": 0.2,
-        "friction_coefficient": 0.84
+        "restitution": 0.83,
+        "friction_coefficient": 0.84,
+        "restitution_at_ms": 1
       },
       "thermal": {
         "specific_heat": 800,
@@ -1539,12 +1563,13 @@
           50
         ]
       },
-      "notes": "Cohesionless; strength in friction_angle (angular interlock -> higher than sand). Hardness/color depend entirely on parent rock (limestone ~3, quartzite/granite 6-7); bulk N/A. Stiffer than sand.",
+      "notes": "Cohesionless; strength in friction_angle (angular interlock -> higher than sand). Hardness/color depend entirely on parent rock (limestone ~3, quartzite/granite 6-7); bulk N/A. Stiffer than sand. ★★★ 2026-08-17 RESTITUTION SOURCED (docs/46 row 63). Was 0.2 and UNCITED — no source in this entry ever mentioned restitution. Now 0.83 MEASURED AT 1 m/s, range 0-1.5. Restitution is NOT a material constant: it falls with impact speed, so the velocity is part of the number. Velocity dependence observed: NO velocity dependence resolved within the tested range — verbatim: 'No clear trend of coefficient of restitution with impact speed is discernable in the data.' SD 0.06, consistent with measurement error alone (their Q-Q plot supports a normal error model). Range is narrow and entirely LOW-speed, and the ceiling was mechanical not… CONFIGURATION: SURVIVES VERIFICATION; confidence downgraded from high to medium. GRANITE SPHERE ON GRANITE SPHERE — a true same-material, EQUAL-MASS pair, i.e. genuinely the engine's configuration (preference class 1). I read the paper in full and every quoted sentence is verbatim and correctly attributed. Two ~1-m-diameter, 1300 kg 'G603' granite… Confidence: medium.",
       "sources": [
         "https://www.aqua-calc.com/page/density-table/substance/gravel-coma-and-blank-loose-blank-dry",
         "https://structville.com/angle-of-internal-friction",
         "https://en.wikipedia.org/wiki/Angle_of_repose",
-        "https://civilsir.com/density-of-cement-sand-and-aggregate-in-kg-m3-list-of-material-density/"
+        "https://civilsir.com/density-of-cement-sand-and-aggregate-in-kg-m3-list-of-material-density/",
+        "Durda, D.D., Movshovitz, N., Richardson, D.C., Asphaug, E., Morgan, A., Rawlings, A.R. & Vest, C. (2011), 'Experimental determination of the coefficient of restitution for meter-scale granite spheres', Icarus 211(2), 849-855. Full text read and all quotes checked verbatim at https://pages.astro.umd.edu/~dcr/reprints/durda_icarus211,849.pdf"
       ]
     },
     {
@@ -1561,7 +1586,8 @@
         "hardness_mohs": 3.0,
         "ductility": 0.2,
         "restitution": 0.4,
-        "friction_coefficient": 0.35
+        "friction_coefficient": 0.35,
+        "restitution_at_ms": null
       },
       "optical": {
         "albedo": [
@@ -1589,7 +1615,7 @@
         "thermal_conductivity": 74.8,
         "conductivity_note": "74.8 W/m/K at 20 C for C90500 — about a fifth of pure copper's 401, alloying scatters electrons"
       },
-      "notes": "THE gun-bronze. Cannon were cast in this for centuries and it was preferred over iron despite costing far more, for one reason the numbers here explain: it is DUCTILE. An overloaded bronze gun bulges and splits; an overloaded cast-iron one shatters. SOURCED: density 8719, tensile 221-310 MPa (265 taken as the midpoint of the sourced range), Young's modulus 103.4 GPa, thermal conductivity 74.8 W/m/K, and a melting RANGE rather than a point — solidus 854 C, liquidus 999 C — because an alloy melts over an interval; `melt_point` carries the midpoint 1127 K and this note carries the truth. ★ `specific_heat` 377 J/kg/K is DERIVED, not sourced: gunmetal is 87.5-88% copper by mass and copper's 385 J/kg/K is catalogued here, so the alloy's is within a few percent of it. Flagged as a derivation rather than typed as a measurement, and it should be replaced with a measured value when one is found. NOT CHARACTERIZED and left at 0: latent heats beyond copper's fusion, boiling behaviour, compressive and shear strengths. Brinell hardness 65-74 is sourced but this catalogue carries Mohs, so 3.0 is the approximate conversion and is an estimate.",
+      "notes": "THE gun-bronze. Cannon were cast in this for centuries and it was preferred over iron despite costing far more, for one reason the numbers here explain: it is DUCTILE. An overloaded bronze gun bulges and splits; an overloaded cast-iron one shatters. SOURCED: density 8719, tensile 221-310 MPa (265 taken as the midpoint of the sourced range), Young's modulus 103.4 GPa, thermal conductivity 74.8 W/m/K, and a melting RANGE rather than a point — solidus 854 C, liquidus 999 C — because an alloy melts over an interval; `melt_point` carries the midpoint 1127 K and this note carries the truth. ★ `specific_heat` 377 J/kg/K is DERIVED, not sourced: gunmetal is 87.5-88% copper by mass and copper's 385 J/kg/K is catalogued here, so the alloy's is within a few percent of it. Flagged as a derivation rather than typed as a measurement, and it should be replaced with a measured value when one is found. NOT CHARACTERIZED and left at 0: latent heats beyond copper's fusion, boiling behaviour, compressive and shear strengths. Brinell hardness 65-74 is sourced but this catalogue carries Mohs, so 3.0 is the approximate conversion and is an estimate. ★★ 2026-08-17 RESTITUTION IS UNSOURCED AND STAYS THAT WAY (docs/46 row 63). Its value here was typed, not measured — no citation in this entry has ever mentioned restitution — and a literature pass plus an adversarial re-check FAILED to find a usable measurement. An unknown stays unknown at the boundary rather than being back-filled with a plausible number. What was searched and what exists instead: CONFIRMED AS A GENUINE GAP — the prior report's found:false is the right call and I did not overturn it. No measurement exists for gunmetal / C90500 / Admiralty bronze / 88-10-2 tin bronze at any velocity. TWO CORRECTIONS TO THE PRIOR REPORT'S REASONING, neither of which changes the verdict. (1) Its claim that Güttler et al. 'contains no bronze of any stated composition' is imprecise: I read §3.2 and Güttler DOES describe bronze — 'Sondergaard et al. (1990) presented vertical impacts of steel and bronze ball bearings onto plates of polymethyl methacrylate (PMMA, lucite) or aluminum'. Composition unstated and the…",
       "sources": [
         "https://en.wikipedia.org/wiki/Gunmetal (88/10/2 Admiralty composition, density 8719 kg/m3, tensile 221-310 MPa, Brinell 65-74)",
         "https://www.makeitfrom.com/material-properties/UNS-C90500-Alloy-D-SAE-62-Gun-Metal (E = 103.4 GPa, k = 74.8 W/m/K, solidus 854 C / liquidus 999 C)",
@@ -1711,8 +1737,9 @@
         "friction_angle": null,
         "hardness_mohs": 1.5,
         "ductility": 0.15,
-        "restitution": 0.4,
-        "friction_coefficient": 0.05
+        "restitution": 0.88,
+        "friction_coefficient": 0.05,
+        "restitution_at_ms": 0.25
       },
       "optical": {
         "albedo": [
@@ -1744,13 +1771,14 @@
           6.0
         ]
       },
-      "notes": "Strengths vary ~4x with temperature and strain rate. Hardness rises sharply when colder (1.5 at 0C -> 6 at -78.5C). Brittle at high strain rate, ductile creep near melt (glacier flow). Friction is the most condition-sensitive field: kinetic min ~0.02-0.05 near -7C, rises near 0C and with speed; static ice-on-ice 0.1-0.5.",
+      "notes": "Strengths vary ~4x with temperature and strain rate. Hardness rises sharply when colder (1.5 at 0C -> 6 at -78.5C). Brittle at high strain rate, ductile creep near melt (glacier flow). Friction is the most condition-sensitive field: kinetic min ~0.02-0.05 near -7C, rises near 0C and with speed; static ice-on-ice 0.1-0.5. ★★★ 2026-08-17 RESTITUTION SOURCED (docs/46 row 63). Was 0.4 and UNCITED — no source in this entry ever mentioned restitution. Now 0.88 MEASURED AT 0.25 m/s, range 0.01–7 m/s in the 1996 paper (1–700 cm/s); 0.01–10 m/s across the 1996+1998…. Restitution is NOT a material constant: it falls with impact speed, so the velocity is part of the number. Velocity dependence observed: e = 0.88 and velocity-INDEPENDENT below the critical (fracture) velocity vc; above vc it falls steeply, following e = e_qe·(v/vc)^(−log(v/vc)). vc is strongly temperature-dependent: 0.25 m/s at 269 K (−4 °C) rising to 1.8 m/s at 113–215 K. So at near-0 °C the 0.88 plateau holds only to ~0.25 m/s; by 1 m/s the same ice is already… CONFIGURATION: Same-material, category 2 (sphere onto thick slab of the same material), and honestly described as such. CONFIRMED VERBATIM from Güttler et al. §3.3, whose PDF I downloaded and text-extracted myself: 'Higa et al. (1996, 1998) present results from drop bar experiments of polycristalline ice spheres. They used a bar to push the sample out… Confidence: high.",
       "sources": [
         "https://en.wikipedia.org/wiki/Ice",
         "https://pubs.aip.org/aip/adv/article/8/12/125108/127679/Mechanical-properties-of-bi-and-poly-crystalline",
         "https://www.epj-conferences.org/articles/epjconf/pdf/2015/13/epjconf-dymat2015_01070.pdf",
         "https://link.aps.org/doi/10.1103/PhysRevX.11.011025",
-        "https://www.engineeringtoolbox.com/thermal-conductivity-d_429.html"
+        "https://www.engineeringtoolbox.com/thermal-conductivity-d_429.html",
+        "Higa, M., Arakawa, M. & Maeno, N. (1996), 'Measurements of restitution coefficients of ice at low temperatures', Planetary and Space Science 44(9):917–925, DOI 10.1016/0032-0633(95)00133-6. Companion: Higa, Arakawa & Maeno (1998), 'Size Dependence of Restitution Coefficients of Ice in Relation to Collision Strength', Icarus 133:310–320, DOI 10.1006/icar.1998.5938 (title and authors confirmed via Semantic Scholar API). Setup + functional form independently confirmed in Güttler, Heißelmann, Blum & Krijt, 'Normal Collisions of Spheres: A Literature Survey on Available Experiments', arXiv:1204.0001, §3.3 and Tables (https://arxiv.org/pdf/1204.0001). Fracturing regime: Deckers, J. & Teiser, J. (2016), 'Collisions of solid ice in planetesimal formation', MNRAS 456(4):4328–4334, https://arxiv.org/pdf/1601.04609."
       ],
       "thermal": {
         "specific_heat": 2090.0,
@@ -1799,8 +1827,9 @@
         "friction_angle": null,
         "hardness_mohs": 4.25,
         "ductility": 0.85,
-        "restitution": 0.6,
-        "friction_coefficient": 0.74
+        "restitution": 0.95,
+        "friction_coefficient": 0.74,
+        "restitution_at_ms": 0.2
       },
       "optical": {
         "albedo": [
@@ -1860,13 +1889,14 @@
           4.5
         ]
       },
-      "notes": "compressive_strength = compressive yield (ductile metals flow, not crush). friction_angle N/A (not granular). Brinell 126 HB, Vickers 131 HV. friction_coefficient is steel-on-steel dry. Optical albedo is measured metal F0; roughness/grain are art params. color_variance rises with rust.",
+      "notes": "compressive_strength = compressive yield (ductile metals flow, not crush). friction_angle N/A (not granular). Brinell 126 HB, Vickers 131 HV. friction_coefficient is steel-on-steel dry. Optical albedo is measured metal F0; roughness/grain are art params. color_variance rises with rust. ★★★ 2026-08-17 RESTITUTION SOURCED (docs/46 row 63). Was 0.6 and UNCITED — no source in this entry ever mentioned restitution. Now 0.95 MEASURED AT 0.2 m/s, range 0.07 – 1.4 m/s (the survey's own body text; see the units warning below). Restitution is NOT a material constant: it falls with impact speed, so the velocity is part of the number. Velocity dependence observed: VERIFIED by reading Güttler Fig. 3 as an image at 600 dpi and calibrating the log axis; the prior report's digitisation is accurate. Genuine two-regime curve. Flat plateau at e ≈ 0.95 from ~0.07 to ~0.25–0.3 m/s. Then: 0.898 at 0.40 m/s, 0.832 at 0.48, 0.755 at 0.64, 0.700 at 0.84, 0.665 at 1.05, 0.650 at 1.38 m/s. The kink at ~0.3 m/s… CONFIGURATION: CATEGORY 2 (near-same-material) — a 12.7 mm steel ball, pendulum-suspended on a thin long wire, swung horizontally into a 5 cm thick MILD STEEL block, rebounding repeatedly; pendulum friction (1–2% energy loss per swing) measured separately in free oscillation and corrected. Güttler's Table 1 lists the pair as 'steel / steel', diameter… Confidence: high.",
       "sources": [
         "https://www.azom.com/article.aspx?ArticleID=6115",
         "https://www.makeitfrom.com/material-properties/SAE-AISI-1018-G10180-Carbon-Steel",
         "https://www.roymech.co.uk/Useful_Tables/Tribology/co_of_frict.htm",
         "https://ntrs.nasa.gov/archive/nasa/casi.ntrs.nasa.gov/19950004401.pdf",
-        "CRC Handbook of Chemistry and Physics, 97th ed., 'Thermal Conductivity of Metals and Alloys' (300 K)"
+        "CRC Handbook of Chemistry and Physics, 97th ed., 'Thermal Conductivity of Metals and Alloys' (300 K)",
+        "PRIMARY: J.M. Lifshitz and H. Kolsky, \"Some experiments on anelastic rebound\", Journal of the Mechanics and Physics of Solids, 12(1), 1964, pp.35–43 — reference verified verbatim in Güttler's bibliography: \"Lifshitz, J. and Kolsky, H. (1964). Some experiments on anelastic rebound. Journal of the Mechanics and Physics of Solids, 12(1):35 – 43.\" VELOCITY-RESOLVED DIGITISATION USED HERE: C. Güttler, D. Heißelmann, J. Blum, S. Krijt, \"Normal Collisions of Spheres: A Literature Survey on Available Experiments\", arXiv:1204.0001v2 [physics.class-ph], 28 May 2013 — Table 1 and Figure 3 (red squares), caption verified: \"red squares Lifshitz and Kolsky (1964, steel, 13 mm)\"."
       ]
     },
     {
@@ -1885,8 +1915,9 @@
         "friction_angle": 37,
         "hardness_mohs": 3.0,
         "ductility": 0.1,
-        "restitution": 0.4,
-        "friction_coefficient": 0.6
+        "restitution": 0.42,
+        "friction_coefficient": 0.6,
+        "restitution_at_ms": 6.5
       },
       "optical": {
         "albedo": [
@@ -1918,13 +1949,14 @@
           50000000.0
         ]
       },
-      "notes": "Soft calcite (Mohs 3). Jointed cohesion 2-6 MPa. Rejected bad MatWeb UCS (700 MPa). Alabaster/onyx-marble translucency up to ~0.5.",
+      "notes": "Soft calcite (Mohs 3). Jointed cohesion 2-6 MPa. Rejected bad MatWeb UCS (700 MPa). Alabaster/onyx-marble translucency up to ~0.5. ★★★ 2026-08-17 RESTITUTION SOURCED (docs/46 row 63). Was 0.4 and UNCITED — no source in this entry ever mentioned restitution. Now 0.42 MEASURED AT 6.5 m/s, range 6.08 to 9.12 (full Table 1 range); the 0.42 row is vi = 6.50 +/- 0.11. Restitution is NOT a material constant: it falls with impact speed, so the velocity is part of the number. Velocity dependence observed: All Table 1 numbers VERIFIED exactly against the published PDF. Most-nearly-normal impacts (plate angle 30 deg, alpha ~57-58 deg): D=10 cm — Rn = 0.42 +/- 0.09 at vi = 6.50, 0.38 +/- 0.04 at 7.75, 0.39 +/- 0.03 at 9.06. D=20 cm — 0.40 +/- 0.01 at 6.47, 0.31 +/- 0.03 at 7.80, 0.37 +/- 0.03 at 8.89. Authors' verdict verified verbatim: 'No… CONFIGURATION: PREFERENCE 3, CONFIRMED AND HONESTLY DESCRIBED BY THE PRIOR REPORT — a DIFFERENT-material pair. Verified from the PDF: 'spherical limestone polyhedron with two diameters' (Fig. 2 caption), natural limestone from the China Three Gorges area, D = 10 cm / 1.2 kg and D = 20 cm / 10 kg, released from 2.5, 3.5 and 4.5 m onto C25 concrete slabs… Confidence: low.",
       "sources": [
         "https://cpb-us-e1.wpmucdn.com/sites.psu.edu/dist/1/57960/files/2016/10/Some-Useful-Numbers-1g1rkuu.pdf",
         "https://www.mdpi.com/2075-5309/15/11/1924",
         "https://en.wikipedia.org/wiki/Limestone",
         "https://www.researchgate.net/figure/Range-of-restitution-coefficients-R-n-and-R-t-for-limestone_fig6_258685828",
-        "Clauser, C. & Huenges, E. (1995), 'Thermal Conductivity of Rocks and Minerals', in Rock Physics & Phase Relations: A Handbook of Physical Constants, AGU Reference Shelf 3, Table 3"
+        "Clauser, C. & Huenges, E. (1995), 'Thermal Conductivity of Rocks and Minerals', in Rock Physics & Phase Relations: A Handbook of Physical Constants, AGU Reference Shelf 3, Table 3",
+        "Wang, Y., Jiang, W., Cheng, S., Song, P., Mao, C. (2018). 'Effects of the impact angle on the coefficient of restitution in rockfall analysis based on a medium-scale laboratory test.' Natural Hazards and Earth System Sciences 18, 3045-3061. doi:10.5194/nhess-18-3045-2018. Open access. VERIFIED INDEPENDENTLY: I downloaded https://nhess.copernicus.org/articles/18/3045/2018/nhess-18-3045-2018.pdf and extracted Table 1 with pdftotext -layout rather than trusting the prior transcription. Every figure the prior report gave matches the printed table to the decimal."
       ],
       "thermal": {
         "specific_heat": 910.0,
@@ -2013,7 +2045,8 @@
         "hardness_mohs": 4.0,
         "ductility": 0.4,
         "restitution": 0.6,
-        "friction_coefficient": 0.7
+        "friction_coefficient": 0.7,
+        "restitution_at_ms": null
       },
       "optical": {
         "albedo": [
@@ -2055,7 +2088,7 @@
           4.2
         ]
       },
-      "notes": "Commercially-pure Ni 200 (annealed). Iron meteorites are Fe-Ni (kamacite ~5-7% Ni, taenite up to ~50%). specific_heat/latent heats are elemental nickel.",
+      "notes": "Commercially-pure Ni 200 (annealed). Iron meteorites are Fe-Ni (kamacite ~5-7% Ni, taenite up to ~50%). specific_heat/latent heats are elemental nickel. ★★ 2026-08-17 RESTITUTION IS UNSOURCED AND STAYS THAT WAY (docs/46 row 63). Its value here was typed, not measured — no citation in this entry has ever mentioned restitution — and a literature pass plus an adversarial re-check FAILED to find a usable measurement. An unknown stays unknown at the boundary rather than being back-filled with a plausible number. What was searched and what exists instead: DOWNGRADED FROM found:true. The paper is real and its quotes are accurate — but the number does not answer the question the engine asks, and the prior report's own recommendation ('catalogue nickel as an honest gap for the engine's regime') contradicts the found:true it returned. I am resolving that contradiction in favour of the gap. WHAT IS VERIFIED: I. Dowding and C.A. Schuh, \"At extreme strain rates, pure metals thermally harden while alloys thermally soften\", arXiv:2503.02000 (MIT / Northwestern) exists with exactly that title and author list. Every quoted sentence is verbatim: \"These samples were tested at…",
       "sources": [
         "https://www.azom.com/article.aspx?ArticleID=2193",
         "https://www.engineeringtoolbox.com/specific-heat-metals-d_152.html",
@@ -2140,7 +2173,8 @@
         "hardness_mohs": 3.0,
         "ductility": 0.3,
         "restitution": 0.55,
-        "friction_coefficient": 0.62
+        "friction_coefficient": 0.62,
+        "restitution_at_ms": null
       },
       "optical": {
         "albedo": [
@@ -2168,7 +2202,7 @@
           61000000.0
         ]
       },
-      "notes": "Anisotropic: along-grain (_perp suffix = across-grain) modulus ~14x cross; tensile ∥ ~15x ⊥ (dominant failure). Values at 12% MC; wet wood weaker. Hardness: Janka 6000 N. Finished-surface roughness ~0.35. Albedo linear (sRGB ~0.57,0.45,0.30).",
+      "notes": "Anisotropic: along-grain (_perp suffix = across-grain) modulus ~14x cross; tensile ∥ ~15x ⊥ (dominant failure). Values at 12% MC; wet wood weaker. Hardness: Janka 6000 N. Finished-surface roughness ~0.35. Albedo linear (sRGB ~0.57,0.45,0.30). ★★ 2026-08-17 RESTITUTION IS UNSOURCED AND STAYS THAT WAY (docs/46 row 63). Its value here was typed, not measured — no citation in this entry has ever mentioned restitution — and a literature pass plus an adversarial re-check FAILED to find a usable measurement. An unknown stays unknown at the boundary rather than being back-filled with a plausible number. What was searched and what exists instead: NEGATIVE UPHELD after adversarial re-check. I independently re-searched (Crossref REST API, 4 queries: 'coefficient of restitution oak wood', 'restitution coefficient oak impact velocity', 'coefficient of restitution hardwood impact', 'restitution Quercus impact'; OpenAlex API, 4 queries incl. 'wood on wood coefficient of restitution drop test', 'coefficient of restitution timber timber impact') and found NO oak-specific, and no wood-on-wood, restitution measurement at a stated impact velocity. Nearest OpenAlex hits are wood PELLETS (Int. Agrophysics 2020, 'Determination of mechanical properties for wood pellets…",
       "sources": [
         "https://www.wood-database.com/white-oak/",
         "https://www.fpl.fs.usda.gov/documnts/fplgtr/fplgtr190/chapter_05.pdf",
@@ -2207,7 +2241,8 @@
         "hardness_mohs": 6.5,
         "ductility": 0.05,
         "restitution": 0.5,
-        "friction_coefficient": 0.65
+        "friction_coefficient": 0.65,
+        "restitution_at_ms": null
       },
       "optical": {
         "albedo": [
@@ -2259,7 +2294,7 @@
           150000000000.0
         ]
       },
-      "notes": "Earth's mantle rock (docs/25 layered planets). Surface-condition properties; melt_point is the peridotite SOLIDUS (~1120 C at 1 atm). Simon-Glatzel fit anchors the solidus at ~4150 K @ 135 GPa (CMB) per Fiquet et al. 2010. Deep-mantle density reaches ~5500 kg/m3 under compression - the layered-planet profile carries the compressed mean density separately (PREM).",
+      "notes": "Earth's mantle rock (docs/25 layered planets). Surface-condition properties; melt_point is the peridotite SOLIDUS (~1120 C at 1 atm). Simon-Glatzel fit anchors the solidus at ~4150 K @ 135 GPa (CMB) per Fiquet et al. 2010. Deep-mantle density reaches ~5500 kg/m3 under compression - the layered-planet profile carries the compressed mean density separately (PREM). ★★ 2026-08-17 RESTITUTION IS UNSOURCED AND STAYS THAT WAY (docs/46 row 63). Its value here was typed, not measured — no citation in this entry has ever mentioned restitution — and a literature pass plus an adversarial re-check FAILED to find a usable measurement. An unknown stays unknown at the boundary rather than being back-filled with a plausible number. What was searched and what exists instead: GAP UPHELD. I searched independently of the prior report — peridotite / dunite / olivine against 'coefficient of restitution', 'impact experiment', 'measured rebound velocity' — and returned nothing for any ultramafic rock at any velocity. The hits are for unrelated materials (small spherical particles, asteroid landers, regolith simulant, metals). The prior report's explanation is also structurally sound and I could not find a counterexample: the restitution literature is driven by rockfall hazard (limestone, sandstone, marble, granite — the rocks that form cliffs above roads) and by industrial DEM (limestone,…",
       "sources": [
         "https://doi.org/10.1126/science.1192448",
         "https://www.sciencedirect.com/topics/earth-and-planetary-sciences/peridotite",
@@ -2289,8 +2324,9 @@
         "hardness_janka_n": 1700,
         "hardness_mohs": 2.5,
         "ductility": 0.25,
-        "restitution": 0.5,
-        "friction_coefficient": 0.29
+        "restitution": 0.557,
+        "friction_coefficient": 0.29,
+        "restitution_at_ms": 1
       },
       "optical": {
         "albedo": [
@@ -2318,12 +2354,13 @@
           35000000.0
         ]
       },
-      "notes": "Anisotropic (_perp = across grain). Soft but brittle in tension/across grain; low toughness. Southern yellow pine analog: density ~570, MOE ~12.3e9, MOR ~88e6, Janka ~3100 N. Albedo linear (sRGB ~0.85,0.73,0.50).",
+      "notes": "Anisotropic (_perp = across grain). Soft but brittle in tension/across grain; low toughness. Southern yellow pine analog: density ~570, MOE ~12.3e9, MOR ~88e6, Janka ~3100 N. Albedo linear (sRGB ~0.85,0.73,0.50). ★★★ 2026-08-17 RESTITUTION SOURCED (docs/46 row 63). Was 0.5 and UNCITED — no source in this entry ever mentioned restitution. Now 0.557 MEASURED AT 1 m/s, range 0.2 to 4.0 m/s (seven velocities). Restitution is NOT a material constant: it falls with impact speed, so the velocity is part of the number. Velocity dependence observed: Monotonically falling in both bounds, ~37% over the range. Table 2 Timber rows, verified verbatim against the PDF: 0.6567-0.6934 at 0.2 m/s; 0.5852-0.6356 at 0.5; 0.5334-0.5797 at 1.0; 0.4851-0.5354 at 1.5; 0.4281-0.5347 at 2.0; 0.4076-0.4708 at 3.0; 0.4002-0.4428 at 4.0. Band midpoints: 0.675, 0.610, 0.557, 0.510, 0.481, 0.439, 0.422.… CONFIGURATION: Category 2, same-material: solid pinewood balls (55, 71, 118 mm diameter; 0.065-0.066, 0.109-0.112, 0.493-0.497 kg; 2 balls of each size) dropped onto a rigid surface of the SAME material (pinewood). Part of a 4-material campaign (steel, concrete, timber, ceramics). e was computed from directly recorded prior-impact and post-impact… Confidence: high.",
       "sources": [
         "https://www.wood-database.com/eastern-white-pine/",
         "https://www.fpl.fs.usda.gov/documnts/fplgtr/fplgtr190/chapter_05.pdf",
         "https://hypertextbook.com/facts/2005/wood.shtml",
-        "https://www.engineeringtoolbox.com/thermal-conductivity-d_429.html"
+        "https://www.engineeringtoolbox.com/thermal-conductivity-d_429.html",
+        "Jankowski, R. (2007). \"Theoretical and experimental assessment of parameters for the non-linear viscoelastic model of structural pounding.\" Journal of Theoretical and Applied Mechanics 45(4), 931-942, Warsaw. Open-access PDF verified and read in full: http://www.ptmts.org.pl/jtam/index.php/jtam/article/download/v45n4p931/455 (article page: http://www.ptmts.org.pl/jtam/index.php/jtam/article/view/v45n4p931). NOTE: the host's TLS certificate does not match its hostname, so the PDF must be fetched over http or with cert checking relaxed. CAVEAT: the prior researcher's secondary citation to Jankowski (2010), Earthquake Engng Struct. Dyn. 39(3):343-354, doi:10.1002/eqe.941, as 'the same experimental campaign' is UNVERIFIED — I did not open it. Cite the 2007 paper alone."
       ],
       "thermal": {
         "specific_heat": 2300.0,
@@ -2418,8 +2455,9 @@
         "hardness_shore_a": 60,
         "hardness_mohs": null,
         "ductility": 4.5,
-        "restitution": 0.5,
-        "friction_coefficient": 0.9
+        "restitution": 0.55,
+        "friction_coefficient": 0.9,
+        "restitution_at_ms": 2.67
       },
       "optical": {
         "albedo": [
@@ -2459,13 +2497,14 @@
           6.0
         ]
       },
-      "notes": "Nearly incompressible (poisson ~0.49): bulk modulus is ~300x Young's, so it changes SHAPE not volume — a tyre's contact patch spreads rather than compressing. friction_coefficient is the most condition-sensitive field here and is NOT a constant: dry road 0.7-1.0, wet 0.4-0.6, ice <0.15, and it FALLS with both temperature and slip speed (the reason a locked wheel stops gripping). Grip is hysteretic and load-dependent, not Amontons-Coulomb, so mu is a first-order stand-in — flagged. High ductility (elongation at break 400-600%) and restitution well below a bouncy ball because tread compounds are deliberately damped (loss tangent ~0.1-0.3), which is why tyres do not ring. THERMAL DELIBERATELY OMITTED: rubber does not melt, it PYROLYSES (~570-670 K) — an irreversible chemical change, so melt_point/latent_fusion have no honest value. The schema's optional `thermal` is how it says 'not characterised' (oak, concrete and ice do the same), and damage.rs then returns Fractured rather than ever claiming melt. Glass transition ~210-220 K: below it the compound goes glassy and grip collapses — real, and not yet representable without a temperature-dependent mu.",
+      "notes": "Nearly incompressible (poisson ~0.49): bulk modulus is ~300x Young's, so it changes SHAPE not volume — a tyre's contact patch spreads rather than compressing. friction_coefficient is the most condition-sensitive field here and is NOT a constant: dry road 0.7-1.0, wet 0.4-0.6, ice <0.15, and it FALLS with both temperature and slip speed (the reason a locked wheel stops gripping). Grip is hysteretic and load-dependent, not Amontons-Coulomb, so mu is a first-order stand-in — flagged. High ductility (elongation at break 400-600%) and restitution well below a bouncy ball because tread compounds are deliberately damped (loss tangent ~0.1-0.3), which is why tyres do not ring. THERMAL DELIBERATELY OMITTED: rubber does not melt, it PYROLYSES (~570-670 K) — an irreversible chemical change, so melt_point/latent_fusion have no honest value. The schema's optional `thermal` is how it says 'not characterised' (oak, concrete and ice do the same), and damage.rs then returns Fractured rather than ever claiming melt. Glass transition ~210-220 K: below it the compound goes glassy and grip collapses — real, and not yet representable without a temperature-dependent mu. ★★★ 2026-08-17 RESTITUTION SOURCED (docs/46 row 63). Was 0.5 and UNCITED — no source in this entry ever mentioned restitution. Now 0.55 MEASURED AT 2.67 m/s, range 2.67 m/s ONLY. Verified: Table 1's NR row carries its own 2.67 m/s, so the…. Restitution is NOT a material constant: it falls with impact speed, so the velocity is part of the number. Velocity dependence observed: NOT MEASURED for natural rubber — this remains a genuine gap and I confirmed it independently. The velocity-dependence context checks out: Meyer et al. 2022 (Comput. Part. Mech. 9, DOI 10.1007/s40571-022-00471-z), 30 mm STEEL sphere onto polymer walls, measurement range verbatim 'The measurement range for this experimental setup is vI0 =… CONFIGURATION: VERIFIED AGAINST THE PDF, and MORE PRECISE than previously stated. Zwick-Roell Charpy-type pendulum, mass 159.81 g, total length 258.00 mm, nominal 0.5 J (paper: 'in agreement with the nominal impact energy of the 0.5J pendulum' — this detail is real, I checked), released from a maximum rotation angle of 160 deg. Striker is a FLAT… Confidence: low.",
       "sources": [
         "https://www.engineeringtoolbox.com/friction-coefficients-d_778.html",
         "https://en.wikipedia.org/wiki/Natural_rubber",
         "https://en.wikipedia.org/wiki/Tire",
         "https://www.matweb.com/search/DataSheet.aspx?MatGUID=b1c46f0b9d2b4b1c9d0f2f0b7d3e1a2c",
-        "https://www.engineeringtoolbox.com/thermal-conductivity-d_429.html"
+        "https://www.engineeringtoolbox.com/thermal-conductivity-d_429.html",
+        "Emminger, C., Cakmak, U., Nikonov, A., Lackner, M., Major, Z. (2025) 'Advanced characterization of the damping dynamics of silicone elastomers and natural rubber using the instrumented rebound resilience tester', Journal of Materials Research and Technology 38, 4828-4837. DOI 10.1016/j.jmrt.2025.08.181. CITATION VERIFIED REAL: resolves via doi.org to Elsevier PII S2238785425021350; gold OA; full text confirmed at https://epub.jku.at/download/pdf/12646954.pdf (I extracted and read this PDF directly, not via summary). Affiliations: JKU Linz + Univ. Ljubljana. | Velocity-dependence companion, VERIFIED: Meyer, N., Wagemann, E.L., Jackstadt, A., Seifried, R. (2022) 'Material and particle size sensitivity analysis on coefficient of restitution in low-velocity normal impacts', Computational Particle Mechanics 9, DOI 10.1007/s40571-022-00471-z; PDF read directly at https://tore.tuhh.de/bitstreams/60aded39-bbc7-4afa-b6a9-18ceb640e2d6/download | Standard, VERIFIED: ISO 4662:2017 'Rubber, vulcanized or thermoplastic — Determination of rebound resilience', preview PDF read at https://cdn.standards.iteh.ai/samples/68111/3f11ed908c904809ae0ff4e041a2add2/ISO-4662-2017.pdf | Sphere-sphere correction, claim confirmed from abstract: Weir, G. & Tallon, S. (2005) 'The coefficient of restitution for normal incident, low velocity particle impacts', Chem. Eng. Sci. 60, 3637-3647."
       ],
       "thermal": {
         "specific_heat": 2000.0,
@@ -2499,8 +2538,9 @@
         "friction_angle": 34,
         "hardness_mohs": 7.0,
         "ductility": 0.0,
-        "restitution": 0.2,
-        "friction_coefficient": 0.67
+        "restitution": 0.75,
+        "friction_coefficient": 0.67,
+        "restitution_at_ms": 1.74
       },
       "thermal": {
         "specific_heat": 830,
@@ -2539,12 +2579,13 @@
           46
         ]
       },
-      "notes": "Cohesionless: no unconfined compressive strength; strength lives in friction_angle (loose 28-34, dense 40-46). Moist sand gains temporary apparent cohesion ~1-5 kPa (vanishes dry/saturated). Hardness 7 = quartz grains (bulk flows, N/A). Bulk restitution 0.2 (single grains 0.4-0.9). Wet albedo <0.20.",
+      "notes": "Cohesionless: no unconfined compressive strength; strength lives in friction_angle (loose 28-34, dense 40-46). Moist sand gains temporary apparent cohesion ~1-5 kPa (vanishes dry/saturated). Hardness 7 = quartz grains (bulk flows, N/A). Bulk restitution 0.2 (single grains 0.4-0.9). Wet albedo <0.20. ★★★ 2026-08-17 RESTITUTION SOURCED (docs/46 row 63). Was 0.2 and UNCITED — no source in this entry ever mentioned restitution. Now 0.75 MEASURED AT 1.74 m/s, range 1.74-2.43. Restitution is NOT a material constant: it falls with impact speed, so the velocity is part of the number. Velocity dependence observed: Velocity-resolved (Table 3, mean +/- SD), CONFIRMED verbatim against the manuscript: 0.75 +/- 0.080 at 1.74 m/s; 0.80 +/- 0.060 at 1.93 m/s; 0.80 +/- 0.070 at 2.17 m/s; 0.82 +/- 0.060 at 2.43 m/s. Programme average 0.79. I independently recomputed the velocities from the stated drop heights (155/190/240/300 mm, v = sqrt(2gh)) and got… CONFIGURATION: SURVIVES VERIFICATION, with corrections. Single DRY QUARTZ SAND GRAIN dropped onto a thick GRANITE BLOCK — grain-on-slab, normal incidence. I obtained the accepted manuscript and read it in full; every material detail checks out verbatim: Leighton Buzzard sand (LBS), 2 +/- 0.2 mm diameter (average over all three directions), handpicked… Confidence: medium.",
       "sources": [
         "https://www.aqua-calc.com/page/density-table/substance/sand-coma-and-blank-dry",
         "https://structville.com/angle-of-internal-friction",
         "https://en.wikipedia.org/wiki/Angle_of_repose",
-        "https://biologyinsights.com/does-sand-reflect-sunlight-the-science-of-albedo/"
+        "https://biologyinsights.com/does-sand-reflect-sunlight-the-science-of-albedo/",
+        "CITATION CORRECTED — the original gave the year as 2020; Crossref confirms it published in 2021. Sandeep, C.S., Senetakis, K., Cheung, D., Choi, C.E., Wang, Y., Coop, M.R. & Ng, C.W.W. (2021), 'Experimental study on the coefficient of restitution of grain against block interfaces for natural and engineered materials', Canadian Geotechnical Journal 58(1), 35-48, doi:10.1139/cgj-2018-0712. Accepted manuscript read in full at https://discovery.ucl.ac.uk/10082944/1/Sandeep_et_al_TRS_Manuscript_Revised_COPY.pdf . The misattributed '0-2%' quote actually belongs to: Sandeep, C.S., Luo, L. & Senetakis, K. (2020), 'Effect of Grain Size and Surface Roughness on the Normal Coefficient of Restitution of Single Grains', Materials 13(4):814, https://pmc.ncbi.nlm.nih.gov/articles/PMC7079616/ (glass balls, not sand). Secondary/weak: Banks, M., Bridges, N.T. & Benzit, M. (2005), LPSC XXXVI abstract #2116, https://ntrs.nasa.gov/api/citations/20050166958/downloads/20050166958.pdf"
       ]
     },
     {
@@ -2564,7 +2605,8 @@
         "hardness_mohs": 6.0,
         "ductility": 0.05,
         "restitution": 0.3,
-        "friction_coefficient": 0.6
+        "friction_coefficient": 0.6,
+        "restitution_at_ms": null
       },
       "optical": {
         "albedo": [
@@ -2596,7 +2638,7 @@
           55
         ]
       },
-      "notes": "Weakly cemented bulk hardness ~3-4 (grains Mohs 6-7). Disaggregated sand friction_angle ~30-35. Wet lowers strength and roughness (~0.4).",
+      "notes": "Weakly cemented bulk hardness ~3-4 (grains Mohs 6-7). Disaggregated sand friction_angle ~30-35. Wet lowers strength and roughness (~0.4). ★★ 2026-08-17 RESTITUTION IS UNSOURCED AND STAYS THAT WAY (docs/46 row 63). Its value here was typed, not measured — no citation in this entry has ever mentioned restitution — and a literature pass plus an adversarial re-check FAILED to find a usable measurement. An unknown stays unknown at the boundary rather than being back-filled with a plausible number. What was searched and what exists instead: REJECTION UPHELD, and I independently re-verified all three of its supporting claims. (1) THE IDEAL SOURCE EXISTS AND IS GENUINELY CLOSED. Asteriou, P. & Tsiambaos, G. (2018), Int. J. Rock Mech. Min. Sci. 106, 41-50, doi:10.1016/j.ijrmms.2018.04.001. I queried Unpaywall directly: is_oa false, oa_status 'closed', oa_locations [], has_repository_copy false. OpenAlex independently reports no best_oa_location and no PDF. Two independent OA indexes agree there is no legal open copy, so the prior report's refusal to state a number it could not read is correct, not lazy. (2) THE SETUP IS AS DESCRIBED — it really is…",
       "sources": [
         "https://baltica.gamtc.lt/administravimas/uploads/202235-102_lakirouhani_et_al_6267bd2080852.pdf",
         "https://www.sciencedirect.com/science/article/abs/pii/S0926985122000283",
@@ -2636,8 +2678,9 @@
         "friction_angle": 25,
         "hardness_mohs": null,
         "ductility": 0.6,
-        "restitution": 0.1,
-        "friction_coefficient": 0.05
+        "restitution": 0.3,
+        "friction_coefficient": 0.05,
+        "restitution_at_ms": 4.12
       },
       "optical": {
         "albedo": [
@@ -2669,12 +2712,13 @@
           10000.0
         ]
       },
-      "notes": "Nearly every mechanical property scales with density and changes 2-4 orders of magnitude between fresh powder (~50, negligible strength) and firn (>550). Youngs modulus and compressive strength roughly follow (rho_snow/rho_ice)^2 - ALWAYS state assumed density. Ductile creep (slow) vs brittle slab fracture (fast). Albedo 0.8-0.9 fresh, 0.5-0.7 aged, spectrally flat.",
+      "notes": "Nearly every mechanical property scales with density and changes 2-4 orders of magnitude between fresh powder (~50, negligible strength) and firn (>550). Youngs modulus and compressive strength roughly follow (rho_snow/rho_ice)^2 - ALWAYS state assumed density. Ductile creep (slow) vs brittle slab fracture (fast). Albedo 0.8-0.9 fresh, 0.5-0.7 aged, spectrally flat. ★★★ 2026-08-17 RESTITUTION SOURCED (docs/46 row 63). Was 0.1 and UNCITED — no source in this entry ever mentioned restitution. Now 0.3 MEASURED AT 4.12 m/s, range 0.43–4.12 m/s. Restitution is NOT a material constant: it falls with impact speed, so the velocity is part of the number. Velocity dependence observed: VERIFIED FROM PRIMARY SOURCE: e is INDEPENDENT of impact velocity and of impact parameter across 0.43–4.12 m/s; it is set by POROSITY, and reaches ZERO at 70% porosity, above which impacts stick rather than bounce. NOT VERIFIED: the specific value '0.3' at the dense end (44% porosity, bulk density ≈ 515 kg/m³) — see `searched`.… CONFIGURATION: Category 1, EQUAL-MASS SAME-MATERIAL PAIR — the best possible config for this engine, and I confirmed it from the authors' own abstract, whose title is literally 'Experimental study on equal-sized collision of sintered porous ice spheres'. Two identical sintered porous ice spheres (30 mm diameter, built from ~28 µm ice particles frozen… Confidence: medium.",
       "sources": [
         "https://nsidc.org/learn/parts-cryosphere/snow/science-snow",
         "https://agupubs.onlinelibrary.wiley.com/doi/full/10.1002/2017GL075110",
         "https://arc.lib.montana.edu/snow-science/objects/ISSW-2006-008.pdf",
-        "https://serc.carleton.edu/integrate/teaching_materials/climate_change/student_materials/unit4_article.html"
+        "https://serc.carleton.edu/integrate/teaching_materials/climate_change/student_materials/unit4_article.html",
+        "Shimaki, Y. & Arakawa, M. (2012), 'Low-velocity collisions between centimeter-sized snowballs: Porosity dependence of coefficient of restitution for ice aggregates analogues in the Solar System', Icarus 221(1):310–319, DOI 10.1016/j.icarus.2012.08.005 — title, authors, volume and pages all confirmed via the Crossref API. Authors' open conference abstract with the full method: JpGU 2012, session P-PS21, abstract PPS21-03, https://www2.jpgu.org/meeting/2012/session/PDF_all/P-PS21/PPS21_O_e.pdf (CORRECTED: the original finding cited PPS21-04, which is a different abstract by Fujita, Arakawa, Hasegawa & Shimaki). Velocity dependence at lower speeds: Toyoda, Y., Arakawa, M. & Yasui, M., LPSC 52 (2021) abstract #1903, https://www.hou.usra.edu/meetings/lpsc2021/pdf/1903.pdf; full paper 'Low-velocity impact experiments of porous ice balls simulating Saturn's ring particles', Icarus 411:115964 (2024), DOI 10.1016/j.icarus.2024.115964 (title confirmed via Semantic Scholar)."
       ],
       "thermal": {
         "specific_heat": 2090.0,
@@ -2706,12 +2750,15 @@
         "compressive_strength": 45000.0,
         "tensile_strength": 8000.0,
         "tensile_strength_stem": 25000000.0,
+        "youngs_modulus_stem": 5670000000.0,
+        "rigidity_modulus_stem": 407000000.0,
         "cohesion": 6000.0,
         "friction_angle": 35,
         "hardness_mohs": null,
         "ductility": 0.6,
-        "restitution": 0.05,
-        "friction_coefficient": 0.8
+        "restitution": 0.238,
+        "friction_coefficient": 0.8,
+        "restitution_at_ms": 1.17
       },
       "thermal": {
         "specific_heat": 1800,
@@ -2747,15 +2794,27 @@
         "youngs_modulus_pa": [
           83000,
           350000
+        ],
+        "youngs_modulus_stem_pa": [
+          4760000000.0,
+          6580000000.0
+        ],
+        "rigidity_modulus_stem_pa": [
+          267000000.0,
+          547000000.0
         ]
       },
-      "notes": "Added 2026-08-10 for docs/70 compaction — the haystack Robin named: *\"a rock fall on a haystack, unsettle the hay (dry grass), but the impact could be absorbed.\"* Straw absorbs by CRUSHING ITS VOID, not by snapping, so `compressive_strength` is the number that matters and it is ~3x LOWER than grass turf's. FLAGGED: the compressive figure is a bale-scale test at 20% strain, so it is a crush stress for the ARRANGEMENT more than for the fibre; the fibre's own is the tensile entry.",
+      "notes": "Added 2026-08-10 for docs/70 compaction — the haystack Robin named: *\"a rock fall on a haystack, unsettle the hay (dry grass), but the impact could be absorbed.\"* Straw absorbs by CRUSHING ITS VOID, not by snapping, so `compressive_strength` is the number that matters and it is ~3x LOWER than grass turf's. FLAGGED: the compressive figure is a bale-scale test at 20% strain, so it is a crush stress for the ARRANGEMENT more than for the fibre; the fibre's own is the tensile entry. ★★ 2026-08-15, docs/46 row 60: the SAME split now exists for STIFFNESS, and it had to, because it is four to five orders of magnitude wide. `youngs_modulus` 150 kPa is a BALE being squashed; `youngs_modulus_stem` 5.67 GPa is a single straw in BENDING — O'Dogherty et al. 1995, four-point loading transversely to the stem, wheat cv. Mercia internodes over 8-22% moisture w.b., which brackets this entry's declared ~15%. Computing a blade's bending stiffness from the bale figure would have been wrong by ~38,000x and would have looked sourced. Midpoints of the measured ranges are recorded here, the ranges in `ranges`. Two consistency checks passed: the same paper's tensile 21.2-31.2 MPa contains this entry's pre-existing `tensile_strength_stem` of 25 MPa, and E/G = 5670/407 = 13.9 against ~2.6 for an isotropic solid, which is the strong axial anisotropy a fibre composite must show. Independently bracketed by grass-family culms at 2.6-8.5 GPa (tall fescue among them) and maize rind at 6-16 GPa. ★★★ 2026-08-17 RESTITUTION SOURCED (docs/46 row 63). Was 0.05 and UNCITED — no source in this entry ever mentioned restitution. Now 0.238 MEASURED AT 1.17 m/s, range 0.89 to 1.40 m/s. Restitution is NOT a material constant: it falls with impact speed, so the velocity is part of the number. Velocity dependence observed: 0.241 at 0.89 m/s, 0.238 at 1.17 m/s, 0.236 at 1.40 m/s — a shallow but monotonic fall (~2% over the range). Mechanism stated by the paper: bigger H0 raises the released straw's potential energy, deformation increases, er decreases. The authors' DEM-CALIBRATED straw-straw value is 0.230; 0.236-0.241 is the direct physical measurement and… CONFIGURATION: Category 1, ideal same-material pair: rice straw on rice straw by double (Newton's-cradle) pendulum. Two rice straw segments 'approximate in shape and size' fixed with super glue to 0.25 mm nylon wires of equal length, perfectly aligned; straw 1 released from height H0 without initial velocity, both post-collision rise heights (Hb, Hc)… Confidence: high.",
       "sources": [
         "https://www.sciencedirect.com/science/article/abs/pii/S1537511013002018",
         "https://people.bath.ac.uk/abspw/straw%20bale%20test%20report.pdf",
         "https://tallerconco.org/wp-content/uploads/2017/05/LoadBearingTestsWorldWide-BruceKing.pdf",
         "https://www.sciencedirect.com/science/article/pii/S0950061823021505",
-        "https://www.sciencedirect.com/science/article/abs/pii/S0378778821008434"
+        "https://www.sciencedirect.com/science/article/abs/pii/S0378778821008434",
+        "https://colab.ws/articles/10.1006/jaer.1995.1072",
+        "https://elibrary.asabe.org/abstract.asp?aid=27580",
+        "https://plantmethods.biomedcentral.com/articles/10.1186/s13007-018-0279-6",
+        "Jia, H., Deng, J., Deng, Y., Chen, T., Wang, G., Sun, Z., Guo, H. (2021). \"Contact parameter analysis and calibration in discrete element simulation of rice straw.\" International Journal of Agricultural and Biological Engineering 14(4), 72-81. doi:10.25165/j.ijabe.20211404.6435. Open-access PDF verified and read in full: https://ijabe.org/index.php/ijabe/article/download/6435/pdf. CAVEAT on the prior researcher's rejected contrast: Agriculture 15(15):1686 (2025), doi:10.3390/agriculture15151686, claimed to give wheat straw-wheat straw e = 0.479 with no stated height or velocity — I could NOT open it (MDPI returns 403 to both WebFetch and curl), so treat that contrast as UNVERIFIED. It does not affect this entry."
       ]
     },
     {
@@ -2938,7 +2997,7 @@
           0.00179
         ]
       },
-      "notes": "Liquid: bulk_modulus + dynamic_viscosity replace solid mechanics; strengths/friction/hardness/ductility N/A. Peak density 1000 at 4 C. Viscosity halves 0->40 C. Specular F0 ~0.02 (n~1.33). Restitution ~0 (splashes).",
+      "notes": "Liquid: bulk_modulus + dynamic_viscosity replace solid mechanics; strengths/friction/hardness/ductility N/A. Peak density 1000 at 4 C. Viscosity halves 0->40 C. Specular F0 ~0.02 (n~1.33). Restitution ~0 (splashes). ★★ 2026-08-17 (docs/46 row 62): `restitution: 0.0` here is a PLACEHOLDER meaning \"a parcel of this does not bounce\", NOT a measurement — and it is now expensive. A linear no-tension contact reaches e = 0 only as its damping ratio goes to infinity, so `granular::zeta_for_no_tension_restitution` clamps and returns zeta ~ 50, i.e. c ~ 70.7*sqrt(k) — 38.8x what the old (wrong) textbook inversion gave — which drives a stable explicit timestep 25x smaller for no physical reason. The gas path already sidesteps this: `atmosphere::gas_contact_from_material` sets `normal_damp: 0.0` directly and notes that dissipation enters via VISCOSITY. A liquid is the same case and should do the same; `dynamic_viscosity` is already catalogued here. Flagged rather than changed, because what a liquid parcel's contact should be is a design decision, not a typo.",
       "sources": [
         "https://www.engineeringtoolbox.com/water-density-specific-weight-d_595.html",
         "https://www.engineeringtoolbox.com/bulk-modulus-elasticity-d_585.html",

@@ -67,19 +67,52 @@ pub fn quiescent_interval_s(g: f32, cell_m: f32) -> f32 {
 /// feeds it the region's peak particle speed each physics step; one observation above the quiescent
 /// speed resets the clock, because "sustained" means continuous — a region that jolts mid-window has
 /// not settled, however quiet the average.
-#[derive(Clone, Copy, Debug, Default)]
+///
+/// ★ **THE GAUGE CARRIES THE SCALE IT IS ASKED AT** (2026-08-15). Both halves of the criterion are
+/// already functions of the cell — the module doc above says so: *"change the gravity or the cell and
+/// both move as the physics says."* The gauge nevertheless hardcoded the voxel [`World`]'s 1 m cell,
+/// which silently made it the ONLY scale anything could be settled at. That is fine for its first
+/// consumer and wrong for anyone else: at Δ = 1 m a region counts as quiet below `√(2gΔ)` = **4.4
+/// m/s**, and a 0.35 m grass blade moving at 4.4 m/s crosses its own length in 80 ms. Declaring that
+/// heap "settled" would be measuring nothing.
+///
+/// So the cell is a FIELD, not a constant, and [`SettleGauge::new`] keeps meaning "at the voxel
+/// world's own cell" for the consumers that bin into it. One criterion, one formula, asked at
+/// whatever scale the caller is actually resolving — the same shape as `Terra::ground_relief_m`,
+/// where the model and the renderer differ only in what they ask for.
+#[derive(Clone, Copy, Debug)]
 pub struct SettleGauge {
     quiet_s: f32,
+    /// The length scale this gauge judges quiet AT. Both halves of the criterion scale with it.
+    cell_m: f32,
+}
+
+impl Default for SettleGauge {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SettleGauge {
+    /// A gauge at the voxel [`World`]'s own cell — the resolution this module demotes INTO.
     pub fn new() -> Self {
-        SettleGauge { quiet_s: 0.0 }
+        Self::for_cell(CELL_M)
+    }
+
+    /// **A gauge at a stated scale.** `cell_m` is the resolution the caller is judging quiet at: the
+    /// cell it will represent the matter on once it stops. Below the voxel world's metre this gets
+    /// STRICTER in both halves — a slower speed counts as moving, and a shorter window proves it —
+    /// which is what "quiet enough to be summarised at this resolution" means at that resolution.
+    pub fn for_cell(cell_m: f32) -> Self {
+        SettleGauge {
+            quiet_s: 0.0,
+            cell_m: cell_m.max(0.0),
+        }
     }
 
     /// Feed one physics step: the region's peak particle speed over the `dt` seconds just simulated.
     pub fn observe(&mut self, peak_speed: f32, g: f32, dt: f32) {
-        if peak_speed < quiescent_speed(g, CELL_M) {
+        if peak_speed < quiescent_speed(g, self.cell_m) {
             self.quiet_s += dt;
         } else {
             self.quiet_s = 0.0;
@@ -88,7 +121,23 @@ impl SettleGauge {
 
     /// Has the region been quiet for at least its own cell dynamical time?
     pub fn settled(&self, g: f32) -> bool {
-        self.quiet_s > 0.0 && self.quiet_s >= quiescent_interval_s(g, CELL_M)
+        self.quiet_s > 0.0 && self.quiet_s >= self.needed_s(g)
+    }
+
+    /// The sustained-quiet interval THIS gauge requires (s) — so a refusal quotes the window the
+    /// gauge is actually waiting out, rather than some other scale's.
+    pub fn needed_s(&self, g: f32) -> f32 {
+        quiescent_interval_s(g, self.cell_m)
+    }
+
+    /// The speed THIS gauge counts as moving (m/s).
+    pub fn moving_above(&self, g: f32) -> f32 {
+        quiescent_speed(g, self.cell_m)
+    }
+
+    /// The scale this gauge judges at (m).
+    pub fn cell_m(&self) -> f32 {
+        self.cell_m
     }
 
     /// Re-arm after a demotion or a fresh disturbance.
@@ -178,7 +227,10 @@ pub fn recohere_settled(
     if !gauge.settled(g) {
         return Err(Refusal::NotSustained {
             quiet_s: gauge.quiet_seconds(),
-            needed_s: quiescent_interval_s(g, CELL_M),
+            // The GAUGE's own interval, not this module's cell: a refusal must quote the window the
+            // caller is actually waiting out, or a gauge asked at another scale reports a number it
+            // is not being judged against.
+            needed_s: gauge.needed_s(g),
         });
     }
     let limit = quiescent_speed(g, CELL_M);
@@ -593,5 +645,53 @@ mod tests {
 
         // Free space: nothing settles onto ground where there is no down.
         assert!(quiescent_interval_s(0.0, 1.0).is_infinite());
+    }
+
+    /// ★★ **A GAUGE ASKED AT A FINER SCALE IS STRICTER, IN BOTH HALVES** — the reason the cell is a
+    /// field and not a constant.
+    ///
+    /// The criterion's two halves are `v_q = √(2gΔ)` and `t_q = √(2Δ/g)`, so both shrink as `√Δ`.
+    /// The consequence is the whole point: a heap of 0.35 m grass blades judged at the voxel world's
+    /// **1 m** cell is "quiet" below **4.4 m/s** — fast enough for a blade to cross its own length in
+    /// 80 ms — and judged at a heap's own 4.4 cm cell it must be below 0.93 m/s. Same formula, same
+    /// gravity; the scale is what the caller is entitled to choose, because the scale is what they
+    /// are going to represent the matter ON.
+    #[test]
+    fn a_gauge_asked_at_a_finer_scale_is_stricter_in_both_halves() {
+        let g = 9.81;
+        let world = SettleGauge::new();
+        let heap = SettleGauge::for_cell(0.044);
+
+        // `new()` still means the voxel world's own cell — the existing consumers are unmoved.
+        assert!((world.cell_m() - 1.0).abs() < 1e-9);
+        assert!((world.moving_above(g) - quiescent_speed(g, 1.0)).abs() < 1e-9);
+
+        // Both halves scale as √Δ, so a 22.7× finer cell is 4.77× stricter in each.
+        assert!(heap.moving_above(g) < world.moving_above(g));
+        assert!(heap.needed_s(g) < world.needed_s(g));
+        let ratio = (1.0f32 / 0.044).sqrt();
+        assert!((world.moving_above(g) / heap.moving_above(g) - ratio).abs() < 1e-4);
+        assert!((world.needed_s(g) / heap.needed_s(g) - ratio).abs() < 1e-4);
+
+        // ★ THE CASE THAT MOTIVATED IT: a speed the world calls quiet, a heap calls moving. Without
+        // this, a heap of blades still travelling at metres per second would have been "settled".
+        let blade_speed = 2.0;
+        assert!(
+            blade_speed < world.moving_above(g),
+            "the world would allow it"
+        );
+        assert!(blade_speed > heap.moving_above(g), "the heap must not");
+
+        let mut w = SettleGauge::new();
+        let mut h = SettleGauge::for_cell(0.044);
+        for _ in 0..1000 {
+            w.observe(blade_speed, g, 0.001);
+            h.observe(blade_speed, g, 0.001);
+        }
+        assert!(
+            w.settled(g) && !h.settled(g),
+            "one criterion, two scales: {:.2} m/s is sub-resolution at a metre and is motion at 44 mm",
+            blade_speed
+        );
     }
 }

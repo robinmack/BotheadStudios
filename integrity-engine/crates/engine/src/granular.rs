@@ -381,16 +381,137 @@ pub fn contact_dissipation(pi: DVec3, vi: DVec3, pj: DVec3, vj: DVec3, c: &Conta
     p_n + p_t
 }
 
-/// Normal damping (1/s, per unit mass) that yields coefficient of restitution `e` for a linear
-/// spring–dashpot contact of stiffness `k` (`docs/24` Stage 1). Invert the textbook relation
-/// `e = exp(−ζπ/√(1−ζ²))` to `ζ = −ln e / √(π² + ln²e)` (ζ = fraction of critical damping), then
-/// `c = 2ζ√k` (critical damping is `2√(km)`, m = 1 in the mass-agnostic model). So `e = 1` → `c = 0`
-/// (perfectly elastic), and less-bouncy matter gets more damping. This makes how bouncy a contact is a
-/// **material property**, not a dial — the source of truth is `Material::restitution`. NOTE: the stable
-/// θ-solver in the shader adds a little numerical dissipation on top, so the realized restitution is
-/// somewhat below `e` (a documented approximation, verified by the bounce test in `tools/gpu-verify`).
+/// **The restitution a NO-TENSION linear spring–dashpot actually delivers**, as a function of its
+/// damping ratio ζ. Dimensionless and velocity-independent — the model is linear, so `e` depends on ζ
+/// and nothing else.
+///
+/// The relative coordinate obeys `δ̈ + 2ζω₀δ̇ + ω₀²δ = 0` from `δ(0)=0, δ̇(0)=v₀`, and the contact ENDS
+/// when the force `ω₀²δ + 2ζω₀δ̇` reaches zero — not at the half-period. That is the whole difference
+/// from the textbook relation, and it is the physical one: a dry contact separates the instant its
+/// traction would go tensile. Solving for that instant and reading off the separation speed gives a
+/// closed form in each damping regime; verified against direct integration of the same ODE to 5 d.p.
+pub fn restitution_of_damping_ratio(zeta: f64) -> f64 {
+    let z = if (zeta - 1.0).abs() < 1.0e-9 {
+        1.0 + 1.0e-9
+    } else {
+        zeta.max(1.0e-12)
+    };
+    // ω₀ = 1 without loss of generality: e is dimensionless.
+    let (b, den) = (z, 1.0 - 2.0 * z * z);
+    let (t, d_dot) = if z < 1.0 {
+        let wd = (1.0 - z * z).sqrt();
+        let mut t = (-2.0 * b * wd).atan2(den);
+        if t < 0.0 {
+            t += std::f64::consts::PI;
+        }
+        t /= wd;
+        (
+            t,
+            (1.0 / wd) * (-b * t).exp() * (wd * (wd * t).cos() - b * (wd * t).sin()),
+        )
+    } else {
+        let wd = (z * z - 1.0).sqrt();
+        let x = (-2.0 * b * wd) / den;
+        if !(-1.0..1.0).contains(&x) {
+            return 0.0; // so overdamped the contact never re-separates with speed
+        }
+        let t = x.atanh() / wd;
+        if t < 0.0 {
+            return 0.0;
+        }
+        (
+            t,
+            (1.0 / wd) * (-b * t).exp() * (wd * (wd * t).cosh() - b * (wd * t).sinh()),
+        )
+    };
+    let _ = t;
+    (-d_dot).clamp(0.0, 1.0)
+}
+
+/// **The damping ratio a NO-TENSION contact needs to deliver restitution `e`** — the inversion of
+/// [`restitution_of_damping_ratio`], by bisection because that relation has no elementary inverse.
+///
+/// ★★ This REPLACES the textbook `ζ = −ln e / √(π² + ln²e)` for contacts that cannot pull. That
+/// inversion is exact for an oscillator run over a full half-cycle, which requires the dashpot to go
+/// TENSILE while unloading; `contact_accel` clamps at `.max(0.0)` and detaches instead, so the
+/// textbook ζ delivers a contact far bouncier than the material asked for. Measured for straw
+/// (`e = 0.05`): the textbook ζ = 0.690 gives **e = 0.2137**, while ζ = 1.945 gives **e = 0.0500**.
+/// The cutoff is not the bug — a dry surface genuinely cannot pull — the formula applied to it was.
+///
+/// ★★ **`e = 0` IS NOT REACHABLE, AND ASKING FOR IT IS EXPENSIVE.** `restitution_of_damping_ratio`
+/// tends to zero only as ζ → ∞, so a perfectly inelastic linear contact does not exist: the clamp
+/// below turns `e = 0` into ζ ≈ 50, i.e. `c ≈ 70.7·√k`, **38.8× the damping the old textbook
+/// inversion returned for the same input**. That is not a bug in this function — it is what "no
+/// bounce at all" costs a linear dashpot — but it makes the caller's timestep 25× smaller than a
+/// realistic `e` would, because a stable explicit step scales as `1/c`.
+///
+/// It matters because the catalogue currently carries `restitution: 0.0` on **9 materials** — 7 gases
+/// and 2 liquids — where restitution is not a measured property at all but a placeholder for "a
+/// parcel of this does not bounce". The gas path already sidesteps it (`gas_contact_from_material`
+/// sets `normal_damp: 0.0` directly, noting that *"dissipation enters via viscosity later"*); the
+/// liquids do not, and go through here. **The fix belongs in the data**: a liquid's dissipation is
+/// viscous, and `crude_oil`/`water` should say so rather than declare an unreachable restitution.
+pub fn zeta_for_no_tension_restitution(e: f64) -> f64 {
+    let target = e.clamp(1.0e-4, 0.9999);
+    let (mut lo, mut hi) = (1.0e-6f64, 1.0e3f64);
+    for _ in 0..200 {
+        let mid = 0.5 * (lo + hi);
+        if restitution_of_damping_ratio(mid) > target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+/// Normal damping (1/s, per unit mass) that yields coefficient of restitution `e` for the engine's
+/// linear spring–dashpot contact of stiffness `k` (`docs/24` Stage 1), **for the equal-mass PAIR that
+/// `contact_accel` actually models**. This makes how bouncy a contact is a **material property**, not
+/// a dial — the source of truth is `Material::restitution`.
+///
+/// ★★★ **CORRECTED 2026-08-16 (docs/46 row 62) — it was wrong twice, in opposite directions, and the
+/// two errors partly masked each other.** It used to return `2ζ√k` with ζ from the textbook inversion
+/// `e = exp(−ζπ/√(1−ζ²))`. Measured on a dt-refinement ladder, straw's catalogued `e = 0.05` came out
+/// as **0.1399 — 2.8× too bouncy — in every scene**, and correcting either error alone made it worse.
+///
+/// 1. **Reduced mass.** `contact_accel` applies `+a` to one body and `−a` to the other, so the pair's
+///    relative coordinate obeys `δ̈ + 2c·δ̇ + 2k·δ = 0`: natural frequency `√(2k)`, critical damping
+///    `2√(2k)`, and the realised ratio is `2c/(2√(2k)) = c/√(2k)`. The old `2ζ√k` therefore realised
+///    **√2·ζ**. `2ζ√k` is right for a grain against a FIXED WALL, which is not what this models.
+/// 2. **The cutoff.** The textbook inversion assumes a dashpot that pulls while unloading. Ours
+///    detaches at zero force, so [`zeta_for_no_tension_restitution`] is the inversion that applies.
+///
+/// So: `c = ζ_no-tension(e) · √(2k)`. Both corrections are dt-INDEPENDENT — this is not the
+/// integrator's fault.
+///
+/// ★★★ **BUT IT IS NOT FREE, AND I SAID IT WAS.** Correcting the calibration roughly DOUBLES `c`,
+/// and this module's own doc names the consequence: *"explicit damping overshoots and pumps energy
+/// once `Z·c·dt` nears 2"*. Doubling `c` halves the coordination at which that bites — from Z ≈ 14.5
+/// to Z ≈ 7.3, which a heap reaches easily. MEASURED: a 400-rod pile at its old timestep went from a
+/// 0.46 m heap to a **14.94 m** one with a **+2075%** energy drawup. The right restitution needs a
+/// timestep that respects the DAMPER as well as the spring (`dt ≤ 0.1/c` alongside `0.1/√k`), which
+/// for straw is ~2.75× more steps. The GPU path pays this with an implicit solve instead; the native
+/// path pays it in dt.
+///
+/// ★★ **THIS IS CALIBRATED FOR, AND VERIFIED ON, THE NATIVE EXPLICIT PATH.** `particle_step.wgsl`
+/// consumes the same `c_normal_damp` but does NOT integrate it the same way: its `f_rep` carries no
+/// damping term at all (`c_stiffness * max(overlap, 0)`), because the spring and the damper are moved
+/// into a directional IMPLICIT solve (`g = θ²dt²k + θ·dt·c`) so stiff contacts at high coordination
+/// cannot inject. That solver adds numerical dissipation of its own, so the GPU's realised restitution
+/// sits somewhat BELOW `e` — a documented approximation whose measurement is the bounce test in
+/// `tools/gpu-verify`, and which this correction shifts without re-measuring. **Re-run that bounce
+/// test before trusting a GPU restitution.** The two agree as `dt → 0`, which is the contract; they
+/// are not expected to agree at a production timestep.
+///
+/// ★ **DECLARED APPROXIMATION, and it is the real ceiling here** (Law V, docs/46 row 62): a LINEAR
+/// contact gives a restitution that does not depend on impact speed (verified: identical `e` at 0.05,
+/// 0.5 and 5.0 m/s). Real viscoelastic and plastic contacts get LESS bouncy as they are struck
+/// harder, so `Material::restitution` as a single number cannot be right at every speed no matter how
+/// it is calibrated. The computation this defers is a nonlinear contact — Hertz–Kuwabara–Kono,
+/// `F = k_h·δ^{3/2} + c_h·δ^{1/2}·δ̇` — in which `e` falls with velocity because the physics says so.
 pub fn damping_for_restitution(e: f64, stiffness: f64) -> f64 {
-    2.0 * zeta_for_restitution(e) * stiffness.sqrt()
+    zeta_for_no_tension_restitution(e) * (2.0 * stiffness).sqrt()
 }
 
 /// The DAMPING RATIO ζ a material's coefficient of restitution implies, for a linear spring-dashpot
@@ -1234,6 +1355,122 @@ mod tests {
         );
     }
 
+    /// ★★★ **A CONTACT MUST ACTUALLY BOUNCE THE WAY ITS MATERIAL SAYS IT DOES** (docs/46 row 62).
+    ///
+    /// The gate that did not exist, which is why this was wrong for the whole life of the module.
+    /// `damping_for_restitution`'s doc promised *"how bouncy a contact is a material property, not a
+    /// dial"*, and nothing ever collided two grains and measured the bounce. It measures **2.8× too
+    /// bouncy** when you do: straw asks 0.05 and the shipped contact delivered 0.1399.
+    ///
+    /// ★★ **IT REFINES dt, and that is not decoration.** At the production timestep the same contact
+    /// reads ~5% off its converged value, so a single-dt check can hide which way a change moved
+    /// things — and it is exactly how one could "fix" the √2 alone, see it improve at one dt, and ship
+    /// a contact that is *worse* (0.1399 → 0.2138). Refinement also proves the result is a property of
+    /// the FORCE LAW and not of the integrator.
+    #[test]
+    fn a_pair_contact_bounces_at_its_material_restitution() {
+        // Two equal-mass grains, head-on, in the engine's own per-mass units.
+        fn measured_e(target: f64, k: f64, r: f64, v0: f64, refine: u32) -> f64 {
+            let c = damping_for_restitution(target, k);
+            let contact = Contact {
+                radius: r,
+                stiffness: k,
+                normal_damp: c,
+                friction: 0.0,
+                tangent_damp: 0.0,
+                cohesion: 0.0,
+                coh_range: 0.0,
+                shock: 0.0,
+            };
+            let dt = (0.1 / k.sqrt()) / f64::from(refine);
+            let touch = 2.0 * r;
+            // Separation along +x, approaching at v0. Symmetric, so track the pair as one relative
+            // coordinate: each grain gets ±a, hence the relative acceleration is 2a.
+            let (mut sep, mut rel) = (touch, -v0);
+            for _ in 0..40_000_000 {
+                let a = contact_accel(
+                    DVec3::new(sep, 0.0, 0.0),
+                    DVec3::new(rel, 0.0, 0.0),
+                    DVec3::ZERO,
+                    DVec3::ZERO,
+                    &contact,
+                );
+                rel += 2.0 * a.x * dt;
+                sep += rel * dt;
+                if sep >= touch && rel > 0.0 {
+                    return rel / v0;
+                }
+            }
+            f64::NAN
+        }
+
+        let (k, r, v0) = (1.8117e5, 5.3784e-4, 0.5);
+        for target in [0.05, 0.2, 0.5] {
+            let ladder: Vec<f64> = [1u32, 4, 16, 64]
+                .iter()
+                .map(|&n| measured_e(target, k, r, v0, n))
+                .collect();
+            let converged = *ladder.last().expect("a ladder");
+            println!(
+                "asked e={target:.2} -> measured {:.4} {:.4} {:.4} {:.4} (dt, dt/4, dt/16, dt/64)",
+                ladder[0], ladder[1], ladder[2], ladder[3]
+            );
+            assert!(
+                (converged - target).abs() < 0.02 * target.max(0.05),
+                "a contact asked for e={target} delivered {converged:.4} — `Material::restitution` \
+                 is documented as a material property, so this is the property not being delivered \
+                 (docs/46 row 62)"
+            );
+        }
+
+        // ★★ THE CEILING OF A LINEAR CONTACT, in the two ways it shows up. Both are why row 62 stays
+        // open, and both are answered by the same nonlinear contact.
+        //
+        // (1) A linear spring can only arrest an approach of `2r·√(2k)` before the two centres reach
+        //     coincidence — beyond that the pair passes THROUGH itself and there is no collision at
+        //     all. MEASURED the hard way: this test first asked for 5.0 m/s and got NaN, because the
+        //     grains tunnelled. That is a real bound on what this law can represent, not a test bug.
+        //     The UNDAMPED bound is `2r·√(2k)`; the real one is higher, because the dashpot removes
+        //     energy on the way in. So it is MEASURED rather than derived — deriving it is how this
+        //     assertion was wrong first time round.
+        let undamped_bound = 2.0 * r * (2.0 * k).sqrt();
+        let (mut lo, mut hi) = (undamped_bound, undamped_bound * 64.0);
+        assert!(
+            measured_e(0.05, k, r, hi, 16).is_nan(),
+            "even {hi:.2} m/s did not tunnel — the law has gained a stopping mechanism this bound \
+             does not know about"
+        );
+        for _ in 0..40 {
+            let mid = 0.5 * (lo + hi);
+            if measured_e(0.05, k, r, mid, 16).is_nan() {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        println!(
+            "tunnelling: undamped bound 2r*sqrt(2k) = {undamped_bound:.4} m/s · MEASURED {:.4} m/s \
+             ({:.2}x, the damping buying the difference)",
+            hi,
+            hi / undamped_bound
+        );
+
+        // (2) Below that bound the restitution does not depend on impact speed AT ALL, because the
+        //     model is linear. Real viscoelastic and plastic contacts get LESS bouncy when struck
+        //     harder, so `Material::restitution` as a single number cannot be right at every speed.
+        //     This is the DECLARED approximation named in `damping_for_restitution`, asserted so it
+        //     stays declared rather than quietly becoming a belief.
+        let slow = measured_e(0.05, k, r, 0.02, 64);
+        let fast = measured_e(0.05, k, r, 0.4, 64);
+        println!("velocity dependence: e(0.02 m/s)={slow:.4}  e(0.40 m/s)={fast:.4}");
+        assert!(
+            (slow - fast).abs() < 1.0e-3,
+            "a linear contact CANNOT be velocity-dependent; if this ever fails, the contact law has \
+             stopped being linear and the declared approximation in `damping_for_restitution` needs \
+             revisiting: {slow:.4} vs {fast:.4}"
+        );
+    }
+
     #[test]
     fn restitution_damping_is_monotone_and_matches_the_calibration() {
         let k = 5.0e5;
@@ -1245,11 +1482,28 @@ mod tests {
             damping_for_restitution(0.999, k) < 5.0,
             "≈elastic ⇒ ≈no damping"
         );
-        // Granite (e=0.80) reproduces the hand-calibrated c≈100 the contact was using — a sanity anchor.
-        assert!(
-            (c_bouncy - 100.0).abs() < 6.0,
-            "granite e=0.80 ⇒ c≈100 (got {c_bouncy:.1})"
-        );
+        // ★ RETIRED 2026-08-16 (docs/46 row 62): ~~"granite (e=0.80) reproduces the hand-calibrated
+        // c≈100 the contact was using — a sanity anchor"~~, which asserted `|c - 100| < 6` and now
+        // reads ~80. That anchor tied the calibration to a HAND-TUNED CONSTANT — the definition of a
+        // dial — and it held the √2 reduced-mass error and the wrong (tension-allowing) inversion in
+        // place, because any correction moved `c` away from 100 and would have failed here. An anchor
+        // to a legacy number cannot detect that the legacy number was wrong.
+        //
+        // What replaces it is not another constant but a MEASUREMENT:
+        // `a_pair_contact_bounces_at_its_material_restitution` collides two grains and reads the
+        // bounce off a dt-refinement ladder. That is the anchor — the material's own restitution,
+        // delivered.
+        //
+        // The one structural thing worth keeping here is that the calibration inverts CLEANLY, which
+        // a hand-tuned constant never checked:
+        for e in [0.05, 0.2, 0.5, 0.8, 0.95] {
+            let round_trip = restitution_of_damping_ratio(zeta_for_no_tension_restitution(e));
+            assert!(
+                (round_trip - e).abs() < 1.0e-3,
+                "the calibration must invert its own restitution relation: asked {e}, round-tripped \
+                 {round_trip:.4}"
+            );
+        }
     }
 
     fn params() -> Contact {
