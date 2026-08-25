@@ -3,6 +3,55 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-25 — a material id must name one material, not a member and its bulk
+
+★★★ **`granular::contact_from_material` calls itself *"the ONE place where 'what the matter IS' becomes
+'how it collides'"*, and it reads the plain `youngs_modulus`.** Two entries put an AGGREGATE's compliance
+in that field, so every individual blade and stem in the engine collided with the stiffness of the pile it
+belongs to:
+
+| material | `youngs_modulus` was | the member's own | ratio |
+|---|---|---|---|
+| `grass` | 5.0e6 Pa — the soil MAT | `youngs_modulus_blade` 1.06e9 | **212×** |
+| `grass` | 5.0e6 Pa — the soil MAT | `youngs_modulus_culm` 5.55e9 | **1110×** |
+| `straw` | 1.5e5 Pa — a LOOSE HAY MASS | `youngs_modulus_stem` 5.67e9 | **37,800×** |
+
+★★ **The straw case is also circular.** A haystack's bulk compliance is exactly what `pile::settle` exists
+to PRODUCE — members stacking, bridging and settling under gravity. Feeding it back as those members' own
+contact stiffness makes the emergent quantity an input to itself (Law III: the aggregate is computed, not
+declared).
+
+★ **And the catalogue said so the whole time.** `grass`'s own notes read *"Two stiffnesses coexist: soft
+soil mat (~MPa) vs stiff strong blades."* The entry knew, in prose, and the field went on handing callers
+the wrong one. Prose is not a gate — so the rule is one now:
+`laws::catalogue_tests::a_material_id_names_one_material_not_a_member_and_its_bulk`, which fails any entry
+whose generic modulus disagrees with a catalogued member-scale modulus by more than 30×. The bound is loose
+on purpose: it is not a tuned threshold but a statement that real anisotropy lives inside one decade and
+three or four decades is a different substance wearing the same id.
+
+**The fix.** `youngs_modulus` now carries the MEMBER (grass 1.06e9, straw 5.67e9), with its **declared
+range moved to match** — the ranges turned out to be the aggregate's bands too, and the range gate caught
+that within a minute of the first change, one gate checking another. The aggregate compliances survive as
+`youngs_modulus_sward_aggregate` and `youngs_modulus_loose_aggregate`, declared unwired **deliberately**:
+they are the measured targets an emergent answer must reproduce, which is the opposite of an input.
+
+**Verified.** 647/647 native, 29 skipped, `mod app` clean for wasm32, `cargo fmt` clean.
+
+### ★★ The silence was the second finding
+
+A 37,800× change in contact stiffness — a factor that also drives `pile::settle`'s own timestep — broke
+**nothing**, and the suite finished in the same wall-clock. That is not reassurance. `haystack`, `hay-bale`
+and `grass-blade-dry` are shipped, compiled assemblies; `assembly.rs` quotes Robin's scenario for them three
+separate times (*"a rock fall on a haystack, unsettle the hay (dry grass), but the impact could be
+absorbed"*); and **nothing in the suite loads `straw`, settles a haystack, or drops anything on one.** The
+measurement was reporting that it had never been looking — the same shape as `--fast` skipping the wasm
+gate, and as a rig with no negative control.
+
+Now **row 69**, with the good version of the test named: settle a pile of `grass-blade-dry`, then drop a rock
+on it and measure what the pile ABSORBS. That absorbed energy is also the honest test of
+`youngs_modulus_loose_aggregate` — the bulk compliance should EMERGE from the settled pile and land inside
+its measured [8.3e4, 3.5e5] Pa band, which would close a declared-not-emergent quantity by computing it.
+
 ## 2026-08-24 — bending, de-resolved: the patch is not the average blade
 
 ★★★ **Law III's half of bending.** A meadow holds ~10¹² blades and `flexure::solve` costs thousands of

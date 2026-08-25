@@ -825,6 +825,27 @@ pub(crate) const UNWIRED_MATERIAL_PROPERTIES: &[(&str, &str)] = &[
     // back. These are the composable parts a slender-body flexure would read. There is deliberately
     // NO catalogued `flexural_rigidity`: EI depends on width, on thickness CUBED and on cross-section
     // shape, so a stored EI is wrong for every blade but the one it was measured on.
+    // ★★★ THE TWO AGGREGATE COMPLIANCES, deliberately unread (2026-08-25, docs/46 row 67).
+    // Both used to sit in `youngs_modulus`, where `granular::contact_from_material` — "the ONE place
+    // where what the matter IS becomes how it collides" — handed them to every individual blade and
+    // stem. They are not material properties: they are what an ASSEMBLY of those members does, so
+    // Law III says the engine COMPUTES them. They stay catalogued as the measured targets that
+    // emergent answer has to reproduce, which is the opposite of an input.
+    (
+        "youngs_modulus_sward_aggregate",
+        "the measured compliance of a TURF MAT (5.0 MPa) — blades plus roots plus moist topsoil. Held \
+         `youngs_modulus` until 2026-08-25, making every grass blade in the engine 212x too soft. Kept \
+         as the target a vegetated-soil assembly must reproduce, never as a member's stiffness",
+    ),
+    (
+        "youngs_modulus_loose_aggregate",
+        "the measured compliance of a LOOSE HAY MASS (0.15 MPa). Held `youngs_modulus` until \
+         2026-08-25 — 37,800x below the stem it describes, the worst instance in the catalogue, and \
+         CIRCULAR besides: a haystack's bulk compliance is precisely what `pile::settle` exists to \
+         produce from members stacking and bridging, so feeding it back as those members' own contact \
+         stiffness made the emergent quantity an input to itself. Kept as what `pile::settle` must \
+         REPRODUCE rather than be told",
+    ),
     (
         "youngs_modulus_blade",
         "the leaf blade's EFFECTIVE FLAT-SLAB BENDING modulus (1.06 GPa) — derived from the only \
@@ -1993,6 +2014,71 @@ mod catalogue_tests {
     }
     fn num(m: &Value, block: &str, key: &str) -> Option<f64> {
         m.get(block)?.get(key)?.as_f64()
+    }
+
+    /// ★★★ **A MATERIAL ID MUST NAME ONE MATERIAL — THE MEMBER OR THE BULK, NEVER BOTH.**
+    ///
+    /// `granular::contact_from_material` calls itself *"the ONE place where 'what the matter IS'
+    /// becomes 'how it collides'"*, and it reads the plain `youngs_modulus`. So whatever that field
+    /// holds is what a single grain, blade or stem is made of, everywhere in the engine.
+    ///
+    /// Two entries put the **aggregate's** compliance there instead of the **member's**, and both say
+    /// so in their own notes while the field goes on lying to every caller:
+    ///
+    /// - `grass`: `youngs_modulus` 5.0e6 Pa is the soil MAT; `youngs_modulus_blade` is 1.06e9 — **212×**.
+    ///   Its notes read *"Two stiffnesses coexist: soft soil mat (~MPa) vs stiff strong blades."*
+    /// - `straw`: `youngs_modulus` 1.5e5 Pa is the loose HAY MASS; `youngs_modulus_stem` is 5.67e9 —
+    ///   **37,800×**.
+    ///
+    /// ★★ **The straw case is also circular.** A haystack's bulk compliance is what `pile::settle`
+    /// exists to PRODUCE — members stacking, bridging and settling under gravity. Feeding it back in as
+    /// the members' own stiffness makes the emergent quantity an input to itself (Law V: every number
+    /// traces to physics or is a flagged IOU; Law III: the aggregate is computed, not declared).
+    ///
+    /// The ratio bound is deliberately loose — **30×** — because it is not a tuned threshold but a
+    /// statement that a member and its bulk are not the same substance. Real anisotropy and real
+    /// tissue variation live well inside one decade; three or four decades is a different material
+    /// wearing the same id.
+    #[test]
+    fn a_material_id_names_one_material_not_a_member_and_its_bulk() {
+        // The member-scale moduli the catalogue already records, in the order a member would claim them.
+        const MEMBER_MODULI: [&str; 3] = [
+            "youngs_modulus_blade",
+            "youngs_modulus_stem",
+            "youngs_modulus_culm",
+        ];
+        const MAX_RATIO: f64 = 30.0;
+
+        let mut offenders = Vec::new();
+        for m in catalogue() {
+            let id = m["id"].as_str().unwrap_or("?").to_string();
+            let Some(generic) = num(&m, "mechanical", "youngs_modulus") else {
+                continue;
+            };
+            if generic <= 0.0 {
+                continue;
+            }
+            for key in MEMBER_MODULI {
+                let Some(member) = num(&m, "mechanical", key) else {
+                    continue;
+                };
+                let ratio = (member / generic).max(generic / member);
+                println!(
+                    "  {id:10} youngs_modulus {generic:.3e} vs {key} {member:.3e} — {ratio:.0}x"
+                );
+                if ratio > MAX_RATIO {
+                    offenders.push(format!(
+                        "`{id}`: youngs_modulus {generic:.3e} Pa vs {key} {member:.3e} Pa ({ratio:.0}x). \
+                         `contact_from_material` gives every member of this material the FORMER."
+                    ));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "a material id must name one material — the member or the bulk, never both:\n  {}",
+            offenders.join("\n  ")
+        );
     }
 
     /// ★★ **A VALUE MUST LIE INSIDE ITS OWN DECLARED RANGE.**

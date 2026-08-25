@@ -9,6 +9,17 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★★ **A material id must name one material — the member or the bulk, never both** (docs/46 row 67).
+  `granular::contact_from_material` reads `youngs_modulus`, and two entries had an AGGREGATE's compliance
+  there: `grass` gave every blade the soil mat's 5.0e6 Pa (**212× too soft**) and `straw` gave every stem a
+  loose hay mass's 1.5e5 Pa (**37,800×**, and circular — that bulk compliance is what `pile::settle` exists
+  to produce). `youngs_modulus` now carries the member, with declared ranges moved to match; the aggregate
+  values survive as `youngs_modulus_sward_aggregate` / `youngs_modulus_loose_aggregate`, deliberately
+  unwired as targets an emergent answer must reproduce. Enforced by a new gate at a 30× bound.
+  **Breaking for anyone reading `grass`/`straw` `youngs_modulus` as a bulk value.**
+- **Recorded, not fixed** (docs/46 row 69): the haystack has three shipped assemblies and zero tests — the
+  37,800× change above broke nothing because nothing measures it.
+
 - ★★ **The plants know what month it is** (docs/46 row 58). `Assembly::mesh_in_season` /
   `mesh_seasoned` hand a mesh the season, and `build_flora` gets it from `solar::senescence_fraction`
   — so a leaf and the ground it stands on can no longer disagree about the date. `mesh` and
