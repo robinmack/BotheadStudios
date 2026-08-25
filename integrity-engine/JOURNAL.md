@@ -3,6 +3,71 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-24 — bending, de-resolved: the patch is not the average blade
+
+★★★ **Law III's half of bending.** A meadow holds ~10¹² blades and `flexure::solve` costs thousands of
+relaxation sweeps each, so a patch cannot be resolved and must still be answered. `flexure::Compliance`
+is that answer, and Law 8 supplies its acceptance test — *does it converge as the budget grows?*
+
+**The obvious de-resolution is wrong, and that is the whole point.** The elastica is nonlinear in load: a
+blade already laid over bends far less for the next newton than the first did. So the mean of the responses
+is not the response of the mean. Pushing the average wind through one elastica is off by **21.9%** on the
+patch this test builds, and off in a *consistent direction*, which is exactly what lets that model survive
+inspection. It is Jensen's inequality doing physics, and it stays in the suite as a negative control so
+`Compliance` cannot quietly decay back into it.
+
+The honest form comes from the scalability law (`docs/67`, *identical until damaged*): the TYPE tabulates
+its own compliance once, every instance reads the table, and **cost scales with how many distinct winds the
+patch sees, not how many blades stand in it.**
+
+**Verified.** Grass blade, EI 7.225e-6 N·m², self weight 6.33e-3 N/m, 24 wind samples from 1 to 6 m/s:
+
+| | lean | error |
+|---|---|---|
+| RESOLVED — 24 elasticas | 0.05810 m | — |
+| DE-RESOLVED — 12 elasticas, amortised over every blade of the type ever | 0.05782 m | **0.476%** |
+| NAIVE — one elastica at the mean wind | 0.07081 m | **21.881%** |
+
+and the error quarters with each doubling of the table — 7.07 / 1.25 / 0.27 / 0.067 / 0.016% for 4, 8, 16,
+32, 64 entries. Clean O(h²).
+
+**Nothing in `Compliance` is about grass.** Its inputs are rigidity, length and self weight, so a wheat
+stem, a sapling, a fence post and a bent nail are the same call.
+
+### ★★★ Two defects it found on the way, both now in the ledger
+
+**Row 67 — a grass blade is built from the sward's stiffness.** `Material::youngs_modulus` for `grass` is
+**5.0e6 Pa**, the turf MAT's value. The blade's own `youngs_modulus_blade` = **1.06e9 Pa**, sourced a week
+ago, **has no reader** — nor does `density_fresh_blade` = 710 against the generic 1400. So every caller gets
+a blade 212× too floppy and 2× too heavy. At those numbers Greenhill's critical length is **2.78 cm** and the
+shipped blade is **35 cm — 12.6× past it**, winding through tip angles of 420, 560 and 3164 radians. With its
+own sourced numbers L_crit is 20.8 cm and the blade is 1.7× it: an arch, which is what grass looks like. The
+catalogue was right and unread — the same `docs/48` pattern as row 58, in the same session. ★ The two errors
+partly cancel in L_crit (stiffness up, weight down), which is how a wrong number survives a sanity check.
+
+**Row 68 — the large-deflection solver cannot reach the deflections grass in wind actually has.** The
+fixed-point relaxation is contractive only while tip lean stays under **~85% of arclength** — measured at
+85.2 / 85.7 / 88.7% across three lengths, so it is a *deflection* ceiling, not a load one. As load that
+collapses fast: 202× self weight at 0.25× L_crit, 24.7× at 0.5×, **3.0× at L_crit**. A full-length blade
+converges at no non-zero wind. The formulation is right; fixed-point relaxation is the wrong way to walk
+`dθ/ds = M/EI` past the fold, and arc-length continuation is the named fix.
+
+### ★★ Two defects in my own instruments, in one day
+
+**The test read a solver's answer without reading its flag.** The first version called `Bent::tip()` without
+checking `converged` — comparing the 20,000th iterate of two diverging runs and reporting 136% and 323%
+errors as though they were measurements. `solve` returns the flag precisely so a caller cannot do that, and
+its doc says why: *"silently returning the last iterate as though it were a solution is how a solver lies."*
+The solver did its job; I ignored it. Asserting `converged` on every solve is what turned a confusing failure
+into rows 67 and 68.
+
+**And this entry did not exist until the merge check found it missing.** The commit that landed `Compliance`
+touched `flexure.rs`, `docs/46` and `CHANGELOG.md` and **not `JOURNAL.md`**, because the script that wrote it
+anchored on a heading that existed only on the *other* branch. `str.replace` returns the original unchanged
+when the pattern is absent — a write that reports success by doing nothing. It was caught only by
+`AGENTS.md` §6's rule to check what a merge DELETED rather than what it flagged; the deletion turned out to
+be an insertion that never happened. Every anchored write in this entry now asserts its anchor exists first.
+
 ## 2026-08-24 — the plants learned what month it is, and the picture would not confirm it
 
 ★★ **`docs/46` row 58 was "THE GROUND KNOWS WHAT MONTH IT IS AND THE PLANTS DO NOT."** `SurfaceSampler`
