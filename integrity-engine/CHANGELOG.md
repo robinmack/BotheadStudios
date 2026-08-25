@@ -9,6 +9,11 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Corrected** (docs/46 row 69): the haystack does have a test — `#[ignore]`d, so outside the default
+  suite. The real finding is that row 67's honest stem stiffness shrinks `pile::settle`'s timestep
+  **194×** (2.3494e-4 s → 1.2084e-6 s), taking that test from seconds to over ten minutes. Recorded with
+  the three candidate fixes; softening the stem back is explicitly not one of them.
+
 - ★★★ **A material id must name one material — the member or the bulk, never both** (docs/46 row 67).
   `granular::contact_from_material` reads `youngs_modulus`, and two entries had an AGGREGATE's compliance
   there: `grass` gave every blade the soil mat's 5.0e6 Pa (**212× too soft**) and `straw` gave every stem a
