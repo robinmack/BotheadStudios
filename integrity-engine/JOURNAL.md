@@ -3,6 +3,47 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-25 — the honest stem costs 194x, and my own row 69 was wrong
+
+★★★ **Correcting yesterday's row 69 the day after writing it.** It said *"the haystack has three assemblies
+and ZERO TESTS"*. That is false. `pile::tests::a_heap_of_dry_blades_does_not_come_to_rest_yet` loads `straw`,
+settles a haystack of `grass-blade-dry`, and has been there since 2026-08-15. I missed it two ways at once:
+it is `#[ignore]`d, so it is absent from the default suite, and a grep for `"straw"` cannot find it because
+the material arrives through `Assembly::dominant_material()` rather than a literal. **Two ways of not seeing
+a test, and I reported it as not existing** — on the strength of a green suite plus a grep, which is the same
+shape of mistake as the eye on the uncontrolled Galway pair.
+
+### What the silence actually was
+
+Not missing coverage — coverage excluded from the default run. And the change did not pass unnoticed either:
+it made the one test that would have noticed **unaffordable**.
+
+Row 67 raised straw's contact stiffness by 37,800×, and `pile::settle` sets its own step from it
+(`dt_spring = 0.1/√stiffness`):
+
+| straw `youngs_modulus` | contact stiffness | timestep |
+|---|---|---|
+| 1.5e5 Pa — the loose-hay aggregate (what it was) | 1.8117e5 /s² | 2.3494e-4 s |
+| 5.67e9 Pa — the stem (what it is) | 6.8484e9 /s² | **1.2084e-6 s** |
+
+**194× smaller step for the same simulated time.** The test ran in seconds before and exceeded ten minutes
+after. Honest physics made the haystack 194× more expensive, and that is not a regression — it is the price
+of the number being right.
+
+### The Law 8 question, stated rather than answered
+
+*Is this the most physical thing this budget can buy, and does it converge as the budget grows?* A 5.67 GPa
+stem inside an explicit penalty contact is honest and costs 194×. Three candidate answers, in order of
+honesty: **sub-step the contact** while the pile integrates at its own rate; move the contact to an
+**implicit/semi-implicit solve**, where stiffness stops setting the step at all; or accept the cost and
+**shrink the member count**, trading a real answer for a smaller one.
+
+★ **Do NOT soften the stem back.** That is exactly the fudge row 67 removed, and it would be very easy to
+reach for while pointing at a ten-minute test as the justification.
+
+The prize is unchanged: settle the pile, drop a rock on it, and check that the bulk compliance EMERGES into
+its measured [8.3e4, 3.5e5] Pa band — closing a declared-not-emergent quantity by computing it.
+
 ## 2026-08-25 — a material id must name one material, not a member and its bulk
 
 ★★★ **`granular::contact_from_material` calls itself *"the ONE place where 'what the matter IS' becomes
