@@ -2128,3 +2128,173 @@ mod catalogue_tests {
         );
     }
 }
+
+/// ★★★ **THE EARTH IS NOT TILTED, AND NOTHING COULD TELL** (docs/46 row 39).
+///
+/// These tests are written BEFORE the fix, and they FAIL. That is deliberate. Row 39 has been open
+/// since 2026-08-04 with the seasonal tests passing the whole time, and it records exactly why they
+/// could not catch it: *"the seasonal tests in `solar` all pass BECAUSE they read the orbit-side
+/// value — they would pass identically with the body upright."*
+///
+/// The body IS upright. `lib.rs` builds the spin as `DVec3::new(0.0, 0.0, 1.0)` and says so in its own
+/// comment: *"spin axis ⊥ the orbital (x-y) plane."* So tilting it now would be unverifiable in either
+/// direction, because no test asks. Fix the instrument first.
+#[cfg(test)]
+mod obliquity_tests {
+    use super::material_property_tests::collect_rs;
+
+    fn engine_src() -> String {
+        let mut blob = String::new();
+        collect_rs(
+            &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut blob,
+        );
+        assert!(blob.len() > 100_000, "the source scan found almost nothing");
+        blob
+    }
+
+    /// ★★★ **ONE OBLIQUITY, ONE OWNER.**
+    ///
+    /// Earth's axial tilt is the reason there are seasons, and the engine currently states it in FOUR
+    /// places that cannot disagree loudly enough to be noticed:
+    ///
+    /// - `orbit.rs` — `23.439` with the secular term, inside a local `let`
+    /// - `solar.rs` — `23.44`, twice, one of them under a comment claiming it *"keeps ONE source for
+    ///   the obliquity"*, which is the opposite of what it does
+    /// - `lib.rs` — `0.0`, implicitly, by building the spin axis perpendicular to the orbital plane
+    ///
+    /// A number stated four times is four numbers. This scans for the literal rather than for a name,
+    /// because the whole problem is that it has no name — there is no `obliquity_rad()` anywhere to
+    /// grep for, which is why nothing reads it and nothing can contradict it.
+    #[test]
+    fn the_obliquity_is_stated_in_exactly_one_place() {
+        let blob = engine_src();
+        // Count source lines that state Earth's tilt as a bare literal. Test fixtures legitimately
+        // quote the solstice declination, so only non-test statements of the constant count.
+        let sites: Vec<&str> = blob
+            .lines()
+            .filter(|l| {
+                let t = l.trim();
+                !t.starts_with("//")
+                    && !t.starts_with("///")
+                    && (t.contains("23.439") || t.contains("23.44"))
+                    // a fixture asserting the solstice declination is data, not a statement of tilt
+                    && !t.contains("solstice")
+            })
+            .collect();
+        assert_eq!(
+            sites.len(),
+            1,
+            "Earth's obliquity is stated in {} places; a number stated more than once is more than \
+             one number. Give it a single public owner and have every site read it.\n{}",
+            sites.len(),
+            sites
+                .iter()
+                .map(|l| format!("  {}", l.trim()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    /// ★★★ **THE BODY IS TILTED BY IT — not just the ephemeris.**
+    ///
+    /// Written first as a source scan, because there was nothing to assert against: the tilt had no
+    /// NAME, which is exactly why nothing read it and nothing could contradict it.
+    /// `orbit::obliquity_rad` now owns it and `orbit::spin_axis_for_obliquity` builds the axis from
+    /// it, so this is a physics assertion rather than a grep.
+    #[test]
+    fn the_earth_body_is_tilted_and_not_merely_the_ephemeris() {
+        let eps = crate::orbit::obliquity_rad(946_728_000.0); // J2000
+        let axis = crate::orbit::spin_axis_for_obliquity(eps);
+        let orbital_normal = glam::DVec3::Z; // the orbital plane is x-y
+
+        let tilt_deg = axis.angle_between(orbital_normal).to_degrees();
+        assert!(
+            (tilt_deg - 23.439).abs() < 1.0e-6,
+            "the spin axis must lean from the orbital normal by the obliquity: {tilt_deg:.6}"
+        );
+        assert!(
+            (axis.length() - 1.0).abs() < 1.0e-12,
+            "a direction is a unit vector"
+        );
+
+        // ★ THE NEGATIVE CONTROL, and it is the whole point: at zero obliquity the axis IS the
+        // orbital normal — exactly the `DVec3::new(0.0, 0.0, 1.0)` the scene used to hardcode. The
+        // untilted Earth was not a different model, it was THIS model with the tilt left out, which
+        // is precisely why no test could see the difference.
+        let upright = crate::orbit::spin_axis_for_obliquity(0.0);
+        assert!(
+            (upright - orbital_normal).length() < 1.0e-15,
+            "zero tilt must reproduce the old hardcoded axis exactly, or this is a different model"
+        );
+
+        // ★★ IT DRIFTS, which is why the owner takes a time. 0.47 arcsec/yr is small, real, and
+        // impossible to express with the constant this replaced.
+        let millennium = 946_728_000.0 + 1000.0 * 365.25 * 86_400.0;
+        let then = crate::orbit::obliquity_rad(millennium).to_degrees();
+        let now = eps.to_degrees();
+        println!("obliquity: {now:.5} deg at J2000 -> {then:.5} deg a millennium later");
+        assert!(
+            then < now && (now - then) > 0.1,
+            "the obliquity must decrease measurably over a millennium: {now:.5} -> {then:.5}"
+        );
+    }
+
+    /// ★★★ **THE SEASONS MUST VANISH WHEN THE TILT DOES** — the claim row 39 has wanted since
+    /// 2026-08-04 and that could not be WRITTEN until now.
+    ///
+    /// This is the real physics statement, and it is a counterfactual: an Earth with no obliquity has
+    /// no seasons anywhere, at any latitude, on any date. Until `orbit` and `solar` could be handed a
+    /// hypothetical tilt, there was nowhere for that counterfactual to enter — every seasonal function
+    /// looked the tilt up for itself, so no test could ask "and what if it were zero?" That is exactly
+    /// how an upright Earth survived twenty days of a passing suite.
+    #[test]
+    fn the_seasons_vanish_when_the_tilt_does() {
+        // Four dates across a year, and latitudes from equator to well inside the Arctic.
+        const JAN: f64 = 1_704_067_200.0; // 2024-01-01
+        const APR: f64 = 1_711_929_600.0;
+        const JUL: f64 = 1_719_792_000.0;
+        const OCT: f64 = 1_727_740_800.0;
+
+        for lat in [0.0, 23.5, 45.0, 60.0, 70.0] {
+            for t in [JAN, APR, JUL, OCT] {
+                // ★ AN UPRIGHT EARTH: the sun sits on the equator all year, every day is 12 hours
+                // everywhere, and there is no season to be part-way through.
+                let (dec, _) = crate::orbit::solar_declination_ra_at_obliquity(t, 0.0);
+                assert!(
+                    dec.abs() < 1.0e-12,
+                    "with no tilt the sun must never leave the equator: dec {dec:.3e} rad at \
+                     lat {lat}, t {t}"
+                );
+                let flat = crate::solar::senescence_fraction_at_obliquity(lat, t, 0.0);
+                assert!(
+                    flat.abs() < 1.0e-9,
+                    "an untilted Earth has no season anywhere: senescence {flat:.6} at lat {lat}"
+                );
+            }
+        }
+
+        // ★★ AND THE REAL EARTH DOES HAVE ONE — otherwise the assertion above would be satisfied by a
+        // function that always returns zero, which is the failure mode this whole row is about.
+        let eps = crate::orbit::obliquity_rad(JUL);
+        let north_summer = crate::solar::senescence_fraction_at_obliquity(60.0, JUL, eps);
+        let north_winter = crate::solar::senescence_fraction_at_obliquity(60.0, JAN, eps);
+        println!(
+            "lat 60: senescence {north_summer:.3} in July vs {north_winter:.3} in January \
+             (tilt {:.3} deg)",
+            eps.to_degrees()
+        );
+        assert!(
+            north_winter - north_summer > 0.5,
+            "a tilted Earth must show a real season at 60 deg: {north_summer:.3} -> {north_winter:.3}"
+        );
+
+        // ★ The tropics barely senesce even WITH the tilt, which the model predicts for free and is
+        // why the counterfactual above is a meaningful control rather than a tautology.
+        let tropics = crate::solar::senescence_fraction_at_obliquity(0.0, JAN, eps);
+        assert!(
+            tropics.abs() < 1.0e-9,
+            "the equator has no season either way: {tropics:.6}"
+        );
+    }
+}
