@@ -1138,6 +1138,31 @@ impl Assembly {
         self.mesh_damaged(mats, segments, None)
     }
 
+    /// ★★★ **THE SAME MESH, IN THE SEASON IT IS ACTUALLY IN** (docs/46 row 58).
+    ///
+    /// Row 58: *"THE GROUND KNOWS WHAT MONTH IT IS AND THE PLANTS DO NOT."* `SurfaceSampler` carries
+    /// `at_epoch`, so the ground's albedo answers for the season — that is what the phenology work
+    /// built. This took `mats[mi].albedo` flat, with no clock anywhere in its signature, so every
+    /// plant was drawn in its summer colours on every date.
+    ///
+    /// `turned` is the fraction of this plant whose chlorophyll is spent —
+    /// [`crate::solar::senescence_fraction`], which has existed and been tested since the phenology
+    /// work and reached NOTHING. So did [`Material::albedo_when_turned`], which mixes the two measured
+    /// spectra and puts the result through the CIE observer. Both halves were built; only the wire
+    /// between them was missing, which is the pattern docs/48 names.
+    ///
+    /// A material with no senescent spectrum returns its ordinary albedo whatever the season, so a
+    /// cannon does not turn amber in October and an evergreen does not turn at all — the model's own
+    /// testable claim rather than a special case.
+    pub fn mesh_in_season(
+        &self,
+        mats: &[Material],
+        segments: usize,
+        turned: f64,
+    ) -> crate::mesher::Mesh {
+        self.mesh_seasoned(mats, segments, None, turned)
+    }
+
     /// ★★ **THE SAME MESH, MINUS WHAT IS GONE** (docs/70). `integrity[i] <= 0` means that part no
     /// longer exists, so it is not drawn — the render REPORTING the model's damage, which is Law VI in
     /// the direction it is meant to run. A shorter slice than `parts` leaves the rest pristine, exactly
@@ -1152,6 +1177,20 @@ impl Assembly {
         segments: usize,
         integrity: Option<&[f64]>,
     ) -> crate::mesher::Mesh {
+        // ★ Summer, because a caller that has not said when it is cannot be given a season. The two
+        // callers that KNOW their epoch use `mesh_in_season`; this keeps every other one — the cannon,
+        // the test fixtures — bit-identical to before (docs/46 row 58).
+        self.mesh_seasoned(mats, segments, integrity, 0.0)
+    }
+
+    /// [`mesh_damaged`] with the season named. The one place a part's colour is chosen.
+    pub fn mesh_seasoned(
+        &self,
+        mats: &[Material],
+        segments: usize,
+        integrity: Option<&[f64]>,
+        turned: f64,
+    ) -> crate::mesher::Mesh {
         let mut out = crate::mesher::Mesh {
             vertices: Vec::new(),
             indices: Vec::new(),
@@ -1163,7 +1202,7 @@ impl Assembly {
             let Some(mi) = mats.iter().position(|m| m.id == p.material) else {
                 continue; // an unknown material draws nothing rather than drawing a lie
             };
-            let (col, mat) = (mats[mi].albedo, mi as u32);
+            let (col, mat) = (mats[mi].albedo_when_turned(turned), mi as u32);
             let part = match p.shape {
                 Shape::Sphere { r } => crate::mesher::build_uv_sphere(r as f32, mat, col, 12, 20),
                 // A shell is drawn as its OUTER surface: from outside, a planet's crust is what you
@@ -3429,5 +3468,70 @@ mod roll_tests {
         .expect("turned");
         assert!((over.i_v_m4 - up.i_w_m4).abs() <= up.i_w_m4 * 1e-12);
         assert!((over.i_w_m4 - up.i_v_m4).abs() <= up.i_v_m4 * 1e-12);
+    }
+}
+
+/// ★★★ **THE PLANTS KNOW WHAT MONTH IT IS** (docs/46 row 58).
+#[cfg(test)]
+mod season_tests {
+    use super::*;
+
+    /// Row 58: *"THE GROUND KNOWS WHAT MONTH IT IS AND THE PLANTS DO NOT."* Both halves of the wiring
+    /// existed and were tested — `solar::senescence_fraction` and `Material::albedo_when_turned` — and
+    /// neither had a consumer. Only the wire was missing, which is why nothing failed.
+    ///
+    /// So this asserts the WIRE, at the level a picture would show: the mesh a plant draws with must
+    /// change colour with the season, and must NOT for something that has no senescent state.
+    #[test]
+    fn a_leaf_mesh_changes_colour_with_the_season_and_a_cannon_does_not() {
+        let mats = crate::materials::load();
+        let tuft = compiled::parse(compiled::GRASS_TUFT);
+
+        let summer = tuft.mesh_in_season(&mats, 6, 0.0);
+        let autumn = tuft.mesh_in_season(&mats, 6, 1.0);
+        assert_eq!(
+            summer.vertices.len(),
+            autumn.vertices.len(),
+            "the season changes colour, never geometry"
+        );
+        let (a, b) = (summer.vertices[0].col, autumn.vertices[0].col);
+        let moved: f32 = (0..3).map(|i| (a[i] - b[i]).abs()).sum();
+        println!("grass tuft: summer {a:?} -> autumn {b:?}  (channel sum moved {moved:.4})");
+        assert!(
+            moved > 0.01,
+            "a grass tuft must not be drawn in July colours in October: {a:?} vs {b:?}"
+        );
+
+        // ★ AND IT MUST BE MONOTONE THROUGH THE TURN — a half-turned footprint really does contain
+        // both kinds of leaf, so the mixture is what is physically there.
+        let mut prev = summer.vertices[0].col;
+        for t in [0.25, 0.5, 0.75, 1.0] {
+            let c = tuft.mesh_in_season(&mats, 6, t).vertices[0].col;
+            assert!(
+                (0..3).map(|i| (c[i] - prev[i]).abs()).sum::<f32>() > 0.0,
+                "the turn must be continuous, not a switch at one date"
+            );
+            prev = c;
+        }
+
+        // ★★ THE NEGATIVE CONTROL: a cannon has no senescent spectrum, so it does not turn amber in
+        // October. Without this the test would pass for a `mesh_in_season` that tinted everything.
+        let gun = compiled::parse(compiled::NAVAL_24PDR_GUN);
+        let (jul, oct) = (
+            gun.mesh_in_season(&mats, 8, 0.0).vertices[0].col,
+            gun.mesh_in_season(&mats, 8, 1.0).vertices[0].col,
+        );
+        assert_eq!(
+            jul, oct,
+            "bronze does not have a season: {jul:?} vs {oct:?}"
+        );
+
+        // ★ And the default path is unchanged: a caller that has not said when it is gets summer, so
+        // every existing scene and fixture draws exactly what it drew before.
+        assert_eq!(
+            tuft.mesh(&mats, 6).vertices[0].col,
+            summer.vertices[0].col,
+            "`mesh` must stay bit-identical to the old flat-albedo behaviour"
+        );
     }
 }

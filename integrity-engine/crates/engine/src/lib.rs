@@ -1579,10 +1579,23 @@ mod app {
             }
             let acc = crate::orbit::accelerations(&bodies);
             let initial_bodies = bodies.clone();
-            // Modern Earth: the measured sidereal day, spin axis ⊥ the orbital (x-y) plane.
-            let spin_l = glam::DVec3::new(0.0, 0.0, 1.0)
-                * (crate::tides::moment_of_inertia(earth_mass(), earth_radius_m())
-                    * (2.0 * std::f64::consts::PI / 86_164.0));
+            // ★★★ Modern Earth: the measured sidereal day, and an axis TILTED BY ITS OBLIQUITY.
+            //
+            // This used to read `DVec3::new(0.0, 0.0, 1.0)` under a comment saying "spin axis ⊥ the
+            // orbital (x-y) plane" — i.e. the Earth stood bolt upright while
+            // `orbit::solar_declination_ra` computed the seasons from a tilt of 23.439°. Two different
+            // Earths: the one the ephemeris believed in and the one the scene built (docs/46 row 39).
+            //
+            // Nothing caught it for twenty days because the seasonal tests read the ephemeris and
+            // never asked the body — they would have passed identically either way, which is what
+            // makes a test worthless rather than merely weak.
+            // The axis is an INITIAL CONDITION, so it is set at the epoch the scene starts at. The
+            // obliquity drifts 0.47 arcsec per year, i.e. 0.0013 degrees per decade — real, and far
+            // below anything visible, but asked for honestly rather than frozen at J2000.
+            let spin_l = crate::orbit::spin_axis_for_obliquity(crate::orbit::obliquity_rad(
+                crate::orbit::unix_now_seconds(),
+            )) * (crate::tides::moment_of_inertia(earth_mass(), earth_radius_m())
+                * (2.0 * std::f64::consts::PI / 86_164.0));
 
             // Body colours derived from a real composition, aggregated (docs/17) — NOT hand-picked.
             // Earth: ~71% ocean water, ~24% continental (granitic) rock, ~5% polar ice. This EXCLUDES
@@ -8306,6 +8319,12 @@ mod app {
                 vertices: Vec::new(),
                 indices: Vec::new(),
             };
+            // ★★★ WHEN THIS SCENE IS SET, asked of the ONE senescence model (docs/46 row 58).
+            // `solar::senescence_fraction` derives the fraction of chlorophyll spent from the local
+            // day length against its own annual extremes — so the tropics barely turn and the far
+            // north turns early and hard, both for free. It has been built and tested since the
+            // phenology work and had no consumer at all until now.
+            let turned = crate::solar::senescence_fraction(lat, self.celestial_epoch_s());
             let meshes: Vec<crate::mesher::Mesh> = self
                 .flora_kinds
                 .iter()
@@ -8315,7 +8334,12 @@ mod app {
                         "conifer-tree-spruce" => crate::assembly::compiled::CONIFER_TREE_SPRUCE,
                         _ => crate::assembly::compiled::GRASS_TUFT,
                     };
-                    crate::assembly::compiled::parse(txt).mesh(mats, 6)
+                    // ★★★ THE PLANTS NOW KNOW WHAT MONTH IT IS (docs/46 row 58). The ground has
+                    // answered for the season since the phenology work; this drew every plant in its
+                    // summer colours on every date, because `mesh` had no clock in its signature.
+                    // `solar::senescence_fraction` and `Material::albedo_when_turned` both existed,
+                    // both tested, and reached nothing — only the wire between them was missing.
+                    crate::assembly::compiled::parse(txt).mesh_in_season(mats, 6, turned)
                 })
                 .collect();
             for s in &sited {
@@ -8338,8 +8362,12 @@ mod app {
                             "conifer-tree-spruce" => crate::assembly::compiled::CONIFER_TREE_SPRUCE,
                             _ => crate::assembly::compiled::GRASS_TUFT,
                         };
-                        damaged =
-                            crate::assembly::compiled::parse(txt).mesh_damaged(mats, 6, Some(v));
+                        damaged = crate::assembly::compiled::parse(txt).mesh_seasoned(
+                            mats,
+                            6,
+                            Some(v),
+                            turned,
+                        );
                         &damaged
                     }
                 };

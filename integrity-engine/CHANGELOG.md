@@ -9,6 +9,15 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★ **The plants know what month it is** (docs/46 row 58). `Assembly::mesh_in_season` /
+  `mesh_seasoned` hand a mesh the season, and `build_flora` gets it from `solar::senescence_fraction`
+  — so a leaf and the ground it stands on can no longer disagree about the date. `mesh` and
+  `mesh_damaged` delegate with `turned = 0.0` and are bit-identical, so existing callers are
+  unaffected. **The colour change is verified in test and NOT yet visible in a rig shot**: at Galway
+  the two solstices differ by +61% brightness (sun elevation) and only 2.6% in hue, in the wrong
+  direction — recorded rather than claimed.
+- **Pinned-epoch worlds** `galway-june`, `galway-december` and `earth-solstice`, so a seasonal or
+  celestial claim can be photographed under a fixed clock instead of `now`.
 - ★★★ **`flexure::Compliance` — the de-resolved form of bending** (Law III). A type tabulates its own
   load→deflection response once; every instance reads the table, so cost scales with how many distinct
   loads a patch sees rather than how many bodies stand in it. **0.476% off the resolved answer with 12
