@@ -8319,6 +8319,12 @@ mod app {
                 vertices: Vec::new(),
                 indices: Vec::new(),
             };
+            // ★★★ WHEN THIS SCENE IS SET, asked of the ONE senescence model (docs/46 row 58).
+            // `solar::senescence_fraction` derives the fraction of chlorophyll spent from the local
+            // day length against its own annual extremes — so the tropics barely turn and the far
+            // north turns early and hard, both for free. It has been built and tested since the
+            // phenology work and had no consumer at all until now.
+            let turned = crate::solar::senescence_fraction(lat, self.celestial_epoch_s());
             let meshes: Vec<crate::mesher::Mesh> = self
                 .flora_kinds
                 .iter()
@@ -8328,7 +8334,12 @@ mod app {
                         "conifer-tree-spruce" => crate::assembly::compiled::CONIFER_TREE_SPRUCE,
                         _ => crate::assembly::compiled::GRASS_TUFT,
                     };
-                    crate::assembly::compiled::parse(txt).mesh(mats, 6)
+                    // ★★★ THE PLANTS NOW KNOW WHAT MONTH IT IS (docs/46 row 58). The ground has
+                    // answered for the season since the phenology work; this drew every plant in its
+                    // summer colours on every date, because `mesh` had no clock in its signature.
+                    // `solar::senescence_fraction` and `Material::albedo_when_turned` both existed,
+                    // both tested, and reached nothing — only the wire between them was missing.
+                    crate::assembly::compiled::parse(txt).mesh_in_season(mats, 6, turned)
                 })
                 .collect();
             for s in &sited {
@@ -8351,8 +8362,12 @@ mod app {
                             "conifer-tree-spruce" => crate::assembly::compiled::CONIFER_TREE_SPRUCE,
                             _ => crate::assembly::compiled::GRASS_TUFT,
                         };
-                        damaged =
-                            crate::assembly::compiled::parse(txt).mesh_damaged(mats, 6, Some(v));
+                        damaged = crate::assembly::compiled::parse(txt).mesh_seasoned(
+                            mats,
+                            6,
+                            Some(v),
+                            turned,
+                        );
                         &damaged
                     }
                 };

@@ -3,6 +3,48 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-24 — the plants learned what month it is, and the picture would not confirm it
+
+★★ **`docs/46` row 58 was "THE GROUND KNOWS WHAT MONTH IT IS AND THE PLANTS DO NOT."** `SurfaceSampler`
+carries `at_epoch`, so a mesh cell's albedo answers for the season; `Assembly::mesh` took `mats[mi].albedo`
+flat, with no clock anywhere in its signature. Two answers to *what colour is grass on this date*, drawn
+side by side in the same frame.
+
+**Only the wire was missing.** Both halves existed, were tested, and had no consumer between them —
+`solar::senescence_fraction(lat, t)` (chlorophyll spent, derived from local day length against its own
+annual extremes) and `Material::albedo_when_turned(turned)` (the two measured spectra mixed through the CIE
+observer). That is exactly the pattern `docs/48` names: physics built and verified, then wired into one
+place or none. `mesh_in_season`/`mesh_seasoned` are the wire; `build_flora` asks the one senescence model
+what date it is. `mesh` and `mesh_damaged` delegate with `turned = 0.0`, asserted bit-identical, so the
+cannon and every fixture are untouched.
+
+**Verified** with a negative control: a grass tuft's drawn colour moves with the season
+(summer `[0.095, 0.140, 0.063]` -> autumn `[0.123, 0.168, 0.066]`, continuous through the turn) and a
+bronze cannon does NOT, because it has no senescent spectrum. Without that second half the test would pass
+for a `mesh_in_season` that tinted everything. 642/642 native, `mod app` clean for wasm32.
+
+### ★★ And then the picture refused to confirm it
+
+The point of the preceding commit — `galway-june` and `galway-december`, two worlds identical but for a
+pinned epoch — was to make this claim checkable at all. So it was checked. Galway 53.27N, eye at 1.6 m,
+ground band, 14,250 samples:
+
+| | R | G | B | G/R |
+|---|---|---|---|---|
+| June solstice | 32.5 | 45.4 | 16.1 | 1.397 |
+| December solstice | 51.5 | 73.8 | 25.9 | 1.434 |
+
+**+61.0% brighter, and 2.6% GREENER — the wrong direction for autumn.** By eye, December looked paler and
+I read that as "turned"; the measurement says the frame is dominated by the very different sun elevation at
+that latitude, and what little the hue moved, it moved *against* senescence.
+
+So: **verified in code, NOT verified in the picture**, and recorded that way. Either that band is terrain
+albedo rather than flora, or the two seasonal paths disagree — it needs chasing, not asserting. Row 58 stays
+open as a picture claim. The pattern is the session's own: *almost every defect this month was in an
+instrument, not the physics*, and here the instrument was my eye on an uncontrolled comparison. Compounding
+it, and already catalogued: the measured senescent endmember is not fully cured grass (NEON sampled the
+growing season), so the turn is mild by construction.
+
 ## 2026-08-17 — the catalogue's restitutions were never sourced, and they were too low
 
 ★★★ **27 of 32 restitution values in `data/materials.json` were typed, not measured.** The pass began
