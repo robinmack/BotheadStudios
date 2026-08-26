@@ -9,6 +9,25 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The haystack re-measured with the new instrument** — and it is a scatter, not a heap: packing 0.0005
+  (0.7 kg/m³ against loose hay's 40), not quiet after 20 s. Centres of mass nearly still at 0.147 m/s
+  while tips move at 37.4 m/s: **rotation has no dissipation channel** (docs/46 row 72), because
+  `contact_accel` is fed centre-of-mass velocity rather than the velocity at the contact point.
+- `pile::Sample::peak_speed_ms` keeps its original meaning (fastest CENTRE OF MASS); the rotation-aware
+  tip-speed comparison is given only to the settle gauge.
+
+- ★★★ **A blade is a ribbon, and it can turn** (docs/46 rows 70, 60 step B). `Rod` gains its real
+  `width_m`/`thickness_m`, a broad-face normal, and `ang_vel`; drag now uses
+  `atmosphere::box_frontal_area_m2` with the sourced `FLAT_PLATE_NORMAL_DRAG_CD`. A blade's presented
+  area swings **10:1** with orientation where the old equal-volume capsule was isotropic, and its
+  terminal speed falls **7.23 → 2.05 m/s**. A blade stood on its end now falls over — from the floor's
+  own off-centre impulse, not from anything added. New: `pile::step_one_rod` (one integrator),
+  `pile::release_rods` (one release), `Rod::principal_inertia_kgm2`.
+- **`recohere::SettleGauge` now sees rotation** (docs/46 row 71). It measured linear speed only, so a
+  heap given the new rotational freedom could tumble in place and read as settled. Closed with the
+  gauge's own quiescence — a tip moving at `ω·L/2` is compared against the same threshold as a centre.
+- `pile::Sample` gains `lowest_end_m` and `peak_ang_speed_rads`.
+
 - ★★★ **A falling rod feels Earth's air, by the same law a meteor does** (docs/46 row 60 step A3).
   `pile::settle`'s `vel *= 1 - 2·dt` — a rate constant its own comment admitted was tuned for behaviour —
   is replaced by `atmosphere::drag_accel`, which the meteor path already used. New:

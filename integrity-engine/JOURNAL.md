@@ -3,6 +3,133 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-26 — the heap re-measured: a scatter of spinning blades
+
+Every packing figure this module had reported was taken through machinery since replaced — an invented
+drag, a member 212× too soft, a blade shaped like a wire, rods that could not turn, and a gauge blind to
+rotation. Re-taken with the new instrument:
+
+| | packing | bulk | quiet after 20 s | peak centre |
+|---|---|---|---|---|
+| 10 blades | 0.00053 | 0.7 kg/m³ | **false** | 0.065 m/s |
+| 20 blades | 0.00047 | 0.7 kg/m³ | **false** | 0.147 m/s |
+
+Loose hay is 40 kg/m³ (0.029 packing). **The heap is 55× too loose — it is a scatter, not a pile**, and it
+does not come to rest in 20 s of simulated time. That is not a regression: the test has been called
+`..._does_not_come_to_rest_yet` since 2026-08-15. What is new is that the negative is now trustworthy
+rather than inherited.
+
+### ★★★ The centres of mass are still, and the blades are spinning
+
+0.147 m/s of translation, and a TIP speed of 37.4 m/s — ω ≈ 214 rad/s. The members stopped moving and went
+on turning. **Row 72**: rotation has no dissipation channel. `granular::contact_accel` is fed `rod.vel`,
+the centre-of-mass velocity, where the physical quantity is the velocity at the CONTACT POINT, `v + ω × r`.
+A contact can therefore neither damp a spin nor be properly driven by one, and its `normal_damp` — which
+carries the material's own restitution — never sees the rotation at all. It is worst about the long axis,
+whose moment is 3.4e-10 kg·m² for this blade, so a tiny off-axis impulse spins it up enormously and nothing
+takes it back.
+
+★★ **Without row 71, landed an hour earlier, this heap would have reported `quiet true`** and been called
+settled at 55× too loose. The rotation-aware gauge is the only reason we know it isn't.
+
+### ★★ And I silently redefined a reported number
+
+The first re-measure printed "peak member 37.43 m/s" — impossible for a body the air caps near 2 m/s, and
+that impossibility is the only reason it was caught. Making the gauge rotation-aware, I had folded tip speed
+into `peak_speed_ms` as well, so a field that had always meant *the fastest centre of mass* quietly began
+meaning *the fastest point on any body*. Every earlier figure would have gone on looking comparable.
+
+`peak_speed_ms` now keeps its original meaning; the tip-speed comparison is computed separately and given
+only to the gauge, which is asking a different question. This is the same failure as inheriting a number
+from a replaced instrument — except I made the instrument and the number disagree inside one commit.
+
+### The instrument errors, since there were four in one day
+
+A `nohup` inside a backgrounded call reported exit 0 while cargo ran on for 19 more minutes; a `grep` in a
+background pipeline buffered the results and lost them to SIGTERM; the free-flight window was wrong twice
+(once counting the post-landing rest as flight, once fooled by a rebound). None touched the physics. All
+four looked like results.
+
+### What this says about order
+
+`CAP_S` is 20 s at a 1.2 µs step — **16.6 million iterations per run**, ~6 minutes for 20 blades. That cost
+comes from row 67's honest stiffness and it does not shrink with member count, so a pile cannot be debugged
+at this speed. **Row 69 now sits ahead of row 60 step C**: sub-stepping is not an optimisation here, it is
+the thing that makes the remaining work observable.
+
+## 2026-08-26 — a blade is a ribbon, and it can turn
+
+Two pieces of one thing (docs/46 rows 70 and 60 step B): a member's shape, and its ability to change
+which way that shape faces.
+
+### Row 70 — a flat blade was modelled as a round rod
+
+`rod_for` collapses a member to an **equal-volume capsule**, so the dry blade — a ribbon 3.03 mm wide and
+0.3 mm thick — became a cylinder of radius 0.538 mm. Volume is preserved; **presented area is not**, and
+area is what drag integrates.
+
+★ **The row's own headline number was wrong and the work corrected it.** It claimed "~7×", which compared
+a randomly oriented capsule against a broadside ribbon. Like for like:
+
+| | capsule | ribbon | |
+|---|---|---|---|
+| broadside | 3.774e-4 m² | 1.060e-3 m² | **2.81×** |
+| edge-on | 3.774e-4 m² | 1.050e-4 m² | **0.28×** |
+
+The real statement is not a single ratio. A cylinder is axisymmetric and shows the same area whichever way
+it rolls; the ribbon swings **10:1** with orientation, and that swing is what fluttering is made of.
+
+Landed: `atmosphere::box_frontal_area_m2` (exact box projection) and `FLAT_PLATE_NORMAL_DRAG_CD` = 1.98,
+sourced, with its edge-on over-estimate declared in the open. `Rod` carries `width_m`, `thickness_m` and a
+broad-face normal drawn from its own seeded roll — without that, every blade would have been released at
+the same attitude. `radius_m` survives as the CONTACT proxy only, and says so.
+
+**Result: the blade's terminal speed falls 7.23 → 2.05 m/s**, which is where real straw drifts down, and
+agreement with the closed form *improved* to 0.121%.
+
+### Row 60 step B — rods can turn
+
+`Rod` had a position and a velocity and no angular state, so its `axis` was fixed for life. A pile of
+members that cannot turn is not a pile of blades; it is a pile of arrows all still pointing the way they
+were released, which is why the packing it reported was never going to be straw's.
+
+**Nothing was added to make a blade fall over.** Gravity exerts no torque about a uniform body's own centre
+of mass. The toppling comes from the floor pushing on the rod's lower END — an impulse that was always
+off-centre by up to a half-length, and whose moment arm the old code took and threw away. Measured: **3.00°
+from vertical to 81° in 0.352 s**, |ω| 0 → 5.5 rad/s, against a natural toppling timescale `√(L/g)` of
+0.19 s.
+
+`step_one_rod` is now the ONE integrator — what `settle_traced`'s loop calls and what a single-rod test
+calls. A second stepper for the single-rod case is how the two drift, and the drift stays invisible until a
+pile disagrees with the blade it is made of.
+
+### ★★ Step B put a hole in the settle gauge, and it is now row 71
+
+`recohere::SettleGauge` was built when members could only translate, so it asks exactly one question: is
+anything MOVING, by linear speed? The moment rods could rotate, a heap could tumble in place with every
+centre of mass sitting still and the gauge would call it quiet. **A capability added on one side of the
+engine silently widened a blind spot on the other, and the suite would have stayed green through it.**
+
+Closed with no new dial, because the gauge already owns one: a rod turning at ω has a tip moving at `ω·L/2`,
+and a tip below the quiescent speed is as motionless as a centre below it. The general lesson is the one to
+keep — **when a body gains a degree of freedom, every gauge that decides whether it is at rest has to be
+re-asked.** Bending (row 60 step 3) will pose it again.
+
+### ★ The free-flight criterion was wrong twice before it was right
+
+`height_m > 2·radius` counted the whole post-landing rest as flight, because `height_m` is the heap's TOP
+and not its clearance. "While still descending" then broke the moment rods could topple, since toppling
+lowers the top exactly as falling does — and worse, a blade that hit and REBOUNDED sat back above the
+clearance threshold at 1.71 mm with its speed collapsed to 0.004 m/s, which is what produced a 99.588%
+"disagreement" that was entirely instrumental.
+
+The third version needs no threshold and cannot be fooled: **ω is identically zero until first contact**,
+because gravity acts at the centre of mass and drag at the area centroid, so neither exerts a torque. Both
+new observables — `Sample::lowest_end_m` and `Sample::peak_ang_speed_rads` — exist because a test was
+inferring something the trace could simply report.
+
+**Verified.** 649/649 native, 29 skipped, `mod app` clean for wasm32.
+
 ## 2026-08-26 — the blade falls through Earth's air, by the same law a meteor does
 
 ★★★ **`pile::settle` invented its own drag, and the engine already had a real one.** The integrator

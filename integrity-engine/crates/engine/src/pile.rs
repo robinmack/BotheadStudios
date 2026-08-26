@@ -616,7 +616,10 @@ pub fn settle_traced(
     // The engine's own contact, for THIS material — the same call a sand grain gets. The member's own
     // mass is what sets the contact stiffness per unit mass, so a blade and a boulder of the same
     // substance are as stiff as their masses make them.
-    let (width, thickness) = cross_section_for(member)?;
+    // Not bound for use here — `release_rods` reads the cross-section itself. Called for its REFUSAL:
+    // a member with no cross-section is not a rod, and `settle` should decline rather than build a
+    // pile of degenerate ribbons that present no area to the air.
+    cross_section_for(member)?;
     let member_mass = member.mass_kg(mats).ok()?.max(1e-12);
     let contact = crate::granular::contact_from_material(m, radius, member_mass);
 
@@ -763,15 +766,24 @@ pub fn settle_traced(
         // The criterion needs no new dial, because the gauge already owns one: a rod turning at ω has
         // a TIP moving at `ω·L/2`, and a tip below the quiescent speed is as motionless as a centre
         // below it. So the speed the gauge is shown is whichever of the two is larger.
-        peak_speed = rods
+        // ★ `peak_speed` keeps its ORIGINAL meaning — the fastest CENTRE OF MASS — because it is a
+        // reported field and silently changing what a number means is how old figures go on looking
+        // comparable when they are not. Measured the wrong way first: folding tip speed into this
+        // field made a 20-blade heap report "37.43 m/s", which is impossible for a body the air caps
+        // at ~2 m/s, and the impossible number was the only reason the redefinition was noticed.
+        peak_speed = rods.iter().map(|r| r.vel.length()).fold(0.0f64, f64::max);
+        // What the GAUGE is asked is a different question: is anything moving AT ALL? A rod turning
+        // at ω has a tip moving at `ω·L/2`, and a heap tumbling in place with every centre still is
+        // not settled. That comparison needs no new dial — it reuses the gauge's own quiescent speed.
+        let peak_point_speed = rods
             .iter()
             .map(|r| r.vel.length().max(r.ang_vel.length() * r.half_length_m))
             .fold(0.0f64, f64::max);
-        if peak_speed >= gauge.moving_above(gravity_ms2 as f32) as f64 {
+        if peak_point_speed >= gauge.moving_above(gravity_ms2 as f32) as f64 {
             disturbed = true;
         }
         if disturbed {
-            gauge.observe(peak_speed as f32, gravity_ms2 as f32, dt as f32);
+            gauge.observe(peak_point_speed as f32, gravity_ms2 as f32, dt as f32);
         }
         // ★★★ **QUIET IS NOT THE SAME AS SUPPORTED, AND DAMPING CAN FAKE THE FIRST.**
         //
@@ -1110,6 +1122,50 @@ mod tests {
              terminal speed.",
             100.0 * worst
         );
+    }
+
+    /// ★★★ **RE-MEASURE THE HEAP WITH THE NEW INSTRUMENT** (docs/46 rows 67, 70, 71, 60 step A3/B).
+    ///
+    /// Every packing figure this module has ever reported was taken through machinery that has since
+    /// been replaced: an invented `vel *= 1 − 2·dt` drag, a member 212× too soft, a blade shaped like a
+    /// wire instead of a ribbon, rods that could not turn, and a settle gauge blind to rotation. Those
+    /// numbers are not necessarily wrong, but they were read off an instrument that no longer exists,
+    /// so they are re-taken here rather than inherited.
+    ///
+    /// ★★ **At a member count that FINISHES, and that is the honest caveat.** The 400-blade run this
+    /// module's headline test uses did not complete in 19 minutes of release-build wall clock and was
+    /// abandoned — exactly what `docs/46` row 69 predicts, since row 67's honest stem stiffness cut the
+    /// timestep 194× and the neighbour loop is O(n²) on top. Row 60 step 1 established that packing
+    /// CONVERGES with member count, which is what makes a smaller count a real measurement instead of a
+    /// smaller one; but the convergence was itself measured with the old instrument, so treat these as
+    /// the new baseline rather than as comparable to the old figures.
+    #[test]
+    #[ignore]
+    fn re_measure_the_heap_with_the_new_instrument() {
+        let mats = crate::materials::load();
+        let blade = crate::assembly::compiled::parse(crate::assembly::compiled::GRASS_BLADE_DRY);
+        let (length, radius) = rod_for(&blade).expect("rod");
+        let rho = sea_level_air(&mats);
+        println!(
+            "dry blade: {length:.3} m · capsule r {:.4} mm · air {rho:.4} kg/m³",
+            radius * 1000.0
+        );
+        for n in [10usize, 20] {
+            match settle(&blade, &mats, n, 9.81, rho, 20260810) {
+                Some(s) => println!(
+                    "  {n:3} blades -> packing {:.5} ({:.1} kg/m³ at straw's 1400) · {:.4} m tall · \
+                     quiet {} after {:.3} s · peak member {:.5} m/s",
+                    s.packing,
+                    s.packing * 1400.0,
+                    s.height_m,
+                    s.quiet,
+                    s.elapsed_s,
+                    s.peak_speed_ms
+                ),
+                None => println!("  {n:3} blades -> no heap"),
+            }
+        }
+        println!("  (loose hay is 40 kg/m³ = 0.029 packing; a field bale 100 = 0.071)");
     }
 
     /// ★★★ **DROP THE BLADES AND SEE WHAT FORMS** (docs/71 §3b) — Robin's own idea, measured.
