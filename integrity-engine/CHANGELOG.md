@@ -9,6 +9,15 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★★ **A falling rod feels Earth's air, by the same law a meteor does** (docs/46 row 60 step A3).
+  `pile::settle`'s `vel *= 1 - 2·dt` — a rate constant its own comment admitted was tuned for behaviour —
+  is replaced by `atmosphere::drag_accel`, which the meteor path already used. New:
+  `atmosphere::CYLINDER_CROSSFLOW_DRAG_CD` (1.2, sourced) and `atmosphere::capsule_frontal_area_m2`.
+  **Breaking:** `pile::settle` and `settle_traced` take an `air_density_kgm3` argument; `0.0` is a vacuum.
+  Verified against the closed form `v(t) = v_t·tanh(g t / v_t)` to **1.471%**.
+- **Recorded, not fixed** (docs/46 row 70): `rod_for` models a flat blade as an equal-volume capsule, which
+  preserves volume but not presented area — and area is what drag integrates.
+
 - **Corrected** (docs/46 row 69): the haystack does have a test — `#[ignore]`d, so outside the default
   suite. The real finding is that row 67's honest stem stiffness shrinks `pile::settle`'s timestep
   **194×** (2.3494e-4 s → 1.2084e-6 s), taking that test from seconds to over ten minutes. Recorded with
