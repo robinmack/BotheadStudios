@@ -110,7 +110,17 @@ pub struct Rod {
     /// Unit direction of the long axis.
     pub axis: DVec3,
     pub half_length_m: f64,
+    /// Equal-volume capsule radius — **the CONTACT proxy only** (docs/46 row 70). Segment-segment
+    /// closest approach is what the pile's collision uses, and a capsule is what that solves against.
+    /// It is NOT what the air sees; see `width_m`.
     pub radius_m: f64,
+    /// ★ **The member's REAL cross-section** — a blade is a ribbon, not a wire. Volume is what the
+    /// capsule preserves and AREA is what drag integrates, so aerodynamics asks these instead.
+    pub width_m: f64,
+    pub thickness_m: f64,
+    /// Unit normal of the broad face, perpendicular to `axis`. With `axis` this fixes the ribbon's
+    /// orientation, which is the whole reason its presented area can swing 10:1 as it falls.
+    pub normal: DVec3,
     pub vel: DVec3,
 }
 
@@ -150,6 +160,25 @@ pub fn rod_for(member: &Assembly) -> Option<(f64, f64)> {
     // π r² L = matter ⇒ the capsule carries exactly what the member does.
     let radius = (matter / (std::f64::consts::PI * length)).sqrt();
     Some((length, radius))
+}
+
+/// **The member's real cross-section**, `(width_m, thickness_m)` — the two dimensions that are not its
+/// length, taken from its own parts rather than from an equal-volume fiction (docs/46 row 70).
+///
+/// Width is summed across parts (a fresh blade is lamina + midrib + lamina, side by side) and thickness
+/// is the largest any part has, so a ribbon with a rib down it is as thick as the rib.
+pub fn cross_section_for(member: &Assembly) -> Option<(f64, f64)> {
+    let mut width = 0.0;
+    let mut thickness: f64 = 0.0;
+    for p in &member.parts {
+        let h = p.shape.half_extents_m();
+        let mut d = [2.0 * h.x, 2.0 * h.y, 2.0 * h.z];
+        d.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        // d[0] is the length; the other two are the cross-section.
+        width += d[1];
+        thickness = thickness.max(d[2]);
+    }
+    (width > 0.0 && thickness > 0.0).then_some((width, thickness))
 }
 
 /// The closest points on two segments, and the distance between them. Standard segment–segment
@@ -305,6 +334,57 @@ fn unit(seed: u64, i: u64, k: u64) -> f64 {
 ///
 /// This is a BUILD-TIME cost, not a frame cost — identical until damaged means every bale in a world
 /// is the same settled heap until something happens to one, so the simulation runs once per TYPE.
+/// ★ **THE RELEASE — one owner.** `settle_traced` drops members with these positions and
+/// orientations, and a test that wants to know what a member was given must ask HERE rather than
+/// rebuild the seeded draw for itself. It was briefly rebuilt in a test, which is a second
+/// implementation of the release and would have drifted the first time either changed.
+pub fn release_rods(member: &Assembly, count: usize, seed: u64) -> Option<Vec<Rod>> {
+    let (length, radius) = rod_for(member)?;
+    let (width, thickness) = cross_section_for(member)?;
+    let spread = length * 0.1;
+    let rods: Vec<Rod> = (0..count)
+        .map(|i| {
+            let i = i as u64;
+            let (u1, u2, u3) = (unit(seed, i, 1), unit(seed, i, 2), unit(seed, i, 3));
+            let r = spread * u1.sqrt();
+            let a = u2 * std::f64::consts::TAU;
+            // Orientation on the sphere, uniformly — a dropped blade has no preferred direction.
+            let z = 2.0 * u3 - 1.0;
+            let phi = unit(seed, i, 4) * std::f64::consts::TAU;
+            let s = (1.0 - z * z).max(0.0).sqrt();
+            Rod {
+                // ★ Released just above the floor, not in a tower. MEASURED the other way first: a
+                // column `count`-blades tall is seven metres, and at this contact's stable timestep
+                // 4,000 steps is 0.94 s — less than the fall takes — so the "heap" was still a cloud
+                // at 0.0001 packing. A release height of a couple of blade lengths falls in ~0.4 s.
+                centre: DVec3::new(
+                    r * a.cos(),
+                    radius + unit(seed, i, 5) * length * 2.0,
+                    r * a.sin(),
+                ),
+                axis: DVec3::new(s * phi.cos(), z, s * phi.sin()).normalize(),
+                half_length_m: length * 0.5,
+                radius_m: radius,
+                width_m: width,
+                thickness_m: thickness,
+                // ★ ROLL about the long axis, from its own draw of the seeded stream. A blade released
+                // face-up and one released edge-up are different blades to the air (10:1 in presented
+                // area), so leaving this fixed would have quietly given every blade the same attitude.
+                normal: {
+                    let ax = DVec3::new(s * phi.cos(), z, s * phi.sin()).normalize();
+                    let seed_v = if ax.x.abs() < 0.9 { DVec3::X } else { DVec3::Y };
+                    let u = ax.cross(seed_v).normalize();
+                    let v = ax.cross(u);
+                    let roll = unit(seed, i, 6) * std::f64::consts::TAU;
+                    (u * roll.cos() + v * roll.sin()).normalize()
+                },
+                vel: DVec3::ZERO,
+            }
+        })
+        .collect();
+    Some(rods)
+}
+
 pub fn settle(
     member: &Assembly,
     mats: &[Material],
@@ -388,6 +468,7 @@ pub fn settle_traced(
     // The engine's own contact, for THIS material — the same call a sand grain gets. The member's own
     // mass is what sets the contact stiffness per unit mass, so a blade and a boulder of the same
     // substance are as stiff as their masses make them.
+    let (width, thickness) = cross_section_for(member)?;
     let member_mass = member.mass_kg(mats).ok()?.max(1e-12);
     let contact = crate::granular::contact_from_material(m, radius, member_mass);
 
@@ -397,34 +478,8 @@ pub fn settle_traced(
     // released over a disc wider than a blade is long, 400 blades settled at 0.0005, which is a
     // measurement of how thinly they were scattered rather than of how they pack. A point source lets
     // the pile spread to the angle the contact law gives it.
-    let spread = length * 0.1;
-    let mut rods: Vec<Rod> = (0..count)
-        .map(|i| {
-            let i = i as u64;
-            let (u1, u2, u3) = (unit(seed, i, 1), unit(seed, i, 2), unit(seed, i, 3));
-            let r = spread * u1.sqrt();
-            let a = u2 * std::f64::consts::TAU;
-            // Orientation on the sphere, uniformly — a dropped blade has no preferred direction.
-            let z = 2.0 * u3 - 1.0;
-            let phi = unit(seed, i, 4) * std::f64::consts::TAU;
-            let s = (1.0 - z * z).max(0.0).sqrt();
-            Rod {
-                // ★ Released just above the floor, not in a tower. MEASURED the other way first: a
-                // column `count`-blades tall is seven metres, and at this contact's stable timestep
-                // 4,000 steps is 0.94 s — less than the fall takes — so the "heap" was still a cloud
-                // at 0.0001 packing. A release height of a couple of blade lengths falls in ~0.4 s.
-                centre: DVec3::new(
-                    r * a.cos(),
-                    radius + unit(seed, i, 5) * length * 2.0,
-                    r * a.sin(),
-                ),
-                axis: DVec3::new(s * phi.cos(), z, s * phi.sin()).normalize(),
-                half_length_m: length * 0.5,
-                radius_m: radius,
-                vel: DVec3::ZERO,
-            }
-        })
-        .collect();
+    let rods_v = release_rods(member, count, seed)?;
+    let mut rods: Vec<Rod> = rods_v;
 
     // ★★★ **A CONTACT HAS TWO TIMESCALES AND THIS RULE USED TO SEE ONLY ONE.**
     //
@@ -557,10 +612,16 @@ pub fn settle_traced(
             // `air_density_kgm3 == 0.0` is a vacuum and costs nothing — the Moon's haystack, if anyone
             // builds one, gets no drag rather than a smaller fudge.
             if air_density_kgm3 > 0.0 {
-                let area = crate::atmosphere::capsule_frontal_area_m2(
-                    2.0 * r.half_length_m,
-                    r.radius_m,
-                    r.axis,
+                // ★★★ ASK THE MATTER, NOT A PROXY (docs/46 row 70). The capsule in `radius_m` is the
+                // CONTACT shape; the air meets a ribbon. Exact box projection over the rod's own
+                // frame, so a blade falling face-on and the same blade edge-on differ by 10:1 — which
+                // is what fluttering is made of.
+                let along = r.axis.normalize_or(DVec3::X);
+                let n = (r.normal - along * along.dot(r.normal)).normalize_or(DVec3::Y);
+                let w = along.cross(n);
+                let area = crate::atmosphere::box_frontal_area_m2(
+                    DVec3::new(2.0 * r.half_length_m, r.width_m, r.thickness_m),
+                    [along, w, n],
                     r.vel,
                 );
                 r.vel += crate::atmosphere::drag_accel(
@@ -568,7 +629,7 @@ pub fn settle_traced(
                     r.vel,
                     area,
                     member_mass,
-                    crate::atmosphere::CYLINDER_CROSSFLOW_DRAG_CD,
+                    crate::atmosphere::FLAT_PLATE_NORMAL_DRAG_CD,
                 ) * dt;
             }
             r.centre += r.vel * dt;
@@ -759,12 +820,27 @@ mod tests {
             flying.len()
         );
 
-        // The rod falls straight down and does not rotate, so its presented area is fixed. Take it
-        // from the same geometry the integrator used.
-        let axis = rods_axis_for_seed(&blade, &mats, g, rho, 20260826);
-        let area = crate::atmosphere::capsule_frontal_area_m2(length, radius, axis, DVec3::NEG_Y);
+        // ★ ASK THE RELEASE what this blade was actually given, rather than rebuilding the seeded
+        // draw here — a second implementation of the release would drift the moment either changed.
+        // The rod does not rotate yet (row 60 step B), so its presented area is fixed through the fall.
+        let released = release_rods(&blade, 1, 20260826).expect("one rod");
+        let r0 = &released[0];
+        let along = r0.axis.normalize_or(DVec3::X);
+        let n = (r0.normal - along * along.dot(r0.normal)).normalize_or(DVec3::Y);
+        let w = along.cross(n);
+        let area = crate::atmosphere::box_frontal_area_m2(
+            DVec3::new(2.0 * r0.half_length_m, r0.width_m, r0.thickness_m),
+            [along, w, n],
+            DVec3::NEG_Y,
+        );
         let v_t =
-            (2.0 * mass * g / (rho * crate::atmosphere::CYLINDER_CROSSFLOW_DRAG_CD * area)).sqrt();
+            (2.0 * mass * g / (rho * crate::atmosphere::FLAT_PLATE_NORMAL_DRAG_CD * area)).sqrt();
+        // What the retired equal-volume capsule would have shown, for the record.
+        let cap = crate::atmosphere::capsule_frontal_area_m2(length, radius, along, DVec3::NEG_Y);
+        println!(
+            "  the retired capsule would have presented {cap:.4e} m² ({:.2}x)",
+            cap / area
+        );
         println!(
             "dry blade: {length:.3} m x r {radius:.4e} m · mass {mass:.4e} kg · air {rho:.4} kg/m³",
         );
@@ -802,21 +878,6 @@ mod tests {
              terminal speed.",
             100.0 * worst
         );
-    }
-
-    /// The axis the seeded release actually gave the single rod — so the test measures the geometry
-    /// the integrator saw rather than one it assumed.
-    fn rods_axis_for_seed(
-        member: &Assembly,
-        mats: &[Material],
-        g: f64,
-        rho: f64,
-        seed: u64,
-    ) -> DVec3 {
-        let _ = (member, mats, g, rho);
-        // The release orients from the same seeded stream; recover it the way `settle_traced` builds it.
-        let (u1, u2, u3) = (unit(seed, 0, 1), unit(seed, 0, 2), unit(seed, 0, 3));
-        DVec3::new(u1 * 2.0 - 1.0, u2 * 2.0 - 1.0, u3 * 2.0 - 1.0).normalize_or(DVec3::X)
     }
 
     /// ★★★ **DROP THE BLADES AND SEE WHAT FORMS** (docs/71 §3b) — Robin's own idea, measured.
@@ -1284,6 +1345,9 @@ mod tests {
             axis: DVec3::X, // lying flat, so centre height IS the lowest end's height
             half_length_m: 0.175,
             radius_m: radius,
+            width_m: 2.0 * radius,
+            thickness_m: 0.5 * radius,
+            normal: DVec3::Y,
             vel: DVec3::new(0.0, -1.0, 0.0), // driving downward into the floor
         };
         let hit = floor_contact(&sunk, radius, contact.friction);
@@ -1325,6 +1389,9 @@ mod tests {
             axis: DVec3::Y,
             half_length_m: length * 0.5,
             radius_m: radius,
+            width_m: 2.0 * radius,
+            thickness_m: 0.5 * radius,
+            normal: DVec3::Y,
             vel: DVec3::ZERO,
         };
         let want = blade.matter_volume_m3();

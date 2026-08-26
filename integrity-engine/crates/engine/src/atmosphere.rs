@@ -222,6 +222,42 @@ pub fn air_density_at(surface_pressure: f64, air: &Material, temp_k: f64, g: f64
 /// flow is simulated.
 pub const CYLINDER_CROSSFLOW_DRAG_CD: f64 = 1.2;
 
+/// **Drag coefficient of a thin flat plate held normal to the flow**, dimensionless.
+///
+/// 1.98 is the classical high-aspect-ratio value (White, *Fluid Mechanics*, Table 7.3; Hoerner ch. 3).
+/// A grass blade is `L/W ≈ 115`, which is firmly in that regime — a plate that long behaves as
+/// two-dimensional, with no end-flow relief to lower it toward the ~1.17 of a square.
+///
+/// ★ **Declared limitation, in the open:** this is the coefficient for the BROADSIDE case, and it is
+/// used at every orientation while [`box_frontal_area_m2`] carries the angle. Area is the dominant
+/// term — it swings 10:1 for a blade — but a truly edge-on plate is also more streamlined than 1.98
+/// admits, so edge-on drag is over-estimated. The resolved computation that retires both this and
+/// [`drag_accel`]'s `c_d` is the same one: the pressure field of [`AirField`] parcels around the body.
+pub const FLAT_PLATE_NORMAL_DRAG_CD: f64 = 1.98;
+
+/// **The area a box presents to a flow**, m² — exact, for any orientation.
+///
+/// `dims` are the edge lengths along the three orthonormal `axes`. The projection of a box onto a
+/// direction is the sum of its three face pairs, each weighted by how squarely it faces the flow:
+///
+/// ```text
+/// A(d) = dy·dz·|a₀·d| + dz·dx·|a₁·d| + dx·dy·|a₂·d|
+/// ```
+///
+/// ★★ **This is what a ribbon needs and a capsule cannot give.** A cylinder is axisymmetric, so it
+/// shows the same area whichever way it rolls; a 0.35 × 0.003 m blade shows **1.06e-3 m² broadside and
+/// 1.05e-4 m² edge-on, a 10:1 swing**. That swing IS fluttering — hay turns as it falls, and the drag
+/// it feels turns with it. An equal-volume capsule averages it away and the blade simply drops.
+pub fn box_frontal_area_m2(dims: glam::DVec3, axes: [glam::DVec3; 3], flow: glam::DVec3) -> f64 {
+    let f = flow.normalize_or_zero();
+    if f == glam::DVec3::ZERO {
+        return 0.0;
+    }
+    dims.y * dims.z * axes[0].normalize_or_zero().dot(f).abs()
+        + dims.z * dims.x * axes[1].normalize_or_zero().dot(f).abs()
+        + dims.x * dims.y * axes[2].normalize_or_zero().dot(f).abs()
+}
+
 /// **The area a capsule presents to a flow**, m² — cylinder body plus its two hemispherical caps.
 ///
 /// `A(θ) = 2·r·L·sin θ + π·r²`, where θ is the angle between the capsule's axis and the flow. It is
