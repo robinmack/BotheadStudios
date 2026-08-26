@@ -210,6 +210,40 @@ pub fn air_density_at(surface_pressure: f64, air: &Material, temp_k: f64, g: f64
 /// `c_d` is a DECLARED shape factor with its IOU: the resolved computation is the pressure field of
 /// [`AirField`] parcels flowing around the body, which yields the same force without anyone naming a
 /// coefficient. Deletable when the flow around that body is resolved.
+/// **Drag coefficient of a long circular cylinder in crossflow**, dimensionless.
+///
+/// 1.2 is the classical smooth-cylinder value over the wide Reynolds plateau `Re ≈ 10³–2×10⁵` that a
+/// falling straw, a twig or a dropped pole sits in (White, *Fluid Mechanics*, Table 7.2; Hoerner,
+/// *Fluid-Dynamic Drag*, ch. 3). Above the drag crisis at `Re ≈ 3×10⁵` it falls to ~0.3, which no
+/// blade of grass will ever reach — a 0.35 m straw at 2 m/s is `Re ≈ 70` on its diameter.
+///
+/// Same standing as [`SPHERE_DRAG_CD`] and carrying the same IOU that [`drag_accel`] declares: a
+/// coefficient is a stand-in for the resolved pressure field around the body, deletable the day that
+/// flow is simulated.
+pub const CYLINDER_CROSSFLOW_DRAG_CD: f64 = 1.2;
+
+/// **The area a capsule presents to a flow**, m² — cylinder body plus its two hemispherical caps.
+///
+/// `A(θ) = 2·r·L·sin θ + π·r²`, where θ is the angle between the capsule's axis and the flow. It is
+/// pure geometry and it carries the whole orientation dependence: broadside (`θ = 90°`) a 0.35 m straw
+/// shows ~600× the area it shows end-on, which is why hay flutters instead of dropping. Without this
+/// term a rod would fall at one rate no matter how it lay, and Law I says the matter decides.
+pub fn capsule_frontal_area_m2(
+    length_m: f64,
+    radius_m: f64,
+    axis: glam::DVec3,
+    flow: glam::DVec3,
+) -> f64 {
+    let cap = std::f64::consts::PI * radius_m * radius_m;
+    let (a, f) = (axis.normalize_or_zero(), flow.normalize_or_zero());
+    if a == glam::DVec3::ZERO || f == glam::DVec3::ZERO {
+        return cap;
+    }
+    // sin θ from |a × f|, which needs no branch on the sign of the dot product.
+    let sin_theta = a.cross(f).length().clamp(0.0, 1.0);
+    2.0 * radius_m * length_m * sin_theta + cap
+}
+
 pub fn drag_accel(rho: f64, vel: glam::DVec3, area: f64, mass: f64, c_d: f64) -> glam::DVec3 {
     let speed = vel.length();
     if speed <= 1.0e-12 || rho <= 0.0 || mass <= 0.0 {

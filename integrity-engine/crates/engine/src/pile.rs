@@ -310,9 +310,19 @@ pub fn settle(
     mats: &[Material],
     count: usize,
     gravity_ms2: f64,
+    air_density_kgm3: f64,
     seed: u64,
 ) -> Option<Settled> {
-    settle_traced(member, mats, count, gravity_ms2, seed, 0.0).map(|(s, _)| s)
+    settle_traced(
+        member,
+        mats,
+        count,
+        gravity_ms2,
+        air_density_kgm3,
+        seed,
+        0.0,
+    )
+    .map(|(s, _)| s)
 }
 
 /// One observation of a heap on its way down — what `settle` was doing while it ran.
@@ -362,6 +372,10 @@ pub fn settle_traced(
     mats: &[Material],
     count: usize,
     gravity_ms2: f64,
+    // Air density at the pile, kg/m³ — **0.0 is a vacuum**. The Earth assembly supplies this; the Moon
+    // supplies zero. A parameter and not a constant because whether there is air is a property of
+    // where the pile IS, not of piles.
+    air_density_kgm3: f64,
     seed: u64,
     trace_every_s: f64,
 ) -> Option<(Settled, Vec<Sample>)> {
@@ -520,12 +534,43 @@ pub fn settle_traced(
             // `floor_contact` — see its doc for the image-particle bug this replaces.
             let r = &mut rods[i];
             r.vel += acc * dt;
-            // ★ NUMERICAL damping only, and a RATE rather than a per-step factor — the physics of
-            // dissipation is the contact's own `normal_damp` and Coulomb friction. MEASURED the wrong
-            // way first: `vel *= 0.98` every step is 85 per second at this timestep, which held the
-            // blades in the air and produced a "heap" seven metres tall. 2/s is gentle enough to let
-            // them fall and firm enough to stop the explicit integrator ringing.
-            r.vel *= 1.0 - (2.0 * dt).min(0.5);
+            // ★★★ **THE AIR, AS THE SAME LAW A METEOR FEELS** (docs/46 row 60 step A3, Law II + V).
+            //
+            // This line used to read `r.vel *= 1.0 - (2.0 * dt).min(0.5)`, and its own comment admitted
+            // the tuning: *"2/s is gentle enough to let them fall and firm enough to stop the explicit
+            // integrator ringing."* A rate constant chosen for how the result behaves is a dial. It was
+            // also a SECOND answer to a question the engine already answers — `atmosphere::drag_accel`
+            // is real quadratic drag and the meteor path has used it all along. Two answers to *how
+            // much does air slow this down*, and the blade got the invented one.
+            //
+            // Robin, 2026-08-26, when I proposed simply deleting it: *"Are we forgetting air? It would
+            // be constant until it touches down IN A VACUUM… The Earth assembly supplies an
+            // atmosphere."* The fudge was not wrong to dissipate — it was wrong about WHY.
+            //
+            // ★ MEASURED, and it corrects a claim I made while writing this: the rate constant's
+            // terminal speed is `g/2 = 4.91 m/s`; real drag on the capsule as `rod_for` models it
+            // gives **7.23 m/s**; real drag on a TRUE 3 mm flat blade would give ~1.85 m/s. So the
+            // fudge was not "too fast" or "too slow" — it sat between two geometries and belonged to
+            // neither, which is what a number picked for behaviour looks like from the outside.
+            // The capsule/ribbon gap is its own defect and is filed separately (docs/46 row 70).
+            //
+            // `air_density_kgm3 == 0.0` is a vacuum and costs nothing — the Moon's haystack, if anyone
+            // builds one, gets no drag rather than a smaller fudge.
+            if air_density_kgm3 > 0.0 {
+                let area = crate::atmosphere::capsule_frontal_area_m2(
+                    2.0 * r.half_length_m,
+                    r.radius_m,
+                    r.axis,
+                    r.vel,
+                );
+                r.vel += crate::atmosphere::drag_accel(
+                    air_density_kgm3,
+                    r.vel,
+                    area,
+                    member_mass,
+                    crate::atmosphere::CYLINDER_CROSSFLOW_DRAG_CD,
+                ) * dt;
+            }
             r.centre += r.vel * dt;
 
             // ★★★ THE FLOOR, AS A CONSTRAINT. The `r.centre.y = radius; r.vel.y = max(0)` clamp that
@@ -652,6 +697,128 @@ pub fn settle_traced(
 mod tests {
     use super::*;
 
+    /// Air at the bottom of Earth's atmosphere, from the catalogue's own `air` and the standard
+    /// sea-level state — NOT a typed 1.225. The Earth assembly is what supplies air to anything
+    /// standing on it, and a haystack is standing on it.
+    fn sea_level_air(mats: &[Material]) -> f64 {
+        let air = mats
+            .iter()
+            .find(|m| m.id == "air")
+            .expect("air is catalogued");
+        crate::atmosphere::air_density_at(101_325.0, air, 288.15, 9.81, 0.0)
+    }
+
+    /// ★★★ **A FALLING ROD OBEYS THE SAME AIR A METEOR DOES** (docs/46 row 60 step A3, Laws II + V).
+    ///
+    /// ★★ **This test was WRONG on its first writing, and Robin caught the premise.** It asserted that
+    /// a rod in free flight conserves energy exactly, on the grounds that *"there is no air in this
+    /// world"*. There is: *"Are we forgetting air? It would be constant until it touches down IN A
+    /// VACUUM… The Earth assembly supplies an atmosphere."* A haystack stands on Earth, so its blades
+    /// fall through Earth's air, and an energy-conserving blade would have been the unphysical one.
+    ///
+    /// So the defect in `vel *= 1.0 - (2.0 * dt).min(0.5)` was never that it dissipated. It was that it
+    /// dissipated **by a rate constant chosen for behaviour** — its own comment said *"2/s is gentle
+    /// enough to let them fall and firm enough to stop the explicit integrator ringing"* — while
+    /// `atmosphere::drag_accel` sat in the tree implementing the real quadratic law, already used by
+    /// the meteor path. One question, *how much does air slow this down*, with two answers, and the
+    /// blade got the invented one. Deleting the fudge would have left a hole where physics belongs;
+    /// the fix is to wire the law that was already there.
+    ///
+    /// **The reference is closed-form.** A body released from rest into quadratic drag has
+    /// `v(t) = v_t · tanh(g·t / v_t)` with `v_t = √(2mg / ρ·C_d·A)` — exact, independent of this
+    /// integrator, and the only kind of check that can catch a plausible-looking wrong answer. The rod
+    /// does not rotate yet (row 60 step B), so `A` is constant through the fall and the form holds.
+    #[test]
+    fn a_falling_rod_obeys_the_same_air_a_meteor_does() {
+        let mats = crate::materials::load();
+        let blade = crate::assembly::compiled::parse(crate::assembly::compiled::GRASS_BLADE_DRY);
+        let (length, radius) = rod_for(&blade).expect("a blade is a rod");
+        let mass = blade.mass_kg(&mats).expect("a blade has a mass");
+        let rho = sea_level_air(&mats);
+        let g = 9.81;
+
+        let (_settled, samples) =
+            settle_traced(&blade, &mats, 1, g, rho, 20260826, 1.0e-3).expect("a single rod falls");
+
+        // Free flight is while it is still descending — a geometry-free criterion, and the first
+        // version of this test got it wrong: `Sample::height_m` is the HEAP's height (the top of the
+        // rod), NOT its clearance, so a landed blade still reports 0.0792 m and a
+        // `height_m > 2·radius` filter counted the whole post-landing rest as "flight".
+        let mut last_falling = 0usize;
+        for i in 1..samples.len() {
+            if samples[i].height_m < samples[i - 1].height_m - 1.0e-12 {
+                last_falling = i;
+            } else {
+                break;
+            }
+        }
+        let flying = &samples[..last_falling.saturating_sub(2)];
+        assert!(
+            flying.len() >= 8,
+            "need a real flight window, got {}",
+            flying.len()
+        );
+
+        // The rod falls straight down and does not rotate, so its presented area is fixed. Take it
+        // from the same geometry the integrator used.
+        let axis = rods_axis_for_seed(&blade, &mats, g, rho, 20260826);
+        let area = crate::atmosphere::capsule_frontal_area_m2(length, radius, axis, DVec3::NEG_Y);
+        let v_t =
+            (2.0 * mass * g / (rho * crate::atmosphere::CYLINDER_CROSSFLOW_DRAG_CD * area)).sqrt();
+        println!(
+            "dry blade: {length:.3} m x r {radius:.4e} m · mass {mass:.4e} kg · air {rho:.4} kg/m³",
+        );
+        println!(
+            "  presents {area:.4e} m² to the fall · terminal speed {v_t:.3} m/s \
+             (the retired fudge's was g/2 = {:.3} m/s)",
+            g / 2.0
+        );
+
+        let t0 = flying[0].t_s;
+        let mut worst = 0.0f64;
+        for s in flying.iter().skip(1) {
+            let want = v_t * ((g * (s.t_s - t0)) / v_t).tanh();
+            let err = (s.peak_speed_ms - want).abs() / want.max(1.0e-9);
+            worst = worst.max(err);
+        }
+        for s in flying.iter().skip(1).step_by((flying.len() / 5).max(1)) {
+            let want = v_t * ((g * (s.t_s - t0)) / v_t).tanh();
+            println!(
+                "  t {:.4} s · v {:.4} m/s · closed form {want:.4} m/s · {:+.2}%",
+                s.t_s,
+                s.peak_speed_ms,
+                100.0 * (s.peak_speed_ms - want) / want.max(1e-9)
+            );
+        }
+        println!(
+            "  worst disagreement with the closed form: {:.3}%",
+            100.0 * worst
+        );
+
+        assert!(
+            worst < 0.02,
+            "a falling rod must follow v(t) = v_t·tanh(g·t/v_t) — worst {:.3}% off. \
+             A rate constant cannot: it gives 1 − e^(−kt), a different function with a different \
+             terminal speed.",
+            100.0 * worst
+        );
+    }
+
+    /// The axis the seeded release actually gave the single rod — so the test measures the geometry
+    /// the integrator saw rather than one it assumed.
+    fn rods_axis_for_seed(
+        member: &Assembly,
+        mats: &[Material],
+        g: f64,
+        rho: f64,
+        seed: u64,
+    ) -> DVec3 {
+        let _ = (member, mats, g, rho);
+        // The release orients from the same seeded stream; recover it the way `settle_traced` builds it.
+        let (u1, u2, u3) = (unit(seed, 0, 1), unit(seed, 0, 2), unit(seed, 0, 3));
+        DVec3::new(u1 * 2.0 - 1.0, u2 * 2.0 - 1.0, u3 * 2.0 - 1.0).normalize_or(DVec3::X)
+    }
+
     /// ★★★ **DROP THE BLADES AND SEE WHAT FORMS** (docs/71 §3b) — Robin's own idea, measured.
     ///
     /// The question this answers is not "does it run" but **what density does a free heap of dry grass
@@ -682,7 +849,8 @@ mod tests {
             radius * 2000.0
         );
 
-        let settled = settle(&blade, &mats, 400, 9.81, 20260810).expect("a heap forms");
+        let settled =
+            settle(&blade, &mats, 400, 9.81, sea_level_air(&mats), 20260810).expect("a heap forms");
         println!(
             "settled heap: {} blades · {:.3e} m³ of straw in {:.3e} m³ · packing {:.4} \
              ({:.0} kg/m³) · {:.2} m tall · measured on {:.3} m cells",
@@ -849,8 +1017,8 @@ mod tests {
         // 1.44 s and a 200-rod heap in 0.80 s, but 400 still runs the full cap. The residual scales
         // with MEMBER COUNT, which is the signature of a rod-ROD problem rather than a floor one — so
         // the case worth tracing is the one that still misbehaves.
-        let (s, trace) =
-            settle_traced(&blade, &mats, 400, g, 20260810, 0.25).expect("a heap forms");
+        let (s, trace) = settle_traced(&blade, &mats, 400, g, sea_level_air(&mats), 20260810, 0.25)
+            .expect("a heap forms");
 
         let v_q = crate::recohere::quiescent_speed(g as f32, radius as f32) as f64;
         println!(
@@ -947,7 +1115,8 @@ mod tests {
         // becomes answerable and the large end is exactly where it is answered.
         let mut ladder = Vec::new();
         for n in [100usize, 200, 400] {
-            let s = settle(&blade, &mats, n, 9.81, 20260810).expect("a heap forms");
+            let s = settle(&blade, &mats, n, 9.81, sea_level_air(&mats), 20260810)
+                .expect("a heap forms");
             println!(
                 "{:5}   {:.5}   {:5.1}   {:.3} m   {:5.2}     {:5}   {:5.2} s   {:.4}    {:.3} m",
                 n,
@@ -1045,7 +1214,8 @@ mod tests {
     fn the_floor_the_settler_builds_can_only_pull_down() {
         let mats = crate::materials::load();
         let blade = crate::assembly::compiled::parse(crate::assembly::compiled::GRASS_BLADE_DRY);
-        let (_length, radius) = rod_for(&blade).expect("a blade is a rod");
+        let (length, radius) = rod_for(&blade).expect("a blade is a rod");
+        println!("dry blade rod: {length:.4} m long, radius {radius:.5e} m");
         let material = blade
             .dominant_material()
             .expect("a blade is made of something");

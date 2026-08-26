@@ -3,6 +3,59 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-26 — the blade falls through Earth's air, by the same law a meteor does
+
+★★★ **`pile::settle` invented its own drag, and the engine already had a real one.** The integrator
+carried `r.vel *= 1.0 - (2.0 * dt).min(0.5)` on every rod on every step, in contact or in clear air, and
+its own comment named the tuning out loud: *"2/s is gentle enough to let them fall and firm enough to stop
+the explicit integrator ringing."* A rate constant chosen for how the result behaves is a dial (Law V) —
+and it was a **second answer** to a question `atmosphere::drag_accel` has answered all along for meteors
+(Law II).
+
+### ★★ Robin caught the premise before the fix went in
+
+I wrote the failing test as *"a rod in free flight loses energy to nothing — there is no air in this
+world"*. There is: *"Wait, must it be? Are we forgetting air? It would be constant until it touches down IN
+A VACUUM… The Earth assembly supplies an atmosphere."*
+
+That reversed the whole shape of the work. The fudge was **never wrong to dissipate** — a haystack stands
+on Earth and its blades fall through Earth's air, so an energy-conserving blade would have been the
+unphysical one. The fudge was wrong about *why*. Deleting it, which is what I had queued, would have left a
+hole exactly where physics belongs — the failure mode `docs/48` and the missing-physics rule both warn
+about. **The fix was to wire the law that was already in the tree**, not to remove a line.
+
+### What landed
+
+- `atmosphere::CYLINDER_CROSSFLOW_DRAG_CD` = 1.2, sourced (White Table 7.2; Hoerner ch. 3), same standing
+  and same IOU as the existing `SPHERE_DRAG_CD`.
+- `atmosphere::capsule_frontal_area_m2` — `A(θ) = 2rL·sin θ + πr²`, pure geometry, carrying the whole
+  orientation dependence.
+- `settle`/`settle_traced` take `air_density_kgm3`, where **0.0 is a vacuum** — so a haystack on the Moon
+  gets no drag rather than a smaller fudge. Tests supply it from the catalogue's own `air` at the standard
+  sea-level state, not a typed 1.225.
+
+**Verified against a closed form**, which is the only thing that catches a plausible wrong answer: a body
+released from rest into quadratic drag obeys `v(t) = v_t·tanh(g t / v_t)`, exactly and independently of this
+integrator. Worst disagreement over the fall: **1.471%**. 648/648 native, `mod app` clean for wasm32.
+
+### ★ And it corrected a number I had just written into the code
+
+While wiring it I asserted the fudge made hay fall "2.7× too fast", from a 1.85 m/s terminal speed. That
+figure is for a true 3 mm flat blade. The engine's `rod_for` models the blade as an **equal-volume capsule**
+of radius 0.54 mm, which presents ~1/7 the area:
+
+| | terminal speed |
+|---|---|
+| the retired fudge, `g/2` | 4.91 m/s |
+| real drag on the capsule as modelled | **7.23 m/s** |
+| real drag on a true 3 mm ribbon | ~1.85 m/s |
+
+So the fudge was neither too fast nor too slow — it sat between two geometries and belonged to neither,
+which is what a number picked for behaviour looks like from outside. The claim is corrected in the
+integrator's comment, and the capsule-versus-ribbon gap is now **row 70**: volume is preserved by that
+abstraction and *area is not*, and area is what drag integrates. It feeds row 60 step B too — a ribbon's
+rotational inertia is what makes hay flutter rather than drop.
+
 ## 2026-08-25 — the honest stem costs 194x, and my own row 69 was wrong
 
 ★★★ **Correcting yesterday's row 69 the day after writing it.** It said *"the haystack has three assemblies
