@@ -110,8 +110,23 @@ pub struct Rod {
     /// Unit direction of the long axis.
     pub axis: DVec3,
     pub half_length_m: f64,
+    /// Equal-volume capsule radius — **the CONTACT proxy only** (docs/46 row 70). Segment-segment
+    /// closest approach is what the pile's collision uses, and a capsule is what that solves against.
+    /// It is NOT what the air sees; see `width_m`.
     pub radius_m: f64,
+    /// ★ **The member's REAL cross-section** — a blade is a ribbon, not a wire. Volume is what the
+    /// capsule preserves and AREA is what drag integrates, so aerodynamics asks these instead.
+    pub width_m: f64,
+    pub thickness_m: f64,
+    /// Unit normal of the broad face, perpendicular to `axis`. With `axis` this fixes the ribbon's
+    /// orientation, which is the whole reason its presented area can swing 10:1 as it falls.
+    pub normal: DVec3,
     pub vel: DVec3,
+    /// ★ **Angular velocity, world frame, rad/s** (docs/46 row 60 step B). Without it a rod's `axis`
+    /// was fixed for life: a blade balanced on its end stayed upright forever and one landing on a
+    /// heap slid instead of toppling, so a "pile of blades" was a pile of arrows all still pointing
+    /// the way they were released.
+    pub ang_vel: DVec3,
 }
 
 impl Rod {
@@ -150,6 +165,25 @@ pub fn rod_for(member: &Assembly) -> Option<(f64, f64)> {
     // π r² L = matter ⇒ the capsule carries exactly what the member does.
     let radius = (matter / (std::f64::consts::PI * length)).sqrt();
     Some((length, radius))
+}
+
+/// **The member's real cross-section**, `(width_m, thickness_m)` — the two dimensions that are not its
+/// length, taken from its own parts rather than from an equal-volume fiction (docs/46 row 70).
+///
+/// Width is summed across parts (a fresh blade is lamina + midrib + lamina, side by side) and thickness
+/// is the largest any part has, so a ribbon with a rib down it is as thick as the rib.
+pub fn cross_section_for(member: &Assembly) -> Option<(f64, f64)> {
+    let mut width = 0.0;
+    let mut thickness: f64 = 0.0;
+    for p in &member.parts {
+        let h = p.shape.half_extents_m();
+        let mut d = [2.0 * h.x, 2.0 * h.y, 2.0 * h.z];
+        d.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        // d[0] is the length; the other two are the cross-section.
+        width += d[1];
+        thickness = thickness.max(d[2]);
+    }
+    (width > 0.0 && thickness > 0.0).then_some((width, thickness))
 }
 
 /// The closest points on two segments, and the distance between them. Standard segment–segment
@@ -305,6 +339,188 @@ fn unit(seed: u64, i: u64, k: u64) -> f64 {
 ///
 /// This is a BUILD-TIME cost, not a frame cost — identical until damaged means every bale in a world
 /// is the same settled heap until something happens to one, so the simulation runs once per TYPE.
+impl Rod {
+    /// **Principal moments of inertia**, kg·m², about `(axis, width, normal)` — the standard box
+    /// tensor for edge lengths `(L, W, T)`:
+    ///
+    /// ```text
+    /// I_axis = m(W² + T²)/12 ,  I_width = m(L² + T²)/12 ,  I_normal = m(L² + W²)/12
+    /// ```
+    ///
+    /// ★ The three differ by ~10⁷ for a grass blade, which is the point: it spins almost freely about
+    /// its own length and resists tumbling end over end. A capsule would have made two of them equal
+    /// and lost the distinction that makes a ribbon flutter rather than roll.
+    pub fn principal_inertia_kgm2(&self, mass_kg: f64) -> DVec3 {
+        let (l, w, t) = (2.0 * self.half_length_m, self.width_m, self.thickness_m);
+        DVec3::new(
+            mass_kg * (w * w + t * t) / 12.0,
+            mass_kg * (l * l + t * t) / 12.0,
+            mass_kg * (l * l + w * w) / 12.0,
+        )
+        .max(DVec3::splat(1.0e-30))
+    }
+
+    /// The body frame as three orthonormal world vectors: along, across-the-width, and the face normal.
+    pub fn frame(&self) -> [DVec3; 3] {
+        let along = self.axis.normalize_or(DVec3::X);
+        let fallback = {
+            let seed = if along.x.abs() < 0.9 {
+                DVec3::X
+            } else {
+                DVec3::Y
+            };
+            along.cross(seed).normalize()
+        };
+        let n = (self.normal - along * along.dot(self.normal)).normalize_or(fallback);
+        [along, along.cross(n), n]
+    }
+
+    /// Turn a world-frame angular impulse (N·m·s) into the angular velocity it adds.
+    fn ang_vel_from_impulse(&self, mass_kg: f64, impulse: DVec3) -> DVec3 {
+        let f = self.frame();
+        let i = self.principal_inertia_kgm2(mass_kg);
+        let b = DVec3::new(impulse.dot(f[0]), impulse.dot(f[1]), impulse.dot(f[2])) / i;
+        f[0] * b.x + f[1] * b.y + f[2] * b.z
+    }
+
+    /// Rotate the body by `ang_vel · dt`, carrying `axis` and `normal` with it.
+    fn spin(&mut self, dt: f64) {
+        let w = self.ang_vel.length();
+        if w * dt <= 1.0e-15 {
+            return;
+        }
+        let q = glam::DQuat::from_axis_angle(self.ang_vel / w, w * dt);
+        self.axis = (q * self.axis).normalize_or(self.axis);
+        self.normal = (q * self.normal).normalize_or(self.normal);
+    }
+}
+
+/// ★★★ **ONE ROD, ONE STEP — and the ONE integrator** (docs/46 row 60 step B).
+///
+/// `settle_traced`'s loop calls this after adding whatever its neighbours contribute, and so does any
+/// test that wants a single member's motion. Writing a second stepper for the single-rod case is how
+/// the two drift apart, and the drift is invisible until a pile disagrees with the blade it is made of.
+///
+/// `extra_accel` and `extra_torque` are the neighbour terms (m/s² and N·m). Gravity, the air, the floor
+/// and the spin all live here.
+#[allow(clippy::too_many_arguments)]
+pub fn step_one_rod(
+    rod: &mut Rod,
+    mass_kg: f64,
+    contact: &crate::granular::Contact,
+    gravity_ms2: f64,
+    air_density_kgm3: f64,
+    dt: f64,
+    extra_accel: DVec3,
+    extra_torque: DVec3,
+) {
+    // Gravity acts at the centre of mass and so exerts NO torque about it. Everything that turns this
+    // rod turns it because the force arrived somewhere else.
+    rod.vel += (extra_accel + DVec3::new(0.0, -gravity_ms2, 0.0)) * dt;
+
+    if air_density_kgm3 > 0.0 {
+        let f = rod.frame();
+        let area = crate::atmosphere::box_frontal_area_m2(
+            DVec3::new(2.0 * rod.half_length_m, rod.width_m, rod.thickness_m),
+            f,
+            rod.vel,
+        );
+        rod.vel += crate::atmosphere::drag_accel(
+            air_density_kgm3,
+            rod.vel,
+            area,
+            mass_kg,
+            crate::atmosphere::FLAT_PLATE_NORMAL_DRAG_CD,
+        ) * dt;
+    }
+
+    rod.ang_vel += rod.ang_vel_from_impulse(mass_kg, extra_torque * dt);
+    // Free precession: a body whose principal moments differ does not spin about a fixed world axis.
+    // τ_gyro = −ω × (I·ω), in the body frame where I is diagonal.
+    {
+        let f = rod.frame();
+        let i = rod.principal_inertia_kgm2(mass_kg);
+        let wb = DVec3::new(
+            rod.ang_vel.dot(f[0]),
+            rod.ang_vel.dot(f[1]),
+            rod.ang_vel.dot(f[2]),
+        );
+        let iw = wb * i;
+        let g = -(wb.cross(iw));
+        let world = f[0] * g.x + f[1] * g.y + f[2] * g.z;
+        rod.ang_vel += rod.ang_vel_from_impulse(mass_kg, world * dt);
+    }
+
+    rod.centre += rod.vel * dt;
+    rod.spin(dt);
+
+    // ★★ THE FLOOR, AND ITS MOMENT ARM. The constraint resolves at the rod's LOWER END, so the impulse
+    // it applies is off-centre by up to a half-length — that arm is exactly why a blade on its end
+    // topples. The old code took the velocity change and threw the arm away.
+    let (e0, e1) = rod.ends();
+    let lower = if e0.y <= e1.y { e0 } else { e1 };
+    let hit = floor_contact(rod, contact.radius, contact.friction);
+    if hit.hit {
+        let dv = hit.vel - rod.vel;
+        rod.vel = hit.vel;
+        rod.centre += hit.dpos;
+        let arm = lower - rod.centre;
+        rod.ang_vel += rod.ang_vel_from_impulse(mass_kg, arm.cross(dv * mass_kg));
+    }
+}
+
+/// ★ **THE RELEASE — one owner.** `settle_traced` drops members with these positions and
+/// orientations, and a test that wants to know what a member was given must ask HERE rather than
+/// rebuild the seeded draw for itself. It was briefly rebuilt in a test, which is a second
+/// implementation of the release and would have drifted the first time either changed.
+pub fn release_rods(member: &Assembly, count: usize, seed: u64) -> Option<Vec<Rod>> {
+    let (length, radius) = rod_for(member)?;
+    let (width, thickness) = cross_section_for(member)?;
+    let spread = length * 0.1;
+    let rods: Vec<Rod> = (0..count)
+        .map(|i| {
+            let i = i as u64;
+            let (u1, u2, u3) = (unit(seed, i, 1), unit(seed, i, 2), unit(seed, i, 3));
+            let r = spread * u1.sqrt();
+            let a = u2 * std::f64::consts::TAU;
+            // Orientation on the sphere, uniformly — a dropped blade has no preferred direction.
+            let z = 2.0 * u3 - 1.0;
+            let phi = unit(seed, i, 4) * std::f64::consts::TAU;
+            let s = (1.0 - z * z).max(0.0).sqrt();
+            Rod {
+                // ★ Released just above the floor, not in a tower. MEASURED the other way first: a
+                // column `count`-blades tall is seven metres, and at this contact's stable timestep
+                // 4,000 steps is 0.94 s — less than the fall takes — so the "heap" was still a cloud
+                // at 0.0001 packing. A release height of a couple of blade lengths falls in ~0.4 s.
+                centre: DVec3::new(
+                    r * a.cos(),
+                    radius + unit(seed, i, 5) * length * 2.0,
+                    r * a.sin(),
+                ),
+                axis: DVec3::new(s * phi.cos(), z, s * phi.sin()).normalize(),
+                half_length_m: length * 0.5,
+                radius_m: radius,
+                width_m: width,
+                thickness_m: thickness,
+                // ★ ROLL about the long axis, from its own draw of the seeded stream. A blade released
+                // face-up and one released edge-up are different blades to the air (10:1 in presented
+                // area), so leaving this fixed would have quietly given every blade the same attitude.
+                normal: {
+                    let ax = DVec3::new(s * phi.cos(), z, s * phi.sin()).normalize();
+                    let seed_v = if ax.x.abs() < 0.9 { DVec3::X } else { DVec3::Y };
+                    let u = ax.cross(seed_v).normalize();
+                    let v = ax.cross(u);
+                    let roll = unit(seed, i, 6) * std::f64::consts::TAU;
+                    (u * roll.cos() + v * roll.sin()).normalize()
+                },
+                vel: DVec3::ZERO,
+                ang_vel: DVec3::ZERO,
+            }
+        })
+        .collect();
+    Some(rods)
+}
+
 pub fn settle(
     member: &Assembly,
     mats: &[Material],
@@ -336,6 +552,18 @@ pub struct Sample {
     pub mean_speed_ms: f64,
     /// How tall it stands at this instant (m).
     pub height_m: f64,
+    /// ★ **The lowest END of any member, m** — how close the heap is to the floor, as distinct from
+    /// `height_m`, which is its TOP. Added 2026-08-26 because a test needed to know *has anything
+    /// landed yet* and had been inferring it from `height_m` falling. That inference was valid only
+    /// while rods could not turn: once they can, a landed blade TOPPLES, and toppling drops the top of
+    /// the heap just as surely as falling does. The two readings look identical and mean opposite
+    /// things, so the honest fix is to report the quantity that was actually wanted.
+    pub lowest_end_m: f64,
+    /// ★ **The fastest member's angular speed, rad/s.** With `peak_speed_ms` this separates a heap that
+    /// is sliding from one that is tumbling — and it is exactly zero for a body in free flight, since
+    /// gravity acts at the centre of mass and drag at the area centroid, so neither exerts a torque.
+    /// That makes it the one exact test for *has anything touched yet*.
+    pub peak_ang_speed_rads: f64,
     /// Continuous quiet the gauge has accumulated so far (s).
     pub quiet_s: f64,
     /// ★ **Total mechanical energy, J** — `Σ ½mv²` plus `Σ mgh`, and NOTHING ELSE. If gravity is the
@@ -388,6 +616,10 @@ pub fn settle_traced(
     // The engine's own contact, for THIS material — the same call a sand grain gets. The member's own
     // mass is what sets the contact stiffness per unit mass, so a blade and a boulder of the same
     // substance are as stiff as their masses make them.
+    // Not bound for use here — `release_rods` reads the cross-section itself. Called for its REFUSAL:
+    // a member with no cross-section is not a rod, and `settle` should decline rather than build a
+    // pile of degenerate ribbons that present no area to the air.
+    cross_section_for(member)?;
     let member_mass = member.mass_kg(mats).ok()?.max(1e-12);
     let contact = crate::granular::contact_from_material(m, radius, member_mass);
 
@@ -397,34 +629,8 @@ pub fn settle_traced(
     // released over a disc wider than a blade is long, 400 blades settled at 0.0005, which is a
     // measurement of how thinly they were scattered rather than of how they pack. A point source lets
     // the pile spread to the angle the contact law gives it.
-    let spread = length * 0.1;
-    let mut rods: Vec<Rod> = (0..count)
-        .map(|i| {
-            let i = i as u64;
-            let (u1, u2, u3) = (unit(seed, i, 1), unit(seed, i, 2), unit(seed, i, 3));
-            let r = spread * u1.sqrt();
-            let a = u2 * std::f64::consts::TAU;
-            // Orientation on the sphere, uniformly — a dropped blade has no preferred direction.
-            let z = 2.0 * u3 - 1.0;
-            let phi = unit(seed, i, 4) * std::f64::consts::TAU;
-            let s = (1.0 - z * z).max(0.0).sqrt();
-            Rod {
-                // ★ Released just above the floor, not in a tower. MEASURED the other way first: a
-                // column `count`-blades tall is seven metres, and at this contact's stable timestep
-                // 4,000 steps is 0.94 s — less than the fall takes — so the "heap" was still a cloud
-                // at 0.0001 packing. A release height of a couple of blade lengths falls in ~0.4 s.
-                centre: DVec3::new(
-                    r * a.cos(),
-                    radius + unit(seed, i, 5) * length * 2.0,
-                    r * a.sin(),
-                ),
-                axis: DVec3::new(s * phi.cos(), z, s * phi.sin()).normalize(),
-                half_length_m: length * 0.5,
-                radius_m: radius,
-                vel: DVec3::ZERO,
-            }
-        })
-        .collect();
+    let rods_v = release_rods(member, count, seed)?;
+    let mut rods: Vec<Rod> = rods_v;
 
     // ★★★ **A CONTACT HAS TWO TIMESCALES AND THIS RULE USED TO SEE ONLY ONE.**
     //
@@ -514,7 +720,8 @@ pub fn settle_traced(
     while elapsed_s < CAP_S {
         let snapshot = rods.clone();
         for i in 0..rods.len() {
-            let mut acc = DVec3::new(0.0, -gravity_ms2, 0.0);
+            let mut acc = DVec3::ZERO;
+            let mut torque = DVec3::ZERO;
             let (a0, a1) = snapshot[i].ends();
             for (j, other) in snapshot.iter().enumerate() {
                 if i == j {
@@ -528,73 +735,55 @@ pub fn settle_traced(
                     continue;
                 }
                 let (pa, pb) = closest_points(a0, a1, b0, b1);
-                acc += crate::granular::contact_accel(pa, snapshot[i].vel, pb, other.vel, &contact);
+                let a_n =
+                    crate::granular::contact_accel(pa, snapshot[i].vel, pb, other.vel, &contact);
+                acc += a_n;
+                // ★ THE NEIGHBOUR'S MOMENT ARM. The contact happens at `pa`, which is somewhere along
+                // this rod, not at its centre — so it both pushes and TURNS. Discarding the arm is what
+                // made a landing blade slide instead of topple onto the heap.
+                torque += (pa - snapshot[i].centre).cross(a_n * member_mass);
             }
-            // ★ The floor is NOT a force here. It is resolved as a constraint after the step, by
-            // `floor_contact` — see its doc for the image-particle bug this replaces.
             let r = &mut rods[i];
-            r.vel += acc * dt;
-            // ★★★ **THE AIR, AS THE SAME LAW A METEOR FEELS** (docs/46 row 60 step A3, Law II + V).
-            //
-            // This line used to read `r.vel *= 1.0 - (2.0 * dt).min(0.5)`, and its own comment admitted
-            // the tuning: *"2/s is gentle enough to let them fall and firm enough to stop the explicit
-            // integrator ringing."* A rate constant chosen for how the result behaves is a dial. It was
-            // also a SECOND answer to a question the engine already answers — `atmosphere::drag_accel`
-            // is real quadratic drag and the meteor path has used it all along. Two answers to *how
-            // much does air slow this down*, and the blade got the invented one.
-            //
-            // Robin, 2026-08-26, when I proposed simply deleting it: *"Are we forgetting air? It would
-            // be constant until it touches down IN A VACUUM… The Earth assembly supplies an
-            // atmosphere."* The fudge was not wrong to dissipate — it was wrong about WHY.
-            //
-            // ★ MEASURED, and it corrects a claim I made while writing this: the rate constant's
-            // terminal speed is `g/2 = 4.91 m/s`; real drag on the capsule as `rod_for` models it
-            // gives **7.23 m/s**; real drag on a TRUE 3 mm flat blade would give ~1.85 m/s. So the
-            // fudge was not "too fast" or "too slow" — it sat between two geometries and belonged to
-            // neither, which is what a number picked for behaviour looks like from the outside.
-            // The capsule/ribbon gap is its own defect and is filed separately (docs/46 row 70).
-            //
-            // `air_density_kgm3 == 0.0` is a vacuum and costs nothing — the Moon's haystack, if anyone
-            // builds one, gets no drag rather than a smaller fudge.
-            if air_density_kgm3 > 0.0 {
-                let area = crate::atmosphere::capsule_frontal_area_m2(
-                    2.0 * r.half_length_m,
-                    r.radius_m,
-                    r.axis,
-                    r.vel,
-                );
-                r.vel += crate::atmosphere::drag_accel(
-                    air_density_kgm3,
-                    r.vel,
-                    area,
-                    member_mass,
-                    crate::atmosphere::CYLINDER_CROSSFLOW_DRAG_CD,
-                ) * dt;
-            }
-            r.centre += r.vel * dt;
-
-            // ★★★ THE FLOOR, AS A CONSTRAINT. The `r.centre.y = radius; r.vel.y = max(0)` clamp that
-            // used to live here is DELETED — not because it injected energy (audited: its net work is
-            // identically zero per step, and a net SINK at the speeds in play) but because it was
-            // standing in for a floor that could not push up, and it was standing in badly: the clamp
-            // tested the rod's CENTRE while the force tested its lowest END. For an unsupported
-            // near-vertical blade the centre sits ~0.175 m above the end, so nothing stopped it until
-            // it had sunk its whole half-length through the ground.
-            let hit = floor_contact(r, radius, contact.friction);
-            if hit.hit {
-                r.vel = hit.vel;
-                r.centre += hit.dpos;
-            }
+            step_one_rod(
+                r,
+                member_mass,
+                &contact,
+                gravity_ms2,
+                air_density_kgm3,
+                dt,
+                acc,
+                torque,
+            );
         }
         elapsed_s += dt;
         // PEAK, not mean — the gauge's contract, and the right one: an average hides the single
         // member still bouncing, and one member crossing cells is a heap that has not settled.
+        // ★★★ **A SPINNING BLADE IS NOT A SETTLED BLADE** (docs/46 row 60 step B). `SettleGauge` was
+        // built when rods could only translate, so it asks one question: is anything MOVING? Give the
+        // members a rotational degree of freedom and a heap can tumble in place while every centre of
+        // mass sits still, and the gauge would call that quiet.
+        //
+        // The criterion needs no new dial, because the gauge already owns one: a rod turning at ω has
+        // a TIP moving at `ω·L/2`, and a tip below the quiescent speed is as motionless as a centre
+        // below it. So the speed the gauge is shown is whichever of the two is larger.
+        // ★ `peak_speed` keeps its ORIGINAL meaning — the fastest CENTRE OF MASS — because it is a
+        // reported field and silently changing what a number means is how old figures go on looking
+        // comparable when they are not. Measured the wrong way first: folding tip speed into this
+        // field made a 20-blade heap report "37.43 m/s", which is impossible for a body the air caps
+        // at ~2 m/s, and the impossible number was the only reason the redefinition was noticed.
         peak_speed = rods.iter().map(|r| r.vel.length()).fold(0.0f64, f64::max);
-        if peak_speed >= gauge.moving_above(gravity_ms2 as f32) as f64 {
+        // What the GAUGE is asked is a different question: is anything moving AT ALL? A rod turning
+        // at ω has a tip moving at `ω·L/2`, and a heap tumbling in place with every centre still is
+        // not settled. That comparison needs no new dial — it reuses the gauge's own quiescent speed.
+        let peak_point_speed = rods
+            .iter()
+            .map(|r| r.vel.length().max(r.ang_vel.length() * r.half_length_m))
+            .fold(0.0f64, f64::max);
+        if peak_point_speed >= gauge.moving_above(gravity_ms2 as f32) as f64 {
             disturbed = true;
         }
         if disturbed {
-            gauge.observe(peak_speed as f32, gravity_ms2 as f32, dt as f32);
+            gauge.observe(peak_point_speed as f32, gravity_ms2 as f32, dt as f32);
         }
         // ★★★ **QUIET IS NOT THE SAME AS SUPPORTED, AND DAMPING CAN FAKE THE FIRST.**
         //
@@ -636,8 +825,19 @@ pub fn settle_traced(
             trace.push(Sample {
                 t_s: elapsed_s,
                 peak_speed_ms: peak_speed,
+                peak_ang_speed_rads: rods
+                    .iter()
+                    .map(|r| r.ang_vel.length())
+                    .fold(0.0f64, f64::max),
                 mean_speed_ms: mean,
                 height_m: top,
+                lowest_end_m: rods
+                    .iter()
+                    .map(|r| {
+                        let (a, b) = r.ends();
+                        a.y.min(b.y)
+                    })
+                    .fold(f64::INFINITY, f64::min),
                 quiet_s: gauge.quiet_seconds() as f64,
                 energy_j: energy,
             });
@@ -708,6 +908,97 @@ mod tests {
         crate::atmosphere::air_density_at(101_325.0, air, 288.15, 9.81, 0.0)
     }
 
+    /// ★★★ **A BLADE STOOD ON ITS END FALLS OVER** (docs/46 row 60 step B).
+    ///
+    /// The plainest thing a rod could not do. `Rod` carried a position and a velocity and no angular
+    /// state at all, so its `axis` was fixed for life: a blade balanced upright stayed upright
+    /// forever, and one landing on a heap slid instead of toppling. A pile made of members that cannot
+    /// turn is not a pile of blades, it is a pile of arrows all pointing the way they were released —
+    /// which is why the packing it reported was never going to be straw's.
+    ///
+    /// Gravity exerts no torque about a uniform body's own centre of mass, so the toppling here comes
+    /// from where it must: **the floor pushes on the rod's lower END, and that force has a moment arm
+    /// to the centre.** Nothing is added to make it fall; the contact was always off-centre and there
+    /// was simply no degree of freedom for it to act on.
+    ///
+    /// The test asks only for the sign of the effect — that it tips, and keeps tipping — because the
+    /// rate depends on the contact stiffness and the air, both of which are measured elsewhere. A
+    /// tolerance on the rate would be a tolerance on those, which is how a test starts pinning numbers
+    /// nobody chose.
+    #[test]
+    fn a_blade_stood_on_its_end_falls_over() {
+        let mats = crate::materials::load();
+        let blade = crate::assembly::compiled::parse(crate::assembly::compiled::GRASS_BLADE_DRY);
+        let (length, radius) = rod_for(&blade).expect("a blade is a rod");
+        let (width, thickness) = cross_section_for(&blade).expect("a blade has a cross-section");
+        let mass = blade.mass_kg(&mats).expect("mass");
+        let m = mats.iter().find(|m| m.id == "straw").expect("straw");
+        let contact = crate::granular::contact_from_material(m, radius, mass);
+        let rho = sea_level_air(&mats);
+
+        // Stood almost upright — 3° off vertical, so gravity has somewhere to take it but the rod is
+        // not simply lying down already.
+        let tilt: f64 = 3.0_f64.to_radians();
+        let mut rod = Rod {
+            centre: DVec3::new(0.0, 0.5 * length * tilt.cos() + radius, 0.0),
+            axis: DVec3::new(tilt.sin(), tilt.cos(), 0.0).normalize(),
+            half_length_m: 0.5 * length,
+            radius_m: radius,
+            width_m: width,
+            thickness_m: thickness,
+            normal: DVec3::Z,
+            ang_vel: DVec3::ZERO,
+            vel: DVec3::ZERO,
+        };
+
+        let from_vertical = |r: &Rod| r.axis.normalize_or(DVec3::Y).dot(DVec3::Y).abs().acos();
+        let start = from_vertical(&rod);
+        println!(
+            "released {:.2}° from vertical · inertia about its width axis {:.4e} kg·m²",
+            start.to_degrees(),
+            rod.principal_inertia_kgm2(mass).y
+        );
+
+        let dt = (0.1 / contact.stiffness.max(1.0).sqrt()).min(1.0e-4);
+        let mut t = 0.0;
+        let mut angle = start;
+        for step in 0..400_000 {
+            step_one_rod(
+                &mut rod,
+                mass,
+                &contact,
+                9.81,
+                rho,
+                dt,
+                DVec3::ZERO,
+                DVec3::ZERO,
+            );
+            t += dt;
+            angle = from_vertical(&rod);
+            if step % 80_000 == 0 {
+                println!(
+                    "  t {t:.4} s · {:.2}° from vertical · |ω| {:.4} rad/s",
+                    angle.to_degrees(),
+                    rod.ang_vel.length()
+                );
+            }
+            if angle > std::f64::consts::FRAC_PI_2 * 0.9 {
+                break;
+            }
+        }
+        println!(
+            "  ended {:.2}° from vertical after {t:.4} s",
+            angle.to_degrees()
+        );
+        assert!(
+            angle > start * 2.0,
+            "a blade stood on its end must fall over: {:.3}° -> {:.3}° in {t:.3} s. \
+             With no angular degree of freedom its axis is fixed for life.",
+            start.to_degrees(),
+            angle.to_degrees()
+        );
+    }
+
     /// ★★★ **A FALLING ROD OBEYS THE SAME AIR A METEOR DOES** (docs/46 row 60 step A3, Laws II + V).
     ///
     /// ★★ **This test was WRONG on its first writing, and Robin caught the premise.** It asserted that
@@ -740,31 +1031,47 @@ mod tests {
         let (_settled, samples) =
             settle_traced(&blade, &mats, 1, g, rho, 20260826, 1.0e-3).expect("a single rod falls");
 
-        // Free flight is while it is still descending — a geometry-free criterion, and the first
-        // version of this test got it wrong: `Sample::height_m` is the HEAP's height (the top of the
-        // rod), NOT its clearance, so a landed blade still reports 0.0792 m and a
-        // `height_m > 2·radius` filter counted the whole post-landing rest as "flight".
-        let mut last_falling = 0usize;
-        for i in 1..samples.len() {
-            if samples[i].height_m < samples[i - 1].height_m - 1.0e-12 {
-                last_falling = i;
-            } else {
-                break;
-            }
-        }
-        let flying = &samples[..last_falling.saturating_sub(2)];
+        // ★★ FREE FLIGHT IS BEFORE ANYTHING TOUCHES, and this criterion has now been wrong TWICE.
+        // First it was `height_m > 2·radius` — but `height_m` is the heap's TOP, so a landed blade
+        // still read 0.0792 m and the whole post-landing rest counted as flight. Then it was "while
+        // still descending" — which was valid only while rods could not turn, because a toppling
+        // blade lowers the top of the heap exactly as falling does. `lowest_end_m` reports the thing
+        // that was actually meant, so the third version does not have to be clever.
+        // ω is EXACTLY zero until the first contact, so this needs no threshold and cannot be fooled
+        // by a rebound. The two earlier versions of this criterion both could: `height_m > 2·radius`
+        // counted the whole post-landing rest as flight, and "while still descending" broke the moment
+        // rods could topple. The third try measures the thing that actually distinguishes the states.
+        let flying: Vec<&Sample> = samples
+            .iter()
+            .take_while(|s| s.peak_ang_speed_rads == 0.0)
+            .collect();
         assert!(
             flying.len() >= 8,
             "need a real flight window, got {}",
             flying.len()
         );
 
-        // The rod falls straight down and does not rotate, so its presented area is fixed. Take it
-        // from the same geometry the integrator used.
-        let axis = rods_axis_for_seed(&blade, &mats, g, rho, 20260826);
-        let area = crate::atmosphere::capsule_frontal_area_m2(length, radius, axis, DVec3::NEG_Y);
+        // ★ ASK THE RELEASE what this blade was actually given, rather than rebuilding the seeded
+        // draw here — a second implementation of the release would drift the moment either changed.
+        // The rod does not rotate yet (row 60 step B), so its presented area is fixed through the fall.
+        let released = release_rods(&blade, 1, 20260826).expect("one rod");
+        let r0 = &released[0];
+        let along = r0.axis.normalize_or(DVec3::X);
+        let n = (r0.normal - along * along.dot(r0.normal)).normalize_or(DVec3::Y);
+        let w = along.cross(n);
+        let area = crate::atmosphere::box_frontal_area_m2(
+            DVec3::new(2.0 * r0.half_length_m, r0.width_m, r0.thickness_m),
+            [along, w, n],
+            DVec3::NEG_Y,
+        );
         let v_t =
-            (2.0 * mass * g / (rho * crate::atmosphere::CYLINDER_CROSSFLOW_DRAG_CD * area)).sqrt();
+            (2.0 * mass * g / (rho * crate::atmosphere::FLAT_PLATE_NORMAL_DRAG_CD * area)).sqrt();
+        // What the retired equal-volume capsule would have shown, for the record.
+        let cap = crate::atmosphere::capsule_frontal_area_m2(length, radius, along, DVec3::NEG_Y);
+        println!(
+            "  the retired capsule would have presented {cap:.4e} m² ({:.2}x)",
+            cap / area
+        );
         println!(
             "dry blade: {length:.3} m x r {radius:.4e} m · mass {mass:.4e} kg · air {rho:.4} kg/m³",
         );
@@ -776,11 +1083,24 @@ mod tests {
 
         let t0 = flying[0].t_s;
         let mut worst = 0.0f64;
+        let mut worst_at = flying[0];
         for s in flying.iter().skip(1) {
             let want = v_t * ((g * (s.t_s - t0)) / v_t).tanh();
             let err = (s.peak_speed_ms - want).abs() / want.max(1.0e-9);
-            worst = worst.max(err);
+            if err > worst {
+                worst = err;
+                worst_at = s;
+            }
         }
+        println!(
+            "  WORST at t {:.4} s · v {:.4} m/s · want {:.4} · lowest end {:.5} m · height {:.4} m · n={}",
+            worst_at.t_s,
+            worst_at.peak_speed_ms,
+            v_t * ((g * (worst_at.t_s - t0)) / v_t).tanh(),
+            worst_at.lowest_end_m,
+            worst_at.height_m,
+            flying.len()
+        );
         for s in flying.iter().skip(1).step_by((flying.len() / 5).max(1)) {
             let want = v_t * ((g * (s.t_s - t0)) / v_t).tanh();
             println!(
@@ -804,19 +1124,48 @@ mod tests {
         );
     }
 
-    /// The axis the seeded release actually gave the single rod — so the test measures the geometry
-    /// the integrator saw rather than one it assumed.
-    fn rods_axis_for_seed(
-        member: &Assembly,
-        mats: &[Material],
-        g: f64,
-        rho: f64,
-        seed: u64,
-    ) -> DVec3 {
-        let _ = (member, mats, g, rho);
-        // The release orients from the same seeded stream; recover it the way `settle_traced` builds it.
-        let (u1, u2, u3) = (unit(seed, 0, 1), unit(seed, 0, 2), unit(seed, 0, 3));
-        DVec3::new(u1 * 2.0 - 1.0, u2 * 2.0 - 1.0, u3 * 2.0 - 1.0).normalize_or(DVec3::X)
+    /// ★★★ **RE-MEASURE THE HEAP WITH THE NEW INSTRUMENT** (docs/46 rows 67, 70, 71, 60 step A3/B).
+    ///
+    /// Every packing figure this module has ever reported was taken through machinery that has since
+    /// been replaced: an invented `vel *= 1 − 2·dt` drag, a member 212× too soft, a blade shaped like a
+    /// wire instead of a ribbon, rods that could not turn, and a settle gauge blind to rotation. Those
+    /// numbers are not necessarily wrong, but they were read off an instrument that no longer exists,
+    /// so they are re-taken here rather than inherited.
+    ///
+    /// ★★ **At a member count that FINISHES, and that is the honest caveat.** The 400-blade run this
+    /// module's headline test uses did not complete in 19 minutes of release-build wall clock and was
+    /// abandoned — exactly what `docs/46` row 69 predicts, since row 67's honest stem stiffness cut the
+    /// timestep 194× and the neighbour loop is O(n²) on top. Row 60 step 1 established that packing
+    /// CONVERGES with member count, which is what makes a smaller count a real measurement instead of a
+    /// smaller one; but the convergence was itself measured with the old instrument, so treat these as
+    /// the new baseline rather than as comparable to the old figures.
+    #[test]
+    #[ignore]
+    fn re_measure_the_heap_with_the_new_instrument() {
+        let mats = crate::materials::load();
+        let blade = crate::assembly::compiled::parse(crate::assembly::compiled::GRASS_BLADE_DRY);
+        let (length, radius) = rod_for(&blade).expect("rod");
+        let rho = sea_level_air(&mats);
+        println!(
+            "dry blade: {length:.3} m · capsule r {:.4} mm · air {rho:.4} kg/m³",
+            radius * 1000.0
+        );
+        for n in [10usize, 20] {
+            match settle(&blade, &mats, n, 9.81, rho, 20260810) {
+                Some(s) => println!(
+                    "  {n:3} blades -> packing {:.5} ({:.1} kg/m³ at straw's 1400) · {:.4} m tall · \
+                     quiet {} after {:.3} s · peak member {:.5} m/s",
+                    s.packing,
+                    s.packing * 1400.0,
+                    s.height_m,
+                    s.quiet,
+                    s.elapsed_s,
+                    s.peak_speed_ms
+                ),
+                None => println!("  {n:3} blades -> no heap"),
+            }
+        }
+        println!("  (loose hay is 40 kg/m³ = 0.029 packing; a field bale 100 = 0.071)");
     }
 
     /// ★★★ **DROP THE BLADES AND SEE WHAT FORMS** (docs/71 §3b) — Robin's own idea, measured.
@@ -1284,6 +1633,10 @@ mod tests {
             axis: DVec3::X, // lying flat, so centre height IS the lowest end's height
             half_length_m: 0.175,
             radius_m: radius,
+            width_m: 2.0 * radius,
+            thickness_m: 0.5 * radius,
+            normal: DVec3::Y,
+            ang_vel: DVec3::ZERO,
             vel: DVec3::new(0.0, -1.0, 0.0), // driving downward into the floor
         };
         let hit = floor_contact(&sunk, radius, contact.friction);
@@ -1325,6 +1678,10 @@ mod tests {
             axis: DVec3::Y,
             half_length_m: length * 0.5,
             radius_m: radius,
+            width_m: 2.0 * radius,
+            thickness_m: 0.5 * radius,
+            normal: DVec3::Y,
+            ang_vel: DVec3::ZERO,
             vel: DVec3::ZERO,
         };
         let want = blade.matter_volume_m3();
