@@ -1382,7 +1382,9 @@ mod tests {
                 coh_range: 0.0,
                 shock: 0.0,
             };
-            let dt = (0.1 / k.sqrt()) / f64::from(refine);
+            // Same derived criterion as `pile` and `Aggregate` — one answer to "how small must a
+            // step be" (docs/46 row 69). `0.1/√k` here was a third copy of the retired dial.
+            let dt = crate::substep::accurate_dt_s(k, 0.0, 32.0) / f64::from(refine);
             let touch = 2.0 * r;
             // Separation along +x, approaching at v0. Symmetric, so track the pair as one relative
             // coordinate: each grain gets ±a, hence the relative acceleration is 2a.
