@@ -564,6 +564,10 @@ pub struct Sample {
     /// gravity acts at the centre of mass and drag at the area centroid, so neither exerts a torque.
     /// That makes it the one exact test for *has anything touched yet*.
     pub peak_ang_speed_rads: f64,
+    /// ★ **What fraction of members are TOUCHING something** — the number that decides whether block
+    /// timestepping can help at all (docs/46 row 69). A population where everyone is in contact pays
+    /// the stiff step no matter how cleverly it is scheduled.
+    pub contacting_fraction: f64,
     /// Continuous quiet the gauge has accumulated so far (s).
     pub quiet_s: f64,
     /// ★ **Total mechanical energy, J** — `Σ ½mv²` plus `Σ mgh`, and NOTHING ELSE. If gravity is the
@@ -650,9 +654,22 @@ pub fn settle_traced(
     // So the step respects both: a tenth of the spring's period AND a tenth of the damping time
     // constant `1/c`. Both are derived, neither is chosen, and the heap's own energy trace is what
     // says whether they are sufficient.
-    let dt_spring = 0.1 / contact.stiffness.max(1.0).sqrt();
-    let dt_damp = 0.1 / contact.normal_damp.max(1.0e-30);
-    let dt = dt_spring.min(dt_damp).min(1e-3);
+    // ★★★ THE STEP, DERIVED (docs/46 row 69, `substep`). This was `0.1/√stiffness`, whose `0.1`
+    // traced to nothing. `substep::accurate_dt_s` gets it from the contact's own duration `π/ω`
+    // divided by a resolution that was MEASURED, not chosen — see
+    // `substep::tests::how_finely_a_contact_must_be_resolved`, which integrates one bounce through
+    // `granular::contact_accel` and compares against the analytic restitution.
+    //
+    // ★ The retired dial worked out to 31.4 steps per contact, which the measurement puts at ~2.2%
+    // error in restitution. So it was approximately RIGHT and merely unjustified — worth saying
+    // plainly, because "it was a dial" and "it was wrong" are different findings and only the first
+    // one is true here. 32 keeps that behaviour with a reason attached; 64 would halve the error and
+    // double the cost, and the catalogue's own restitutions are not known to better than a few
+    // percent, so buying below the data's uncertainty would be spending for nothing.
+    const STEPS_PER_CONTACT: f64 = 32.0;
+    let dt =
+        crate::substep::accurate_dt_s(contact.stiffness, contact.normal_damp, STEPS_PER_CONTACT)
+            .min(1e-3);
 
     // ★★★ **IT RUNS UNTIL IT IS QUIET, AND THE ENGINE ALREADY OWNS WHAT QUIET MEANS.**
     //
@@ -829,6 +846,26 @@ pub fn settle_traced(
                     .iter()
                     .map(|r| r.ang_vel.length())
                     .fold(0.0f64, f64::max),
+                contacting_fraction: {
+                    let touch = 2.0 * contact.radius + contact.coh_range;
+                    let mut n_touch = 0usize;
+                    for (i, r) in rods.iter().enumerate() {
+                        let (a0, a1) = r.ends();
+                        let floor = a0.y.min(a1.y) <= contact.radius;
+                        let neigh = rods.iter().enumerate().any(|(j, o)| {
+                            if i == j {
+                                return false;
+                            }
+                            let (b0, b1) = o.ends();
+                            let (pa, pb) = closest_points(a0, a1, b0, b1);
+                            (pa - pb).length() < touch
+                        });
+                        if floor || neigh {
+                            n_touch += 1;
+                        }
+                    }
+                    n_touch as f64 / rods.len().max(1) as f64
+                },
                 mean_speed_ms: mean,
                 height_m: top,
                 lowest_end_m: rods
@@ -959,7 +996,8 @@ mod tests {
             rod.principal_inertia_kgm2(mass).y
         );
 
-        let dt = (0.1 / contact.stiffness.max(1.0).sqrt()).min(1.0e-4);
+        let dt =
+            crate::substep::accurate_dt_s(contact.stiffness, contact.normal_damp, 32.0).min(1.0e-4);
         let mut t = 0.0;
         let mut angle = start;
         for step in 0..400_000 {
@@ -1150,7 +1188,28 @@ mod tests {
             "dry blade: {length:.3} m · capsule r {:.4} mm · air {rho:.4} kg/m³",
             radius * 1000.0
         );
-        for n in [10usize, 20] {
+        for n in [10usize] {
+            match settle_traced(&blade, &mats, n, 9.81, rho, 20260810, 0.5) {
+                Some((s, tr)) => {
+                    let mean_touch = tr.iter().map(|x| x.contacting_fraction).sum::<f64>()
+                        / tr.len().max(1) as f64;
+                    let last_touch = tr.last().map(|x| x.contacting_fraction).unwrap_or(0.0);
+                    println!(
+                        "  {n:3} blades -> packing {:.5} · quiet {} after {:.3} s · peak centre {:.5} m/s",
+                        s.packing, s.quiet, s.elapsed_s, s.peak_speed_ms
+                    );
+                    println!(
+                        "      contacting fraction: mean {:.3} over the run, {:.3} at the end \
+                         -> block-stepping could save at most {:.2}x",
+                        mean_touch,
+                        last_touch,
+                        1.0 / (mean_touch + (1.0 - mean_touch) / 32.0).max(1e-9)
+                    );
+                }
+                None => println!("  {n:3} blades -> no heap"),
+            }
+        }
+        for n in [] as [usize; 0] {
             match settle(&blade, &mats, n, 9.81, rho, 20260810) {
                 Some(s) => println!(
                     "  {n:3} blades -> packing {:.5} ({:.1} kg/m³ at straw's 1400) · {:.4} m tall · \

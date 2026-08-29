@@ -9,6 +9,18 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★★ **`substep` — one answer to "how small must a step be"** (docs/46 row 69). `0.1/√stiffness`
+  appeared in three places plus a magic `960` for SPH; `substep::accurate_dt_s` derives it from the
+  contact's own `ω = √stiffness` and duration `π/ω`, at a resolution measured against the analytic
+  restitution (the retired dial was 31.4 steps/contact ≈ 2.2% error — approximately right, but
+  unjustified). `substep::Schedule` lifts the block-timestep arithmetic out of
+  `Aggregate::step_block` body-agnostically, for debris, ejecta and smoke as well as rods, pinned
+  term-for-term against the inline original.
+- **Measured, and it reorders the queue**: block-stepping can save at most **1.78×** on a settling
+  heap (contacting fraction 0.547), so row 72's missing rotational dissipation — not scheduling — is
+  the haystack's affordability fix.
+- `pile::Sample` gains `contacting_fraction`.
+
 - **The haystack re-measured with the new instrument** — and it is a scatter, not a heap: packing 0.0005
   (0.7 kg/m³ against loose hay's 40), not quiet after 20 s. Centres of mass nearly still at 0.147 m/s
   while tips move at 37.4 m/s: **rotation has no dissipation channel** (docs/46 row 72), because

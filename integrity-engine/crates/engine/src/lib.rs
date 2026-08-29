@@ -51,13 +51,14 @@ mod gpu_particles;
 /// read-back, shared by the granular and SPH pipelines. Their SOLVERS stay specialized (docs/46 §1).
 mod gpu_store;
 pub mod granular;
-mod grid; // docs/47 §1 — the hierarchical spatial hash: no global cell size
-          // WebGPU host for sph_step.wgsl. Compiled on EVERY target, deliberately: it used to be wasm-only, but the
-          // only thing that actually required wasm was one `Rc<Cell<bool>>` in a `map_async` callback (see
-          // `gpu_sph::GpuSph::readback_ready`). That accident hid ~700 lines of shipping GPU host code from native
-          // `cargo check`/`cargo test` — the very trap CLAUDE.md rule 3 flags ("no in-crate tests") and that once
-          // shipped a non-compiling commit. Building it natively costs nothing (wgpu's types exist without a
-          // backend) and puts its shader-facing layouts under the suite. Running still needs a browser.
+mod grid;
+pub mod substep; // docs/46 row 69 — one answer to "how small must a step be", and the block schedule // docs/47 §1 — the hierarchical spatial hash: no global cell size
+                 // WebGPU host for sph_step.wgsl. Compiled on EVERY target, deliberately: it used to be wasm-only, but the
+                 // only thing that actually required wasm was one `Rc<Cell<bool>>` in a `map_async` callback (see
+                 // `gpu_sph::GpuSph::readback_ready`). That accident hid ~700 lines of shipping GPU host code from native
+                 // `cargo check`/`cargo test` — the very trap CLAUDE.md rule 3 flags ("no in-crate tests") and that once
+                 // shipped a non-compiling commit. Building it natively costs nothing (wgpu's types exist without a
+                 // backend) and puts its shader-facing layouts under the suite. Running still needs a browser.
 mod gpu_sph;
 pub mod gravity;
 mod hydrostatic;

@@ -3,6 +3,73 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-29 — one answer to "how small must a step be", and a measurement that killed the plan
+
+Robin, on the pile's timestep problem: *"Note this for future massive multiple object work as a useful
+pattern; if possible make it reusable"*, and then *"Engine should be able to use similar optimizations for
+impact debris, smoke ejection, etc."* Both are right, and following them turned row 69 from a tuning job
+into a Law II job.
+
+### Five answers to one question
+
+Grepping before building found `0.1/√stiffness` in **three** places — `pile::settle`, a second copy in a
+pile test with a different cap, and `granular` — plus `time_scale/960.0` for SPH sub-steps and a genuine
+CFL condition in `hydrostatic`. Five rules for *how finely must time be cut*.
+
+`substep::accurate_dt_s` is now the single owner, derived rather than dialled: a contact's stiffness is
+stored per mass, so `ω = √stiffness`, it lasts `t_c = π/ω`, symplectic Euler survives to `2/ω`, and the
+step that gets the ANSWER right is `t_c` over a resolution that was measured.
+
+★ **The dial was approximately right, and saying so matters.** Measured against the analytic restitution,
+`0.1/√k` works out to **31.4 steps per contact ≈ 2.2% error**, with error halving per doubling. I had
+speculated it was 20× over-conservative. It was unjustified, not wrong — and there is no easy factor hiding
+in the timestep.
+
+### The pattern already existed
+
+`Aggregate::step_block` (docs/30 stage 3) is hierarchical block timestepping with power-of-two rate levels,
+KDK leapfrog, and the expensive self-gravity evaluated only for the active set. Its doc records that it
+conserves energy and reproduces the global-dt result. It was simply welded to point-mass particles, so a
+rod could not use it.
+
+`substep::Schedule` lifts out the arithmetic — levels, strides, who starts and ends a step on each sub-tick
+— knowing nothing about what a body is. It is pinned term-for-term against the inline version, because the
+risk in extracting verified code is not that the new code is wrong in the abstract but that it is subtly
+different from the code that earned the verification.
+
+### ★★ And the measurement killed the plan for the pile
+
+| | |
+|---|---|
+| contacting fraction, mean over the run | **0.547** |
+| contacting fraction at the end | 0.400 |
+| best possible block-stepping speedup | **1.78×** |
+
+Against the ~100× the haystack needs. **A heap is the worst case for block timestepping**, which pays off
+when most of a population is free — debris in flight, ejecta, smoke. Half of a settling pile is touching at
+any moment, and touching members pay the stiff step however cleverly they are scheduled.
+
+So the affordability fix is **row 72, not row 69**: the run costs the full 20 s cap only *because* the pile
+never settles. Give rotation a dissipation channel and the gauge terminates early, which is worth more than
+any scheduling. Implicit contact remains the only route to a genuinely stiffer step.
+
+### ★ I wrote a second contact law inside the measurement
+
+The convergence test first integrated `a = −kx − cv` by hand and converged beautifully to **0.372**, the
+textbook `exp(−ζπ/√(1−ζ²))` — while the engine answers **0.451**. The gap is not numerical:
+`granular::contact_accel` is a **no-tension** contact, so the dashpot may not pull the bodies back together
+as they separate, and a contact that cannot pull rebounds faster than the textbook one. I had written a
+second contact law and then carefully measured its convergence. Caught only because the reference
+disagreed — the same Law II failure the module itself exists to fix, committed inside its own test.
+
+### ★ One more thing the numbers said
+
+Packing read 0.00053 and then 0.00046 across a **1.9% timestep change** — 13% apart. A scatter of spinning
+blades is plausibly chaotic, but either way that figure is not converged in dt and must not be quoted to
+two significant figures.
+
+**Verified.** 651/651 native, 30 skipped, `mod app` clean for wasm32.
+
 ## 2026-08-26 — the heap re-measured: a scatter of spinning blades
 
 Every packing figure this module had reported was taken through machinery since replaced — an invented
