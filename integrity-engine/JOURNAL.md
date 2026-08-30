@@ -3,6 +3,125 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-29 — forkful by forkful, and two premises that turned out to be false
+
+Row 60 step C said *"the release starts interpenetrated"*. Measuring it first corrected both the row and
+my own reading of it.
+
+| blades | interpenetrating pairs at t=0 | worst overlap |
+|---|---|---|
+| 10 | **0/45** | 0% |
+| 20 | 1/190 | 52% |
+| 40 | 6/780 | 73% |
+| 100 | 25/4950 | 96% |
+| 200 | 149/19900 | 100% |
+| 400 | **553/79800** | **100%** — coincident |
+
+I had told Robin "every member starts inside every other", reasoning from the 3.5 cm release disc against a
+35 cm blade. Wrong: the release also spreads members over **0.7 m vertically**, which separates them. The
+defect is real and severe **at scale** — a 100% overlap is a **3.14 m/s kick on the first step**, larger
+than the 2 m/s a blade reaches falling — and **entirely absent at 10 members**.
+
+★ So my stated expectation, that this would lift the 0.00086 packing, was wrong before it was tested: those
+runs had zero overlapping pairs. Saying it in advance is what made it checkable.
+
+### What landed
+
+`release_rods` now places each member by rejection and, when the next one cannot be fitted, **the forkful is
+full and the rest wait for the following throw**. No batch size is chosen; the geometry decides it. The
+interval is `√(2h/g) + √(2L/g)` — the fall from the release ceiling plus the settle gauge's own support
+time. `Rod::release_t_s` carries it, and a member not yet thrown neither falls nor collides. The gauge also
+refuses to call a heap settled while it is still being built.
+
+Result: **0 interpenetrating pairs at every count from 10 to 400.**
+
+### ★★ It biased the physics, and the check caught it
+
+Re-drawing a whole member on each rejection quietly reshaped the population. A 0.35 m blade in a 0.07 m disc
+fits more easily **lying down**, because a horizontal blade reaches out of the crowded disc into empty
+space. At 400 members the mean `|axis·ŷ|` came out **0.4369 against a uniform 0.5000** — 4.4 standard
+errors low. A flatter release packs differently, so fixing interpenetration that way would have traded one
+defect for a subtler one.
+
+`Rod::axis` is drawn uniformly on the sphere precisely because *a dropped blade has no preferred direction*.
+Orientation is now drawn ONCE per member and only the position is retried: **0.5068 at 400 members**, 0.47σ.
+
+★ And with orientations no longer resampled, the forkful mechanism finally engages at all — 400 blades need
+2 throws. Until that fix it never fired once, so the "forkful" release was rejection sampling wearing the
+name of something it wasn't.
+
+### ★ The test's own invariant was wrong too
+
+Comparing every pair regardless of release time reported 209 "interpenetrations" between members of
+*different* forkfuls — which never coexist, since the first has landed before the second exists. The
+invariant is *no two members that are in the world at the same moment may overlap*, and it now says so.
+
+### Recorded, not fixed — row 74
+
+The forkful interval is DERIVED but not CHECKED: it estimates when the previous throw has cleared the
+release volume rather than measuring it. At today's counts it barely fires, so the risk is small and grows
+with member count. The fix is to apply the same invariant at every throw instead of only at `t = 0`.
+
+**Verified.** 653/653 native, 30 skipped, `mod app` clean for wasm32.
+
+## 2026-08-29 — the contact learns to see rotation, and the heap becomes a pile
+
+`granular::contact_accel(pi, vi, pj, vj, …)` has always taken the velocities of the two CONTACT POINTS.
+Every caller handed it the body's centre-of-mass velocity for a point that is not the centre. So a rod
+turning in place presented `v_rel = 0`: its restitution damping never saw the motion, and Coulomb friction
+never saw its foot sliding. **Nothing in the engine could spin anything down.**
+
+The law did not change. What the callers told it did.
+
+- Both sites now pass `v + ω × r`.
+- The floor constraint distributes its impulse with the real effective-mass matrix
+  `K = (1/m)I₃ − [r]ₓ·I⁻¹·[r]ₓ`, inverted. A point far out on a light blade is easier to move than its
+  mass suggests, because the body can rotate out of the way; using the bare mass over-brakes it.
+
+**A blade spinning on the floor now spins down 20 → 10 rad/s in 0.074 s**, where before it held 20.0000
+rad/s indefinitely with its foot sliding at 3.5 m/s across friction 0.8.
+
+### The heap, re-measured
+
+| | before | after |
+|---|---|---|
+| packing | 0.00046 | **0.00086** |
+| peak centre of mass | 0.147 m/s | **0.000063 m/s** |
+| peak \|ω\| | 214 rad/s | **3.40 rad/s** |
+| contacting fraction | 0.547 | **0.972** (1.000 at the end) |
+
+**It is a pile now, not a scatter** — every member ends in contact, and translation is dead. Still 34×
+looser than loose hay, and still not `quiet`.
+
+### ★★★ It caught a bug the sibling test had blessed
+
+The toppling test began failing. Not a regression: the floor contact had been applied **twice** — once as a
+velocity constraint on the centre, and again as an angular impulse computed from the full mass — so a blade
+toppled **1.75× too fast**, and `a_blade_stood_on_its_end_falls_over` passed because it asserted only "more
+than twice the starting angle". My own sanity check at the time was that `√(L/g)` gave "the right order of
+magnitude", which is exactly the kind of check that cannot see a factor of 1.75.
+
+A rod pivoting on its end obeys `θ̈ = (3g/2L)·sin θ`, so `θ(t) = θ₀·cosh(ωt)` with `ω = √(3g/2L)` — exact
+and independent of the integrator. The test now measures against it: **0.2032 s against theory 0.2031 s,
++0.06%.**
+
+### ★★ Why it still is not settled — row 73
+
+Translation is dead and everything is touching, and peak `|ω|` is still 3.40 rad/s: a tip speed of 0.595
+m/s against a quiescent 0.103 m/s, so the gauge is right to refuse.
+
+**A capsule contact cannot see axial spin.** Contact between capsules resolves at the closest point on each
+SEGMENT — a point *on the axis* — so the moment arm is parallel to the body's own long axis, and for a spin
+about that axis `ω × r = 0` identically. The contact point does not move; friction has nothing to oppose.
+And it is the worst case by construction: the axial moment is the small one, ~10⁷ below the others, so
+axial spin is both the easiest to excite and the only one nothing can remove.
+
+The fix is to resolve contact on the SURFACE rather than the axis — `p_surface = p_axis − n·r` — after
+checking the blast radius, since it moves the point of application for every pile contact. Row 70 already
+said a capsule is the wrong shape for a ribbon; it closed that for drag and not for contact.
+
+**Verified.** 652/652 native, 30 skipped, `mod app` clean for wasm32.
+
 ## 2026-08-29 — one answer to "how small must a step be", and a measurement that killed the plan
 
 Robin, on the pile's timestep problem: *"Note this for future massive multiple object work as a useful

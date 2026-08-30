@@ -9,6 +9,29 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★ **The release is forkful by forkful** (docs/46 row 60 step C). Members are placed by rejection;
+  when the next cannot be fitted, that forkful is full and the rest wait for the following throw, at an
+  interval of `√(2h/g) + √(2L/g)`. `Rod::release_t_s` carries it, and an unthrown member neither falls
+  nor collides. **0 interpenetrating pairs at every count from 10 to 400**, against 553/79800 at 400
+  before — where the worst overlap was a 3.14 m/s kick on the first step.
+- **Orientation is drawn once per member**; only position is retried. Re-drawing on rejection biased the
+  population toward horizontal (mean `|axis·ŷ|` 0.4369 vs a uniform 0.5, 4.4σ) because a long blade fits
+  a narrow disc more easily lying down.
+- **Recorded, not fixed** (docs/46 row 74): the forkful interval estimates when the previous throw has
+  cleared rather than measuring it.
+
+- ★★★ **Contacts see rotation** (docs/46 row 72). `contact_accel` always took contact-point velocities;
+  every caller passed the centre of mass, so nothing could ever spin down. Both sites now pass
+  `v + ω × r`, and the floor constraint distributes its impulse via the effective-mass matrix
+  `K = (1/m)I₃ − [r]ₓI⁻¹[r]ₓ`. A blade spinning on the floor decays 20 → 10 rad/s in 0.074 s; the heap's
+  peak `|ω|` falls 63×, translation dies to 6.3e-5 m/s, and every member ends in contact — a pile rather
+  than a scatter. New: `Rod::velocity_at`, `Rod::effective_mass_at`, `Rod::inv_inertia_world`,
+  `Rod::apply_impulse_at`.
+- **Fixed a double-applied floor contact** that made a toppling blade fall 1.75× too fast; the test now
+  checks the analytic pivot `θ₀cosh(√(3g/2L)·t)` and agrees to +0.06%.
+- **Recorded, not fixed** (docs/46 row 73): a capsule contact resolves on the axis, so `ω × r = 0` for
+  axial spin — the one rotation nothing can damp, and the reason the heap still is not `quiet`.
+
 - ★★★ **`substep` — one answer to "how small must a step be"** (docs/46 row 69). `0.1/√stiffness`
   appeared in three places plus a magic `960` for SPH; `substep::accurate_dt_s` derives it from the
   contact's own `ω = √stiffness` and duration `π/ω`, at a resolution measured against the analytic

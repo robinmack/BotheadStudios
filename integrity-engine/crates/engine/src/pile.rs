@@ -127,6 +127,9 @@ pub struct Rod {
     /// heap slid instead of toppling, so a "pile of blades" was a pile of arrows all still pointing
     /// the way they were released.
     pub ang_vel: DVec3,
+    /// ★ **When this member is thrown on**, s (docs/46 row 60 step C). A haystack is built forkful by
+    /// forkful; before its moment a member is not in the world, so it neither falls nor collides.
+    pub release_t_s: f64,
 }
 
 impl Rod {
@@ -267,7 +270,12 @@ fn closest_points(a0: DVec3, a1: DVec3, b0: DVec3, b1: DVec3) -> (DVec3, DVec3) 
 /// own size in one substep — and `headroom` is `INFINITY`, matching every other caller, which is the
 /// one thing here worth revisiting if a buried rod is ever seen being rammed up through its
 /// neighbours.
-fn floor_contact(rod: &Rod, radius: f64, friction: f64) -> crate::granular::TerrainContact {
+fn floor_contact(
+    rod: &Rod,
+    point_vel: DVec3,
+    radius: f64,
+    friction: f64,
+) -> crate::granular::TerrainContact {
     let (e0, e1) = rod.ends();
     // ★ The WHOLE lower end, not its height bolted onto the centre's x and z. The old floor block
     // built `(centre.x, lowest, centre.z)` — a point that is on neither the rod nor the segment — and
@@ -277,7 +285,7 @@ fn floor_contact(rod: &Rod, radius: f64, friction: f64) -> crate::granular::Terr
     let lower = if e0.y <= e1.y { e0 } else { e1 };
     crate::granular::terrain_contact_resolve(
         lower,
-        rod.vel,
+        point_vel,
         0.0,
         0.0,
         0.0,
@@ -375,6 +383,46 @@ impl Rod {
         [along, along.cross(n), n]
     }
 
+    /// **The inverse inertia tensor in WORLD axes**, kg⁻¹m⁻². The body's principal moments are
+    /// diagonal in its own frame, so this is `F · diag(1/I) · Fᵀ` for the frame `F`.
+    pub fn inv_inertia_world(&self, mass_kg: f64) -> glam::DMat3 {
+        let f = self.frame();
+        let i = self.principal_inertia_kgm2(mass_kg);
+        let basis = glam::DMat3::from_cols(f[0], f[1], f[2]);
+        basis * glam::DMat3::from_diagonal(DVec3::ONE / i) * basis.transpose()
+    }
+
+    /// ★★ **The effective-mass matrix at a point offset `r` from the centre** — what a contact there
+    /// actually has to shove.
+    ///
+    /// `Δv_point = K · J` for an impulse `J` applied at that point, with
+    /// `K = (1/m)·I₃ − [r]ₓ · I⁻¹ · [r]ₓ`. A point far out along a light blade is much EASIER to move
+    /// than the blade's mass suggests, because the body can rotate out of the way instead of
+    /// translating — and that is precisely the response a contact fed centre-of-mass velocity cannot
+    /// see. Inverting this is what makes a constraint solved on a point velocity distribute correctly
+    /// between travelling and turning.
+    pub fn effective_mass_at(&self, mass_kg: f64, r: DVec3) -> glam::DMat3 {
+        let skew = glam::DMat3::from_cols(
+            DVec3::new(0.0, r.z, -r.y),
+            DVec3::new(-r.z, 0.0, r.x),
+            DVec3::new(r.y, -r.x, 0.0),
+        );
+        glam::DMat3::from_diagonal(DVec3::splat(1.0 / mass_kg.max(1e-30)))
+            - skew * self.inv_inertia_world(mass_kg) * skew
+    }
+
+    /// **The velocity of the material at a point offset `r` from the centre** — `v + ω × r`. The
+    /// quantity every contact wanted and none was given (docs/46 row 72).
+    pub fn velocity_at(&self, r: DVec3) -> DVec3 {
+        self.vel + self.ang_vel.cross(r)
+    }
+
+    /// Apply an impulse at a point offset `r`: it both pushes and turns.
+    pub fn apply_impulse_at(&mut self, mass_kg: f64, r: DVec3, impulse: DVec3) {
+        self.vel += impulse / mass_kg.max(1e-30);
+        self.ang_vel += self.inv_inertia_world(mass_kg) * r.cross(impulse);
+    }
+
     /// Turn a world-frame angular impulse (N·m·s) into the angular velocity it adds.
     fn ang_vel_from_impulse(&self, mass_kg: f64, impulse: DVec3) -> DVec3 {
         let f = self.frame();
@@ -459,13 +507,22 @@ pub fn step_one_rod(
     // topples. The old code took the velocity change and threw the arm away.
     let (e0, e1) = rod.ends();
     let lower = if e0.y <= e1.y { e0 } else { e1 };
-    let hit = floor_contact(rod, contact.radius, contact.friction);
+    let arm = lower - rod.centre;
+    // ★★★ THE CONTACT SEES ROTATION (docs/46 row 72). The constraint is solved on the velocity of the
+    // MATERIAL AT THE FOOT, `v + ω × r`, not on the centre of mass — a blade spinning in place has a
+    // foot sliding at `ω·L/2` and used to present `v_rel = 0`, so neither its restitution damping nor
+    // Coulomb friction could see the motion. Nothing spun down, ever.
+    let v_foot = rod.velocity_at(arm);
+    let hit = floor_contact(rod, v_foot, contact.radius, contact.friction);
     if hit.hit {
-        let dv = hit.vel - rod.vel;
-        rod.vel = hit.vel;
         rod.centre += hit.dpos;
-        let arm = lower - rod.centre;
-        rod.ang_vel += rod.ang_vel_from_impulse(mass_kg, arm.cross(dv * mass_kg));
+        // The constraint says what the FOOT should now be doing. Distributing that between travelling
+        // and turning needs the effective mass at the foot: `Δv = K·J`, so `J = K⁻¹·Δv`. A point far
+        // out on a light blade is easier to move than the blade's mass suggests, because the body can
+        // rotate out of the way — using `m` here instead would over-brake it.
+        let k = rod.effective_mass_at(mass_kg, arm);
+        let impulse = k.inverse() * (hit.vel - v_foot);
+        rod.apply_impulse_at(mass_kg, arm, impulse);
     }
 }
 
@@ -477,47 +534,104 @@ pub fn release_rods(member: &Assembly, count: usize, seed: u64) -> Option<Vec<Ro
     let (length, radius) = rod_for(member)?;
     let (width, thickness) = cross_section_for(member)?;
     let spread = length * 0.1;
-    let rods: Vec<Rod> = (0..count)
-        .map(|i| {
-            let i = i as u64;
-            let (u1, u2, u3) = (unit(seed, i, 1), unit(seed, i, 2), unit(seed, i, 3));
-            let r = spread * u1.sqrt();
-            let a = u2 * std::f64::consts::TAU;
-            // Orientation on the sphere, uniformly — a dropped blade has no preferred direction.
-            let z = 2.0 * u3 - 1.0;
-            let phi = unit(seed, i, 4) * std::f64::consts::TAU;
-            let s = (1.0 - z * z).max(0.0).sqrt();
-            Rod {
-                // ★ Released just above the floor, not in a tower. MEASURED the other way first: a
-                // column `count`-blades tall is seven metres, and at this contact's stable timestep
-                // 4,000 steps is 0.94 s — less than the fall takes — so the "heap" was still a cloud
-                // at 0.0001 packing. A release height of a couple of blade lengths falls in ~0.4 s.
-                centre: DVec3::new(
-                    r * a.cos(),
-                    radius + unit(seed, i, 5) * length * 2.0,
-                    r * a.sin(),
-                ),
-                axis: DVec3::new(s * phi.cos(), z, s * phi.sin()).normalize(),
-                half_length_m: length * 0.5,
-                radius_m: radius,
-                width_m: width,
-                thickness_m: thickness,
-                // ★ ROLL about the long axis, from its own draw of the seeded stream. A blade released
-                // face-up and one released edge-up are different blades to the air (10:1 in presented
-                // area), so leaving this fixed would have quietly given every blade the same attitude.
-                normal: {
-                    let ax = DVec3::new(s * phi.cos(), z, s * phi.sin()).normalize();
-                    let seed_v = if ax.x.abs() < 0.9 { DVec3::X } else { DVec3::Y };
-                    let u = ax.cross(seed_v).normalize();
-                    let v = ax.cross(u);
-                    let roll = unit(seed, i, 6) * std::f64::consts::TAU;
-                    (u * roll.cos() + v * roll.sin()).normalize()
-                },
-                vel: DVec3::ZERO,
-                ang_vel: DVec3::ZERO,
-            }
-        })
-        .collect();
+    let touch = 2.0 * radius;
+
+    // ★★★ **FORKFUL BY FORKFUL** (docs/46 row 60 step C). Robin: *"in a hay stack it's all gravity"* —
+    // a haystack is built by throwing on forkfuls, each landing before the next arrives. That is not a
+    // convenience, it is the only release that satisfies the invariant matter has anyway: **nothing may
+    // start inside anything else.**
+    //
+    // ★ MEASURED, and it corrects both this row's own wording and my first reading of it. The release
+    // is NOT uniformly interpenetrated — the vertical spread (`0..2·length`) separates members even
+    // though the horizontal disc is only `0.1·length` across. It degrades with crowding:
+    //
+    //     10 blades   0/45 pairs        20 blades   1/190      40 blades   6/780
+    //    100 blades  25/4950          200 blades 149/19900    400 blades 553/79800, fully coincident
+    //
+    // At the shipped 400 that is a 3.14 m/s kick on the first step — larger than the 2 m/s a blade
+    // reaches falling — so the heap was being blown apart before gravity got a word in. At 10 it never
+    // happened at all, which is why the small-count measurements are unaffected by this fix and why a
+    // claim that it explains them would have been wrong.
+    //
+    // A forkful is however many members can be placed WITHOUT overlapping. When the next one cannot be
+    // fitted, the forkful is full and the rest wait for the following throw — no batch size is chosen.
+    // The interval is the fall time from the release height, `√(2h/g)`, plus the same `√(2L/g)` the
+    // settle gauge already uses to decide a member is supported: nothing new is declared.
+    let ceiling = 2.0 * length;
+    let interval = (2.0 * ceiling / 9.81).sqrt() + (2.0 * length / 9.81).sqrt();
+
+    let mut rods: Vec<Rod> = Vec::with_capacity(count);
+    let mut forkful_start = 0usize; // index of the first member of the forkful being built
+    let mut forkful = 0u32;
+    let mut attempt = 0u64;
+    while rods.len() < count {
+        let i = rods.len() as u64;
+        // ★★★ ORIENTATION IS DRAWN ONCE, FROM `i`; ONLY THE POSITION IS RETRIED, FROM `k`.
+        //
+        // MEASURED THE WRONG WAY FIRST. Re-drawing the whole member on each rejection biased the
+        // population: a blade 0.35 m long in a disc 0.07 m across fits more easily lying DOWN, because
+        // a horizontal blade reaches out of the crowded disc into empty space. At 400 members the mean
+        // `|axis·ŷ|` came out **0.4369 against a uniform 0.5000** — 4.4 standard errors low, a real
+        // tilt toward horizontal, and a flatter release packs differently. Fixing interpenetration by
+        // silently re-shaping the orientation distribution would have traded one defect for a subtler
+        // one, and `Rod::axis` is drawn uniformly on the sphere precisely because *a dropped blade has
+        // no preferred direction*.
+        let z = 2.0 * unit(seed, i, 3) - 1.0;
+        let phi = unit(seed, i, 4) * std::f64::consts::TAU;
+        let sph = (1.0 - z * z).max(0.0).sqrt();
+        let axis = DVec3::new(sph * phi.cos(), z, sph * phi.sin()).normalize();
+        let k = i * 64 + (attempt % 64);
+        let (u1, u2) = (unit(seed, k, 1), unit(seed, k, 2));
+        let r = spread * u1.sqrt();
+        let a = u2 * std::f64::consts::TAU;
+        let centre = DVec3::new(
+            r * a.cos(),
+            radius + unit(seed, k, 5) * ceiling,
+            r * a.sin(),
+        );
+        let cand = Rod {
+            centre,
+            axis,
+            half_length_m: length * 0.5,
+            radius_m: radius,
+            width_m: width,
+            thickness_m: thickness,
+            normal: {
+                let seed_v = if axis.x.abs() < 0.9 {
+                    DVec3::X
+                } else {
+                    DVec3::Y
+                };
+                let u = axis.cross(seed_v).normalize();
+                let v = axis.cross(u);
+                let roll = unit(seed, i, 6) * std::f64::consts::TAU;
+                (u * roll.cos() + v * roll.sin()).normalize()
+            },
+            vel: DVec3::ZERO,
+            ang_vel: DVec3::ZERO,
+            release_t_s: forkful as f64 * interval,
+        };
+        // Only against the CURRENT forkful: earlier ones are already on the heap and out of the way.
+        let (c0, c1) = cand.ends();
+        let clash = rods[forkful_start..].iter().any(|o| {
+            let (o0, o1) = o.ends();
+            let (pa, pb) = closest_points(c0, c1, o0, o1);
+            (pa - pb).length() < touch
+        });
+        if !clash {
+            rods.push(cand);
+            attempt = 0;
+            continue;
+        }
+        attempt += 1;
+        if attempt >= 64 {
+            // This forkful is full — the disc cannot hold another blade without one lying inside
+            // another. Throw the next one.
+            forkful += 1;
+            forkful_start = rods.len();
+            attempt = 0;
+        }
+    }
     Some(rods)
 }
 
@@ -737,11 +851,16 @@ pub fn settle_traced(
     while elapsed_s < CAP_S {
         let snapshot = rods.clone();
         for i in 0..rods.len() {
+            // ★ Not thrown on yet: a member waiting for its forkful is not in the world, so it neither
+            // falls nor collides. Skipping it is what makes the release a SEQUENCE rather than a cloud.
+            if rods[i].release_t_s > elapsed_s {
+                continue;
+            }
             let mut acc = DVec3::ZERO;
             let mut torque = DVec3::ZERO;
             let (a0, a1) = snapshot[i].ends();
             for (j, other) in snapshot.iter().enumerate() {
-                if i == j {
+                if i == j || other.release_t_s > elapsed_s {
                     continue;
                 }
                 let (b0, b1) = other.ends();
@@ -752,8 +871,12 @@ pub fn settle_traced(
                     continue;
                 }
                 let (pa, pb) = closest_points(a0, a1, b0, b1);
-                let a_n =
-                    crate::granular::contact_accel(pa, snapshot[i].vel, pb, other.vel, &contact);
+                // ★★★ Both bodies' velocities AT THEIR CONTACT POINTS (docs/46 row 72) — the
+                // quantity `contact_accel` has always taken and never been given. Two blades scraping
+                // past each other spin-to-spin were invisible to the damping and to friction alike.
+                let va = snapshot[i].velocity_at(pa - snapshot[i].centre);
+                let vb = other.velocity_at(pb - other.centre);
+                let a_n = crate::granular::contact_accel(pa, va, pb, vb, &contact);
                 acc += a_n;
                 // ★ THE NEIGHBOUR'S MOMENT ARM. The contact happens at `pa`, which is somewhere along
                 // this rod, not at its centre — so it both pushes and TURNS. Discarding the arm is what
@@ -821,7 +944,10 @@ pub fn settle_traced(
         // moving?* is a contact-radius question, and *has that lasted long enough to prove support?*
         // is a body-length one. Collapsing them into one gauge is what let a frozen cloud pass.
         let support_s = (2.0 * length / gravity_ms2).sqrt();
-        let supported = gauge.quiet_seconds() as f64 >= support_s;
+        // ★ A heap that is still being BUILT is not a settled heap, however quiet the part already
+        // thrown on happens to be. Without this the gauge could declare victory between forkfuls.
+        let all_thrown = rods.iter().all(|r| r.release_t_s <= elapsed_s);
+        let supported = all_thrown && gauge.quiet_seconds() as f64 >= support_s;
         if trace_every_s > 0.0 && elapsed_s >= next_sample {
             next_sample = elapsed_s + trace_every_s;
             let mean = rods.iter().map(|r| r.vel.length()).sum::<f64>() / rods.len().max(1) as f64;
@@ -945,62 +1071,56 @@ mod tests {
         crate::atmosphere::air_density_at(101_325.0, air, 288.15, 9.81, 0.0)
     }
 
-    /// ★★★ **A BLADE STOOD ON ITS END FALLS OVER** (docs/46 row 60 step B).
+    /// ★★★ **A BLADE LYING ON THE FLOOR, SPINNING, MUST SPIN DOWN** (docs/46 row 72).
     ///
-    /// The plainest thing a rod could not do. `Rod` carried a position and a velocity and no angular
-    /// state at all, so its `axis` was fixed for life: a blade balanced upright stayed upright
-    /// forever, and one landing on a heap slid instead of toppling. A pile made of members that cannot
-    /// turn is not a pile of blades, it is a pile of arrows all pointing the way they were released —
-    /// which is why the packing it reported was never going to be straw's.
+    /// Row 60 step B gave rods angular velocity and nothing that takes it away. The re-measured heap
+    /// showed the consequence in the plainest possible terms: centres of mass nearly still at 0.147
+    /// m/s while the tips moved at 37.4 m/s — the blades had stopped travelling and gone on spinning,
+    /// forever, because **no contact in the engine could see rotation.**
     ///
-    /// Gravity exerts no torque about a uniform body's own centre of mass, so the toppling here comes
-    /// from where it must: **the floor pushes on the rod's lower END, and that force has a moment arm
-    /// to the centre.** Nothing is added to make it fall; the contact was always off-centre and there
-    /// was simply no degree of freedom for it to act on.
+    /// `granular::contact_accel(pi, vi, pj, vj, …)` takes the velocities of the two CONTACT POINTS.
+    /// Every caller was handing it the body's centre-of-mass velocity for a point that is not the
+    /// centre — so a rod turning in place presented `v_rel = 0` and the contact's `normal_damp`, which
+    /// carries the material's own measured restitution, never saw the motion at all. Friction likewise:
+    /// a spinning blade's foot is SLIDING across the floor, and sliding is what friction acts on.
     ///
-    /// The test asks only for the sign of the effect — that it tips, and keeps tipping — because the
-    /// rate depends on the contact stiffness and the air, both of which are measured elsewhere. A
-    /// tolerance on the rate would be a tolerance on those, which is how a test starts pinning numbers
-    /// nobody chose.
+    /// The physical quantity is `v + ω × r`. Nothing here changes the contact law; it changes what the
+    /// callers tell it about, which was wrong.
     #[test]
-    fn a_blade_stood_on_its_end_falls_over() {
+    fn a_blade_spinning_on_the_floor_spins_down() {
         let mats = crate::materials::load();
         let blade = crate::assembly::compiled::parse(crate::assembly::compiled::GRASS_BLADE_DRY);
-        let (length, radius) = rod_for(&blade).expect("a blade is a rod");
-        let (width, thickness) = cross_section_for(&blade).expect("a blade has a cross-section");
+        let (length, radius) = rod_for(&blade).expect("rod");
+        let (width, thickness) = cross_section_for(&blade).expect("cross-section");
         let mass = blade.mass_kg(&mats).expect("mass");
         let m = mats.iter().find(|m| m.id == "straw").expect("straw");
         let contact = crate::granular::contact_from_material(m, radius, mass);
         let rho = sea_level_air(&mats);
 
-        // Stood almost upright — 3° off vertical, so gravity has somewhere to take it but the rod is
-        // not simply lying down already.
-        let tilt: f64 = 3.0_f64.to_radians();
+        // Lying flat on the floor, not moving, spinning about the vertical: its foot is sliding.
+        let spin0 = 20.0;
         let mut rod = Rod {
-            centre: DVec3::new(0.0, 0.5 * length * tilt.cos() + radius, 0.0),
-            axis: DVec3::new(tilt.sin(), tilt.cos(), 0.0).normalize(),
+            centre: DVec3::new(0.0, radius, 0.0),
+            axis: DVec3::X,
             half_length_m: 0.5 * length,
             radius_m: radius,
             width_m: width,
             thickness_m: thickness,
-            normal: DVec3::Z,
-            ang_vel: DVec3::ZERO,
+            normal: DVec3::Y,
             vel: DVec3::ZERO,
+            ang_vel: DVec3::new(0.0, spin0, 0.0),
+            release_t_s: 0.0,
         };
-
-        let from_vertical = |r: &Rod| r.axis.normalize_or(DVec3::Y).dot(DVec3::Y).abs().acos();
-        let start = from_vertical(&rod);
         println!(
-            "released {:.2}° from vertical · inertia about its width axis {:.4e} kg·m²",
-            start.to_degrees(),
-            rod.principal_inertia_kgm2(mass).y
+            "resting blade spun at {spin0} rad/s about the vertical · foot sliding at {:.3} m/s · friction {:.3}",
+            spin0 * rod.half_length_m,
+            contact.friction
         );
 
         let dt =
             crate::substep::accurate_dt_s(contact.stiffness, contact.normal_damp, 32.0).min(1.0e-4);
         let mut t = 0.0;
-        let mut angle = start;
-        for step in 0..400_000 {
+        for step in 0..2_000_000 {
             step_one_rod(
                 &mut rod,
                 mass,
@@ -1012,28 +1132,112 @@ mod tests {
                 DVec3::ZERO,
             );
             t += dt;
-            angle = from_vertical(&rod);
-            if step % 80_000 == 0 {
-                println!(
-                    "  t {t:.4} s · {:.2}° from vertical · |ω| {:.4} rad/s",
-                    angle.to_degrees(),
-                    rod.ang_vel.length()
-                );
+            if step % 400_000 == 0 {
+                println!("  t {t:.4} s · |ω| {:.4} rad/s", rod.ang_vel.length());
             }
-            if angle > std::f64::consts::FRAC_PI_2 * 0.9 {
+            if rod.ang_vel.length() < 0.5 * spin0 {
+                break;
+            }
+        }
+        let spin1 = rod.ang_vel.length();
+        println!("  ended |ω| {spin1:.4} rad/s after {t:.4} s");
+        assert!(
+            spin1 < 0.9 * spin0,
+            "a blade spinning on the floor must spin down: {spin0} -> {spin1:.4} rad/s in {t:.3} s. \
+             With the contact fed centre-of-mass velocity it sees v_rel = 0 and never damps."
+        );
+    }
+
+    /// ★★★ **A BLADE STOOD ON ITS END FALLS OVER AT THE RATE A PIVOTING ROD DOES** (docs/46 row 60
+    /// step B, and its correction by row 72).
+    ///
+    /// The plainest thing a rod could not do. `Rod` carried a position and a velocity and no angular
+    /// state, so its `axis` was fixed for life: a blade balanced upright stayed upright forever.
+    ///
+    /// Gravity exerts no torque about a uniform body's own centre of mass, so the toppling comes from
+    /// where it must: **the floor pushes on the rod's lower END, and that force has a moment arm.**
+    ///
+    /// ★★ **AND THE RATE IS NOW CHECKED AGAINST THEORY, WHICH CAUGHT A BUG THIS TEST HAD BLESSED.**
+    /// Its first version asserted only that the blade tipped "more than twice its starting angle", and
+    /// passed while the contact was being applied TWICE — the constraint set the centre's velocity
+    /// outright AND an angular impulse was added from the full mass, so the blade toppled **1.75× too
+    /// fast** and a loose threshold called it right. A rod pivoting on its end obeys
+    /// `θ̈ = (3g/2L)·sin θ`, so for small angles `θ(t) = θ₀·cosh(ωt)` with `ω = √(3g/2L)` — exact,
+    /// independent of this integrator, and unforgiving about a factor of 1.75.
+    #[test]
+    fn a_blade_stood_on_its_end_falls_over() {
+        let mats = crate::materials::load();
+        let blade = crate::assembly::compiled::parse(crate::assembly::compiled::GRASS_BLADE_DRY);
+        let (length, radius) = rod_for(&blade).expect("a blade is a rod");
+        let (width, thickness) = cross_section_for(&blade).expect("a blade has a cross-section");
+        let mass = blade.mass_kg(&mats).expect("mass");
+        let m = mats.iter().find(|m| m.id == "straw").expect("straw");
+        let contact = crate::granular::contact_from_material(m, radius, mass);
+        let rho = sea_level_air(&mats);
+        let g = 9.81;
+
+        let tilt: f64 = 3.0_f64.to_radians();
+        let mut rod = Rod {
+            centre: DVec3::new(0.0, 0.5 * length * tilt.cos() + radius, 0.0),
+            axis: DVec3::new(tilt.sin(), tilt.cos(), 0.0).normalize(),
+            half_length_m: 0.5 * length,
+            radius_m: radius,
+            width_m: width,
+            thickness_m: thickness,
+            normal: DVec3::Z,
+            ang_vel: DVec3::ZERO,
+            release_t_s: 0.0,
+            vel: DVec3::ZERO,
+        };
+
+        // The analytic pivot: θ̈ = (3g/2L)·sin θ, so θ = θ₀·cosh(ωt) while θ stays small.
+        let w = (3.0 * g / (2.0 * length)).sqrt();
+        let from_vertical = |r: &Rod| r.axis.normalize_or(DVec3::Y).dot(DVec3::Y).abs().acos();
+        let start = from_vertical(&rod);
+        println!(
+            "released {:.2}° from vertical · pivot rate ω = √(3g/2L) = {w:.4} 1/s",
+            start.to_degrees()
+        );
+
+        let dt =
+            crate::substep::accurate_dt_s(contact.stiffness, contact.normal_damp, 32.0).min(1.0e-4);
+        let target = 2.0f64; // measure the time to double the tilt — still inside the small-angle law
+        let want_t = target.acosh() / w;
+        let mut t = 0.0;
+        let mut angle = start;
+        while t < 4.0 * want_t {
+            step_one_rod(
+                &mut rod,
+                mass,
+                &contact,
+                g,
+                rho,
+                dt,
+                DVec3::ZERO,
+                DVec3::ZERO,
+            );
+            t += dt;
+            angle = from_vertical(&rod);
+            if angle >= target * start {
                 break;
             }
         }
         println!(
-            "  ended {:.2}° from vertical after {t:.4} s",
+            "  doubled the tilt at t = {t:.4} s · theory {want_t:.4} s · {:+.2}%",
+            100.0 * (t - want_t) / want_t
+        );
+        assert!(
+            angle >= target * start,
+            "a blade stood on its end must fall over: reached only {:.3}° in {t:.3} s",
             angle.to_degrees()
         );
         assert!(
-            angle > start * 2.0,
-            "a blade stood on its end must fall over: {:.3}° -> {:.3}° in {t:.3} s. \
-             With no angular degree of freedom its axis is fixed for life.",
-            start.to_degrees(),
-            angle.to_degrees()
+            (t - want_t).abs() / want_t < 0.15,
+            "and it must topple at the rate a pivoting rod does: {t:.4} s against theory {want_t:.4} s \
+             ({:+.1}%). The contact was once applied twice — once as a velocity constraint on the \
+             centre and again as an angular impulse from the full mass — which toppled it 1.75x too \
+             fast and passed a looser assertion than this one.",
+            100.0 * (t - want_t) / want_t
         );
     }
 
@@ -1162,6 +1366,118 @@ mod tests {
         );
     }
 
+    /// ★★★ **NO MEMBER MAY BE RELEASED INSIDE ANOTHER** (docs/46 row 60 step C).
+    ///
+    /// The release scatters members over a disc of radius `0.1·length` — **3.5 cm for a blade 35 cm
+    /// long**. Every member therefore starts deep inside several others, and a stiff contact resolving
+    /// a large initial overlap delivers an enormous impulse, off-centre, at `t = 0`. That is the
+    /// scatter the heap has been measuring all along: not how straw packs, but how hard the engine
+    /// threw it apart on the first step.
+    ///
+    /// ★ **Both previous release geometries were wrong, in opposite directions**, and the code says so
+    /// in its own comment: a disc wider than a blade is long gave *"a measurement of how thinly they
+    /// were scattered rather than of how they pack"*, so it was replaced by a point source — which
+    /// packs them at infinite density instead. Neither is a haystack.
+    ///
+    /// Robin's own description is the way out: *"in a hay stack it's all gravity"*, thrown on **forkful
+    /// by forkful**. A forkful is however many members fit without overlapping; the next goes on once
+    /// that one has landed. Nothing is invented — it is what building a haystack IS.
+    ///
+    /// This test asserts only the invariant, because the invariant is the physics: overlapping matter
+    /// at `t = 0` is not an initial condition, it is a violation being paid off as an explosion.
+    #[test]
+    fn no_member_is_released_inside_another() {
+        let mats = crate::materials::load();
+        let blade = crate::assembly::compiled::parse(crate::assembly::compiled::GRASS_BLADE_DRY);
+        let _ = &mats;
+        let (length, radius) = rod_for(&blade).expect("rod");
+        let touch = 2.0 * radius;
+
+        let mut worst_any = 0.0f64;
+        let mut total_overlapping = 0usize;
+        for count in [10usize, 20, 40, 100, 200, 400] {
+            let rods = release_rods(&blade, count, 20260810).expect("a release");
+            let mut worst_overlap = 0.0f64;
+            let mut pairs_overlapping = 0usize;
+            // ★ Compare only members that are in the world AT THE SAME MOMENT. Forkfuls reuse the
+            // same release volume and are separated in TIME, so two blades from different throws may
+            // occupy the same space at t=0 and never meet — the first has landed before the second
+            // exists. The first version of this check compared every pair regardless and reported 209
+            // "interpenetrations" that were nothing of the kind.
+            for i in 0..rods.len() {
+                let (a0, a1) = rods[i].ends();
+                for j in (i + 1)..rods.len() {
+                    if (rods[i].release_t_s - rods[j].release_t_s).abs() > 1e-12 {
+                        continue;
+                    }
+                    let (b0, b1) = rods[j].ends();
+                    let (pa, pb) = closest_points(a0, a1, b0, b1);
+                    let gap = (pa - pb).length();
+                    if gap < touch {
+                        pairs_overlapping += 1;
+                        worst_overlap = worst_overlap.max(touch - gap);
+                    }
+                }
+            }
+            let pairs = {
+                let mut n = 0usize;
+                for i in 0..rods.len() {
+                    for j in (i + 1)..rods.len() {
+                        if (rods[i].release_t_s - rods[j].release_t_s).abs() <= 1e-12 {
+                            n += 1;
+                        }
+                    }
+                }
+                n
+            };
+            let mut times: Vec<f64> = rods.iter().map(|r| r.release_t_s).collect();
+            times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            times.dedup_by(|a, b| (*a - *b).abs() < 1e-12);
+            // ★ A dropped blade has no preferred direction, so `|axis·ŷ|` must average 0.5 — the
+            // mean of |cos θ| for a uniform direction. Rejection sampling can quietly break that:
+            // in a narrow disc only near-VERTICAL blades fit, so accepting whatever fits would tilt
+            // the whole population upright and call it chance.
+            let mean_updown = rods.iter().map(|r| r.axis.y.abs()).sum::<f64>() / rods.len() as f64;
+            println!(
+                "      {} forkful(s), last thrown at {:.3} s · mean |axis·ŷ| {:.4} (uniform = 0.5000)",
+                times.len(),
+                times.last().copied().unwrap_or(0.0),
+                mean_updown
+            );
+            println!(
+                "  {count:3} blades: {pairs_overlapping}/{pairs} pairs interpenetrating at t=0 · \
+                 worst overlap {:.4} mm ({:.1}% of a diameter)",
+                worst_overlap * 1000.0,
+                100.0 * worst_overlap / touch
+            );
+            worst_any = worst_any.max(worst_overlap);
+            total_overlapping += pairs_overlapping;
+        }
+        // What an overlap COSTS, so "one pair" is not mistaken for "harmless": the contact is a
+        // per-mass spring at ~6.8e9, so an overlap of `d` launches the pair at `k·d·dt` on the first
+        // step alone.
+        let m = crate::materials::load();
+        let m = m.iter().find(|m| m.id == "straw").expect("straw");
+        let mass = blade.mass_kg(&crate::materials::load()).expect("mass");
+        let contact = crate::granular::contact_from_material(m, radius, mass);
+        let dt = crate::substep::accurate_dt_s(contact.stiffness, contact.normal_damp, 32.0);
+        println!(
+            "  worst overlap anywhere {:.4} mm -> first-step kick {:.3} m/s (terminal fall is ~2 m/s)",
+            worst_any * 1000.0,
+            contact.stiffness * worst_any * dt
+        );
+        assert_eq!(
+            total_overlapping, 0,
+            "no member may be released inside another: {total_overlapping} overlapping pairs across \
+             the counts above, worst by {:.4} mm against a {:.4} mm diameter, which is a {:.2} m/s \
+             kick on the first step. That is an explosion, not an initial condition.",
+            worst_any * 1000.0,
+            touch * 1000.0,
+            contact.stiffness * worst_any * dt
+        );
+        let _ = length;
+    }
+
     /// ★★★ **RE-MEASURE THE HEAP WITH THE NEW INSTRUMENT** (docs/46 rows 67, 70, 71, 60 step A3/B).
     ///
     /// Every packing figure this module has ever reported was taken through machinery that has since
@@ -1194,9 +1510,25 @@ mod tests {
                     let mean_touch = tr.iter().map(|x| x.contacting_fraction).sum::<f64>()
                         / tr.len().max(1) as f64;
                     let last_touch = tr.last().map(|x| x.contacting_fraction).unwrap_or(0.0);
+                    let last_w = tr.last().map(|x| x.peak_ang_speed_rads).unwrap_or(0.0);
+                    let half_l = 0.5 * length;
                     println!(
-                        "  {n:3} blades -> packing {:.5} · quiet {} after {:.3} s · peak centre {:.5} m/s",
+                        "  {n:3} blades -> packing {:.5} · quiet {} after {:.3} s · peak centre {:.6} m/s",
                         s.packing, s.quiet, s.elapsed_s, s.peak_speed_ms
+                    );
+                    // ★ The gauge asks about the fastest POINT, so report what it is actually seeing:
+                    // a heap can be translationally dead and still be turning.
+                    println!(
+                        "      peak |ω| {last_w:.5} rad/s -> tip {:.6} m/s · quiescent {:.5} m/s -> {}",
+                        last_w * half_l,
+                        crate::recohere::quiescent_speed(9.81, radius as f32),
+                        if last_w * half_l
+                            > crate::recohere::quiescent_speed(9.81, radius as f32) as f64
+                        {
+                            "STILL TURNING"
+                        } else {
+                            "rotationally at rest"
+                        }
                     );
                     println!(
                         "      contacting fraction: mean {:.3} over the run, {:.3} at the end \
@@ -1696,9 +2028,10 @@ mod tests {
             thickness_m: 0.5 * radius,
             normal: DVec3::Y,
             ang_vel: DVec3::ZERO,
+            release_t_s: 0.0,
             vel: DVec3::new(0.0, -1.0, 0.0), // driving downward into the floor
         };
-        let hit = floor_contact(&sunk, radius, contact.friction);
+        let hit = floor_contact(&sunk, sunk.vel, radius, contact.friction);
         println!(
             "  the settler's floor now: hit={} · vel {:+.4} -> {:+.4} m/s · dpos {:+.3e} m",
             hit.hit, sunk.vel.y, hit.vel.y, hit.dpos.y
@@ -1741,6 +2074,7 @@ mod tests {
             thickness_m: 0.5 * radius,
             normal: DVec3::Y,
             ang_vel: DVec3::ZERO,
+            release_t_s: 0.0,
             vel: DVec3::ZERO,
         };
         let want = blade.matter_volume_m3();
