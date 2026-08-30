@@ -507,6 +507,9 @@ pub fn step_one_rod(
     // topples. The old code took the velocity change and threw the arm away.
     let (e0, e1) = rod.ends();
     let lower = if e0.y <= e1.y { e0 } else { e1 };
+    // ★ The arm to the AXIS endpoint, not the surface. Moving it to the surface is the right physics
+    // and is docs/46 row 73 — it is NOT done here because it destabilises the resting contact; the
+    // measurement and the reason are in that row.
     let arm = lower - rod.centre;
     // ★★★ THE CONTACT SEES ROTATION (docs/46 row 72). The constraint is solved on the velocity of the
     // MATERIAL AT THE FOOT, `v + ω × r`, not on the centre of mass — a blade spinning in place has a
@@ -874,14 +877,19 @@ pub fn settle_traced(
                 // ★★★ Both bodies' velocities AT THEIR CONTACT POINTS (docs/46 row 72) — the
                 // quantity `contact_accel` has always taken and never been given. Two blades scraping
                 // past each other spin-to-spin were invisible to the damping and to friction alike.
-                let va = snapshot[i].velocity_at(pa - snapshot[i].centre);
-                let vb = other.velocity_at(pb - other.centre);
+                //
+                // ★ The arms are to the AXIS points. Moving them to the surfaces is docs/46 row 73 and
+                // is not done here — see that row for the instability it produced.
+                let arm_a = pa - snapshot[i].centre;
+                let arm_b = pb - other.centre;
+                let va = snapshot[i].velocity_at(arm_a);
+                let vb = other.velocity_at(arm_b);
                 let a_n = crate::granular::contact_accel(pa, va, pb, vb, &contact);
                 acc += a_n;
                 // ★ THE NEIGHBOUR'S MOMENT ARM. The contact happens at `pa`, which is somewhere along
                 // this rod, not at its centre — so it both pushes and TURNS. Discarding the arm is what
                 // made a landing blade slide instead of topple onto the heap.
-                torque += (pa - snapshot[i].centre).cross(a_n * member_mass);
+                torque += arm_a.cross(a_n * member_mass);
             }
             let r = &mut rods[i];
             step_one_rod(
@@ -1069,6 +1077,87 @@ mod tests {
             .find(|m| m.id == "air")
             .expect("air is catalogued");
         crate::atmosphere::air_density_at(101_325.0, air, 288.15, 9.81, 0.0)
+    }
+
+    /// ★★★ **AND IT MUST SPIN DOWN ABOUT ITS OWN LONG AXIS TOO** (docs/46 row 73).
+    ///
+    /// Row 72 taught contacts to see rotation and the heap became a pile — translation dead at
+    /// 0.000063 m/s, every member touching. It still would not settle: peak `|ω|` sat at **3.40 rad/s**,
+    /// a tip speed of 0.595 m/s against a quiescent 0.103 m/s.
+    ///
+    /// ★★ **Because a capsule contact cannot see AXIAL spin.** `closest_points` returns points on each
+    /// body's SEGMENT — points *on the axis* — so the moment arm `r` is parallel to the long axis, and
+    /// for `ω` about that same axis `ω × r = 0` **identically**. The contact point does not move,
+    /// friction has no sliding to oppose, and the damping has no relative velocity to remove. It is the
+    /// worst case by construction: the axial moment `m(W²+T²)/12` is ~10⁷ below the other two, so axial
+    /// spin is both the easiest to excite and the only one nothing could remove.
+    ///
+    /// The sibling test above spins about the VERTICAL while the blade lies along x — `ω ⊥ axis`, which
+    /// has a real moment arm and always worked. This one spins about the blade's own length, and it is
+    /// the case that never did.
+    ///
+    /// The fix is geometry, not a new force: matter touches at its SURFACE, so the contact point is
+    /// `p_axis − n·r`. Then the arm has a component perpendicular to the axis, an axial spin drags the
+    /// surface across the floor, and the friction that already exists does the work.
+    #[test]
+    #[ignore = "docs/46 row 73: the geometry fix works and destabilises the resting contact — see the row"]
+    fn a_blade_spinning_about_its_own_length_spins_down() {
+        let mats = crate::materials::load();
+        let blade = crate::assembly::compiled::parse(crate::assembly::compiled::GRASS_BLADE_DRY);
+        let (length, radius) = rod_for(&blade).expect("rod");
+        let (width, thickness) = cross_section_for(&blade).expect("cross-section");
+        let mass = blade.mass_kg(&mats).expect("mass");
+        let m = mats.iter().find(|m| m.id == "straw").expect("straw");
+        let contact = crate::granular::contact_from_material(m, radius, mass);
+        let rho = sea_level_air(&mats);
+
+        // Lying flat, still, spinning about its OWN LENGTH — ω ∥ axis.
+        let spin0 = 20.0;
+        let mut rod = Rod {
+            centre: DVec3::new(0.0, radius, 0.0),
+            axis: DVec3::X,
+            half_length_m: 0.5 * length,
+            radius_m: radius,
+            width_m: width,
+            thickness_m: thickness,
+            normal: DVec3::Y,
+            vel: DVec3::ZERO,
+            ang_vel: DVec3::new(spin0, 0.0, 0.0),
+            release_t_s: 0.0,
+        };
+        let i_axial = rod.principal_inertia_kgm2(mass).x;
+        println!(
+            "axial spin {spin0} rad/s · I_axial {i_axial:.4e} kg·m² · surface drags at ω·r = {:.5} m/s",
+            spin0 * radius
+        );
+
+        let dt =
+            crate::substep::accurate_dt_s(contact.stiffness, contact.normal_damp, 32.0).min(1.0e-4);
+        let mut t = 0.0;
+        for _ in 0..2_000_000 {
+            step_one_rod(
+                &mut rod,
+                mass,
+                &contact,
+                9.81,
+                rho,
+                dt,
+                DVec3::ZERO,
+                DVec3::ZERO,
+            );
+            t += dt;
+            if rod.ang_vel.length() < 0.5 * spin0 {
+                break;
+            }
+        }
+        let spin1 = rod.ang_vel.length();
+        println!("  ended |ω| {spin1:.4} rad/s after {t:.5} s");
+        assert!(
+            spin1 < 0.9 * spin0,
+            "a blade spinning about its own length must spin down: {spin0} -> {spin1:.4} rad/s in \
+             {t:.5} s. With the contact resolved on the AXIS the arm is parallel to ω, so ω × r = 0 \
+             and the surface never moves."
+        );
     }
 
     /// ★★★ **A BLADE LYING ON THE FLOOR, SPINNING, MUST SPIN DOWN** (docs/46 row 72).
