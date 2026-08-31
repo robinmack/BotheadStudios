@@ -397,3 +397,116 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod rotational_tests {
+    use super::*;
+    use glam::DVec3;
+
+    /// ★★★ **WHAT STEP A ROTATIONAL CONTACT MODE ACTUALLY NEEDS — MEASURED, because two derivations
+    /// of it disagreed** (docs/46 row 73, suspect 1).
+    ///
+    /// [`accurate_dt_s`] takes the contact's stiffness and nothing else, so the step it returns
+    /// resolves the TRANSLATIONAL contact oscillation `ω = √stiffness`. A contact that also turns the
+    /// body has a second mode, whose frequency depends on the effective inertia at the contact point —
+    /// and for a grass blade the axial moment is `~10⁷` below the other two, so that mode can be far
+    /// stiffer than the one the step was chosen for.
+    ///
+    /// ★★ **I could not settle it on paper.** One derivation said 2.1× finer would do; another said the
+    /// rotational mode is SLOWER than translation and therefore not the constraint at all. When two of
+    /// my own derivations disagree, the next plausible patch is a guess — so this finds the boundary by
+    /// bisection instead, on the exact configuration that blew up.
+    ///
+    /// Reported as a ratio against what `accurate_dt_s` currently hands out, because that ratio IS the
+    /// answer to *is the timestep the problem?*
+    #[test]
+    #[ignore = "sweeps a stiff contact at up to 64x resolution — seconds, not milliseconds"]
+    fn what_step_a_rotational_contact_mode_actually_needs() {
+        let mats = crate::materials::load();
+        let blade = crate::assembly::compiled::parse(crate::assembly::compiled::GRASS_BLADE_DRY);
+        let (length, radius) = crate::pile::rod_for(&blade).expect("rod");
+        let (width, thickness) = crate::pile::cross_section_for(&blade).expect("cross-section");
+        let mass = blade.mass_kg(&mats).expect("mass");
+        let m = mats.iter().find(|m| m.id == "straw").expect("straw");
+        let contact = crate::granular::contact_from_material(m, radius, mass);
+        let air = {
+            let a = mats.iter().find(|m| m.id == "air").expect("air");
+            crate::atmosphere::air_density_at(101_325.0, a, 288.15, 9.81, 0.0)
+        };
+
+        let base = accurate_dt_s(contact.stiffness, contact.normal_damp, 32.0).min(1.0e-4);
+        println!(
+            "contact ω {:.4e} rad/s · accurate_dt_s(32) = {base:.4e} s · stable_dt {:.4e} s",
+            contact_omega(contact.stiffness),
+            stable_dt_s(contact.stiffness)
+        );
+
+        let spin0 = 20.0f64;
+        let run = |dt: f64| -> (f64, f64) {
+            let mut rod = crate::pile::Rod {
+                centre: DVec3::new(0.0, radius, 0.0),
+                axis: DVec3::X,
+                half_length_m: 0.5 * length,
+                radius_m: radius,
+                width_m: width,
+                thickness_m: thickness,
+                normal: DVec3::Y,
+                vel: DVec3::ZERO,
+                ang_vel: DVec3::new(0.0, spin0, 0.0),
+                release_t_s: 0.0,
+            };
+            let energy = |r: &crate::pile::Rod| {
+                let i = r.principal_inertia_kgm2(mass);
+                let f = r.frame();
+                let wb = DVec3::new(
+                    r.ang_vel.dot(f[0]),
+                    r.ang_vel.dot(f[1]),
+                    r.ang_vel.dot(f[2]),
+                );
+                0.5 * mass * r.vel.length_squared()
+                    + 0.5 * (i.x * wb.x * wb.x + i.y * wb.y * wb.y + i.z * wb.z * wb.z)
+                    + mass * 9.81 * r.centre.y
+            };
+            let e0 = energy(&rod);
+            let steps = (0.05 / dt).ceil() as u64;
+            for _ in 0..steps {
+                crate::pile::step_one_rod(
+                    &mut rod,
+                    mass,
+                    &contact,
+                    9.81,
+                    air,
+                    dt,
+                    DVec3::ZERO,
+                    DVec3::ZERO,
+                );
+            }
+            // ★ TOTAL mechanical energy — translation, ROTATION and height. Gravity is conservative and
+            // every other channel here (contact, friction, air) is dissipative, so a rise is
+            // manufactured energy and nothing else.
+            (rod.ang_vel.length(), energy(&rod) / e0.max(1e-30))
+        };
+
+        println!(
+            "  a blade spinning about the VERTICAL, 0.05 s of simulated time, from {spin0} rad/s:"
+        );
+        let mut first_stable: Option<f64> = None;
+        for div in [1.0f64, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0] {
+            let dt = base / div;
+            let (w, e_ratio) = run(dt);
+            let verdict = if w > spin0 { "RUNS AWAY" } else { "decays" };
+            println!(
+                "    dt = base/{div:<5.0} = {dt:.4e} s -> |ω| {w:9.4} rad/s · energy x{e_ratio:8.2}  {verdict}"
+            );
+            if w <= spin0 && first_stable.is_none() {
+                first_stable = Some(div);
+            }
+        }
+        match first_stable {
+            Some(d) => println!(
+                "  -> the rotational mode needs the step {d}x finer than `accurate_dt_s` gives it"
+            ),
+            None => println!("  -> STILL unstable at 128x finer: the timestep is NOT the cause"),
+        }
+    }
+}

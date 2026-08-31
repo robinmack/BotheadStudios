@@ -3,6 +3,67 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-30 (later) — the heap settles, and three times I measured the wrong quantity
+
+**`quiet true after 5.220 s`.** The haystack comes to rest for the first time in this line of work, and
+because it stops instead of grinding to the 20 s cap the run costs **116 s instead of 432 s** — the
+affordability row 69's block-stepping could not buy, bought by correcting physics instead.
+
+Getting there meant measuring suspect 1, and the measurement inverted the diagnosis.
+
+### Both suspects were innocent
+
+**Suspect 1 — the timestep — refuted.** The stability sweep held the spin-up at **128× finer dt**:
+
+```
+dt = base/1    -> |ω| 311.54  RUNS AWAY
+dt = base/128  -> |ω| 289.92  RUNS AWAY
+```
+
+311 → 290 across 128× refinement is *converging*, not diverging.
+
+**Suspect 2 — friction as a velocity kill — refuted** from the code: `terrain_contact_resolve` already
+bounds friction by the Coulomb cone `μ·jn`, and its documented contract is *non-injecting*.
+
+### ★★★ There was never an instability
+
+Measuring **total mechanical energy** — translation, rotation and height, the thing I should have measured
+first — showed it **falling to 0.27×** while `|ω|` rose to 290 rad/s.
+
+Energy was never created. It was draining into the softest rotational mode. `I_axial` for a blade is
+3.4e-10 kg·m², **13,000× below** `I_width`, so the same joules parked there buy ~114× the angular speed;
+the final fast spin carries 1.5% of the starting energy.
+
+**So yesterday's revert was my error, not the physics'.** Row 73's surface-contact geometry was right all
+along. I asserted on angular SPEED — meaningless for a body with anisotropic inertia — and threw away a
+correct change. Both spin tests now assert on energy: the vertical case sheds **97%** of its energy while
+spinning faster, and the axial case damps for the first time.
+
+### ★★ And the same mistake was in my own gauge
+
+Row 71, two days old, taught `SettleGauge` about rotation by comparing `ω·L/2`. That tip lever is right for
+a tumble and wrong by `L/2r` for a spin about the body's own length, which moves its surface by only
+`ω·radius` — for a blade a **325× over-statement**. And that is precisely the rotation an anisotropic body
+ends up in.
+
+The heap's residual 3.40 rad/s registered as 0.595 m/s against a 0.103 m/s quiescent, when its true surface
+speed was 0.0018 m/s — **56× below**. A heap that was at rest was being told it was moving, by a gauge I had
+just "fixed".
+
+`Rod::max_surface_speed_ms` now uses the geometric lever: the farthest any surface point sits from the axis
+it is turning about. It collapses to `radius` for an axial spin and `L/2 + radius` for a tumble, with no
+cases. The trace reports it too, because the print was making the same 325× misreading a third time —
+`137.28 rad/s` shown as "24 m/s, STILL TURNING" where the truth is 0.074 m/s, rotationally at rest.
+
+### The lesson, which cost three instances
+
+**For a body with anisotropic inertia, angular speed is not a measure of how much is happening.** Energy is
+what must fall; surface speed is what "at rest" means. I used `|ω|` as a proxy for both, in a test, in a
+gauge, and in a trace, and it was wrong in all three.
+
+**Verified.** 654/654 native, 31 skipped, `mod app` clean for wasm32. Heap: packing 0.00074, `quiet` after
+5.220 s, contacting fraction 1.000 at the end.
+
 ## 2026-08-30 — row 73 attempted, measured, and reverted: right geometry, wrong stability
 
 Row 73 said a capsule contact cannot see axial spin, because `closest_points` returns points on the

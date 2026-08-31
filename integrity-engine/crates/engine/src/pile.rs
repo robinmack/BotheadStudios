@@ -411,6 +411,32 @@ impl Rod {
             - skew * self.inv_inertia_world(mass_kg) * skew
     }
 
+    /// ★★★ **THE FASTEST ANY OF THIS BODY'S MATTER IS MOVING**, m/s — what "is it at rest?" actually
+    /// asks (docs/46 row 71, corrected).
+    ///
+    /// Row 71 taught `SettleGauge` about rotation by comparing `ω·L/2` — the tip speed — against the
+    /// quiescent speed. That lever is right for a tumble and **wrong by `L/2r` for a spin about the
+    /// body's own length**, which moves its surface by only `ω·radius`. For a grass blade that is a
+    /// **325× over-statement**, and it is the rotation an anisotropic body ends up in: the axial moment
+    /// is ~10⁴ below the others, so energy draining out of a heap collects there as fast spin carrying
+    /// almost no energy at all. A heap can be genuinely at rest and be told it is moving at 0.595 m/s.
+    ///
+    /// The honest lever is geometric: the farthest any point of the body sits from the axis it is
+    /// turning about. For a capsule that is an end's perpendicular distance from `ω̂`, plus the radius —
+    /// which collapses to `radius` for an axial spin and to `L/2 + radius` for a tumble, with no cases.
+    pub fn max_surface_speed_ms(&self) -> f64 {
+        let w = self.ang_vel.length();
+        let spin = if w <= 1.0e-30 {
+            0.0
+        } else {
+            let w_hat = self.ang_vel / w;
+            let end = self.axis.normalize_or(DVec3::X) * self.half_length_m;
+            let perp = (end - w_hat * end.dot(w_hat)).length();
+            w * (perp + self.radius_m)
+        };
+        self.vel.length() + spin
+    }
+
     /// **The velocity of the material at a point offset `r` from the centre** — `v + ω × r`. The
     /// quantity every contact wanted and none was given (docs/46 row 72).
     pub fn velocity_at(&self, r: DVec3) -> DVec3 {
@@ -507,10 +533,10 @@ pub fn step_one_rod(
     // topples. The old code took the velocity change and threw the arm away.
     let (e0, e1) = rod.ends();
     let lower = if e0.y <= e1.y { e0 } else { e1 };
-    // ★ The arm to the AXIS endpoint, not the surface. Moving it to the surface is the right physics
-    // and is docs/46 row 73 — it is NOT done here because it destabilises the resting contact; the
-    // measurement and the reason are in that row.
-    let arm = lower - rod.centre;
+    // ★★ THE FOOT IS ON THE SURFACE (docs/46 row 73). Re-applied 2026-08-30 to MEASURE the stability
+    // boundary that two hand derivations disagreed about — see
+    // `substep::tests::what_step_a_rotational_contact_mode_actually_needs`.
+    let arm = (lower - DVec3::Y * contact.radius) - rod.centre;
     // ★★★ THE CONTACT SEES ROTATION (docs/46 row 72). The constraint is solved on the velocity of the
     // MATERIAL AT THE FOOT, `v + ω × r`, not on the centre of mass — a blade spinning in place has a
     // foot sliding at `ω·L/2` and used to present `v_rel = 0`, so neither its restitution damping nor
@@ -681,6 +707,12 @@ pub struct Sample {
     /// gravity acts at the centre of mass and drag at the area centroid, so neither exerts a torque.
     /// That makes it the one exact test for *has anything touched yet*.
     pub peak_ang_speed_rads: f64,
+    /// ★ **The fastest any member's MATTER is moving**, m/s — `Rod::max_surface_speed_ms`, which is
+    /// what the settle gauge is actually shown. Reported alongside `peak_ang_speed_rads` because the
+    /// two can disagree wildly: an axial spin of 137 rad/s moves a blade's surface at 0.074 m/s, and
+    /// reading `ω·L/2` instead says 24 m/s. A trace that reports the angular speed alone invites the
+    /// same 325x misreading the gauge itself made.
+    pub peak_surface_speed_ms: f64,
     /// ★ **What fraction of members are TOUCHING something** — the number that decides whether block
     /// timestepping can help at all (docs/46 row 69). A population where everyone is in contact pays
     /// the stiff step no matter how cleverly it is scheduled.
@@ -925,7 +957,7 @@ pub fn settle_traced(
         // not settled. That comparison needs no new dial — it reuses the gauge's own quiescent speed.
         let peak_point_speed = rods
             .iter()
-            .map(|r| r.vel.length().max(r.ang_vel.length() * r.half_length_m))
+            .map(|r| r.max_surface_speed_ms())
             .fold(0.0f64, f64::max);
         if peak_point_speed >= gauge.moving_above(gravity_ms2 as f32) as f64 {
             disturbed = true;
@@ -979,6 +1011,10 @@ pub fn settle_traced(
                 peak_ang_speed_rads: rods
                     .iter()
                     .map(|r| r.ang_vel.length())
+                    .fold(0.0f64, f64::max),
+                peak_surface_speed_ms: rods
+                    .iter()
+                    .map(|r| r.max_surface_speed_ms())
                     .fold(0.0f64, f64::max),
                 contacting_fraction: {
                     let touch = 2.0 * contact.radius + contact.coh_range;
@@ -1068,6 +1104,26 @@ pub fn settle_traced(
 mod tests {
     use super::*;
 
+    /// ★★★ **THE QUANTITY THAT MUST FALL IS ENERGY, NOT ANGULAR SPEED** (docs/46 row 73, corrected).
+    ///
+    /// A body with anisotropic inertia can spin FASTER while losing energy, because `E = ½Iω²` and the
+    /// axial moment of a blade is ~10⁴ below the others: the same joules parked in the soft mode buy
+    /// ~100× the angular speed. Measured — a blade whose `|ω|` ran 20 → 290 rad/s had **27% of its
+    /// starting energy left**, and the sweep showed it converging as `dt` fell 128×, so it was never an
+    /// instability at all. Asserting on `|ω|` called correct physics a blow-up and sent me to revert it.
+    fn mechanical_energy_j(rod: &Rod, mass_kg: f64, g: f64) -> f64 {
+        let i = rod.principal_inertia_kgm2(mass_kg);
+        let f = rod.frame();
+        let wb = DVec3::new(
+            rod.ang_vel.dot(f[0]),
+            rod.ang_vel.dot(f[1]),
+            rod.ang_vel.dot(f[2]),
+        );
+        0.5 * mass_kg * rod.vel.length_squared()
+            + 0.5 * (i.x * wb.x * wb.x + i.y * wb.y * wb.y + i.z * wb.z * wb.z)
+            + mass_kg * g * rod.centre.y
+    }
+
     /// Air at the bottom of Earth's atmosphere, from the catalogue's own `air` and the standard
     /// sea-level state — NOT a typed 1.225. The Earth assembly is what supplies air to anything
     /// standing on it, and a haystack is standing on it.
@@ -1100,7 +1156,6 @@ mod tests {
     /// `p_axis − n·r`. Then the arm has a component perpendicular to the axis, an axial spin drags the
     /// surface across the floor, and the friction that already exists does the work.
     #[test]
-    #[ignore = "docs/46 row 73: the geometry fix works and destabilises the resting contact — see the row"]
     fn a_blade_spinning_about_its_own_length_spins_down() {
         let mats = crate::materials::load();
         let blade = crate::assembly::compiled::parse(crate::assembly::compiled::GRASS_BLADE_DRY);
@@ -1208,6 +1263,7 @@ mod tests {
 
         let dt =
             crate::substep::accurate_dt_s(contact.stiffness, contact.normal_damp, 32.0).min(1.0e-4);
+        let e0 = mechanical_energy_j(&rod, mass, 9.81);
         let mut t = 0.0;
         for step in 0..2_000_000 {
             step_one_rod(
@@ -1229,11 +1285,17 @@ mod tests {
             }
         }
         let spin1 = rod.ang_vel.length();
-        println!("  ended |ω| {spin1:.4} rad/s after {t:.4} s");
+        let e1 = mechanical_energy_j(&rod, mass, 9.81);
+        println!(
+            "  ended |ω| {spin1:.4} rad/s after {t:.4} s · energy x{:.3} of start",
+            e1 / e0
+        );
         assert!(
-            spin1 < 0.9 * spin0,
-            "a blade spinning on the floor must spin down: {spin0} -> {spin1:.4} rad/s in {t:.3} s. \
-             With the contact fed centre-of-mass velocity it sees v_rel = 0 and never damps."
+            e1 < 0.9 * e0,
+            "a blade spinning on the floor must LOSE ENERGY: x{:.3} of its start in {t:.3} s. \
+             (Angular speed is the wrong test — an anisotropic body can spin faster while losing \
+             energy, since the axial moment is ~10^4 below the others.)",
+            e1 / e0
         );
     }
 
@@ -1600,20 +1662,18 @@ mod tests {
                         / tr.len().max(1) as f64;
                     let last_touch = tr.last().map(|x| x.contacting_fraction).unwrap_or(0.0);
                     let last_w = tr.last().map(|x| x.peak_ang_speed_rads).unwrap_or(0.0);
-                    let half_l = 0.5 * length;
                     println!(
                         "  {n:3} blades -> packing {:.5} · quiet {} after {:.3} s · peak centre {:.6} m/s",
                         s.packing, s.quiet, s.elapsed_s, s.peak_speed_ms
                     );
                     // ★ The gauge asks about the fastest POINT, so report what it is actually seeing:
                     // a heap can be translationally dead and still be turning.
+                    let last_surf = tr.last().map(|x| x.peak_surface_speed_ms).unwrap_or(0.0);
                     println!(
-                        "      peak |ω| {last_w:.5} rad/s -> tip {:.6} m/s · quiescent {:.5} m/s -> {}",
-                        last_w * half_l,
+                        "      peak |ω| {last_w:.5} rad/s -> surface {:.6} m/s · quiescent {:.5} m/s -> {}",
+                        last_surf,
                         crate::recohere::quiescent_speed(9.81, radius as f32),
-                        if last_w * half_l
-                            > crate::recohere::quiescent_speed(9.81, radius as f32) as f64
-                        {
+                        if last_surf > crate::recohere::quiescent_speed(9.81, radius as f32) as f64 {
                             "STILL TURNING"
                         } else {
                             "rotationally at rest"
