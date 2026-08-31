@@ -3,6 +3,58 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-08-30 — row 73 attempted, measured, and reverted: right geometry, wrong stability
+
+Row 73 said a capsule contact cannot see axial spin, because `closest_points` returns points on the
+SEGMENTS — points on the axis — so the moment arm is parallel to the body's own length and `ω × r = 0`
+identically for a spin about that axis. The fix it named is geometry, not a new force: matter touches at
+its surface, `p_axis − n·r`.
+
+**The prediction held.** A blade spinning about its own length went from **20.0000 rad/s held forever** to
+decaying **20 → 14.50 rad/s in 0.85 s**. That is the rotation nothing in the engine could previously remove.
+
+### ★★★ And it broke the case that already worked
+
+The sibling test — a blade spinning about the VERTICAL, `ω ⊥ axis`, which has always had a real moment arm
+— blew up:
+
+```
+step       0  |ω|  20.0000 · foot |v| 3.50000 · y 0.000538   resting, damping correctly
+step  200000  |ω| 311.5726 · foot |v| 1.07806 · y 0.035794   spun up 15x, launched 66 radii airborne
+```
+
+The first eight steps damp correctly and then it runs away. The mechanism is clear enough: the friction
+impulse now has a moment arm about the blade's own axis, where `I_axial` = 3.4e-10 kg·m², so
+`Δω_axial = I⁻¹·r_y·J ≈ 1.6e6·J`. Any impulse produces an enormous axial spin, which enlarges the next
+impulse.
+
+**The cause is understood; the cure is not.** I derived the unstable mode's admissible timestep two
+different ways and got answers that disagreed with each other — one said 2.1× finer would do, the other
+said the mode is *slower* than translation and therefore not the constraint at all. That disagreement is
+the signal to stop patching and measure, not to try the next plausible thing.
+
+### Reverted, with the reproduction checked in
+
+Landing a contact that injects energy, to fix one that under-damps, is a bad trade — and the engine has a
+Law about not moving matter for a result. The geometry change is out; the axial-spin test stays as an
+`#[ignore]`d reproduction so the next attempt starts from a failing case rather than from this prose.
+
+Three suspects are recorded in row 73, in order:
+
+1. **`substep::accurate_dt_s` only knows translational stiffness.** The admissible step for a rotational
+   mode is `√(k·m·λmax(K))` and nothing computes it. The module built two days ago to be the one owner of
+   "how small must a step be" does not yet answer the rotational half of the question.
+2. **Friction may be a velocity kill rather than a Coulomb cone.** If the tangential constraint removes all
+   sliding instead of being limited by `μ·J_n`, it overshoots and reverses — the classic explicit-friction
+   pump.
+3. **A capsule lying flat contacts along a LINE, and `floor_contact` uses ONE endpoint.** The whole weight
+   bears on a single point with a `radius`-sized arm, which is both the under-damping in the axial case and
+   a likely amplifier here.
+
+★ Measure which, before changing anything.
+
+**Verified.** 653/653 native, 31 skipped (the reproduction), `mod app` clean for wasm32.
+
 ## 2026-08-29 — forkful by forkful, and two premises that turned out to be false
 
 Row 60 step C said *"the release starts interpenetrated"*. Measuring it first corrected both the row and

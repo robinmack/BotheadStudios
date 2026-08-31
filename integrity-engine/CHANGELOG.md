@@ -9,6 +9,12 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Attempted and reverted** (docs/46 row 73): resolving pile contacts on the capsule SURFACE rather than
+  its axis does make axial spin damp (20 → 14.50 rad/s where it had held 20.0000 forever), but it
+  destabilises the resting contact — a blade spinning about the vertical ran to 311 rad/s and was
+  launched off the floor. The reproduction ships `#[ignore]`d with three measured suspects; no contact
+  behaviour changes in this release.
+
 - ★★ **The release is forkful by forkful** (docs/46 row 60 step C). Members are placed by rejection;
   when the next cannot be fitted, that forkful is full and the rest wait for the following throw, at an
   interval of `√(2h/g) + √(2L/g)`. `Rod::release_t_s` carries it, and an unthrown member neither falls
