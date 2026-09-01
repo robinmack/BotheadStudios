@@ -426,6 +426,154 @@ pub fn rupture_stress_pa(m: &Material) -> Option<f64> {
     m.modulus_of_rupture.filter(|v| *v > 0.0).map(|v| v as f64)
 }
 
+/// ★★★ **A BODY THAT CAN BEND WHILE THINGS HAPPEN TO IT** — the chain (docs/46 row 60 step 3).
+///
+/// [`solve`] answers where a slender body ENDS UP under a static load. A blade in a heap needs
+/// something else: a SHAPE THAT IS STATE, which a neighbour can push on and which pushes back. That is
+/// a chain of segments carrying a bending moment at each interior joint.
+///
+/// ★★ **It is a DECLARED SPECIALISATION and owes its keep** (Law V). `docs/18`'s one deformation
+/// process targets MPM, so a second answer to *how far does this bend* is Law II's two-answers
+/// violation — unless the new answer provably BECOMES the old one as it is refined.
+/// `flexure::tests::a_discretised_blade_converges_to_the_elastica` is that proof and the only thing
+/// that makes this type admissible.
+///
+/// ★ **What is and is not independent, stated plainly:** both this and [`solve`] find equilibrium by
+/// the same under-relaxed fixed point, so the SOLVER is shared and agreement between them says nothing
+/// about it. What the test does establish is the thing that matters — that a body modelled as `n` rigid
+/// segments with discrete joints approaches the CONTINUUM elastica as `n` grows. The models differ;
+/// the method of solving them does not, and claiming otherwise would be overselling the check.
+///
+/// **The physics is the same `dθ/ds = M/EI` the elastica integrates**, read the other way round: the
+/// angle between neighbouring segments IS a curvature, `κ = Δθ/ds`, so the joint carries `M = EI·κ` and
+/// nothing is declared that the continuum did not already say.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Chain {
+    /// Node positions in the bending plane, `n + 1` of them; node 0 is clamped.
+    pub xy: Vec<(f64, f64)>,
+    /// Segment angles from +x, `n` of them.
+    pub theta: Vec<f64>,
+    pub ds: f64,
+    pub ei_nm2: f64,
+    pub converged: bool,
+    pub sweeps: usize,
+}
+
+impl Chain {
+    /// **Relax a clamped chain to equilibrium** under `load_per_m(s)` plus its own `weight_per_m`.
+    ///
+    /// Equilibrium is where each joint's elastic moment balances the moment of every load beyond it —
+    /// the same statement `solve` makes about a continuum, evaluated at `n` joints instead of
+    /// continuously. Gradient descent on the angles, because the moment about joint `i` depends on
+    /// where the segments beyond it are, and where they are depends on the angles.
+    /// `load_per_m(s)` carries EVERYTHING acting on the body — self weight included — exactly as
+    /// [`solve`]'s does. The two signatures are deliberately parallel: they must agree about what a
+    /// load is, or the convergence test is comparing two different problems.
+    pub fn relaxed<F: Fn(f64) -> (f64, f64)>(
+        ei_nm2: f64,
+        length_m: f64,
+        n: usize,
+        base_angle_rad: f64,
+        load_per_m: F,
+    ) -> Chain {
+        let n = n.max(1);
+        let ds = length_m / n as f64;
+        let ei = ei_nm2.max(f64::MIN_POSITIVE);
+        let mut theta = vec![base_angle_rad; n];
+        let mut converged = false;
+        let mut sweeps = 0;
+
+        // ★ EQUILIBRIUM IS A RECURRENCE, NOT A DESCENT. Each joint's condition is
+        // `EI·(θ_i − θ_{i−1})/ds = M_i`, so the angles can be INTEGRATED from the clamp —
+        // `θ_i = θ_{i−1} + M_i·ds/EI` — and only the circularity (moments depend on shape, shape on
+        // moments) needs iterating. MEASURED THE WRONG WAY FIRST: gradient descent with a step
+        // `0.25·ds²/EI` crawls as `ds²`, so at 8 segments it ran 200,000 sweeps without converging and
+        // its "answer" was an iterate. The convergence flag caught it; loosening the tolerance to make
+        // it pass would have buried it.
+        const MIX: f64 = 0.5;
+        for sweep in 1..=200_000usize {
+            sweeps = sweep;
+            // Positions from the angles.
+            let mut xy = Vec::with_capacity(n + 1);
+            let (mut x, mut y) = (0.0, 0.0);
+            xy.push((x, y));
+            for t in theta.iter() {
+                x += t.cos() * ds;
+                y += t.sin() * ds;
+                xy.push((x, y));
+            }
+            // Moment at joint i = the loads BEYOND it, about it. Accumulated from the free tip back,
+            // exactly as `solve` does, so the two cannot disagree about what a moment is.
+            let (mut fx, mut fy, mut mx, mut my) = (0.0, 0.0, 0.0, 0.0);
+            let mut worst = 0.0f64;
+            let mut applied = vec![0.0; n];
+            for i in (0..n).rev() {
+                let s_mid = (i as f64 + 0.5) * ds;
+                let (lx, ly) = load_per_m(s_mid);
+                let (px, py) = (0.5 * (xy[i].0 + xy[i + 1].0), 0.5 * (xy[i].1 + xy[i + 1].1));
+                fx += lx * ds;
+                fy += ly * ds;
+                mx += lx * ds * py;
+                my += ly * ds * px;
+                applied[i] = (my - fy * xy[i].0) - (mx - fx * xy[i].1);
+            }
+            // Re-integrate the angles from the clamp: θ_i = θ_{i−1} + M_i·ds/EI.
+            let mut next = Vec::with_capacity(n);
+            let mut prev = base_angle_rad;
+            for m in applied.iter().take(n) {
+                let t = prev + m * ds / ei;
+                next.push(t);
+                prev = t;
+            }
+            for i in 0..n {
+                let mixed = theta[i] + MIX * (next[i] - theta[i]);
+                worst = worst.max((mixed - theta[i]).abs());
+                theta[i] = mixed;
+            }
+            if worst < 1.0e-14 {
+                converged = true;
+                break;
+            }
+        }
+        let mut xy = Vec::with_capacity(n + 1);
+        let (mut x, mut y) = (0.0, 0.0);
+        xy.push((x, y));
+        for t in theta.iter() {
+            x += t.cos() * ds;
+            y += t.sin() * ds;
+            xy.push((x, y));
+        }
+        Chain {
+            xy,
+            theta,
+            ds,
+            ei_nm2,
+            converged,
+            sweeps,
+        }
+    }
+
+    /// Where the free end sits.
+    pub fn tip(&self) -> (f64, f64) {
+        *self.xy.last().unwrap_or(&(0.0, 0.0))
+    }
+
+    /// **The curvature at each interior joint**, 1/m — `Δθ/ds`, which is what `M = EI·κ` acts on and
+    /// what `yielding`/`fails` need to decide whether the blade stays bent or breaks.
+    pub fn curvature_per_m(&self, base_angle_rad: f64) -> Vec<f64> {
+        (0..self.theta.len())
+            .map(|i| {
+                let prev = if i == 0 {
+                    base_angle_rad
+                } else {
+                    self.theta[i - 1]
+                };
+                (self.theta[i] - prev) / self.ds
+            })
+            .collect()
+    }
+}
+
 /// **Where a bent body's tip ended up, and how hard its base was worked.** The three things a
 /// de-resolved patch has to answer without the shape that produced them.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -930,6 +1078,79 @@ mod failure_tests {
         let safe = fails(oak, 0.25 * mor, 0.1 * tau_lim);
         println!("  a lightly loaded oak plank: {safe:?}");
         assert!(matches!(safe, Failure::Holds { .. }));
+    }
+
+    /// ★★★ **A DISCRETISED BLADE MUST CONVERGE TO THE ELASTICA** (docs/46 row 60 step 3).
+    ///
+    /// `solve` answers where a bent body ENDS UP, statically, given a load. A blade in a heap needs
+    /// something else: to bend *while things happen to it*, so its shape is a state that contacts push
+    /// on. That is a chain of segments with bending moments at the joints — and it is a **declared
+    /// specialisation** (Law V), because `docs/18`'s one deformation process targets MPM. A second way
+    /// of answering *how far does this bend* is Law II's two-answers violation unless the new one
+    /// provably becomes the old one.
+    ///
+    /// So this is the acceptance test, and it is the only thing that makes the chain admissible: as the
+    /// segment count grows, the chain's tip must approach `solve`'s. The reference is independent —
+    /// `solve` relaxes a continuum elastica by a completely different method — which is what makes a
+    /// disagreement meaningful rather than two implementations of the same mistake.
+    ///
+    /// ★ Kept inside `solve`'s own contractive regime (row 68: it is only valid while tip lean stays
+    /// under ~85% of arclength), because a reference outside its validity is not a reference.
+    #[test]
+    fn a_discretised_blade_converges_to_the_elastica() {
+        let mats = crate::materials::load();
+        let blade = crate::assembly::compiled::by_id("grass-blade").expect("a shipped type");
+        let sec = blade.section().expect("a slab has a section");
+        let e_pa = 1.06e9f64;
+        let rho = 710.0f64;
+        let ei = e_pa * sec.i_v_m4;
+        let q = rho * sec.area_m2 * 9.81;
+        let l_crit = greenhill_critical_length_m(ei, q);
+        let length = 0.5 * l_crit;
+        let wind = 0.35 * q; // modest cross-load, well inside the contractive regime
+
+        let bent = solve(ei, length, std::f64::consts::FRAC_PI_2, 96, &|_| (wind, -q));
+        assert!(bent.converged, "the reference must itself have converged");
+        let (rx, ry) = bent.tip();
+        println!(
+            "elastica reference: EI {ei:.3e} · L {length:.4} m · q {q:.3e} · wind {wind:.3e} N/m",
+        );
+        println!("  tip ({rx:.6}, {ry:.6}) m");
+
+        let mut prev = f64::INFINITY;
+        for n in [2usize, 4, 8, 16, 32, 64] {
+            let chain = Chain::relaxed(ei, length, n, std::f64::consts::FRAC_PI_2, |_| (wind, -q));
+            // ★ CHECK THE FLAG. `solve` taught this the hard way: a relaxation that has not converged
+            // returns its last iterate, and comparing two last-iterates is not a convergence test.
+            assert!(
+                chain.converged,
+                "the {n}-segment chain did not converge in {} sweeps — its tip is an iterate, not an \
+                 answer",
+                chain.sweeps
+            );
+            let (cx, cy) = chain.tip();
+            let err = ((cx - rx).hypot(cy - ry)) / length;
+            println!(
+                "  {n:3} segments -> tip ({cx:.6}, {cy:.6}) · {:.4}% of length from the elastica \
+                 · converged in {} sweeps",
+                100.0 * err,
+                chain.sweeps
+            );
+            assert!(
+                err <= prev * 1.05 + 1e-12,
+                "refining the chain must not take it further from the elastica: {n} segments \
+                 {:.4}% vs previous {:.4}%",
+                100.0 * err,
+                100.0 * prev
+            );
+            prev = err;
+        }
+        assert!(
+            prev < 0.02,
+            "a 64-segment chain must sit within 2% of a length from the elastica it specialises: \
+             {:.4}%",
+            100.0 * prev
+        );
     }
 
     /// ★★★ **THE DE-RESOLVED FORM OF BENDING MUST CONVERGE TO THE BODIES IT REPLACES.**

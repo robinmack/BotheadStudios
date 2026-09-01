@@ -3,6 +3,61 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-09-01 — a blade can bend: the chain, and its licence to exist
+
+`flexure::solve` answers where a slender body ENDS UP under a static load. A blade in a heap needs
+something else — **a shape that is state**, which a neighbour can push on and which pushes back. That is
+`flexure::Chain`: `n` rigid segments with a bending moment at each interior joint.
+
+**It is a declared specialisation and it owes its keep.** `docs/18`'s one deformation process targets MPM,
+so a second answer to *how far does this bend* is Law II's two-answers violation unless the new answer
+provably becomes the old one. The physics is the same `dθ/ds = M/EI` read the other way round: the angle
+between neighbouring segments IS a curvature, so the joint carries `M = EI·κ` and nothing is declared that
+the continuum did not already say.
+
+| segments | distance from the elastica |
+|---|---|
+| 2 | 8.0688% of a length |
+| 4 | 3.2461% |
+| 8 | 1.4526% |
+| 16 | 0.6746% |
+| 32 | 0.3119% |
+| 64 | **0.1368%** |
+
+~2.2× per doubling.
+
+### ★★ The convergence flag caught my first version
+
+I wrote the relaxation as gradient descent with a step scaling as `ds²`, which crawls as the chain refines:
+**at 8 segments it ran 200,000 sweeps without converging**, and its "answer" was an iterate. The table
+above looked fine anyway, because the coarse cases had effectively settled — but the 64-segment figure was
+wrong, **0.0737% as an unconverged iterate against a true 0.1368%**.
+
+`solve` reports `converged` for exactly this reason and I had already been taught it once. Asserting the
+flag is what surfaced it; loosening the tolerance to make it pass would have buried it.
+
+The fix was the method, not the tolerance. Equilibrium at a joint is `EI·(θ_i − θ_{i−1})/ds = M_i`, so the
+angles can be **integrated** from the clamp rather than descended toward. 200,000 sweeps → ~51.
+
+### ★ What is and is not independent
+
+Both `Chain` and `solve` find equilibrium by the same under-relaxed fixed point, so **the solver is shared
+and agreement between them says nothing about it**. What the test establishes is the thing that matters:
+that a body modelled as discrete rigid segments approaches the continuum as it refines. The models differ;
+the method does not. Saying so in the type's own doc, because "verified against an independent reference"
+would have been overselling it.
+
+### Recorded, not fixed — row 75
+
+**Nothing in the pile uses the chain yet.** `pile::Rod` is still one rigid capsule, so a blade in a heap
+cannot bend, interlock, or store elastic energy — the `docs/48` pattern again, built and unwired. The heap
+settles at packing 0.00074, still ~40× looser than loose hay, and rigid blades are the leading explanation.
+
+★ It will also pose the settle question a third time: a blade FLEXING in place is not at rest either, and
+`max_surface_speed_ms` cannot see that yet.
+
+**Verified.** 655/655 native, 31 skipped, `mod app` clean for wasm32.
+
 ## 2026-08-30 (later) — the heap settles, and three times I measured the wrong quantity
 
 **`quiet true after 5.220 s`.** The haystack comes to rest for the first time in this line of work, and

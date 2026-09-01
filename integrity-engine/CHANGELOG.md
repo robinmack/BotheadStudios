@@ -9,6 +9,14 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★ **`flexure::Chain` — a body that bends while things happen to it** (docs/46 row 60 step 3). `n`
+  rigid segments with `M = EI·κ` at each joint, so a blade's shape becomes state a contact can act on.
+  A **declared specialisation** of docs/18's one deformation process, admissible only because it
+  converges to the continuum elastica: 8.07% of a length at 2 segments, **0.1368% at 64**, ~2.2× per
+  doubling. `Chain::curvature_per_m` feeds the existing `yielding`/`fails` ladder.
+- **Recorded, not fixed** (docs/46 row 75): nothing in `pile` uses it yet — `Rod` is still one rigid
+  capsule, which is the leading explanation for the settled heap being ~40× looser than loose hay.
+
 - ★★★ **The haystack settles** — `quiet true after 5.220 s`, where it had never settled at all, and the
   run costs 116 s instead of 432 s because it stops rather than grinding to the cap.
 - ★★ **`SettleGauge`'s rotational lever was wrong and is fixed** (docs/46 row 71). It compared `ω·L/2`
