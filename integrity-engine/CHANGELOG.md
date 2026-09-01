@@ -9,6 +9,18 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★★ **The haystack settles** — `quiet true after 5.220 s`, where it had never settled at all, and the
+  run costs 116 s instead of 432 s because it stops rather than grinding to the cap.
+- ★★ **`SettleGauge`'s rotational lever was wrong and is fixed** (docs/46 row 71). It compared `ω·L/2`
+  for every rotation; an axial spin moves a blade's surface by only `ω·radius`, a **325×**
+  over-statement, so a resting heap was reported as moving. `Rod::max_surface_speed_ms` uses the
+  geometric lever — the farthest surface point from the axis of rotation. `pile::Sample` gains
+  `peak_surface_speed_ms`.
+- **Row 73's surface-contact geometry is restored** — the revert in the previous release was based on
+  measuring angular speed rather than energy. Total mechanical energy *fell* to 0.27× while `|ω|` rose;
+  energy drains into the soft axial mode, where the same joules buy ~114× the angular speed. Both spin
+  tests now assert on energy.
+
 - **Attempted and reverted** (docs/46 row 73): resolving pile contacts on the capsule SURFACE rather than
   its axis does make axial spin damp (20 → 14.50 rad/s where it had held 20.0000 forever), but it
   destabilises the resting contact — a blade spinning about the vertical ran to 311 rad/s and was
