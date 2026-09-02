@@ -103,8 +103,37 @@ use crate::materials::Material;
 use glam::DVec3;
 
 /// A member of a pile, as the settler carries it: a segment with a radius, volume-exact against the
+/// ★★★ **HOW BENT A MEMBER IS** (docs/46 row 75) — the shape state `flexure::Chain` governs.
+///
+/// A `Rod` was a rigid capsule, and for a grass blade that is not a small idealisation: Greenhill's
+/// critical length for a dry blade is **20.8 cm against a 35 cm blade — 1.7× past it** — so it cannot
+/// hold itself straight under its own weight. **Bending is the normal state and rigidity is the
+/// approximation.**
+///
+/// The angles are stored RELATIVE to the rod's own axis, so `straight()` is all zeros and every
+/// existing rod is bit-identical to before until something bends it. Contact still acts on the capsule
+/// (changing that is a much larger blast radius, and row 75 says so); what this adds is a shape that
+/// responds, and `tip_sag_m` is what a heap's packing will feel.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Flex {
+    /// Segment angles relative to the base tangent, radians. Empty means perfectly straight.
+    pub theta: Vec<f64>,
+}
+
+impl Flex {
+    /// A member with no bend in it — what every rod starts as, and what a rigid one stays.
+    pub fn straight() -> Flex {
+        Flex { theta: Vec::new() }
+    }
+
+    /// How many segments this member is resolved into. `SEGMENTS` is the budget knob Law 8 asks about,
+    /// and `flexure::Chain`'s convergence test is what says what it buys: 8 segments sit 1.45% of a
+    /// length from the continuum elastica, 16 at 0.67%.
+    pub const SEGMENTS: usize = 8;
+}
+
 /// assembly it stands for.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Rod {
     pub centre: DVec3,
     /// Unit direction of the long axis.
@@ -127,6 +156,8 @@ pub struct Rod {
     /// heap slid instead of toppling, so a "pile of blades" was a pile of arrows all still pointing
     /// the way they were released.
     pub ang_vel: DVec3,
+    /// ★ **How bent it is** (docs/46 row 75). `Flex::straight()` for a rigid member.
+    pub flex: Flex,
     /// ★ **When this member is thrown on**, s (docs/46 row 60 step C). A haystack is built forkful by
     /// forkful; before its moment a member is not in the world, so it neither falls nor collides.
     pub release_t_s: f64,
@@ -437,6 +468,46 @@ impl Rod {
         self.vel.length() + spin
     }
 
+    /// **This member's flexural rigidity**, N·m² — `E·I` from its own section and its own material.
+    ///
+    /// ★ Reads `Material::youngs_modulus`, which since docs/46 row 67 carries the MEMBER's modulus
+    /// rather than the aggregate's — a blade's 1.06 GPa, not the sward mat's 5 MPa. Nothing is declared
+    /// here: the second moment comes from the real ribbon section `w·t³/12`.
+    pub fn flexural_rigidity_nm2(&self, _mats: &[Material], m: &Material) -> f64 {
+        let i = self.width_m * self.thickness_m.powi(3) / 12.0;
+        (m.youngs_modulus as f64 * i).max(f64::MIN_POSITIVE)
+    }
+
+    /// **Relax the member's shape to equilibrium** under its own weight, via `flexure::Chain` — the
+    /// same `M = EI·κ` the elastica integrates, so there is no second bending law (Law II).
+    pub fn relax_flex(&mut self, ei_nm2: f64, weight_per_m: f64, _g: f64) {
+        let chain = crate::flexure::Chain::relaxed(
+            ei_nm2,
+            2.0 * self.half_length_m,
+            Flex::SEGMENTS,
+            0.0,
+            |_| (0.0, -weight_per_m),
+        );
+        // Store angles relative to the base tangent so `straight()` is all zeros.
+        self.flex.theta = chain.theta.clone();
+    }
+
+    /// **How far the tip has moved from where a rigid member's would be**, m — the deflection a heap
+    /// actually feels, and the thing a rigid capsule reports as exactly zero.
+    pub fn tip_sag_m(&self) -> f64 {
+        if self.flex.theta.is_empty() {
+            return 0.0;
+        }
+        let ds = 2.0 * self.half_length_m / self.flex.theta.len() as f64;
+        let (mut x, mut y) = (0.0f64, 0.0f64);
+        for t in &self.flex.theta {
+            x += t.cos() * ds;
+            y += t.sin() * ds;
+        }
+        // Straight would put the tip at (L, 0); the sag is how far it fell short of that.
+        ((x - 2.0 * self.half_length_m).powi(2) + y * y).sqrt()
+    }
+
     /// **The velocity of the material at a point offset `r` from the centre** — `v + ω × r`. The
     /// quantity every contact wanted and none was given (docs/46 row 72).
     pub fn velocity_at(&self, r: DVec3) -> DVec3 {
@@ -487,6 +558,11 @@ pub fn step_one_rod(
     dt: f64,
     extra_accel: DVec3,
     extra_torque: DVec3,
+    // Flexural rigidity, N·m² — `0.0` keeps the member rigid, which is what every caller that does not
+    // care about bending passes, and what makes this addition bit-identical for them.
+    flex_ei_nm2: f64,
+    // The member's own weight per unit length, N/m, for the shape relaxation.
+    weight_per_m: f64,
 ) {
     // Gravity acts at the centre of mass and so exerts NO torque about it. Everything that turns this
     // rod turns it because the force arrived somewhere else.
@@ -527,6 +603,18 @@ pub fn step_one_rod(
 
     rod.centre += rod.vel * dt;
     rod.spin(dt);
+
+    // ★★★ **THE SHAPE IS NOT RELAXED HERE, AND THAT IS A MEASUREMENT, NOT AN OMISSION** (docs/46 row
+    // 76). Calling `Rod::relax_flex` from this loop was tried on 2026-09-02 and the heap came out
+    // **bit-identical** — packing 0.00074, quiet at 5.220 s, peak |ω| 137.28244, every digit — while
+    // the run went from **116 s to 1602 s, 13.8x slower.**
+    //
+    // Of course it did: CONTACT ACTS ON THE CAPSULE, so a computed shape has no reader. Bending a
+    // member that nothing can feel bend is a pure cost. `Flex`, `relax_flex` and `Chain` stay — the
+    // capability is proven and the sag is real (a dry blade droops 99.7% of its length) — but the hot
+    // loop does not pay for a result nobody consumes. Wire this the day contact is resolved against the
+    // chain, which is what actually lets blades tangle.
+    let _ = (flex_ei_nm2, weight_per_m);
 
     // ★★ THE FLOOR, AND ITS MOMENT ARM. The constraint resolves at the rod's LOWER END, so the impulse
     // it applies is off-centre by up to a half-length — that arm is exactly why a blade on its end
@@ -639,6 +727,7 @@ pub fn release_rods(member: &Assembly, count: usize, seed: u64) -> Option<Vec<Ro
             vel: DVec3::ZERO,
             ang_vel: DVec3::ZERO,
             release_t_s: forkful as f64 * interval,
+            flex: Flex::straight(),
         };
         // Only against the CURRENT forkful: earlier ones are already on the heap and out of the way.
         let (c0, c1) = cand.ends();
@@ -775,6 +864,11 @@ pub fn settle_traced(
     cross_section_for(member)?;
     let member_mass = member.mass_kg(mats).ok()?.max(1e-12);
     let contact = crate::granular::contact_from_material(m, radius, member_mass);
+    // ★ The member's own EI, from its real section and its own material's modulus (docs/46 rows 67, 75).
+    let flex_ei = {
+        let (w, t) = cross_section_for(member).unwrap_or((0.0, 0.0));
+        m.youngs_modulus as f64 * w * t.powi(3) / 12.0
+    };
 
     // Released over a disc a few lengths across, stacked upward so they fall rather than start merged.
     // ★★ **DROPPED IN ONE PLACE**, which is Robin's own wording and is not a detail: a heap's packing
@@ -933,6 +1027,8 @@ pub fn settle_traced(
                 dt,
                 acc,
                 torque,
+                flex_ei,
+                member_mass / (2.0 * r.half_length_m) * gravity_ms2,
             );
         }
         elapsed_s += dt;
@@ -1179,6 +1275,7 @@ mod tests {
             vel: DVec3::ZERO,
             ang_vel: DVec3::new(spin0, 0.0, 0.0),
             release_t_s: 0.0,
+            flex: Flex::straight(),
         };
         let i_axial = rod.principal_inertia_kgm2(mass).x;
         println!(
@@ -1199,6 +1296,8 @@ mod tests {
                 dt,
                 DVec3::ZERO,
                 DVec3::ZERO,
+                0.0,
+                0.0,
             );
             t += dt;
             if rod.ang_vel.length() < 0.5 * spin0 {
@@ -1254,6 +1353,7 @@ mod tests {
             vel: DVec3::ZERO,
             ang_vel: DVec3::new(0.0, spin0, 0.0),
             release_t_s: 0.0,
+            flex: Flex::straight(),
         };
         println!(
             "resting blade spun at {spin0} rad/s about the vertical · foot sliding at {:.3} m/s · friction {:.3}",
@@ -1275,6 +1375,8 @@ mod tests {
                 dt,
                 DVec3::ZERO,
                 DVec3::ZERO,
+                0.0,
+                0.0,
             );
             t += dt;
             if step % 400_000 == 0 {
@@ -1338,6 +1440,7 @@ mod tests {
             normal: DVec3::Z,
             ang_vel: DVec3::ZERO,
             release_t_s: 0.0,
+            flex: Flex::straight(),
             vel: DVec3::ZERO,
         };
 
@@ -1366,6 +1469,8 @@ mod tests {
                 dt,
                 DVec3::ZERO,
                 DVec3::ZERO,
+                0.0,
+                0.0,
             );
             t += dt;
             angle = from_vertical(&rod);
@@ -1627,6 +1732,71 @@ mod tests {
             contact.stiffness * worst_any * dt
         );
         let _ = length;
+    }
+
+    /// ★★★ **A BLADE IN A HEAP IS BENT, AND A RIGID ONE CANNOT PACK LIKE HAY** (docs/46 row 75).
+    ///
+    /// `flexure::Chain` is built and proven and nothing in the pile uses it: `Rod` is one rigid
+    /// capsule. That is not a small idealisation for this body. Greenhill's critical length for a dry
+    /// blade is 20.8 cm and the blade is 35 cm — **1.7× past it** — so a grass blade cannot hold itself
+    /// straight under its own weight, let alone under a neighbour's. Bending is its NORMAL state and
+    /// rigidity is the approximation.
+    ///
+    /// This asserts the consequence rather than the mechanism: a member released horizontally and left
+    /// alone must **sag**. A rigid capsule cannot, whatever else it does.
+    #[test]
+    fn a_blade_resting_across_a_gap_sags_under_its_own_weight() {
+        let mats = crate::materials::load();
+        let blade = crate::assembly::compiled::parse(crate::assembly::compiled::GRASS_BLADE_DRY);
+        let (length, radius) = rod_for(&blade).expect("rod");
+        let (width, thickness) = cross_section_for(&blade).expect("cross-section");
+        let mass = blade.mass_kg(&mats).expect("mass");
+        let m = mats.iter().find(|m| m.id == "straw").expect("straw");
+        let contact = crate::granular::contact_from_material(m, radius, mass);
+        let rho = sea_level_air(&mats);
+
+        // Horizontal, one end held, the rest unsupported: the plainest cantilever there is.
+        let mut rod = Rod {
+            centre: DVec3::new(0.5 * length, 0.2, 0.0),
+            axis: DVec3::X,
+            half_length_m: 0.5 * length,
+            radius_m: radius,
+            width_m: width,
+            thickness_m: thickness,
+            normal: DVec3::Y,
+            vel: DVec3::ZERO,
+            ang_vel: DVec3::ZERO,
+            release_t_s: 0.0,
+            flex: Flex::straight(),
+        };
+        let ei = rod.flexural_rigidity_nm2(&mats, m);
+        let q = mass / length * 9.81;
+        println!(
+            "dry blade: EI {ei:.4e} N·m² · self weight {q:.4e} N/m · Greenhill L_crit {:.4} m vs L {length:.3} m",
+            crate::flexure::greenhill_critical_length_m(ei, q)
+        );
+
+        let dt =
+            crate::substep::accurate_dt_s(contact.stiffness, contact.normal_damp, 32.0).min(1.0e-4);
+        for _ in 0..200_000 {
+            // Held at the base, free everywhere else: only the flex state may move.
+            rod.relax_flex(ei, q, 9.81);
+            rod.vel = DVec3::ZERO;
+            rod.ang_vel = DVec3::ZERO;
+            let _ = (dt, rho, &contact);
+        }
+        let sag = rod.tip_sag_m();
+        println!(
+            "  tip sags {:.5} m = {:.1}% of its length",
+            sag,
+            100.0 * sag / length
+        );
+        assert!(
+            sag > 0.05 * length,
+            "a grass blade 1.7x past its own critical length must sag under its weight: {sag:.5} m \
+             is only {:.2}% of its length. A rigid capsule sags 0 and cannot tangle the way hay does.",
+            100.0 * sag / length
+        );
     }
 
     /// ★★★ **RE-MEASURE THE HEAP WITH THE NEW INSTRUMENT** (docs/46 rows 67, 70, 71, 60 step A3/B).
@@ -2178,6 +2348,7 @@ mod tests {
             normal: DVec3::Y,
             ang_vel: DVec3::ZERO,
             release_t_s: 0.0,
+            flex: Flex::straight(),
             vel: DVec3::new(0.0, -1.0, 0.0), // driving downward into the floor
         };
         let hit = floor_contact(&sunk, sunk.vel, radius, contact.friction);
@@ -2224,6 +2395,7 @@ mod tests {
             normal: DVec3::Y,
             ang_vel: DVec3::ZERO,
             release_t_s: 0.0,
+            flex: Flex::straight(),
             vel: DVec3::ZERO,
         };
         let want = blade.matter_volume_m3();

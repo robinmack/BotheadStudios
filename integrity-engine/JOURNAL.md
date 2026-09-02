@@ -3,6 +3,50 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-09-02 — the chain wired into the pile, measured, and unbilled
+
+Row 75 said: nothing in the pile uses `flexure::Chain`. So I wired it. `Rod` gained a `Flex` state whose
+`EI` comes from its real ribbon section and its own material's modulus — the payoff from row 67, since
+`youngs_modulus` now carries the MEMBER's value (straw's 5.67 GPa stem) rather than the aggregate's.
+
+**The premise checked out.** A dry blade held at one end **sags 99.7% of its length**. A 0.35 m blade sits
+1.7× past its own Greenhill critical length, so it cannot hold itself straight: rigidity was the
+approximation all along, not bending.
+
+### ★★★ And wiring it changed nothing, expensively
+
+| | before flex | after flex |
+|---|---|---|
+| packing | 0.00074 | 0.00074 |
+| quiet | 5.220 s | 5.220 s |
+| peak centre | 0.001319 m/s | 0.001319 m/s |
+| peak \|ω\| | 137.28244 rad/s | 137.28244 rad/s |
+| **runtime** | **116 s** | **1602 s** |
+
+Bit-identical, every digit, at **13.8× the cost**.
+
+Of course it is: **contact acts on the capsule.** `closest_points` solves segment-to-segment on
+`Rod::axis`, so a computed shape has no reader. A blade can droop 99.7% of its length and its neighbours
+still meet a straight capsule. That is worse than the `docs/48` built-and-unwired pattern it came from —
+this was **wired, inert, and expensive**.
+
+★ I had stated the prediction before running it: *"if packing doesn't move much, that's the reason, and
+it'll be the next row rather than a surprise."* That is the only thing that made a bit-identical result
+informative instead of baffling — and it is the second time this week that saying the expectation out loud
+in advance did more work than the code.
+
+### What was kept, and what was not
+
+The hot-loop call is gone. `Flex`, `Rod::relax_flex`, `flexure::Chain` and the sag test all stay: the
+capability is proven, the sag is real, and the convergence to the elastica is established. What the pile
+does not do is pay 13.8× for a quantity nobody consumes.
+
+**Row 76** records it, with the condition for wiring it properly: contact resolved against the CHAIN —
+closest approach against a polyline rather than a segment — which is what actually lets blades tangle, and
+remains the leading explanation for a settled heap sitting ~40× looser than loose hay.
+
+**Verified.** 656/656 native, 31 skipped, `mod app` clean for wasm32.
+
 ## 2026-09-01 — a blade can bend: the chain, and its licence to exist
 
 `flexure::solve` answers where a slender body ENDS UP under a static load. A blade in a heap needs
