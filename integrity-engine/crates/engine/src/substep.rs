@@ -454,6 +454,7 @@ mod rotational_tests {
                 vel: DVec3::ZERO,
                 ang_vel: DVec3::new(0.0, spin0, 0.0),
                 release_t_s: 0.0,
+                flex: crate::pile::Flex::straight(),
             };
             let energy = |r: &crate::pile::Rod| {
                 let i = r.principal_inertia_kgm2(mass);
@@ -479,6 +480,8 @@ mod rotational_tests {
                     dt,
                     DVec3::ZERO,
                     DVec3::ZERO,
+                    0.0,
+                    0.0,
                 );
             }
             // ★ TOTAL mechanical energy — translation, ROTATION and height. Gravity is conservative and

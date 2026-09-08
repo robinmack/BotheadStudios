@@ -9,6 +9,14 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★ **`pile::Rod` can bend** — a `Flex` state governed by `flexure::Chain`, with `EI` from the
+  member's real ribbon section and its own material's modulus. A dry blade sags **99.7% of its
+  length**, which is what a body 1.7× past its Greenhill critical length does.
+- **Measured and unbilled** (docs/46 row 76): relaxing that shape every step leaves the heap
+  **bit-identical** (packing 0.00074, quiet at 5.220 s, peak `|ω|` 137.28244) at **13.8× the runtime**,
+  because contact still acts on the capsule and nothing reads the shape. The hot-loop call is removed;
+  the capability stays.
+
 - ★★ **`flexure::Chain` — a body that bends while things happen to it** (docs/46 row 60 step 3). `n`
   rigid segments with `M = EI·κ` at each joint, so a blade's shape becomes state a contact can act on.
   A **declared specialisation** of docs/18's one deformation process, admissible only because it
