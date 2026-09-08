@@ -220,6 +220,34 @@ pub fn cross_section_for(member: &Assembly) -> Option<(f64, f64)> {
     (width > 0.0 && thickness > 0.0).then_some((width, thickness))
 }
 
+/// ★★★ **CLOSEST APPROACH BETWEEN TWO BENT BODIES** (docs/46 row 76) — the minimum over every pair of
+/// their segments.
+///
+/// It calls [`closest_points`] for each pair, so there is exactly ONE closest-approach law in the pile
+/// and a bent body is not a special case of anything: a straight member is a one-segment polyline and
+/// takes the identical path it always did (Law II).
+///
+/// ★ Cost is `O(n·m)` in the segment counts, which is why `Flex::SEGMENTS` is small and why the caller
+/// rejects distant pairs on a bounding check first — the same cheap reject the rigid version used.
+pub fn closest_points_between(a: &[DVec3], b: &[DVec3]) -> (DVec3, DVec3) {
+    let mut best = (
+        a.first().copied().unwrap_or_default(),
+        b.first().copied().unwrap_or_default(),
+    );
+    let mut best_d2 = f64::INFINITY;
+    for wa in a.windows(2) {
+        for wb in b.windows(2) {
+            let (pa, pb) = closest_points(wa[0], wa[1], wb[0], wb[1]);
+            let d2 = (pa - pb).length_squared();
+            if d2 < best_d2 {
+                best_d2 = d2;
+                best = (pa, pb);
+            }
+        }
+    }
+    best
+}
+
 /// The closest points on two segments, and the distance between them. Standard segment–segment
 /// closest approach; the degenerate parallel case falls back to clamping, which is what it should do.
 fn closest_points(a0: DVec3, a1: DVec3, b0: DVec3, b1: DVec3) -> (DVec3, DVec3) {
@@ -492,6 +520,35 @@ impl Rod {
         self.flex.theta = chain.theta.clone();
     }
 
+    /// ★★★ **THE MEMBER'S ACTUAL SHAPE IN WORLD SPACE** — the nodes its matter occupies (docs/46 row
+    /// 76).
+    ///
+    /// A straight member returns its two ends, so a rigid rod is exactly the segment it always was and
+    /// nothing about it changes. A bent one returns `Flex::SEGMENTS + 1` nodes following the curve.
+    /// This is what contact must be resolved against: a blade that droops 99.7% of its length is not
+    /// where its axis says it is.
+    ///
+    /// The bend is taken in the plane spanned by `axis` and `normal`, which is the plane the ribbon is
+    /// weakest in — a blade bends across its thin dimension, not its wide one, and `Rod::frame`
+    /// already fixes that plane.
+    pub fn polyline(&self) -> Vec<DVec3> {
+        let base = self.centre - self.axis * self.half_length_m;
+        if self.flex.theta.is_empty() {
+            return vec![base, self.centre + self.axis * self.half_length_m];
+        }
+        let f = self.frame();
+        let (along, bend_dir) = (f[0], f[2]);
+        let ds = 2.0 * self.half_length_m / self.flex.theta.len() as f64;
+        let mut out = Vec::with_capacity(self.flex.theta.len() + 1);
+        let mut p = base;
+        out.push(p);
+        for t in &self.flex.theta {
+            p += (along * t.cos() + bend_dir * t.sin()) * ds;
+            out.push(p);
+        }
+        out
+    }
+
     /// **How far the tip has moved from where a rigid member's would be**, m — the deflection a heap
     /// actually feels, and the thing a rigid capsule reports as exactly zero.
     pub fn tip_sag_m(&self) -> f64 {
@@ -614,7 +671,12 @@ pub fn step_one_rod(
     // capability is proven and the sag is real (a dry blade droops 99.7% of its length) — but the hot
     // loop does not pay for a result nobody consumes. Wire this the day contact is resolved against the
     // chain, which is what actually lets blades tangle.
-    let _ = (flex_ei_nm2, weight_per_m);
+    // ★★★ NOW IT HAS A READER (docs/46 row 76). The shape was relaxed and discarded before, because
+    // contact met the capsule — bit-identical results at 13.8x the cost. `closest_points_between` reads
+    // the polyline, so bending a member finally changes what its neighbours feel.
+    if flex_ei_nm2 > 0.0 {
+        rod.relax_flex(flex_ei_nm2, weight_per_m, gravity_ms2);
+    }
 
     // ★★ THE FLOOR, AND ITS MOMENT ARM. The constraint resolves at the rod's LOWER END, so the impulse
     // it applies is off-centre by up to a half-length — that arm is exactly why a blade on its end
@@ -999,7 +1061,9 @@ pub fn settle_traced(
                 {
                     continue;
                 }
-                let (pa, pb) = closest_points(a0, a1, b0, b1);
+                // ★★★ AGAINST THE BENT SHAPE, NOT THE AXIS (docs/46 row 76). A straight member is a
+                // one-segment polyline, so a rigid pile takes the identical path it always did.
+                let (pa, pb) = closest_points_between(&snapshot[i].polyline(), &other.polyline());
                 // ★★★ Both bodies' velocities AT THEIR CONTACT POINTS (docs/46 row 72) — the
                 // quantity `contact_accel` has always taken and never been given. Two blades scraping
                 // past each other spin-to-spin were invisible to the damping and to friction alike.
@@ -1734,6 +1798,86 @@ mod tests {
         let _ = length;
     }
 
+    /// ★★★ **A BENT BLADE IS FELT WHERE ITS MATTER IS, NOT WHERE ITS AXIS WOULD BE** (docs/46 row 76).
+    ///
+    /// Row 76 measured the gap: `Rod` could bend, and bending it changed the heap by **nothing at all,
+    /// bit-identically, at 13.8× the cost** — because `closest_points` solves segment-to-segment on
+    /// `Rod::axis`, so a member's computed shape had no reader. A blade could droop 99.7% of its length
+    /// and its neighbours still met a straight capsule.
+    ///
+    /// This is the invariant that closes it, and it needs no tolerance: **place a neighbour against the
+    /// bent body's real tip, and the contact must find it.** A straight-axis test reports the gap to a
+    /// rod that is not there.
+    #[test]
+    fn a_bent_blade_is_felt_where_its_matter_is() {
+        let mats = crate::materials::load();
+        let blade = crate::assembly::compiled::parse(crate::assembly::compiled::GRASS_BLADE_DRY);
+        let (length, radius) = rod_for(&blade).expect("rod");
+        let (width, thickness) = cross_section_for(&blade).expect("cross-section");
+        let mass = blade.mass_kg(&mats).expect("mass");
+        let m = mats.iter().find(|m| m.id == "straw").expect("straw");
+
+        let mut bent = Rod {
+            centre: DVec3::ZERO,
+            axis: DVec3::X,
+            half_length_m: 0.5 * length,
+            radius_m: radius,
+            width_m: width,
+            thickness_m: thickness,
+            normal: DVec3::Y,
+            vel: DVec3::ZERO,
+            ang_vel: DVec3::ZERO,
+            release_t_s: 0.0,
+            flex: Flex::straight(),
+        };
+        let ei = bent.flexural_rigidity_nm2(&mats, m);
+        let q = mass / length * 9.81;
+        bent.relax_flex(ei, q, 9.81);
+
+        let poly = bent.polyline();
+        let straight_tip = bent.centre + bent.axis * bent.half_length_m;
+        let real_tip = *poly.last().expect("a polyline has a tip");
+        let moved = (real_tip - straight_tip).length();
+        println!(
+            "bent blade: tip is {moved:.5} m ({:.0}% of length) from where a straight rod would put it",
+            100.0 * moved / length
+        );
+        assert!(
+            moved > 0.1 * length,
+            "the test needs a genuinely bent body: tip moved only {moved:.6} m"
+        );
+
+        // A STRAIGHT neighbour resting on the bent tip — touching the real matter, nowhere near the
+        // axis. ★ It must be straight: the first version used `..bent.clone()`, which carried the flex
+        // along, so the "neighbour" was itself bent and its matter was not where it had been placed.
+        let touch = 2.0 * radius;
+        let neighbour = Rod {
+            centre: real_tip + DVec3::Z * (0.5 * touch),
+            axis: DVec3::Z,
+            flex: Flex::straight(),
+            ..bent.clone()
+        };
+        let (pa, pb) = closest_points_between(&poly, &neighbour.polyline());
+        let gap_bent = (pa - pb).length();
+        let (sa, sb) = closest_points(
+            bent.centre - bent.axis * bent.half_length_m,
+            straight_tip,
+            neighbour.centre - neighbour.axis * neighbour.half_length_m,
+            neighbour.centre + neighbour.axis * neighbour.half_length_m,
+        );
+        let gap_straight = (sa - sb).length();
+        println!("  polyline gap {gap_bent:.6} m vs straight-axis gap {gap_straight:.6} m · touch {touch:.6} m");
+        assert!(
+            gap_bent < touch,
+            "the bent body must be IN CONTACT with a neighbour resting on its tip: gap {gap_bent:.6} m \
+             against a {touch:.6} m touch distance"
+        );
+        assert!(
+            gap_straight > touch,
+            "and the straight-axis test must MISS it — otherwise this test proves nothing: {gap_straight:.6} m"
+        );
+    }
+
     /// ★★★ **A BLADE IN A HEAP IS BENT, AND A RIGID ONE CANNOT PACK LIKE HAY** (docs/46 row 75).
     ///
     /// `flexure::Chain` is built and proven and nothing in the pile uses it: `Rod` is one rigid
@@ -1791,6 +1935,21 @@ mod tests {
             sag,
             100.0 * sag / length
         );
+        // ★ WHAT SHAPE IS IT, not just how far the tip moved. A body that CURLS occupies far less
+        // space than one that droops, and packing is matter over envelope — so a curl would raise the
+        // reported packing without anything tangling.
+        let poly = rod.polyline();
+        let span = (*poly.last().unwrap() - *poly.first().unwrap()).length();
+        // ★ The angles are ABSOLUTE per segment, so their SUM is not a turn — a first version printed
+        // "total turn -485deg" for a body whose span is 97% of its arclength, which is impossible and
+        // was my instrument, not the shape. The tip angle is the honest summary.
+        let tip_angle = rod.flex.theta.last().copied().unwrap_or(0.0);
+        println!(
+            "  end-to-end span {span:.5} m of a {length:.3} m arclength ({:.0}%) · tip at {:.0}deg",
+            100.0 * span / length,
+            tip_angle.to_degrees()
+        );
+
         assert!(
             sag > 0.05 * length,
             "a grass blade 1.7x past its own critical length must sag under its weight: {sag:.5} m \
