@@ -3,6 +3,64 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-09-07 — contact against the bent shape, and a packing number I will not quote
+
+Row 76's finding was that bending a member changed nothing because `closest_points` solved
+segment-to-segment on `Rod::axis` — the shape had no reader. `Rod::polyline` and
+`closest_points_between` fix that: contact is now resolved against the member's real shape, taking the
+minimum over segment pairs and calling the SAME `closest_points` for each, so there is still exactly one
+closest-approach law and a straight member (a one-segment polyline) takes the identical path it always
+did.
+
+**The invariant is decisive and needed no tolerance.** Place a straight neighbour on a bent blade's real
+tip:
+
+```
+polyline gap 0.000000 m · straight-axis gap 0.295767 m · touch 0.001076 m
+```
+
+The rigid test misses that contact by **275× the touch distance**. Both halves are asserted — the polyline
+must find it AND the straight-axis test must miss it — or the test proves nothing.
+
+### ★★★ And then the heap gave a result I do not understand
+
+| | before | after |
+|---|---|---|
+| packing | 0.00074 | **0.03798** — above loose hay's 0.029 |
+| contacting fraction | 0.809 | **0.100** |
+| quiet at | 5.220 s | **0.266 s** |
+| peak centre speed | 0.001319 m/s | **0.000000 m/s** |
+
+A 51× packing jump is the number that looks like success, and it is the one to distrust, because the
+others contradict it. **A dense pile in which one member of ten touches anything is not a pile.** Settling
+in 0.266 s is less than the fall takes. And a peak centre speed of *exactly* zero says the gauge saw
+nothing move from `t = 0` — members that never moved did not settle.
+
+So it goes in the ledger as **row 78: not understood, do not quote.** The polyline contact itself stands on
+its own invariant test; the heap statistic does not.
+
+### ★★ What I found while chasing it — row 77
+
+`relax_flex` asks `Chain` for the shape under `(0, −weight)` **in the chain's own 2D plane**, and
+`polyline` lays that shape out in the plane spanned by `axis` and `normal` — where `normal` is the seeded
+**roll** drawn at release. So a member droops toward whatever direction its roll happens to point:
+sideways, upward, anywhere. **Gravity does not enter the bend direction at all.**
+
+That is a Law I violation in plain sight — the matter should decide which way it sags, and here a random
+number does. Worse, the shape is recomputed from scratch every step, so a member cannot be bent BY
+anything: it snaps to its own self-weight equilibrium regardless of what rests on it. Until that is fixed
+the bend is decorative, and **any heap statistic that moves because of it is measuring the seeded roll.**
+
+### ★ And my diagnostic was wrong before the physics was
+
+Chasing the anomaly I printed "total turn −485°" for a body whose end-to-end span is 97% of its arclength
+— impossible, and it nearly sent me to debug a coil that does not exist. The angles are ABSOLUTE per
+segment, so their sum is not a turn. The nodes showed a plain smooth droop to −73°. That is the fifth time
+this fortnight the instrument was wrong before the model was, and the tell each time was a number that
+could not be true.
+
+**Verified.** 657/657 native, 31 skipped, `mod app` clean for wasm32.
+
 ## 2026-09-02 — the chain wired into the pile, measured, and unbilled
 
 Row 75 said: nothing in the pile uses `flexure::Chain`. So I wired it. `Rod` gained a `Flex` state whose

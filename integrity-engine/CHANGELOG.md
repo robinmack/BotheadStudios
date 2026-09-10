@@ -9,6 +9,16 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★ **Contact is resolved against a member's bent shape** (docs/46 row 76). `Rod::polyline` and
+  `closest_points_between` take the minimum over segment pairs, calling the same `closest_points` for
+  each — a straight member is a one-segment polyline and is unaffected. Proven by invariant: a straight
+  neighbour on a bent blade's tip reads a **0.000000 m** gap where the straight-axis test reads 0.295767 m.
+- **Not understood, not quoted** (docs/46 row 78): the 10-blade heap now reports packing 0.03798, but
+  its contacting fraction *fell* to 0.100 and its peak centre speed is exactly 0.000000 m/s — a dense
+  pile in which nothing touches or moves. The packing improvement is withheld pending explanation.
+- **Recorded** (docs/46 row 77): a member bends toward its seeded roll rather than toward gravity, and
+  re-solves its own self-weight shape every step, so nothing can bend it.
+
 - ★★ **`pile::Rod` can bend** — a `Flex` state governed by `flexure::Chain`, with `EI` from the
   member's real ribbon section and its own material's modulus. A dry blade sags **99.7% of its
   length**, which is what a body 1.7× past its Greenhill critical length does.
