@@ -3,6 +3,49 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-09-10 — gravity decides which way a blade sags; the heap is still frozen
+
+**Row 77 closed.** `relax_flex` handed `Chain` a body-frame constant and `polyline` laid the result out
+along `normal` — the seeded roll — so a member drooped sideways or upward depending on a random number.
+Now gravity is projected into the plane across the member's axis (an axial component stretches a body, it
+does not bend it) and `Flex::bend_dir` stores that direction.
+
+Measured across twelve rolls: **every one sags −0.296 m**, identical and downward. Before, half the range
+sagged UP, to +0.296 m at 180°.
+
+★ A sign error surfaced on the way and the sweep caught it instantly: `Chain` works in a 2D plane whose +y
+is up, so its angles come out negative for a sag, while `bend_dir` points down — adding them mirrored the
+sag into a rise at *every* roll. A single-roll test would have shown a plausible-looking bend and hidden it.
+
+★★ **Declared limitation, in the type's own doc:** one rigidity is used for every bending direction, so a
+blade edge-on to gravity bends as easily as one face-on. That is visible in the result as twelve identical
+numbers — real orthotropy would make them differ. `Rod::normal` already fixes the principal planes, so only
+the decomposition is missing. And the other half of row 77 is **not** closed: the shape is still re-solved
+from self-weight every step, so a neighbour resting on a blade does not bend it.
+
+### ★★★ The heap is frozen, and I stopped guessing
+
+| | |
+|---|---|
+| contacting fraction at end | **0.000** — nothing touching anything |
+| peak centre speed | **0.000000 m/s** |
+| peak \|ω\| | **0.00000 rad/s** |
+| packing | **0.03798 — identical to five figures across two runs with different bending physics** |
+
+An identical number out of different physics is a degenerate computation, not a measurement.
+
+Two hypotheses are now refuted rather than suspected. **It is not NaN**: every traced quantity is finite,
+and the check is now permanent, because `f64::max` returns the non-NaN operand — a heap full of NaN would
+report exactly this and look perfectly settled. **It is not the bend direction**: row 77 is fixed and the
+freeze is unchanged.
+
+I have spent three probes on hypotheses and not asked the cheap direct question. `peak centre 0.000000`
+with gravity inside the integrator is impossible **unless the loop never calls it** — so the next probe is
+to instrument the release gate and the per-member call count, before touching any physics. That is written
+into row 78 so the next session starts there instead of re-deriving it.
+
+**Verified.** 658/658 native, 31 skipped, `mod app` clean for wasm32.
+
 ## 2026-09-07 — contact against the bent shape, and a packing number I will not quote
 
 Row 76's finding was that bending a member changed nothing because `closest_points` solved

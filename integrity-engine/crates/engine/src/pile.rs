@@ -118,12 +118,19 @@ use glam::DVec3;
 pub struct Flex {
     /// Segment angles relative to the base tangent, radians. Empty means perfectly straight.
     pub theta: Vec<f64>,
+    /// ★ **Which way the bend goes**, a unit vector across the member's axis (docs/46 row 77). Set by
+    /// `Rod::relax_flex` from the LOAD, never from the member's roll — a blade sags the way gravity
+    /// pulls it. `ZERO` for a straight member.
+    pub bend_dir: DVec3,
 }
 
 impl Flex {
     /// A member with no bend in it — what every rod starts as, and what a rigid one stays.
     pub fn straight() -> Flex {
-        Flex { theta: Vec::new() }
+        Flex {
+            theta: Vec::new(),
+            bend_dir: DVec3::ZERO,
+        }
     }
 
     /// How many segments this member is resolved into. `SEGMENTS` is the budget knob Law 8 asks about,
@@ -508,15 +515,42 @@ impl Rod {
 
     /// **Relax the member's shape to equilibrium** under its own weight, via `flexure::Chain` — the
     /// same `M = EI·κ` the elastica integrates, so there is no second bending law (Law II).
-    pub fn relax_flex(&mut self, ei_nm2: f64, weight_per_m: f64, _g: f64) {
+    ///
+    /// ★★★ **THE LOAD DECIDES WHICH WAY IT BENDS, NOT THE ROLL** (docs/46 row 77). This used to hand
+    /// `Chain` a body-frame constant `(0, −weight)` and lay the result out along `normal` — the seeded
+    /// roll — so a member drooped sideways or **upward** depending on a random number. Measured: at a
+    /// roll of 180° the tip rose **+0.296 m**. Matter does not fall upward, and Law I says the matter
+    /// decides, not the seed.
+    ///
+    /// Gravity is projected into the plane perpendicular to the member's own axis (an axial component
+    /// stretches a body, it does not bend it) and the bend runs along that direction. `bend_dir` is
+    /// stored so `polyline` lays the shape out in the plane the load actually bent it in.
+    ///
+    /// ★ **Declared limitation, in the open:** a ribbon is far stiffer about its wide axis than its
+    /// thin one, and this uses ONE rigidity for every direction. The honest form resolves the load into
+    /// the two principal planes and gives each its own `I`. `Rod::normal` already fixes those planes,
+    /// so the geometry is present and only the decomposition is missing — a blade edge-on to gravity
+    /// currently bends as easily as one face-on, which it should not.
+    pub fn relax_flex(&mut self, ei_nm2: f64, weight_per_m: f64, g: f64) {
+        let along = self.axis.normalize_or(DVec3::X);
+        let down = DVec3::NEG_Y;
+        // The part of gravity that is across the member — the only part that bends it.
+        let transverse = down - along * along.dot(down);
+        let mag = transverse.length();
+        if mag <= 1.0e-12 || weight_per_m <= 0.0 || g <= 0.0 {
+            // End-on to gravity: nothing bends it, and a straight member is a one-segment polyline.
+            self.flex.theta.clear();
+            self.flex.bend_dir = DVec3::ZERO;
+            return;
+        }
+        self.flex.bend_dir = transverse / mag;
         let chain = crate::flexure::Chain::relaxed(
             ei_nm2,
             2.0 * self.half_length_m,
             Flex::SEGMENTS,
             0.0,
-            |_| (0.0, -weight_per_m),
+            |_| (0.0, -weight_per_m * mag),
         );
-        // Store angles relative to the base tangent so `straight()` is all zeros.
         self.flex.theta = chain.theta.clone();
     }
 
@@ -536,14 +570,19 @@ impl Rod {
         if self.flex.theta.is_empty() {
             return vec![base, self.centre + self.axis * self.half_length_m];
         }
-        let f = self.frame();
-        let (along, bend_dir) = (f[0], f[2]);
+        let along = self.axis.normalize_or(DVec3::X);
+        // ★ The direction the LOAD bent it in (docs/46 row 77), not the seeded roll.
+        let bend_dir = self.flex.bend_dir.normalize_or(self.frame()[2]);
         let ds = 2.0 * self.half_length_m / self.flex.theta.len() as f64;
         let mut out = Vec::with_capacity(self.flex.theta.len() + 1);
         let mut p = base;
         out.push(p);
         for t in &self.flex.theta {
-            p += (along * t.cos() + bend_dir * t.sin()) * ds;
+            // ★ MINUS. `Chain` works in a 2D plane whose +y is UP and whose load is `(0, −w)`, so its
+            // angles come out NEGATIVE for a sagging body. `bend_dir` points the way the load pulls —
+            // downward — so the two conventions are opposed, and adding them mirrored the sag into a
+            // rise. Measured as a tip that went UP by 0.296 m at every roll.
+            p += (along * t.cos() - bend_dir * t.sin()) * ds;
             out.push(p);
         }
         out
@@ -1798,6 +1837,70 @@ mod tests {
         let _ = length;
     }
 
+    /// ★★★ **A BLADE SAGS DOWNWARD, WHATEVER WAY IT WAS ROLLED** (docs/46 row 77).
+    ///
+    /// `relax_flex` asked `flexure::Chain` for the shape under `(0, −weight)` **in the chain's own 2D
+    /// plane**, and `polyline` laid that shape out along the member's `normal` — which is the seeded
+    /// ROLL drawn at release. So the bend direction was whatever the random roll happened to be:
+    /// sideways, or upward. **Gravity did not enter it at all**, which is Law I inverted — the matter
+    /// should decide which way it sags, not a random number.
+    ///
+    /// The test is the one thing that cannot be argued with: sweep the roll all the way round, and the
+    /// tip must never end up HIGHER than a straight member's would. Matter does not fall upward.
+    #[test]
+    fn a_blade_sags_downward_whatever_way_it_was_rolled() {
+        let mats = crate::materials::load();
+        let blade = crate::assembly::compiled::parse(crate::assembly::compiled::GRASS_BLADE_DRY);
+        let (length, radius) = rod_for(&blade).expect("rod");
+        let (width, thickness) = cross_section_for(&blade).expect("cross-section");
+        let mass = blade.mass_kg(&mats).expect("mass");
+        let m = mats.iter().find(|m| m.id == "straw").expect("straw");
+        let q = mass / length * 9.81;
+
+        let mut worst_rise = f64::NEG_INFINITY;
+        let mut worst_roll = 0.0;
+        for k in 0..12 {
+            let roll = k as f64 / 12.0 * std::f64::consts::TAU;
+            // Horizontal member, rolled about its own length by `roll`.
+            let mut rod = Rod {
+                centre: DVec3::ZERO,
+                axis: DVec3::X,
+                half_length_m: 0.5 * length,
+                radius_m: radius,
+                width_m: width,
+                thickness_m: thickness,
+                normal: DVec3::new(0.0, roll.cos(), roll.sin()),
+                vel: DVec3::ZERO,
+                ang_vel: DVec3::ZERO,
+                release_t_s: 0.0,
+                flex: Flex::straight(),
+            };
+            let ei = rod.flexural_rigidity_nm2(&mats, m);
+            rod.relax_flex(ei, q, 9.81);
+            let tip = *rod.polyline().last().expect("a tip");
+            let straight_tip = rod.centre + rod.axis * rod.half_length_m;
+            let rise = tip.y - straight_tip.y;
+            println!(
+                "  roll {:5.0}° · normal ({:+.2}, {:+.2}, {:+.2}) · tip rises {:+.5} m",
+                roll.to_degrees(),
+                rod.normal.x,
+                rod.normal.y,
+                rod.normal.z,
+                rise
+            );
+            if rise > worst_rise {
+                worst_rise = rise;
+                worst_roll = roll.to_degrees();
+            }
+        }
+        println!("  worst rise {worst_rise:+.5} m at roll {worst_roll:.0}°");
+        assert!(
+            worst_rise <= 1.0e-9,
+            "a blade must never sag UPWARD: at roll {worst_roll:.0}° its tip rose {worst_rise:.5} m. \
+             The bend direction was taken from the seeded roll instead of from gravity."
+        );
+    }
+
     /// ★★★ **A BENT BLADE IS FELT WHERE ITS MATTER IS, NOT WHERE ITS AXIS WOULD BE** (docs/46 row 76).
     ///
     /// Row 76 measured the gap: `Rod` could bend, and bending it changed the heap by **nothing at all,
@@ -1991,6 +2094,14 @@ mod tests {
                         / tr.len().max(1) as f64;
                     let last_touch = tr.last().map(|x| x.contacting_fraction).unwrap_or(0.0);
                     let last_w = tr.last().map(|x| x.peak_ang_speed_rads).unwrap_or(0.0);
+                    // ★ IS ANY OF THIS A NUMBER? `f64::max` returns the non-NaN operand, so a heap
+                    // full of NaN positions reports a peak speed of 0.000000 and looks perfectly
+                    // settled. Check before believing the statistics.
+                    let bad = tr
+                        .last()
+                        .map(|x| !x.height_m.is_finite() || !x.peak_speed_ms.is_finite())
+                        .unwrap_or(false);
+                    println!("      finite: {}", !bad);
                     println!(
                         "  {n:3} blades -> packing {:.5} · quiet {} after {:.3} s · peak centre {:.6} m/s",
                         s.packing, s.quiet, s.elapsed_s, s.peak_speed_ms
