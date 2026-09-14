@@ -9,6 +9,14 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★ **A blade sags toward gravity, not toward its seeded roll** (docs/46 row 77). `relax_flex`
+  projects gravity into the plane across the member's axis and `Flex::bend_dir` stores it. Twelve rolls
+  now sag −0.296 m identically; before, half the range sagged **upward**. Declared limitation: one
+  rigidity for all bending directions, so edge-on bends as easily as face-on.
+- **Still not understood** (docs/46 row 78): the polyline heap is frozen — contacting fraction 0.000,
+  peak speed 0.000000, packing identical to five figures across runs with different physics. Ruled out:
+  NaN (checked, and the check is permanent) and the bend direction. Not quoted as a result.
+
 - ★★ **Contact is resolved against a member's bent shape** (docs/46 row 76). `Rod::polyline` and
   `closest_points_between` take the minimum over segment pairs, calling the same `closest_points` for
   each — a straight member is a one-segment polyline and is unaffected. Proven by invariant: a straight
