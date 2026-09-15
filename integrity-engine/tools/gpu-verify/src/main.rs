@@ -770,28 +770,27 @@ fn main() {
             // The same ζ→c the engine's own `damping_for_restitution` produces, transcribed here
             // because this tool deliberately mirrors rather than links the engine (see Cargo.toml).
             // ζ from the no-tension inversion, by bisection, then c = ζ·√(2k).
+            // ★★★ THE ENGINE'S OWN INVERSION, TRANSCRIBED — no integration, so no step cap and no
+            // hang (docs/46 rows 42, 80). `granular::zeta_for_no_tension_restitution` bisects on the
+            // CLOSED FORM `restitution_of_damping_ratio`, which is why it has never needed one.
+            //
+            // MEASURED THE WRONG WAY FIRST: integrating the contact per probe hung the harness (killed
+            // at 600 s), and the step cap added to stop that truncated every overdamped probe, so ζ
+            // saturated at its ceiling and the gate reported `e = 18.3` — energy gain, not a
+            // restitution. The lesson is narrow: when the engine already inverts something, transcribe
+            // its method, not a fresh one.
             let zeta = {
-                let (mut lo, mut hi) = (0.0f64, 50.0f64);
+                let target = (e_target as f64).clamp(1.0e-4, 0.9999);
+                let (mut lo, mut hi) = (1.0e-6f64, 1.0e3f64);
                 for _ in 0..200 {
                     let mid = 0.5 * (lo + hi);
-                    // No-tension rebound: integrate the clamped contact and read the exit speed.
-                    let (k, c) = (C_STIFFNESS as f64, 2.0 * mid * (C_STIFFNESS as f64).sqrt());
-                    let dt = 1.0e-4 / k.sqrt();
-                    let (mut x, mut v) = (0.0f64, -1.0f64);
-                    // ★ BOUNDED. The first version had only a runaway guard, and an overdamped contact
-                    // creeps back toward zero overlap arbitrarily slowly — so the loop never ended and
-                    // the harness was killed at 600 s. A step cap of 4 contact durations is generous
-                    // (one contact is π/ω) and turns a hang into a measurement that simply reports
-                    // whatever it reached.
-                    let max_steps = (4.0 * std::f64::consts::PI / k.sqrt() / dt) as u64;
-                    let mut n = 0u64;
-                    while (v < 0.0 || x < 0.0) && n < max_steps {
-                        let a = (-k * x - c * v).min(0.0); // no tension: the contact cannot pull
-                        v += a * dt;
-                        x += v * dt;
-                        n += 1;
-                    }
-                    if v.abs() > e_target as f64 {
+                    // restitution_of_damping_ratio: the closed form e = exp(−ζπ/√(1−ζ²)).
+                    let e_mid = if mid >= 1.0 {
+                        0.0
+                    } else {
+                        (-mid * std::f64::consts::PI / (1.0 - mid * mid).sqrt()).exp()
+                    };
+                    if e_mid > target {
                         lo = mid;
                     } else {
                         hi = mid;
