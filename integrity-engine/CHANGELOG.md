@@ -9,6 +9,13 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★★ **The pile was producing NaN on the first timestep** (docs/46 row 79), and every aggregate
+  instrument hid it: `f64::min`/`f64::max` return the non-NaN operand, so `peak_speed`, `height_m` and
+  the envelope all reported healthy values, and `NaN as i64` saturating to 0 put every member in cell
+  (0,0,0) — the "one-cell heap". A per-step `debug_assert` on member finiteness now ships. The
+  suspected source is `Rod::effective_mass_at` inverting a near-singular matrix along the member's
+  low-inertia axis.
+
 - ★★★ **The settled heap occupies ONE CELL at every resolution** (docs/46 row 79) — ten 0.35 m blades
   inside a volume smaller than a grain of sand. Packing rose by exactly the `cell³` factor (+700% per
   halving), which is the signature of a constant cell count. **Every packing figure this module has

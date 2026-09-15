@@ -3,6 +3,59 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-09-14 (later still) — it was NaN, and every instrument I own returns the non-NaN operand
+
+Robin asked how NaN is even possible in a Rust engine. It is not a JavaScript artefact: NaN is IEEE 754,
+identical in Rust `f64`, C++ `double` and every GPU shader. `0/0`, `inf − inf`, `sqrt(−1)` all produce it,
+and Rust propagates it silently rather than trapping. No language choice avoids it and no performance is
+being lost to it.
+
+**The heap is NaN.** A direct `is_finite` check — not through `min`/`max` — reports **10/10 members NaN at
+rest**. A per-step assert catches the first at **t = 4.27e-6 s, one timestep**, with a centre already at
+**3.3e16 m**. The first contact resolution produces an effectively infinite impulse.
+
+### ★★★ Why it hid for a week
+
+**`f64::min` and `f64::max` return the non-NaN operand.** Every aggregate in this module is a fold over one
+of them:
+
+- `peak_speed` — `fold(0.0, f64::max)` → reports **0.000000** for a heap of NaN
+- `height_m` — same → a plausible height
+- the envelope's bbox — same → and `NaN as i64` **saturates to 0** in Rust, so every member lands in cell
+  (0,0,0): *that* is the one-cell envelope at every resolution, and the exact +700%-per-halving
+
+So a NaN heap reports a zero peak speed, `quiet true`, a settled gauge and a tidy packing figure. It does
+not look broken. It looks like an answer.
+
+**And I tested for NaN twice, through those same instruments, and cleared it both times.** The second time
+I wrote the check specifically *because* I knew `f64::max` returns the non-NaN operand — and then read
+`height_m` and `peak_speed_ms`, both of which are folds over `f64::max`. I built the right check on the
+wrong inputs and recorded "NOT NaN" in the ledger as a refuted hypothesis.
+
+Everything downstream followed from that: the frozen heap, the four wrong hypotheses, the collapse-to-a-
+point reading, the convergence sweep. All of it was NaN wearing the shape of a result.
+
+### What is exonerated, and what is suspect
+
+The **release is healthy** — bbox 0.36 × 0.79 × 0.37 m, closest pair 4.8 mm against a 1.08 mm touch
+distance — so rows 74 and 60-step-C are cleared. The NaN arrives in the first *contact*, not the placement.
+
+The suspect is the impulse, not the geometry. `Rod::effective_mass_at` inverts
+`K = (1/m)I₃ − [r]ₓI⁻¹[r]ₓ`, and with an axial inertia of 3.4e-10 kg·m² that matrix is near-singular along
+the member's own axis. `k.inverse()` on a near-singular matrix is exactly how a finite Δv becomes an
+infinite impulse — and it was introduced in row 72, which is when this began.
+
+### What ships
+
+A per-step `debug_assert` on member finiteness — the gate that should have existed from the start, and
+which found the true cause in one run after a week of hypotheses.
+
+★ The general rule, and it is the most useful thing to come out of this fortnight: **an aggregate built
+from `min`/`max` cannot detect the corruption it is aggregating.** If a simulation's health is judged by
+folds, check the state directly, every step, or it will lie to you in the shape of a result.
+
+**Verified.** 658/658 native, 31 skipped, `mod app` clean for wasm32.
+
 ## 2026-09-14 (later) — the heap is one cell wide: every packing number is void
 
 Converging the packing against cell size was meant to decide whether 0.03798 meant anything. It decided
