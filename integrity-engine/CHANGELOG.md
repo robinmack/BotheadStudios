@@ -9,6 +9,13 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★★ **docs/46 row 80 (new): the GPU realises a different restitution than the native path** from the
+  same catalogued number. `particle_step.wgsl` has no no-tension clamp, so it delivers the textbook
+  `e = exp(−ζπ/√(1−ζ²))` while `damping_for_restitution` calibrates ζ against the native path's
+  no-tension cutoff. Verified analytically, by independent replica (0.6363) and on real hardware (0.636).
+- **docs/46 row 63 follow-up**: the nine unsourced restitutions are named, and sandstone's source is
+  shown to exist but be closed-access.
+
 - ★★★ **A contact's axial moment is torsion, not rigid spin** (docs/46 row 79). Perpendicular moments
   tumble a member as before; the component about its own axis — where a ribbon's inertia is four orders
   smaller — is carried elastically by `relax_flex_under` instead. A declared specialisation with a
