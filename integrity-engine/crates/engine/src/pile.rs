@@ -617,7 +617,25 @@ impl Rod {
     /// Apply an impulse at a point offset `r`: it both pushes and turns.
     pub fn apply_impulse_at(&mut self, mass_kg: f64, r: DVec3, impulse: DVec3) {
         self.vel += impulse / mass_kg.max(1e-30);
-        self.ang_vel += self.inv_inertia_world(mass_kg) * r.cross(impulse);
+        let dw = self.inv_inertia_world(mass_kg) * r.cross(impulse);
+        // ★★★ **ONE CALL EARLIER AGAIN** (docs/46 row 79). The neighbour contact was shown to be the
+        // amplifier of an existing spin, not its source; this is where a spin is created. The axial
+        // moment of a grass blade is 3.4e-10 kg·m², so `I⁻¹ ≈ 2.9e9` and any impulse with a moment arm
+        // about the member's own axis is multiplied by three billion. A tip speed bound is the honest
+        // scale to check against: `|Δω|·L/2` is a velocity, and a blade cannot acquire kilometres per
+        // second from resting on the floor.
+        debug_assert!(
+            dw.is_finite() && dw.length() * self.half_length_m < 1.0e3,
+            "impulse spun a member up absurdly: |Δω| {:e} rad/s (tip {:e} m/s) · J {:?} · |J| {:e} · \
+             arm {:?} · I {:?}",
+            dw.length(),
+            dw.length() * self.half_length_m,
+            impulse,
+            impulse.length(),
+            r,
+            self.principal_inertia_kgm2(mass_kg)
+        );
+        self.ang_vel += dw;
     }
 
     /// Turn a world-frame angular impulse (N·m·s) into the angular velocity it adds.
@@ -684,7 +702,20 @@ pub fn step_one_rod(
         ) * dt;
     }
 
-    rod.ang_vel += rod.ang_vel_from_impulse(mass_kg, extra_torque * dt);
+    // ★★★ **THE SECOND SPIN PATH, AND IT WAS NEVER GUARDED** (docs/46 row 79). The `ang_vel` assert went
+    // on `apply_impulse_at` — the FLOOR's path. The neighbour torque reaches `ang_vel_from_impulse`
+    // directly, here, and with an axial `I⁻¹` of 2.9e9 a torque·dt of 1e-6 N·m·s is already 2900 rad/s.
+    // Guarding one of two paths into the same state is the same error as asserting a term and not a sum.
+    let dw_n = rod.ang_vel_from_impulse(mass_kg, extra_torque * dt);
+    debug_assert!(
+        dw_n.is_finite() && dw_n.length() * rod.half_length_m < 1.0e2,
+        "neighbour torque spun a member up: |Δω| {:e} rad/s (tip {:e} m/s) · τ {:?} · I {:?}",
+        dw_n.length(),
+        dw_n.length() * rod.half_length_m,
+        extra_torque,
+        rod.principal_inertia_kgm2(mass_kg)
+    );
+    rod.ang_vel += dw_n;
     // Free precession: a body whose principal moments differ does not spin about a fixed world axis.
     // τ_gyro = −ω × (I·ω), in the body frame where I is diagonal.
     {
@@ -749,7 +780,12 @@ pub fn step_one_rod(
         // bad; this says WHERE. It reports the inputs, so the first failure names its own cause instead
         // of leaving it to be guessed — which is what three wrong guesses cost.
         debug_assert!(
-            impulse.is_finite() && impulse.length() < 1.0,
+            // ★★★ A PHYSICAL BOUND, NOT A ROUND ONE (docs/46 row 79). This read `< 1.0` N·s, which for
+            // a 0.445 GRAM blade permits `Δv = 2247 m/s` in one step — so the assert that was supposed
+            // to catch the explosion was itself letting it through, and the search moved on to
+            // `ang_vel` and to summed accelerations, both of which were innocent. A blade meets the
+            // floor at its ~2 m/s terminal speed, so `m·10 m/s` is already generous.
+            impulse.is_finite() && impulse.length() < mass_kg * 10.0,
             "floor impulse blew up: |J| {} · dv {:?} · arm {:?} · det(K) {:e}",
             impulse.length(),
             dv,
@@ -1157,6 +1193,7 @@ pub fn settle_traced(
             );
             let mut acc = DVec3::ZERO;
             let mut torque = DVec3::ZERO;
+            let mut touching = 0usize;
             let (a0, a1) = snapshot[i].ends();
             for (j, other) in snapshot.iter().enumerate() {
                 if i == j || other.release_t_s > elapsed_s {
@@ -1199,11 +1236,22 @@ pub fn settle_traced(
                     pb
                 );
                 acc += a_n;
+                touching += 1;
                 // ★ THE NEIGHBOUR'S MOMENT ARM. The contact happens at `pa`, which is somewhere along
                 // this rod, not at its centre — so it both pushes and TURNS. Discarding the arm is what
                 // made a landing blade slide instead of topple onto the heap.
                 torque += arm_a.cross(a_n * member_mass);
             }
+            // ★★★ **THE SUM, NOT THE TERM** (docs/46 row 79). Each `a_n` passed its own bound at step 1
+            // and the member still reached 1e4 m/s by step 2 — because a member overlapping MANY
+            // neighbours accumulates all of them. Asserting the term and not the total is how a
+            // thousand legal contributions add up to an illegal answer unseen.
+            debug_assert!(
+                acc.is_finite() && acc.length() < 1.0e9,
+                "summed neighbour contact blew up at t={elapsed_s}: |acc| {:e} m/s² over {touching} \
+                 simultaneous contacts on member {i}",
+                acc.length()
+            );
             let r = &mut rods[i];
             step_one_rod(
                 r,

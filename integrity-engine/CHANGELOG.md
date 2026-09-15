@@ -9,6 +9,14 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★★ **The pile's NaN is located** (docs/46 row 79): the neighbour torque produces `|Δω| = 6.6e5 rad/s`
+  in one step, from a torque **760,000× the member's own weight-moment**, amplified by an axial inertia
+  four orders below the others. Suspect: `torque += arm.cross(a_n * member_mass)` against
+  `contact_accel`'s per-mass units.
+- `pile` now carries four diagnostic asserts — per-term acceleration, **summed** acceleration, floor
+  impulse bounded by `m·10 m/s` (it previously read `< 1.0 N·s`, permitting `Δv = 2247 m/s` for a 0.445 g
+  member), and **both** spin paths. **No physics changed.**
+
 - **The neighbour contact is the amplifier, not the cause** (docs/46 row 79). A `debug_assert` at
   `contact_accel` catches the first excessive acceleration on step 2: overlap is a modest 30% of touch
   and the spring accounts for only 1/4800th of it, but contact-point velocities are already ~1e5 m/s
