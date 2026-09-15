@@ -3,6 +3,46 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-09-14 (last) — three more wrong guesses, and the gate that should replace guessing
+
+I named `Rod::effective_mass_at`'s matrix inversion as the NaN's source. **Measured, it is innocent:**
+`det(K) = 1.9e11`, entries ~5e3–9e3, perfectly conditioned.
+
+The blow-up is in the *input*. `dv = hit.vel − v_foot` arrives as **(76806, 191467, 132526) m/s** — the
+member was already travelling at ~250 km/s before the floor was ever consulted. **The source is the
+neighbour contact**, not the floor constraint and not the inversion.
+
+### ★★★ And then I guessed twice more, and made it worse both times
+
+1. *"The shape snaps from straight to fully drooped in one step, teleporting matter through neighbours."*
+   Plausible — a blade droops 99.7% of its length. Relaxed the shape once at release instead of every
+   step. **`dv` went to 3.4e6 m/s.** Worse.
+2. *"Then the bend must happen before the release's overlap rejection, so the invariant sees the real
+   shape."* Also plausible, and a real defect in its own right. **`dv` went to 1.2e8 m/s.** Worse again.
+
+Both reverted. That is four wrong hypotheses on the NaN itself and three more on its cause, and the
+pattern is the same every time: **diagnosing from plausibility instead of from the first excessive
+value.** The measurement was always one `debug_assert` away and I kept reaching past it.
+
+### What ships
+
+The two asserts. `step_one_rod` now checks member finiteness every step and the floor impulse's magnitude
+at the point it is formed, reporting `dv`, the arm and `det(K)` — so the first failure names its own cause
+instead of leaving it to be guessed.
+
+They have already earned it: the first turned a week of hypotheses into one measured answer, and the
+second refuted my stated cause in a single run.
+
+**The next step is one line, and only that line:** instrument `contact_accel`'s output in the neighbour
+loop, print the first acceleration above a sane bound with both member ids, their polyline closest points,
+the overlap and `t` — and change no physics until it has been read.
+
+★ The general rule from the whole fortnight, now earned three separate ways: **put the assert where the
+quantity is formed, not where the symptom appears.** Every hour lost here went to reasoning about a number
+I had not yet printed.
+
+**Verified.** 658/658 native, 31 skipped, `mod app` clean for wasm32. No physics changed in this commit.
+
 ## 2026-09-14 (later still) — it was NaN, and every instrument I own returns the non-NaN operand
 
 Robin asked how NaN is even possible in a Rust engine. It is not a JavaScript artefact: NaN is IEEE 754,

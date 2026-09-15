@@ -9,6 +9,12 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The `effective_mass_at` inversion is exonerated** (docs/46 row 79): measured `det(K) = 1.9e11` and
+  well-conditioned entries. The NaN's input `dv` already exceeds 250 km/s, so the source is the
+  neighbour contact. Two further candidate fixes were tried and both made it worse; both reverted.
+- `pile::step_one_rod` gains a second `debug_assert` on the floor impulse, reporting `dv`, the arm and
+  `det(K)` at the point the impulse is formed. **No physics changed.**
+
 - ★★★ **The pile was producing NaN on the first timestep** (docs/46 row 79), and every aggregate
   instrument hid it: `f64::min`/`f64::max` return the non-NaN operand, so `peak_speed`, `height_m` and
   the envelope all reported healthy values, and `NaN as i64` saturating to 0 put every member in cell
