@@ -3,6 +3,141 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-09-15 — something runs gpu-verify now, and it does not grade itself green
+
+`tools/gpu-verify` is the only thing that checks the GPU granular path's *physics* on real hardware,
+and **nothing ran it.** `docs/72` queue item 1 recorded `grep gpu-verify scripts/` returning 0 hits.
+`scripts/gpu-gate.sh` is the runner.
+
+### The expectation I stated before the run was wrong, which is the point
+
+I predicted, in writing, before running it: *adapter = RTX 5060 Ti, F5b FAIL (row 80), every other
+check PASS, exit 1.* The tool reports **4 failures, not 1**:
+
+- **F5b ×3** — one per target restitution (e = 0.2, 0.4, 0.6); its `failures` increment sits inside the
+  loop. Row 80, as expected.
+- **Scene D, emergent angle of repose** — a *second, unrelated* declared failure I had not predicted.
+  Measured repose is **0.1°–0.4°** against real friction angles of 30–45°.
+
+Two failures wearing one number. `docs/72` §3.6 says state the expectation before the run; this is what
+that buys — a wrong prediction is diagnostic, and without it "4 failed" would have read as "the known
+one failed" and scene D would have stayed invisible behind row 80.
+
+### So the gate grades, it does not just run
+
+A permanently-red gate is one nobody reads, and a new failure hiding behind a known one is the exact
+failure mode. `gpu-gate.sh` therefore asks **"did it fail in precisely the ways we have declared, and in
+no other way"**. The manifest carries a check id, an expected failing-line count, and a written reason
+citing where the defect is analysed — an IOU with an address (Law V), not permission to be broken. Four
+distinct exit codes, because "it went red" is not one fact: `0` steady state · `1` an **undeclared**
+failure (a regression) · `2` a **declared** failure now PASSES, so the manifest is stale and a human must
+decide · `3` harness failure. The expected failing-line *count* is recorded so that 3-of-3 becoming
+1-of-3 is reported rather than absorbed — that number moving is a physics change even when the verdict
+does not move.
+
+### The adversarial pass refuted my own account of scene D, and that is the physics finding
+
+I was about to record scene D as *"a known deficiency: continuum parcels roll like marbles, fix with
+rolling resistance"*. A refuter agent (`.claude/agents/integrity-refuter.md`) took that apart:
+
+- **The two sources are one.** That explanation originates in the tool's own comment
+  (`main.rs:1026-1029`). `docs/45:129-130` **quotes that comment** rather than corroborating it. Nothing
+  has measured it.
+- ★ **The magnitude refutes it as a complete account.** Scene D drops **117 grains** of 1 m diameter
+  (`main.rs:1042`). A 30° cone of that volume is `r = 5.8 m, h = 3.3 m`; 0.2° over the same footprint is
+  `h = 0.02 m` — **below one grain radius**. That is *no heap formed*, not *a shallower heap*. Rolling
+  spheres are the textbook explanation for 20–25°, nowhere near 0.2°.
+- **An instrument path nobody excluded.** `repose_angle` (`main.rs:469-506`) least-squares fits ring
+  maxima out to the **outermost occupied bin** (r up to 30 m), so a few grains at rest far from the pile
+  flatten the reported angle whatever the heap does — and scene E's own line (`spread 33.1 m`) shows
+  grains do settle tens of metres out. Row 79's pattern exactly: *every instrument hid it*.
+- **I mis-cited the doc.** I had `docs/45` forbidding a "fix" to the *acceptance criterion*; it forbids
+  fixing **the terrain** to match the grains, and calls the agreement test the *correct* criterion. The
+  string I quoted is not in the repo. That is the failure this role exists to catch, and it caught mine.
+
+It also found that **row 80 already carries the F5b numbers verbatim**, so opening a row for those would
+have duplicated. All of this is now `docs/46` **row 81**, with the separation experiment named: refit over
+the connected heap only, and print the ratio between successive bin widths (§3.9) before proposing physics.
+
+Two stale statements in the tool surfaced and are **left alone deliberately** — this change adds no engine
+code — but are recorded here so the next reader is not misled: `main.rs:755-768` still declares F5b's
+verdict untrustworthy because "the ζ bisection … SATURATES at its 50.0 ceiling … `e = 18.3`", which the
+current run contradicts (ζ 0.7312/0.3545/0.1809, no `e > 1`); and `main.rs:884` / `JOURNAL.md:7874` record
+F6 over-predicting at "ratio ≈ 1.35" where this run measures **1.00**.
+
+### The second refutation was of the gate itself, and it was a real defect
+
+A refuter pointed at the gate's own source found that the **count-moved branch printed a notice and left
+the exit code at 0** — so a declared failure going from 3 FAIL lines to 1 would print `!! NOTICE` and then
+`GATE GREEN`, exit 0. The manifest comment four lines above says that number moving "is a physics change
+even when the verdict does not move", recorded "so that a PARTIAL change … is reported rather than
+silently absorbed". An unattended runner reads only `$?`. **It was reproducing, inside the gate, the exact
+trap the gate's own header cites** (`CLAUDE.md` rule 3: a gate that reports a failure and exits 0 is worse
+than no gate). And the six fixtures did not cover it — the grader's subtlest path was its only ungraded
+one, which is why it shipped.
+
+Fixed: a moved count now exits 2, there is a seventh fixture for it, and the exit code is chosen once by
+explicit precedence (regression `1` > vanished check `3` > stale or moved declaration `2`) instead of by
+sequential assignment, which could let a stale declaration overwrite the "someone deleted the inconvenient
+check" alarm.
+
+### The 2070 enumerates first, measured
+
+`docs/46` **row 82**: none of the seven tools under `tools/` has an automated caller, and the mechanism is
+structural — all four Rust tools carry their own `[workspace]` table (deliberate, for wasm feature
+isolation) while the root lists `members = ["crates/engine"]`, so `cargo test` at the root can never reach
+them. `gpu-bh-verify`, `sph-verify` and `impact-run` take `request_adapter(HighPerformance)`, which cannot
+discriminate between two *discrete* GPUs.
+
+I was about to record that as "they silently run on an unknown card". Refuted: **each of them prints its
+adapter.** The true defect is narrower and worse — **`sph-verify` acquires NINE adapters from nine fresh
+instances and prints exactly one** (`run_gpu_steps` is called eight times and announces none).
+
+And the thing worth knowing, now measured rather than inferred: `MESA_VK_DEVICE_SELECT=10de:2d04
+vulkaninfo --summary` **reorders** enumeration and does **not** filter — three devices either way — so it
+is invisible to `gpu-verify`'s count-based selector. The same measurement shows **GPU0 is the RTX 2070 by
+default**, so a first-match selector runs on the 2070, not the card the physics ships against.
+
+### Where it runs, and where it deliberately does not
+
+**Not in `scripts/test.sh`.** `.github/workflows/ci.yml:58` runs `test.sh` on `ubuntu-latest`; there are
+no self-hosted or GPU runners, so wiring it there would put a GPU requirement into CI where it could
+only ever fail for want of hardware. It is a local script, on a box with the card.
+
+★ **`docs/72` item 1 named the wrong environment variable** and is corrected in this change. It said
+gpu-verify *"needs the 5060 Ti (`MESA_VK_DEVICE_SELECT=10de:2d04`)"*. gpu-verify never reads that; it
+reads `GPU_VERIFY_ADAPTER` (`tools/gpu-verify/src/main.rs:221`), and the `"5060"` default in
+`tools/gpu-verify/.cargo/config.toml` applies **only when launched through cargo** — which a gate
+invoking it by `--manifest-path` from the repo root does not get, because cargo reads config from the
+CWD upward, not from the manifest. The gate sets it explicitly and prints the adapter line it got.
+
+### Verified — by making every branch fail
+
+`scripts/gpu-gate.sh --selftest` grades six crafted fixtures with no GPU required, so the *grader* is
+checked on every run rather than once by hand:
+
+| fixture | wanted |
+|---|---|
+| steady state (declared failures failing) | 0 |
+| an undeclared check fails | 1 |
+| a declared check now passes | 2 |
+| a log with no PASS/FAIL lines at all | 3 |
+| a declared check renamed or deleted | 3 |
+| ★ the **real** baseline log, manifest emptied | 1 |
+
+The last is the negative control on real data — without it every fixture is one I wrote to match a
+parser I wrote. The timeout path was then broken deliberately (`GPU_GATE_TIMEOUT_S=1`): exit 3, and
+★ **worth noting what that caught** — at 1 s the log held five PASS lines and *zero* FAIL lines, which a
+naive grader would have called green. Truncation reads as success unless something checks for it.
+
+Real run: **GATE GREEN, 65.7 s wall**, `adapter: NVIDIA GeForce RTX 5060 Ti (DiscreteGpu, 580.178.04)`,
+27 check ids, 30 PASS lines, 4 FAIL lines, all four declared. The 600 s timeout is 9× the measured run,
+not a round number — row 80 records this tool hanging until killed at 600 s.
+
+**Native suite unchanged: 660/660, 31 skipped, `mod app` compiles for wasm32.** This change adds no
+engine code; it only makes an existing verifier reachable.
+
+
 ## 2026-09-14 — the gate is built, and I am not trusting its verdict
 
 `gpu-verify` gains **F5b**: set `c_normal_damp` from a no-tension ζ — the same call the native path makes

@@ -100,6 +100,27 @@ phase('Verify')        a second agent per finding, told to REFUTE it
 Fan out for: catalogue audits, multi-file greps, "which of these N things is true", literature sourcing.
 Do **not** fan out a single causal chain — that is one thread and parallelism cannot help it.
 
+### The two roles are executable definitions, not prose (added 2026-09-15)
+
+`AGENTS.md` §2: *if a rule can be checked by a machine, it must be.* The same applies to a role — a
+discipline that has to be retyped into every prompt is one that drifts, and the rules above were bought
+too expensively to re-derive each session. Both roles live in version control:
+
+| file | role |
+|---|---|
+| `.claude/agents/integrity-investigator.md` | read-only investigation of ONE independent item; every claim carries a `file:line`; "unknown" is a valued answer; carries §3's measurement discipline in full |
+| `.claude/agents/integrity-refuter.md` | the adversarial pass: resolve every citation, `grep -F` every quoted string, recompute every number, look for the second path, ask whether the instrument could have produced this while broken |
+
+The refuter's asymmetric default is the load-bearing part: **uncertain returns REFUTED, not CONFIRMED.**
+A false confirmation enters the record and gets built on; a false refutation costs one re-check.
+
+★ **They are read at session start.** Writing the files does not make them available to the session that
+wrote them — that session must load the definition into the sub-agent's prompt explicitly instead. Both
+routes were used on 2026-09-15 and both work.
+
+★ **One task per agent, and no agent edits.** Investigations that edit in parallel collide, and an
+unattended bad edit runs unseen. They report; the coordinator lands the change.
+
 ---
 
 ## 5. Merging unattended
@@ -145,7 +166,7 @@ Ordered. Each item states what "done" means, so an agent cannot declare victory 
 
 | # | Work | Done when |
 |---|---|---|
-| 1 | **Wire `tools/gpu-verify` into a runnable gate.** It is absent from `scripts/test.sh` (grep: 0 hits), so nothing runs it. It needs the 5060 Ti (`MESA_VK_DEVICE_SELECT=10de:2d04`), which we have. | A script runs it and reports pass/fail per check. F5b is **expected to FAIL** (row 80) — land it as a *declared* failing gate with the reason, so a NEW failure is distinguishable from the known one. |
+| 1 | **Wire `tools/gpu-verify` into a runnable gate.** It is absent from `scripts/test.sh` (grep: 0 hits), so nothing runs it. It needs the 5060 Ti — ~~`MESA_VK_DEVICE_SELECT=10de:2d04`~~ **corrected 2026-09-15: gpu-verify never reads that variable.** It reads `GPU_VERIFY_ADAPTER` (`tools/gpu-verify/src/main.rs:221`), and the `"5060"` default in `tools/gpu-verify/.cargo/config.toml` applies ONLY when launched through cargo — cargo reads config from the CWD upward, not from `--manifest-path`. Set it explicitly. ★ **The old variable is not inert, which is the interesting part.** `VK_LAYER_MESA_device_select` is an implicit *global* Vulkan layer on this box, and **measured 2026-09-15**: `MESA_VK_DEVICE_SELECT=10de:2d04 vulkaninfo --summary` **REORDERS** enumeration (5060 Ti moves GPU1 → GPU0) and does **not filter** — three devices either way. So it cannot satisfy `pick_adapter`, which *counts* non-CPU adapters and refuses with `n > 1` whatever the order. ★★ And the same measurement shows **the RTX 2070 enumerates FIRST by default**, so any tool that simply takes the first suitable adapter is running on the 2070 — see row 82. | ✅ **DONE 2026-09-15 — `scripts/gpu-gate.sh`** (JOURNAL 2026-09-15). It runs gpu-verify on the pinned card and grades it against a declared-failure manifest; four exit codes separate a new regression from a stale declaration from a harness failure. ★ **The item under-counted the known failures: there are TWO, not one.** F5b fails three times (once per target restitution), and **scene D's emergent angle of repose** is a second, unrelated declared failure — 0.1°–0.4° measured against real friction angles of 30–45°. Both are in the manifest with their reasons. |
 | 2 | **The pile's step-2 overlap.** Growth is not gradual: step 1 `\|v\| 8.98e-6` (one step of gravity, correct), step 2 `\|v\| 7.32`. `Δv = 6.4 m/s` in one `4.27e-7 s` step ⇒ `acc 1.5e7` ⇒ at `k = 6.8e9` an **overlap of 2.2 mm, twice the touch distance** — despite a release that guarantees none at `t = 0`. | The 2.2 mm is explained by a measurement, not a hypothesis. Eleven are already refuted; do not re-run them (see row 79). |
 | 3 | **Phenology's missing control** (row 58). Wired and gated in code; **never confirmed in a picture.** The Galway June/December pair was confounded by sun elevation (+61% brightness; hue moved 2.6% the *wrong* way). | A **third** render with senescence forced off makes illumination common-mode, and flora pixels are measured specifically rather than a whole ground band. Publish only if the measurement supports it. |
 | 4 | **Row 80's three routes** — needs Robin. | Specified, not chosen. |
