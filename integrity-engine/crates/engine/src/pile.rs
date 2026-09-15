@@ -743,7 +743,19 @@ pub fn step_one_rod(
         // out on a light blade is easier to move than the blade's mass suggests, because the body can
         // rotate out of the way — using `m` here instead would over-brake it.
         let k = rod.effective_mass_at(mass_kg, arm);
-        let impulse = k.inverse() * (hit.vel - v_foot);
+        let dv = hit.vel - v_foot;
+        let impulse = k.inverse() * dv;
+        // ★★★ **THE SECOND GATE** (docs/46 row 79). The finiteness assert above says a member has gone
+        // bad; this says WHERE. It reports the inputs, so the first failure names its own cause instead
+        // of leaving it to be guessed — which is what three wrong guesses cost.
+        debug_assert!(
+            impulse.is_finite() && impulse.length() < 1.0,
+            "floor impulse blew up: |J| {} · dv {:?} · arm {:?} · det(K) {:e}",
+            impulse.length(),
+            dv,
+            arm,
+            k.determinant()
+        );
         rod.apply_impulse_at(mass_kg, arm, impulse);
     }
 }
