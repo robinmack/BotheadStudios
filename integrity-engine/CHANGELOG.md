@@ -9,6 +9,13 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★★ **A contact's axial moment is torsion, not rigid spin** (docs/46 row 79). Perpendicular moments
+  tumble a member as before; the component about its own axis — where a ribbon's inertia is four orders
+  smaller — is carried elastically by `relax_flex_under` instead. A declared specialisation with a
+  two-sided test: the tumble is preserved (to 7.4e-5, residual free precession) and the axial spin is
+  exactly zero. **Heap `|Δω|` falls 6.60e5 → 6.41e2 rad/s and the run survives 66 s instead of 0.03 s —
+  a 1000× improvement that does not yet fully fix it.**
+
 - ★★ **`Rod::relax_flex_under` — contact forces bend the member they push on** (docs/46 row 79), taking
   `(arclength, force)` loads alongside self-weight. Verified against the analytic cantilever
   `δ = PL³/3EI` with a convergence ladder: 8.98% at 8 segments → **1.16% at 64**, halving per doubling.
