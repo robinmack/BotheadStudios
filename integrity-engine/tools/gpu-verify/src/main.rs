@@ -784,11 +784,51 @@ fn main() {
                 let (mut lo, mut hi) = (1.0e-6f64, 1.0e3f64);
                 for _ in 0..200 {
                     let mid = 0.5 * (lo + hi);
-                    // restitution_of_damping_ratio: the closed form e = exp(−ζπ/√(1−ζ²)).
-                    let e_mid = if mid >= 1.0 {
-                        0.0
-                    } else {
-                        (-mid * std::f64::consts::PI / (1.0 - mid * mid).sqrt()).exp()
+                    // ★★★ THE ENGINE'S `restitution_of_damping_ratio`, TRANSCRIBED FAITHFULLY — the
+                    // NO-TENSION closed form, not the textbook one.
+                    //
+                    // MEASURED THE WRONG WAY TWICE. The first version integrated and hung. The second
+                    // used `exp(−ζπ/√(1−ζ²))` — the TEXTBOOK form — and then scored the GPU against a
+                    // textbook reference, so it calibrated and graded with the same wrong function,
+                    // found agreement, and I concluded docs/46 row 80 was contradicted. It is not.
+                    // The engine's form solves for when the no-tension force RETURNS TO ZERO, which is
+                    // why its doc records that `e = 0` needs ζ ≈ 50 where the textbook reaches `e = 0`
+                    // at ζ = 1. Those are very different calibrations for the same asked-for `e`.
+                    let e_mid = {
+                        let z = if (mid - 1.0).abs() < 1.0e-9 {
+                            1.0 + 1.0e-9
+                        } else {
+                            mid.max(1.0e-12)
+                        };
+                        let (b, den) = (z, 1.0 - 2.0 * z * z);
+                        if z < 1.0 {
+                            let wd = (1.0 - z * z).sqrt();
+                            let mut tt = (-2.0 * b * wd).atan2(den);
+                            if tt < 0.0 {
+                                tt += std::f64::consts::PI;
+                            }
+                            tt /= wd;
+                            let d = (1.0 / wd)
+                                * (-b * tt).exp()
+                                * (wd * (wd * tt).cos() - b * (wd * tt).sin());
+                            d.abs()
+                        } else {
+                            let wd = (z * z - 1.0).sqrt();
+                            let x = (-2.0 * b * wd) / den;
+                            if !(-1.0..1.0).contains(&x) {
+                                0.0
+                            } else {
+                                let tt = x.atanh() / wd;
+                                if tt < 0.0 {
+                                    0.0
+                                } else {
+                                    ((1.0 / wd)
+                                        * (-b * tt).exp()
+                                        * (wd * (wd * tt).cosh() - b * (wd * tt).sinh()))
+                                    .abs()
+                                }
+                            }
+                        }
                     };
                     if e_mid > target {
                         lo = mid;
