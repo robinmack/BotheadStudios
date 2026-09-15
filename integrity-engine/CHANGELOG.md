@@ -9,6 +9,14 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★★ **The heap was never frozen** (docs/46 row 78). `step_one_rod` ran 13,809,390 times with 0 skips;
+  the pile falls and settles in 0.589 s and `peak centre 0.000000 m/s` is a correct report. The
+  anomalies were instruments: `contacting_fraction` and the ENVELOPE both walked the straight axis while
+  contact has used the bent polyline since row 76. Both now walk `Rod::polyline`.
+- **The packing figure cannot resolve bending** and must not be used to judge it: it reads 0.03798 to
+  five figures whether members are bent or straight, because a bent blade occupies the same `cell_m`
+  cells as a straight one. Needs a converged cell-size sweep before any packing claim.
+
 - ★★ **A blade sags toward gravity, not toward its seeded roll** (docs/46 row 77). `relax_flex`
   projects gravity into the plane across the member's axis and `Flex::bend_dir` stores it. Twelve rolls
   now sag −0.296 m identically; before, half the range sagged **upward**. Declared limitation: one

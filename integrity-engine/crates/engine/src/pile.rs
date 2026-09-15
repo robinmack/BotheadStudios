@@ -1078,6 +1078,10 @@ pub fn settle_traced(
     let mut disturbed = false;
     let mut trace: Vec<Sample> = Vec::new();
     let mut next_sample = 0.0f64;
+    // ★★★ THE DIRECT QUESTION (docs/46 row 78). `peak centre 0.000000` with gravity inside the
+    // integrator is impossible unless the loop never calls it. Three probes went to hypotheses before
+    // anyone counted the calls.
+    let (mut stepped, mut skipped) = (0u64, 0u64);
     while elapsed_s < CAP_S {
         let snapshot = rods.clone();
         for i in 0..rods.len() {
@@ -1216,17 +1220,18 @@ pub fn settle_traced(
                     .map(|r| r.max_surface_speed_ms())
                     .fold(0.0f64, f64::max),
                 contacting_fraction: {
+                    // ★ Against the real shapes, for the same reason the envelope is (row 78).
                     let touch = 2.0 * contact.radius + contact.coh_range;
                     let mut n_touch = 0usize;
-                    for (i, r) in rods.iter().enumerate() {
-                        let (a0, a1) = r.ends();
-                        let floor = a0.y.min(a1.y) <= contact.radius;
-                        let neigh = rods.iter().enumerate().any(|(j, o)| {
+                    let polys: Vec<Vec<DVec3>> = rods.iter().map(|r| r.polyline()).collect();
+                    for (i, _r) in rods.iter().enumerate() {
+                        let floor = polys[i].iter().map(|p| p.y).fold(f64::INFINITY, f64::min)
+                            <= contact.radius;
+                        let neigh = (0..rods.len()).any(|j| {
                             if i == j {
                                 return false;
                             }
-                            let (b0, b1) = o.ends();
-                            let (pa, pb) = closest_points(a0, a1, b0, b1);
+                            let (pa, pb) = closest_points_between(&polys[i], &polys[j]);
                             (pa - pb).length() < touch
                         });
                         if floor || neigh {
@@ -1266,17 +1271,24 @@ pub fn settle_traced(
     let mut cells = std::collections::BTreeSet::new();
     let mut height: f64 = 0.0;
     for r in &rods {
-        let (e0, e1) = r.ends();
-        height = height.max(e0.y.max(e1.y));
-        // Walk the segment at cell resolution so a long rod occupies every cell it crosses.
-        let n = ((e1 - e0).length() / cell).ceil().max(1.0) as usize;
-        for k in 0..=n {
-            let p = e0.lerp(e1, k as f64 / n as f64);
-            cells.insert((
-                (p.x / cell).floor() as i64,
-                (p.y / cell).floor() as i64,
-                (p.z / cell).floor() as i64,
-            ));
+        // ★★★ WALK THE MEMBER'S REAL SHAPE (docs/46 row 78). This walked `r.ends()` — the straight AXIS
+        // — while contact has been resolved against the bent polyline since row 76. A drooping blade
+        // leaves its own axis by nearly a full length, so the envelope was sampling empty space and
+        // missing the matter, and the packing it reported was a measurement of a rod that is not there.
+        let poly = r.polyline();
+        for w in poly.windows(2) {
+            let (e0, e1) = (w[0], w[1]);
+            height = height.max(e0.y.max(e1.y));
+            // Walk each segment at cell resolution so a long member occupies every cell it crosses.
+            let n = ((e1 - e0).length() / cell).ceil().max(1.0) as usize;
+            for k in 0..=n {
+                let p = e0.lerp(e1, k as f64 / n as f64);
+                cells.insert((
+                    (p.x / cell).floor() as i64,
+                    (p.y / cell).floor() as i64,
+                    (p.z / cell).floor() as i64,
+                ));
+            }
         }
     }
     let envelope = cells.len() as f64 * cell * cell * cell;
