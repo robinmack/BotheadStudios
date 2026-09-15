@@ -3,6 +3,54 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-09-14 — the assert at the source, and what it named in one run
+
+Put where the quantity is formed, the assert fired on **step 2** and settled in a single run what seven
+hypotheses had not.
+
+```
+t = 8.5e-7 s · |a| 1.06e10 m/s² · members 27<->238
+gap 7.55e-4 m (touch 1.08e-3)  ->  30% penetration, no teleport
+va (19763, -0.197, -12733) m/s
+vb (63326,  1.83, -150772) m/s
+```
+
+### What it ruled out, immediately
+
+**The overlap is modest** — 30% of touch, so nothing had teleported through anything. And **the spring
+cannot be the source**: `k·overlap` = 6.8e9 × 3.2e-4 = **2.2e6 m/s², about 4800× less than the 1.06e10
+observed.**
+
+**The timestep is ruled out properly this time**, on the configuration that actually fails rather than one
+rod on a floor: `ω·dt` is **0.022 axial, 0.061 tumble, 0.035 translational** — all comfortably stable.
+
+### What it showed
+
+The contact-point velocities are already **~10⁵ m/s at step 2**, and their *components* are the tell:
+`y` is 0.2–1.8 while `x` and `z` are 10⁴–10⁵. Gravity acts on y, so a translating member would be
+y-dominant. This is `vel + ω × r` with an enormous `ω` — **rotation**.
+
+So the neighbour contact is the **amplifier, not the cause**: the damping term `c·v_n` is linear in a point
+velocity that a spin has already made astronomical, and each step feeds the next.
+
+### The question is now narrow
+
+**What produces a large `ω` on step one, from rest?** One candidate remains: the floor's
+`apply_impulse_at` does `ang_vel += I⁻¹(r × J)`, and the axial moment is **3.4e-10 kg·m²** — so
+`I⁻¹ ≈ 2.9e9`, and any impulse with a moment arm about the member's own axis is multiplied by three
+billion. That is row 73's surface arm meeting row 72's impulse distribution, which is exactly when this
+began.
+
+The next probe is the same one line, moved one call earlier: assert on `ang_vel` inside
+`apply_impulse_at`, and read step one.
+
+★ Three placements of the same assert have now each cracked a problem that reasoning did not:
+finiteness in the step loop, magnitude at the floor impulse, and magnitude at `contact_accel`. **Put the
+assert where the quantity is formed.** I have written that sentence three times this week and acted on it
+once.
+
+**Verified.** 658/658 native, 31 skipped, `mod app` clean for wasm32. No physics changed.
+
 ## 2026-09-14 (last) — three more wrong guesses, and the gate that should replace guessing
 
 I named `Rod::effective_mass_at`'s matrix inversion as the NaN's source. **Measured, it is innocent:**
