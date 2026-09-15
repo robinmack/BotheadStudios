@@ -9,6 +9,20 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **`scripts/gpu-gate.sh` — something runs `gpu-verify` now.** The only check of the GPU granular path's
+  physics on real hardware had **no caller at all** (docs/72 item 1). The gate runs it on the pinned card
+  and grades the result against a **declared-failure manifest**, so a new failure is distinguishable from
+  a known one: exit `0` steady state · `1` an undeclared failure (regression) · `2` a declared failure now
+  passes (manifest stale, needs a human) · `3` harness failure, including a timeout and a log with nothing
+  in it. Local-only by design — CI has no GPU runner, and `ci.yml` runs `test.sh`, so `test.sh` is the
+  wrong home. `--selftest` grades six fixtures with no GPU, including a negative control on the real log.
+  ★ **Two declared failures, not one**: F5b ×3 (row 80) and **scene D's angle of repose** — measured
+  0.1°–0.4° against real friction angles of 30–45°, a model deficiency docs/45 analyses and explicitly
+  forbids "fixing" by tuning μ. The second one was invisible while nothing graded the tool's output.
+
+- **docs/72 item 1 corrected**: it named `MESA_VK_DEVICE_SELECT`, which `gpu-verify` never reads. The
+  variable is `GPU_VERIFY_ADAPTER`, and its `.cargo/config.toml` default applies only through `cargo run`.
+
 - **`gpu-verify` F5b — the gate rows 42/80 asked for**: sets `c_normal_damp` from a no-tension ζ and
   measures what the shader returns. **Its verdict is explicitly not yet trustworthy** — the ζ bisection
   saturates and the GPU reports `e = 18.3` (energy gain), because a step cap added to stop an earlier
