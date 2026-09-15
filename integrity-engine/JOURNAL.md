@@ -3,6 +3,49 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-09-14 — found: the neighbour torque, through the one path no assert covered
+
+```
+|Δω| 6.60e5 rad/s (tip 1.16e5 m/s) in ONE step
+τ (-61.9, 17.2, 581.4) N·m
+I (3.44e-10, 4.55e-6, 4.55e-6)
+```
+
+A torque of **581 N·m on a 0.445 gram blade** — **760,000× its own weight-moment** of 7.6e-4 N·m. Not an
+overshoot; a category error. The amplifier is beside it in the same line: the axial moment is four orders
+below the other two, so `I⁻¹ ≈ 2.9e9`. The arithmetic closes exactly — `τ·dt/I_axial = 7.2e5` against
+6.6e5 measured.
+
+The suspect is `torque += arm.cross(a_n * member_mass)`: `contact_accel` returns a **per-mass**
+acceleration, so multiplying by mass to recover a force is right in principle and must be checked against
+its own units — a factor loose there is multiplied by three billion.
+
+### ★★★ Four hypotheses died because my asserts were in the wrong places
+
+Each wrong placement taught the next, and all three lessons are general:
+
+1. **The per-term bound passed while the SUM was the concern.** A member overlapping many neighbours
+   accumulates; every contribution can be legal and the total illegal. *Assert the accumulator, not the
+   contribution.*
+2. **The floor impulse bound read `< 1.0 N·s` — a round number.** For a 0.445 g member that permits
+   `Δv = 2247 m/s` in a single step. **The assert meant to catch the explosion was letting it through**,
+   and it sent me off to investigate `ang_vel` and summed accelerations, both innocent. *A bound needs a
+   physical scale, not a tidy one* — `m·10 m/s` here.
+3. **The `ang_vel` assert covered `apply_impulse_at`, the FLOOR's path**, while the neighbour torque
+   reaches `ang_vel_from_impulse` directly in `step_one_rod`. *Guarding one of two paths into the same
+   state is the same error as asserting a term and not a sum.*
+
+I have now written "put the assert where the quantity is formed" four times. The refinement it needed:
+**find every place the quantity is formed, bound it by physics rather than by a round number, and assert
+the total as well as the parts.**
+
+### What ships
+
+All four asserts: per-term acceleration, summed acceleration, floor impulse with a physical bound, and
+both spin paths. No physics changed — the fix is the next commit, and it is now a narrow one.
+
+**Verified.** 658/658 native, 31 skipped, `mod app` clean for wasm32.
+
 ## 2026-09-14 — the assert at the source, and what it named in one run
 
 Put where the quantity is formed, the assert fired on **step 2** and settled in a single run what seven
