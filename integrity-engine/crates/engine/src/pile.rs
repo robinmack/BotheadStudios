@@ -1183,6 +1183,21 @@ pub fn settle_traced(
                 let va = snapshot[i].velocity_at(arm_a);
                 let vb = other.velocity_at(arm_b);
                 let a_n = crate::granular::contact_accel(pa, va, pb, vb, &contact);
+                // ★★★ **AT THE POINT THE QUANTITY IS FORMED** (docs/46 row 79). Everything downstream —
+                // the floor impulse, the member's finiteness, the heap's every statistic — is a symptom.
+                // This is the first place a number can be wrong, so it says what it was given.
+                debug_assert!(
+                    a_n.is_finite() && a_n.length() < 1.0e9,
+                    "neighbour contact blew up at t={elapsed_s}: |a| {:e} m/s² · members {i}<->{j} · \
+                     gap {:e} m (touch {:e}) · va {:?} vb {:?} · pa {:?} pb {:?}",
+                    a_n.length(),
+                    (pa - pb).length(),
+                    2.0 * contact.radius,
+                    va,
+                    vb,
+                    pa,
+                    pb
+                );
                 acc += a_n;
                 // ★ THE NEIGHBOUR'S MOMENT ARM. The contact happens at `pa`, which is somewhere along
                 // this rod, not at its centre — so it both pushes and TURNS. Discarding the arm is what

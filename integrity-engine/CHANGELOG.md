@@ -9,6 +9,13 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The neighbour contact is the amplifier, not the cause** (docs/46 row 79). A `debug_assert` at
+  `contact_accel` catches the first excessive acceleration on step 2: overlap is a modest 30% of touch
+  and the spring accounts for only 1/4800th of it, but contact-point velocities are already ~1e5 m/s
+  with y-components near zero — the signature of `ω × r`, not translation. The damping term amplifies
+  a spin that already exists. Timestep ruled out on the failing configuration (`ω·dt` ≤ 0.06).
+  **No physics changed.**
+
 - **The `effective_mass_at` inversion is exonerated** (docs/46 row 79): measured `det(K) = 1.9e11` and
   well-conditioned entries. The NaN's input `dv` already exceeds 250 km/s, so the source is the
   neighbour contact. Two further candidate fixes were tried and both made it worse; both reverted.
