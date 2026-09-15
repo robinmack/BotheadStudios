@@ -9,6 +9,11 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The GPU restitution fix is specified, not applied** (docs/46 row 80). There is no expression to
+  clamp: the shader's normal force is spring-only and damping enters solely as the implicit tensor
+  coefficient. Three non-equivalent routes are recorded with their costs, and the required ordering —
+  **build row 42's measurement gate first, then choose, then change.** No shader changed.
+
 - ★★★ **docs/46 row 80 (new): the GPU realises a different restitution than the native path** from the
   same catalogued number. `particle_step.wgsl` has no no-tension clamp, so it delivers the textbook
   `e = exp(−ζπ/√(1−ζ²))` while `damping_for_restitution` calibrates ζ against the native path's
