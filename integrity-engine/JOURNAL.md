@@ -3,6 +3,45 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-09-14 — the GPU clamp: specified, not attempted
+
+Asked to fix the GPU contact clamp, I read the shader first. **There is nothing to clamp.**
+
+The native law clamps the *total* normal force — `(k·overlap − c·v_n).max(0.0)` — so the dashpot may
+reduce the push but never pull. On the GPU, `f_rep` (`particle_step.wgsl:184`) is spring-only, and
+`c_normal_damp` enters **only** as the implicit tensor coefficient `g = θ²·dt²·k + θ·dt·c` at `:204`. The
+damping is distributed through the implicit solve; `max(0, ·)` has no expression to act on.
+
+So this is a solver-structure change, and the three available routes are **not** equivalent:
+
+- **(a) Gate the damping term of `g` on approach** (`v_n < 0`) as well as overlap. Closest to the intent,
+  but it is a *third* behaviour rather than the native one, and needs its own calibration.
+- **(b) Move damping into the explicit force with the native clamp**, dropping it from `g`. Exactly one
+  law — but it surrenders the implicit stabilisation that lets the GPU take its timestep, so
+  `substep::stable_dt_s` must be re-derived for an explicit damper.
+- **(c) Calibrate ζ per path** from each path's own end rule. Two answers with a declared reason, which
+  Law II permits only when the difference is *physical* — and here it is not. It is an artefact of how
+  each solver ends a contact.
+
+### Why I specified it instead of doing it
+
+I am near the end of this session's context, which is precisely the condition under which I made things
+worse four times this fortnight: the shape-teleport fix, the release-bend fix, the `K`-inversion suspect,
+and the units suspect. Each was plausible, each was applied before it was measured, and each cost a run
+plus the reasoning around it.
+
+**The ordering this needs is: the gate first, then the choice, then the change.** Row 42 asked for a test
+that measures the GPU's realised restitution against the catalogued one, and the investigation has already
+established the method — an f32 replica converges to the analytic textbook value (0.7289 vs 0.72925) and
+the real 5060 Ti agrees with the replica (0.636 vs 0.6363). That harness is a short step from
+`tools/gpu-verify`. Without it, any of (a)/(b)/(c) is an unverifiable change to a path no scene currently
+exercises.
+
+Row 80 now carries all of that, so the next session starts from the specification rather than from the
+symptom.
+
+**Verified.** 660/660 native, 31 skipped. No shader changed.
+
 ## 2026-09-14 — four ledger investigations in parallel, each adversarially verified
 
 Robin asked to keep working the list with subagents. Four independent ledger items went to a workflow —
