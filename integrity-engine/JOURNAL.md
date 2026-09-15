@@ -3,6 +3,55 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-09-14 — four ledger investigations in parallel, each adversarially verified
+
+Robin asked to keep working the list with subagents. Four independent ledger items went to a workflow —
+each investigated, then re-checked by a second agent told to try to refute it. Every finding below
+survived that, and the refutations it produced were as useful as the confirmations.
+
+### ★★★ Row 80 (new): the GPU and the native path bounce differently from the same number
+
+`granular::damping_for_restitution` calibrates ζ by inverting the **no-tension** response, because the
+native `contact_accel` clamps the normal force with `.max(0.0)` — the dashpot cannot pull. **The shader
+has no such clamp**, so it runs the full half-cycle and delivers the **textbook**
+`e = exp(−ζπ/√(1−ζ²))`. Same ζ, same material, two different contact-end rules, two different bounces.
+
+Confirmed three independent ways: derived analytically from the shader, reproduced in an f32 replica
+(**0.6363**), and run on the real 5060 Ti (**0.636**). That is precisely what the old row 42 asked —
+*does a catalogued restitution survive the GPU's implicit solve?* — and the answer is **no**.
+
+★ Latent today: `GpuProbe::probe_params` is the only setter of `c_normal_damp` and no scene drives
+`GpuParticles`. It goes live the moment one does.
+
+### Row 63 follow-up: the nine are named
+
+`basalt` 0.4, `clay` 0.08, `concrete` 0.4, `dirt` 0.1, `gunmetal` 0.4, `nickel` 0.6, `oak` 0.55,
+`peridotite` 0.5, `sandstone` 0.3. Each carries an explicit note that no citation in the entry has ever
+mentioned restitution, and each declares `restitution_at_ms: null` rather than omitting it — **the gap is
+declared, not hidden.**
+
+**Sandstone's source exists and is closed**, not missing: Asteriou & Tsiambaos (2018) IJRMMS 106:41-50,
+Unpaywall `oa_status 'closed'`, no repository copy. Cited in notes only, because no number could be read
+from it. A further nine entries carry `restitution: 0.0` as a declared placeholder (seven gases plus
+water and crude oil) meaning *a parcel of this does not bounce*.
+
+### The other two
+
+**Row 40's 38.8× damping regression is real** — every digit reproduced against the shipped crate by an
+independently written probe. **The unwired-properties gate is sound**: 23 declared, all genuinely unread,
+verified by an independent re-implementation that agreed exactly (`UNDECLARED+UNREAD: []`,
+`DECLARED BUT READ: []`).
+
+### ★★ And the verifiers earned their keep
+
+One investigation quoted the ledger as saying *"32 of 32"*. The verifier grepped: that string appears
+nowhere in the repo — row 63 says "27 OF 32 WERE TYPED", "Only 5 of 32". **A fabricated quotation,
+caught before it could enter the record.** The data shape it described was right; the citation was
+invented. That is exactly the failure mode an adversarial second pass exists for, and it is the same
+class of error I have made repeatedly this fortnight by reasoning past a number I had not read.
+
+**Verified.** 660/660 native, 31 skipped.
+
 ## 2026-09-14 — the axial moment is torsion: a law, and a 1000x improvement that is not a fix
 
 **The decision, stated rather than slipped in.** A contact's moment about a slender member splits in two:
