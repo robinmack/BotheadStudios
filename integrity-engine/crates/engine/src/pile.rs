@@ -905,6 +905,28 @@ pub fn envelope_m3_at(rods: &[Rod], cell: f64) -> f64 {
 /// rebuild the seeded draw for itself. It was briefly rebuilt in a test, which is a second
 /// implementation of the release and would have drifted the first time either changed.
 pub fn release_rods(member: &Assembly, count: usize, seed: u64) -> Option<Vec<Rod>> {
+    release_rods_bent(member, count, seed, 0.0, 0.0)
+}
+
+/// ★★★ **RELEASED IN THE SHAPE THEY WILL HAVE** (docs/46 row 79).
+///
+/// MEASURED: with members released STRAIGHT, the first `relax_flex_under` at the end of step 1 bends
+/// them all at once — a tip moves up to 99.7% of a length — and step 2 sees `|v|` jump from 9e-6 to
+/// 7.3 m/s and `|ω|` from 6e-4 to 181 rad/s. **An 800,000x jump with nothing having physically moved.**
+/// Matter teleported into its neighbours and the springs answered.
+///
+/// So the bend is applied to each candidate BEFORE the no-overlap rejection: what the release
+/// guarantees is the absence of overlap between the shapes that will actually exist.
+///
+/// ★ Tried once before and it made things worse; at that time the axial-torsion explosion (6.6e5 rad/s
+/// in one step) dominated and masked it. Retried only because that is now fixed, and measured.
+pub fn release_rods_bent(
+    member: &Assembly,
+    count: usize,
+    seed: u64,
+    flex_ei_nm2: f64,
+    weight_per_m: f64,
+) -> Option<Vec<Rod>> {
     let (length, radius) = rod_for(member)?;
     let (width, thickness) = cross_section_for(member)?;
     let spread = length * 0.1;
@@ -986,11 +1008,15 @@ pub fn release_rods(member: &Assembly, count: usize, seed: u64) -> Option<Vec<Ro
             release_t_s: forkful as f64 * interval,
             flex: Flex::straight(),
         };
+        // ★ Bend it FIRST, so the rejection sees the shape that will exist.
+        let mut cand = cand;
+        if flex_ei_nm2 > 0.0 {
+            cand.relax_flex_under(flex_ei_nm2, weight_per_m, &[]);
+        }
         // Only against the CURRENT forkful: earlier ones are already on the heap and out of the way.
-        let (c0, c1) = cand.ends();
+        let cand_poly = cand.polyline();
         let clash = rods[forkful_start..].iter().any(|o| {
-            let (o0, o1) = o.ends();
-            let (pa, pb) = closest_points(c0, c1, o0, o1);
+            let (pa, pb) = closest_points_between(&cand_poly, &o.polyline());
             (pa - pb).length() < touch
         });
         if !clash {
@@ -1133,7 +1159,8 @@ pub fn settle_traced(
     // released over a disc wider than a blade is long, 400 blades settled at 0.0005, which is a
     // measurement of how thinly they were scattered rather than of how they pack. A point source lets
     // the pile spread to the angle the contact law gives it.
-    let rods_v = release_rods(member, count, seed)?;
+    let w_per_m = member_mass / rod_for(member)?.0 * gravity_ms2;
+    let rods_v = release_rods_bent(member, count, seed, flex_ei, w_per_m)?;
     let mut rods: Vec<Rod> = rods_v;
 
     // ★★★ **A CONTACT HAS TWO TIMESCALES AND THIS RULE USED TO SEE ONLY ONE.**
