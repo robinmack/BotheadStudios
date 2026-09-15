@@ -3,6 +3,48 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-09-14 — the axial moment is torsion: a law, and a 1000x improvement that is not a fix
+
+**The decision, stated rather than slipped in.** A contact's moment about a slender member splits in two:
+
+- **Perpendicular to its axis** — it TUMBLES. `I ≈ 4.5e-6 kg·m²`, ordinary rigid-body rotation, passes
+  through untouched.
+- **About its own axis** — it TWISTS. A ribbon 3 mm wide has `I_axial = 3.4e-10 kg·m²`, four orders
+  below, and treating that as a free rigid-body degree of freedom produced **6.6e5 rad/s in one step**.
+  A real blade does not spin up about its length when pushed sideways; the moment is carried
+  **elastically**, which `relax_flex_under` now does with the same force.
+
+★★ **This is a declared specialisation, not a clamp**, and it is falsifiable in both directions. The test
+asserts that the perpendicular moment is preserved — measured to **7.4e-5**, the residual being free
+precession, which is why the tolerance is 1e-3 and not 1e-9: demanding exactness would be demanding the
+absence of other physics. And that the axial moment produces **exactly zero** spin. A change that killed
+the tumble as well would also stop the explosion, and would be wrong.
+
+### Measured on the heap
+
+| | before | after |
+|---|---|---|
+| `\|Δω\|` | 6.60e5 rad/s | **6.41e2 rad/s** |
+| survives | 0.03 s | **66 s** |
+
+**A 1000× reduction — and it still fails.** The raw neighbour torque is `(6840, −549, 4.45) N·m` against
+a weight-moment of 7.6e-4. So an enormous *acceleration* is still being produced upstream; the torsion law
+stopped it being multiplied by three billion, but it is now routed through the perpendicular channel
+instead.
+
+The law is right and it was not the whole story. That is worth landing on its own terms — it is the first
+change in this entire hunt that moved the number, and by three orders.
+
+### On screenshots, since Robin asked
+
+**Nothing new to show, and that is the honest answer.** The last gallery publish was 2026-08-24 — the
+Galway solstice pair and the tilt shots. Everything since (bending, rotational contact, the air, the NaN
+hunt) lives in `pile`, which has no renderer surface; `Terra` and the orbit scene are visually unchanged.
+Publishing now would produce the same pictures with a newer build hash, which is precisely the kind of
+false progress signal this fortnight has been full of.
+
+**Verified.** 660/660 native, 31 skipped, `mod app` clean for wasm32.
+
 ## 2026-09-14 — contact forces now bend the member, and the force is doing two jobs at once
 
 `Rod::relax_flex_under` takes `(arclength, force)` loads and relaxes the member's shape under them as

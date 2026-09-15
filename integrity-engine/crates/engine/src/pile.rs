@@ -760,7 +760,23 @@ pub fn step_one_rod(
     // on `apply_impulse_at` — the FLOOR's path. The neighbour torque reaches `ang_vel_from_impulse`
     // directly, here, and with an axial `I⁻¹` of 2.9e9 a torque·dt of 1e-6 N·m·s is already 2900 rad/s.
     // Guarding one of two paths into the same state is the same error as asserting a term and not a sum.
-    let dw_n = rod.ang_vel_from_impulse(mass_kg, extra_torque * dt);
+    // ★★★ **THE AXIAL MOMENT IS TORSION, NOT SPIN** (docs/46 row 79 — a declared specialisation).
+    //
+    // A contact's moment about a slender member splits in two. PERPENDICULAR to its axis it tumbles the
+    // body, `I ≈ 4.5e-6 kg·m²`, and that is ordinary rigid-body rotation which passes through
+    // untouched. ABOUT its own axis it TWISTS a ribbon — and with `I_axial = 3.4e-10` (four orders
+    // below), treating that as a free rigid-body degree of freedom gave `|Δω| = 6.6e5 rad/s` in a
+    // single step and NaN by the third.
+    //
+    // A real blade does not spin up about its length when pushed sideways; it twists and bends, and the
+    // moment is carried elastically — which `relax_flex_under` now does with the same force. This is
+    // NOT a clamp on the torque: the perpendicular component is preserved exactly, so a member still
+    // tumbles at the rate its inertia dictates, and
+    // `a_moment_tumbles_a_member_but_does_not_spin_it_about_its_length` asserts both halves. A change
+    // that killed the tumble as well would also stop the explosion, and would be wrong.
+    let along = rod.axis.normalize_or(DVec3::X);
+    let bending_moment = extra_torque - along * along.dot(extra_torque);
+    let dw_n = rod.ang_vel_from_impulse(mass_kg, bending_moment * dt);
     debug_assert!(
         dw_n.is_finite() && dw_n.length() * rod.half_length_m < 1.0e2,
         "neighbour torque spun a member up: |Δω| {:e} rad/s (tip {:e} m/s) · τ {:?} · I {:?}",
@@ -2059,6 +2075,115 @@ mod tests {
             contact.stiffness * worst_any * dt
         );
         let _ = length;
+    }
+
+    /// ★★★ **A TRANSVERSE FORCE TWISTS A RIBBON, IT DOES NOT SPIN IT ABOUT ITS OWN LENGTH**
+    /// (docs/46 row 79 — the modelling decision, stated).
+    ///
+    /// A contact's moment about a member's centre splits into two physically different things:
+    ///
+    /// - **Perpendicular to the member's axis** — this TUMBLES it end over end. A blade really does
+    ///   tumble, its moment of inertia there is `m(L²+T²)/12 = 4.5e-6 kg·m²`, and nothing about that is
+    ///   pathological. **This component stays a rigid-body rotation.**
+    /// - **About the member's own axis** — this is TORSION. A ribbon 3 mm wide and 0.3 mm thick has an
+    ///   axial moment of `3.4e-10 kg·m²`, four orders below the others, and treating that as a free
+    ///   rigid-body degree of freedom is what exploded: `I⁻¹ ≈ 2.9e9`, so an ordinary contact produced
+    ///   `|Δω| = 6.6e5 rad/s` in one step. A real blade does not do this. It twists and bends, and the
+    ///   moment is carried **elastically**.
+    ///
+    /// ★★ **This is a declared specialisation, not a clamp** (Law V). It is not "limit the torque to
+    /// something that behaves"; it is "the axial mode of a slender ribbon is elastic, not inertial", and
+    /// it is falsifiable: the perpendicular moment must be preserved EXACTLY, so a member still tumbles
+    /// at the rate its inertia dictates. The test asserts both halves, because a change that killed the
+    /// tumble too would also stop the explosion and be wrong.
+    #[test]
+    fn a_moment_tumbles_a_member_but_does_not_spin_it_about_its_length() {
+        let mats = crate::materials::load();
+        let blade = crate::assembly::compiled::parse(crate::assembly::compiled::GRASS_BLADE_DRY);
+        let (length, radius) = rod_for(&blade).expect("rod");
+        let (width, thickness) = cross_section_for(&blade).expect("cross-section");
+        let mass = blade.mass_kg(&mats).expect("mass");
+        let m = mats.iter().find(|m| m.id == "straw").expect("straw");
+        let contact = crate::granular::contact_from_material(m, radius, mass);
+        let rho = sea_level_air(&mats);
+        let dt =
+            crate::substep::accurate_dt_s(contact.stiffness, contact.normal_damp, 32.0).min(1.0e-4);
+
+        let fresh = || Rod {
+            centre: DVec3::new(0.0, 5.0, 0.0), // high up: no floor contact, isolate the torque
+            axis: DVec3::X,
+            half_length_m: 0.5 * length,
+            radius_m: radius,
+            width_m: width,
+            thickness_m: thickness,
+            normal: DVec3::Y,
+            vel: DVec3::ZERO,
+            ang_vel: DVec3::ZERO,
+            release_t_s: 0.0,
+            flex: Flex::straight(),
+        };
+        let tau = 1.0e-5f64;
+
+        // ★ PERPENDICULAR moment — a tumble. Must survive, at exactly the rate `I_perp` gives.
+        let mut tumbling = fresh();
+        step_one_rod(
+            &mut tumbling,
+            mass,
+            &contact,
+            9.81,
+            rho,
+            dt,
+            DVec3::ZERO,
+            DVec3::Z * tau,
+            0.0,
+            &[],
+            0.0,
+        );
+        let i_perp = tumbling.principal_inertia_kgm2(mass).z;
+        let want = tau * dt / i_perp;
+        let got = tumbling.ang_vel.length();
+        println!(
+            "perpendicular moment {tau:.1e} N·m · I_perp {i_perp:.4e} -> Δω want {want:.6e}, got {got:.6e} rad/s"
+        );
+        assert!(
+            // 1e-3, not 1e-9: free precession acts in the same step (measured 7.4e-5 relative), so
+            // demanding exactness would be demanding the absence of other physics. It still separates
+            // the two cases by four orders, which is what the test is for.
+            (got - want).abs() / want < 1.0e-3,
+            "a perpendicular moment must tumble the member at the rate its inertia gives: \
+             {got:.6e} against {want:.6e} rad/s"
+        );
+
+        // ★★ AXIAL moment — torsion. Must NOT become a rigid spin.
+        let mut twisting = fresh();
+        step_one_rod(
+            &mut twisting,
+            mass,
+            &contact,
+            9.81,
+            rho,
+            dt,
+            DVec3::ZERO,
+            DVec3::X * tau,
+            0.0,
+            &[],
+            0.0,
+        );
+        let i_ax = twisting.principal_inertia_kgm2(mass).x;
+        let rigid = tau * dt / i_ax;
+        println!(
+            "axial moment       {tau:.1e} N·m · I_axial {i_ax:.4e} -> a rigid body would spin at \
+             {rigid:.4e} rad/s (tip {:.1} m/s); got {:.6e}",
+            rigid * 0.5 * length,
+            twisting.ang_vel.length()
+        );
+        assert!(
+            twisting.ang_vel.length() < 1.0e-12,
+            "an axial moment must NOT spin a ribbon about its own length: got {:.6e} rad/s. \
+             That mode is torsional and elastic, not inertial — treating it as a free rigid-body \
+             degree of freedom is what produced 6.6e5 rad/s in a single step.",
+            twisting.ang_vel.length()
+        );
     }
 
     /// ★★★ **A CONTACT FORCE BENDS THE MEMBER IT PUSHES ON** (docs/46 row 79).
