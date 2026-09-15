@@ -1128,6 +1128,21 @@ pub fn settle_traced(
             if rods[i].release_t_s > elapsed_s {
                 continue;
             }
+            // ★★★ **THE GATE THAT SHOULD HAVE EXISTED FROM THE START** (docs/46 row 79). Every
+            // aggregate instrument in this module — `peak_speed`, `height_m`, the envelope's bbox —
+            // is built from `f64::min`/`f64::max`, which **return the non-NaN operand**. A heap of NaN
+            // therefore reports a peak speed of 0.000000, a settled gauge, and a tidy packing figure;
+            // `NaN as i64` saturates to 0, so every member also lands in cell (0,0,0) and the envelope
+            // reads exactly one cell at every resolution. I tested for NaN twice THROUGH those same
+            // instruments and cleared it both times. Check the state directly, every step, or the
+            // simulation will lie to you in the shape of a result.
+            debug_assert!(
+                rods[i].centre.is_finite() && rods[i].vel.is_finite() && rods[i].ang_vel.is_finite(),
+                "member {i} went NaN before step at t={elapsed_s}: centre {:?} vel {:?} ang_vel {:?}",
+                rods[i].centre,
+                rods[i].vel,
+                rods[i].ang_vel
+            );
             let mut acc = DVec3::ZERO;
             let mut torque = DVec3::ZERO;
             let (a0, a1) = snapshot[i].ends();
