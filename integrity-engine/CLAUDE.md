@@ -50,6 +50,11 @@ the Law wins and the other is the bug.
 
 ---
 
+★★★ **WORKING UNATTENDED? READ [`docs/72`](docs/72-unattended-execution.md) FIRST.** It is the contract
+for progress made while Robin is away: what an agent may do alone, what needs her, the measurement
+discipline that a fortnight of NaN-chasing paid for, the sub-agent fan-out pattern that works, the
+merge gate (**every check `SUCCESS`, not merely not-pending**), and the queue with acceptance criteria.
+
 # Integrity engine — start here
 
 A Rust→WASM→WebGPU real-time **physics** engine. Charter: *everything is matter; one contact law + one
