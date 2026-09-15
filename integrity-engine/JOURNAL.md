@@ -3,6 +3,50 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-09-14 — contact forces now bend the member, and the force is doing two jobs at once
+
+`Rod::relax_flex_under` takes `(arclength, force)` loads and relaxes the member's shape under them as
+well as its own weight — the physically right answer to the pile's NaN, since a real blade pushed
+sideways bends rather than spinning to 6.6e5 rad/s.
+
+**Verified against the analytic cantilever** `δ = P·L³/(3·EI)`, in the small-deflection regime where an
+independent closed form exists:
+
+| segments | vs analytic |
+|---|---|
+| 8 | +8.98% |
+| 16 | +4.59% |
+| 32 | +2.32% |
+| 64 | **+1.16%** |
+
+Halving per doubling — first order, matching `flexure::Chain`'s own convergence. ★ The first version of
+this test asserted a 5% tolerance at 8 segments and failed at 8.98%. **Tuning that tolerance would have
+been asserting the discretisation**; measuring the convergence instead showed the shape was right and 8
+segments simply coarse. The test now asserts the convergence, which is the claim that actually matters.
+
+### ★★★ And the pile is bit-identical
+
+`|Δω| 6.6035788802e5`, same torque, same everything, to every digit.
+
+Of course it is: **bending was added as a channel and nothing was taken away.** The same contact force now
+bends the member *and* spins it as a rigid body. A force cannot do both jobs in full — the energy is
+double-counted, and the runaway is untouched.
+
+### What is left, and why I stopped here
+
+The remaining question is a modelling decision: **which part of a contact's moment is carried elastically,
+and which part rotates the body?** For a ribbon whose axial moment is four orders below the others, the
+physical answer is that a transverse force at an off-axis point bends it — the axial spin is not a
+rigid-body degree of freedom worth having. Removing the shape's share from `ang_vel`'s share is the fix.
+
+That deserves its own statement and its own test, not a hurried subtraction at the end of a session. What
+ships is the mechanism, proven on its own terms, and an exact description of what it does not yet do.
+
+★ Ten hypotheses have now been refuted on this one NaN. The ones that cost the most were the ones I acted
+on before measuring; the ones that cost the least were the ones a single assert or a single table settled.
+
+**Verified.** 659/659 native, 31 skipped, `mod app` clean for wasm32.
+
 ## 2026-09-14 — the torque is not a units bug: it is bending meeting a rigid body
 
 Asked to fix the torque, I checked the units first instead of editing the line. **They are correct.**

@@ -481,6 +481,7 @@ mod rotational_tests {
                     DVec3::ZERO,
                     DVec3::ZERO,
                     0.0,
+                    &[],
                     0.0,
                 );
             }

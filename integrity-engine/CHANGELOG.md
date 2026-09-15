@@ -9,6 +9,13 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★ **`Rod::relax_flex_under` — contact forces bend the member they push on** (docs/46 row 79), taking
+  `(arclength, force)` loads alongside self-weight. Verified against the analytic cantilever
+  `δ = PL³/3EI` with a convergence ladder: 8.98% at 8 segments → **1.16% at 64**, halving per doubling.
+- **Known incomplete:** wiring it into the pile leaves the heap bit-identical, because bending was added
+  as a channel without removing the rigid-body torque — the same contact force now bends *and* spins.
+  Which share of a contact's moment is elastic is a modelling decision, recorded rather than guessed.
+
 - **The torque is not a units bug** (docs/46 row 79): `a_n · mass · arm` is dimensionally correct. The
   real mechanism is geometric — `I_axial` is 3.4e-10 kg·m², and once members bend their contact arm
   grows from a radius (5.4e-4 m) to a half-length (0.175 m), **325×**, so an ordinary contact produces a

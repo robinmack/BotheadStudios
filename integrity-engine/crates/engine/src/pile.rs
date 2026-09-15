@@ -592,6 +592,58 @@ impl Rod {
         out
     }
 
+    /// ★★★ **RELAX THE SHAPE UNDER EXTERNAL LOADS AS WELL AS ITS OWN WEIGHT** (docs/46 row 79).
+    ///
+    /// `loads` are `(arclength_m_from_base, force_N)` — where a neighbour pushes, and how hard. They
+    /// are what makes a member bend *because something touched it* rather than only under gravity.
+    ///
+    /// ★★ **This is the honest answer to the pile's NaN.** A contact on a bent member's polyline acts
+    /// up to a half-length off its own axis, and with an axial moment of 3.4e-10 kg·m² that arm turns
+    /// an ordinary force into a 169 m/s tip speed — a runaway. A real blade does not spin up when
+    /// pushed sideways; it BENDS. Sending the force into the shape is not a damper on the symptom, it
+    /// is where the energy actually goes.
+    ///
+    /// Each load is projected into the member's bending plane, exactly as gravity is, and spread over
+    /// the segment containing its arclength. `Chain` then finds equilibrium under the total — the same
+    /// `M = EI·κ` as always, so no second bending law appears (Law II).
+    pub fn relax_flex_under(&mut self, ei_nm2: f64, weight_per_m: f64, loads: &[(f64, DVec3)]) {
+        let along = self.axis.normalize_or(DVec3::X);
+        let l = 2.0 * self.half_length_m;
+
+        // The bending direction is set by the TOTAL transverse load — gravity plus whatever is pushing
+        // — because that is what decides which way the member actually gives.
+        let mut total = DVec3::NEG_Y * (weight_per_m * l);
+        for (_, f) in loads {
+            total += *f;
+        }
+        let transverse = total - along * along.dot(total);
+        let mag = transverse.length();
+        if mag <= 1.0e-30 || l <= 0.0 {
+            self.flex.theta.clear();
+            self.flex.bend_dir = DVec3::ZERO;
+            return;
+        }
+        let dir = transverse / mag;
+        self.flex.bend_dir = dir;
+
+        // Resolve every load into that direction. A load pushing the other way simply enters negative.
+        let w_transverse = (DVec3::NEG_Y * weight_per_m).dot(dir);
+        let n = Flex::SEGMENTS;
+        let ds = l / n as f64;
+        let mut per_segment = vec![0.0f64; n];
+        for (s_m, f) in loads {
+            let k = ((s_m / ds).floor() as usize).min(n - 1);
+            // A point force becomes a load per unit length over the segment it lands on — the same
+            // quantity `Chain` integrates, so nothing special-cases a point.
+            per_segment[k] += f.dot(dir) / ds;
+        }
+        let chain = crate::flexure::Chain::relaxed(ei_nm2, l, n, 0.0, |s| {
+            let k = ((s / ds).floor() as usize).min(n - 1);
+            (0.0, w_transverse + per_segment[k])
+        });
+        self.flex.theta = chain.theta.clone();
+    }
+
     /// **How far the tip has moved from where a rigid member's would be**, m — the deflection a heap
     /// actually feels, and the thing a rigid capsule reports as exactly zero.
     pub fn tip_sag_m(&self) -> f64 {
@@ -679,6 +731,8 @@ pub fn step_one_rod(
     // Flexural rigidity, N·m² — `0.0` keeps the member rigid, which is what every caller that does not
     // care about bending passes, and what makes this addition bit-identical for them.
     flex_ei_nm2: f64,
+    // ★ Where neighbours are pushing on this member, `(arclength_m, force_N)` — the loads that bend it.
+    contact_loads: &[(f64, DVec3)],
     // The member's own weight per unit length, N/m, for the shape relaxation.
     weight_per_m: f64,
 ) {
@@ -1194,6 +1248,9 @@ pub fn settle_traced(
             let mut acc = DVec3::ZERO;
             let mut torque = DVec3::ZERO;
             let mut touching = 0usize;
+            // ★★★ WHERE each neighbour pushes, and how hard (docs/46 row 79) — so the force can go
+            // into the member's SHAPE, which is what a blade actually does with it.
+            let mut loads: Vec<(f64, DVec3)> = Vec::new();
             let (a0, a1) = snapshot[i].ends();
             for (j, other) in snapshot.iter().enumerate() {
                 if i == j || other.release_t_s > elapsed_s {
@@ -1241,6 +1298,12 @@ pub fn settle_traced(
                 // this rod, not at its centre — so it both pushes and TURNS. Discarding the arm is what
                 // made a landing blade slide instead of topple onto the heap.
                 torque += arm_a.cross(a_n * member_mass);
+                // Arclength from the base to the contact, along the member's own length.
+                let s_m = (pa
+                    - (snapshot[i].centre - snapshot[i].axis * snapshot[i].half_length_m))
+                    .dot(snapshot[i].axis.normalize_or(DVec3::X))
+                    .clamp(0.0, 2.0 * snapshot[i].half_length_m);
+                loads.push((s_m, a_n * member_mass));
             }
             // ★★★ **THE SUM, NOT THE TERM** (docs/46 row 79). Each `a_n` passed its own bound at step 1
             // and the member still reached 1e4 m/s by step 2 — because a member overlapping MANY
@@ -1263,6 +1326,7 @@ pub fn settle_traced(
                 acc,
                 torque,
                 flex_ei,
+                &loads,
                 member_mass / (2.0 * r.half_length_m) * gravity_ms2,
             );
         }
@@ -1557,6 +1621,7 @@ mod tests {
                 DVec3::ZERO,
                 DVec3::ZERO,
                 0.0,
+                &[],
                 0.0,
             );
             t += dt;
@@ -1636,6 +1701,7 @@ mod tests {
                 DVec3::ZERO,
                 DVec3::ZERO,
                 0.0,
+                &[],
                 0.0,
             );
             t += dt;
@@ -1730,6 +1796,7 @@ mod tests {
                 DVec3::ZERO,
                 DVec3::ZERO,
                 0.0,
+                &[],
                 0.0,
             );
             t += dt;
@@ -1992,6 +2059,98 @@ mod tests {
             contact.stiffness * worst_any * dt
         );
         let _ = length;
+    }
+
+    /// ★★★ **A CONTACT FORCE BENDS THE MEMBER IT PUSHES ON** (docs/46 row 79).
+    ///
+    /// The pile's NaN is not a wrong line: it is a body that **bends for drawing and is rigid for
+    /// responding**. A contact at a bent member's polyline sits up to a half-length off its own axis,
+    /// and with `I_axial = 3.4e-10 kg·m²` that arm turns an ordinary force into a 169 m/s tip speed,
+    /// which feeds the damping, which feeds the spin. A real blade pushed sideways does not spin up —
+    /// **it bends**, and the energy goes into shape.
+    ///
+    /// The reference is the analytic cantilever, `δ = P·L³/(3·EI)`, valid while the deflection stays
+    /// small — so the load here is deliberately gentle. Small-deflection theory is the only regime
+    /// where an independent closed form exists, which is exactly why the test lives there.
+    #[test]
+    fn a_point_load_bends_a_member_by_the_cantilever_deflection() {
+        let mats = crate::materials::load();
+        let blade = crate::assembly::compiled::parse(crate::assembly::compiled::GRASS_BLADE_DRY);
+        let (length, radius) = rod_for(&blade).expect("rod");
+        let (width, thickness) = cross_section_for(&blade).expect("cross-section");
+        let mass = blade.mass_kg(&mats).expect("mass");
+        let m = mats.iter().find(|m| m.id == "straw").expect("straw");
+
+        let mut rod = Rod {
+            centre: DVec3::ZERO,
+            axis: DVec3::X,
+            half_length_m: 0.5 * length,
+            radius_m: radius,
+            width_m: width,
+            thickness_m: thickness,
+            normal: DVec3::Y,
+            vel: DVec3::ZERO,
+            ang_vel: DVec3::ZERO,
+            release_t_s: 0.0,
+            flex: Flex::straight(),
+        };
+        let ei = rod.flexural_rigidity_nm2(&mats, m);
+
+        // A gentle tip load, sized so the deflection stays inside small-deflection theory.
+        let p = 0.02 * ei / (length * length);
+        let want = p * length.powi(3) / (3.0 * ei);
+        println!(
+            "EI {ei:.4e} N·m² · L {length:.3} m · tip load {p:.4e} N -> cantilever δ = {want:.6} m ({:.1}% of L)",
+            100.0 * want / length
+        );
+
+        // No gravity: this isolates the contact's own contribution to the shape.
+        rod.relax_flex_under(ei, 0.0, &[(length, DVec3::NEG_Y * p)]);
+        let got = rod.tip_sag_m();
+        let err = (got - want).abs() / want;
+        println!(
+            "  {} segments -> {got:.6} m · {:+.2}% of the analytic cantilever",
+            Flex::SEGMENTS,
+            100.0 * (got - want) / want
+        );
+        assert!(
+            got > 0.5 * want,
+            "a point load must BEND the member: {got:.6} m against a {want:.6} m cantilever              deflection. A rigid member reports 0 and puts the whole force into spin instead."
+        );
+
+        // ★★ AND IT MUST CONVERGE, which is the claim that matters (Law 8). Asserting a tolerance at
+        // one resolution would be asserting the discretisation. MEASURED: 8.98% at 8 segments, then
+        // 4.59 / 2.32 / 1.16 — halving per doubling, first order, exactly as `flexure::Chain`'s own
+        // convergence test shows. The shape is right; 8 segments is simply coarse, and the budget knob
+        // is `Flex::SEGMENTS`.
+        let mut prev = f64::INFINITY;
+        for n in [8usize, 16, 32, 64] {
+            let chain = crate::flexure::Chain::relaxed(ei, length, n, 0.0, |s| {
+                let ds = length / n as f64;
+                let k = ((s / ds).floor() as usize).min(n - 1);
+                (0.0, if k == n - 1 { -p / ds } else { 0.0 })
+            });
+            let (tx, ty) = chain.tip();
+            let d = ((tx - length).powi(2) + ty * ty).sqrt();
+            let e = (d - want).abs() / want;
+            println!(
+                "    {n:3} segments -> {:+.2}% off",
+                100.0 * (d - want) / want
+            );
+            assert!(
+                e <= prev * 1.05 + 1e-12,
+                "refining must not take it further from the cantilever: {n} segments {:.2}% vs {:.2}%",
+                100.0 * e,
+                100.0 * prev
+            );
+            prev = e;
+        }
+        assert!(
+            prev < 0.02,
+            "and 64 segments must sit within 2% of the analytic cantilever: {:.2}%",
+            100.0 * prev
+        );
+        let _ = err;
     }
 
     /// ★★★ **A BLADE SAGS DOWNWARD, WHATEVER WAY IT WAS ROLLED** (docs/46 row 77).
