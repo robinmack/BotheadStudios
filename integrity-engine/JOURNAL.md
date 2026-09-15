@@ -65,6 +65,39 @@ verdict untrustworthy because "the ζ bisection … SATURATES at its 50.0 ceilin
 current run contradicts (ζ 0.7312/0.3545/0.1809, no `e > 1`); and `main.rs:884` / `JOURNAL.md:7874` record
 F6 over-predicting at "ratio ≈ 1.35" where this run measures **1.00**.
 
+### The second refutation was of the gate itself, and it was a real defect
+
+A refuter pointed at the gate's own source found that the **count-moved branch printed a notice and left
+the exit code at 0** — so a declared failure going from 3 FAIL lines to 1 would print `!! NOTICE` and then
+`GATE GREEN`, exit 0. The manifest comment four lines above says that number moving "is a physics change
+even when the verdict does not move", recorded "so that a PARTIAL change … is reported rather than
+silently absorbed". An unattended runner reads only `$?`. **It was reproducing, inside the gate, the exact
+trap the gate's own header cites** (`CLAUDE.md` rule 3: a gate that reports a failure and exits 0 is worse
+than no gate). And the six fixtures did not cover it — the grader's subtlest path was its only ungraded
+one, which is why it shipped.
+
+Fixed: a moved count now exits 2, there is a seventh fixture for it, and the exit code is chosen once by
+explicit precedence (regression `1` > vanished check `3` > stale or moved declaration `2`) instead of by
+sequential assignment, which could let a stale declaration overwrite the "someone deleted the inconvenient
+check" alarm.
+
+### The 2070 enumerates first, measured
+
+`docs/46` **row 82**: none of the seven tools under `tools/` has an automated caller, and the mechanism is
+structural — all four Rust tools carry their own `[workspace]` table (deliberate, for wasm feature
+isolation) while the root lists `members = ["crates/engine"]`, so `cargo test` at the root can never reach
+them. `gpu-bh-verify`, `sph-verify` and `impact-run` take `request_adapter(HighPerformance)`, which cannot
+discriminate between two *discrete* GPUs.
+
+I was about to record that as "they silently run on an unknown card". Refuted: **each of them prints its
+adapter.** The true defect is narrower and worse — **`sph-verify` acquires NINE adapters from nine fresh
+instances and prints exactly one** (`run_gpu_steps` is called eight times and announces none).
+
+And the thing worth knowing, now measured rather than inferred: `MESA_VK_DEVICE_SELECT=10de:2d04
+vulkaninfo --summary` **reorders** enumeration and does **not** filter — three devices either way — so it
+is invisible to `gpu-verify`'s count-based selector. The same measurement shows **GPU0 is the RTX 2070 by
+default**, so a first-match selector runs on the 2070, not the card the physics ships against.
+
 ### Where it runs, and where it deliberately does not
 
 **Not in `scripts/test.sh`.** `.github/workflows/ci.yml:58` runs `test.sh` on `ubuntu-latest`; there are

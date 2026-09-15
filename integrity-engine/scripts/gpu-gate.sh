@@ -16,16 +16,20 @@
 #   bash scripts/gpu-gate.sh --selftest  # grade crafted fixtures — verifies THE GRADER, not the GPU
 #   bash scripts/gpu-gate.sh --grade F   # grade an existing log file F (no GPU needed)
 #
-# Exit codes — distinct on purpose, because "it went red" is not one fact:
 # WHERE IT RUNS: **locally only, on a box with the card.** Not in CI and NOT inside scripts/test.sh —
 # `.github/workflows/ci.yml` runs `bash integrity-engine/scripts/test.sh` on `ubuntu-latest` with no
 # GPU and no self-hosted runner, so wiring this into test.sh would put it in CI, where it could only
 # ever fail for want of hardware. Measured runtime: 65.7 s wall on the RTX 5060 Ti (2026-09-15).
 #
+# EXIT CODES — distinct on purpose, because "it went red" is not one fact:
+#
 #   0  every undeclared check passed, and every declared failure is still failing. Expected steady state.
 #   1  an UNDECLARED check FAILED. This is a new regression. The thing this gate exists to catch.
-#   2  a DECLARED failure now PASSES. Not a celebration — the manifest is stale and a human must decide
-#      what it means (row 80's fix is a modelling choice that `docs/72` §2 reserves for Robin).
+#   2  a DECLARED failure no longer fails AS DECLARED — it passes outright, or its failing-line count
+#      moved (3-of-3 becomes 1-of-3). Not a celebration: the manifest no longer describes reality and a
+#      human must decide what changed (row 80's fix is a modelling choice `docs/72` §2 reserves for Robin).
+#      A moved count reaches the EXIT CODE and not merely the output, because an unattended runner reads
+#      only `$?` — a notice that does not reach `$?` is not reported at all.
 #   3  the harness itself failed: no GPU, build error, adapter panic, or a log with no checks in it.
 #      ★ Parsing nothing must NEVER be graded as success — `CLAUDE.md` rule 3 and `AGENTS.md` §2 both
 #      record a gate here that printed its failure and exited 0, which is worse than no gate at all.
@@ -77,21 +81,33 @@ grade() {
         print "         An empty parse is NOT a pass. Check the build and the adapter."
         exit 3
       }
-      rc = 0
+      # Conditions are collected as FLAGS and the exit code is chosen once, by explicit precedence.
+      # An earlier version assigned `rc` as it went, so a later condition silently overwrote an earlier
+      # one — a vanished declared check (3) could be masked by a stale declaration (2), losing exactly
+      # the "someone deleted the inconvenient check" alarm. Every condition is still PRINTED; the exit
+      # code names the most urgent of them.
       print "--- declared failures (expected to be failing) ---"
       for (k in exp_fail) {
         if (!(k in seen)) {
           printf "  ?? %-5s DECLARED BUT NOT FOUND in the log — has the check been renamed or removed?\n", k
           printf "        %s\n", reason[k]
-          rc = (rc == 0 ? 3 : rc)
+          vanished = 1
         } else if (fails[k] + 0 == 0) {
           printf "  XP %-5s NOW PASSES — the declaration is STALE. A human must decide what changed.\n", k
           printf "        was: %s\n", reason[k]
-          rc = 2
+          stale = 1
+        } else if (fails[k] + 0 != exp_fail[k] + 0) {
+          # ★ THIS MOVES THE EXIT CODE, and an earlier version of this script only PRINTED it while
+          # falling through to "GATE GREEN" and exit 0 — reproducing, inside this very gate, the trap
+          # its header cites (a gate that reports a problem and exits 0 teaches you to trust it). The
+          # manifest records the count precisely so a partial change cannot be absorbed; an unattended
+          # runner reads only $?, so a notice that does not reach $? is not reported at all.
+          printf "  !! %-5s failing-line count MOVED %d -> %d. Still failing, so the VERDICT is unchanged —\n", k, exp_fail[k], fails[k]
+          printf "        but the physics behind it moved. Re-read the row; update the count deliberately.\n"
+          printf "        %s\n", reason[k]
+          moved = 1
         } else {
           printf "  ok %-5s still failing as declared (%d/%d FAIL lines)\n", k, fails[k], exp_fail[k]
-          if (fails[k] + 0 != exp_fail[k] + 0)
-            printf "  !! %-5s NOTICE: failing-line count MOVED %d -> %d. Verdict unchanged, but the physics\n        behind it did. Re-read the row before assuming this is noise.\n", k, exp_fail[k], fails[k]
         }
       }
       print ""
@@ -101,10 +117,12 @@ grade() {
         if (!(k in exp_fail)) {
           undeclared++
           printf "  XX %-5s FAILED and is not declared:%s\n", k, line[k]
-          rc = 1
         }
       }
       if (undeclared == 0) print "  none."
+      # Precedence: a regression is what the gate exists to catch; a vanished check means the gate can
+      # no longer see what it claims to; a stale or moved declaration needs a human but nothing is broken.
+      rc = undeclared > 0 ? 1 : (vanished ? 3 : ((stale || moved) ? 2 : 0))
       nseen = 0; for (k in seen) nseen++          # length(array) is a gawk extension; mawk lacks it
       printf "\n--- %d check ids graded: %d PASS lines, %d FAIL lines ---\n",
              nseen, total_pass, total_fail
@@ -144,6 +162,11 @@ EOF
   # this branch, deleting the inconvenient check is the easiest way to make the gate pass.
   grep -v '^F5b' "$tmp/steady.log" > "$tmp/vanished.log"
 
+  # A declared check that still FAILS but a different number of times. The verdict does not move, so
+  # this is the one branch that can look like the steady state — and it was the one branch no fixture
+  # covered, which is how it shipped printing a notice and exiting 0.
+  grep -v 'asked e 0.400' "$tmp/steady.log" | grep -v 'asked e 0.600' > "$tmp/moved.log"
+
   check() { # name expected_rc logfile
     grade "$3" >/dev/null 2>&1; rc=$?
     if [[ $rc -eq $2 ]]; then printf '  ok   %-28s exit %d\n' "$1" "$rc"
@@ -156,6 +179,7 @@ EOF
   check "declared now passes ->2" 2 "$tmp/xpass.log"
   check "nothing parsed -> 3"    3 "$tmp/empty.log"
   check "declared check gone -> 3" 3 "$tmp/vanished.log"
+  check "fail count moved -> 2"  2 "$tmp/moved.log"
 
   # Negative control on REAL data: the true baseline, graded with the manifest emptied, must go red.
   if [[ -r /tmp/gpu-verify-baseline.log ]]; then
