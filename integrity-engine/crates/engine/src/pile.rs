@@ -88,15 +88,28 @@
 //! unified onto the non-injecting `granular::terrain_contact_resolve`. The post-fix heap settles in
 //! 0.80 s, which is too short for a slow pump to show, so this is UNTESTED rather than resolved.
 //!
-//! ### ★★ Rods cannot rotate
+//! ### ~~★★ Rods cannot rotate~~ — SUPERSEDED 2026-09-15, and it said the opposite of the code
 //!
-//! [`Rod::axis`] is set at construction and never updated: no angular velocity, no torque, no moment
+//! ~~[`Rod::axis`] is set at construction and never updated: no angular velocity, no torque, no moment
 //! of inertia, and a contact force found at an off-centre closest approach is applied as pure
 //! translation to the centre. A dropped straw rotates to lie flat, which is the principal way a rod
-//! heap densifies, so the release's uniform-on-the-sphere orientation is also the final one. Whether
-//! this is also an ENERGY problem is open; that it is a PACKING problem is not in doubt.
+//! heap densifies, so the release's uniform-on-the-sphere orientation is also the final one.~~
 //!
-//! Both outrank the bending flag above, and bending cannot be measured through either of them.
+//! **Every clause of that is now false.** `Rod` carries [`Rod::ang_vel`]; [`Rod::principal_inertia_kgm2`]
+//! and [`Rod::inv_inertia_world`] give it a moment of inertia; [`Rod::apply_impulse_at`] turns an
+//! off-centre impulse into `dw = I⁻¹(r × J)`; and the integrator rotates the body by `ang_vel · dt`,
+//! carrying `axis` and `normal` with it. `docs/46` rows 72 and 73 are both **CLOSED**: rotation gained a
+//! dissipation channel (damped 63×) and a capsule contact can now see axial spin.
+//!
+//! ★ It is kept struck through rather than deleted because of WHERE it was wrong. Rotation is not a
+//! missing feature here — it is the mechanism row 79 spent a fortnight identifying (`|Δω| = 6.60e5 rad/s
+//! in one step`, from a contact arm that bending made large, fixed by carrying the axial component as
+//! torsion). A module header telling the next reader that rods have *no angular velocity*, at the top of
+//! the module whose defect *was* angular velocity, is the most expensive kind of stale doc.
+//!
+//! What survives: that rod-heap **packing** depends on rods lying flat is not in doubt — but every
+//! packing number this module has reported is void anyway (row 79), so it is not evidence for anything
+//! until re-measured.
 
 use crate::assembly::Assembly;
 use crate::materials::Material;
