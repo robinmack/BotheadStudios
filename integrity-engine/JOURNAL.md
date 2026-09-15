@@ -3,6 +3,100 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-09-15 — matter that moves without a velocity
+
+`docs/72` queue item 2 asked for the pile's step-2 overlap to be *"explained by a measurement, not a
+hypothesis"*. It is, and the answer is a general one about **derived state**, not about grass.
+
+### The premise did not survive first contact with a measurement
+
+The queue reads an overlap of **2.2 mm** off a step-2 acceleration by assuming `a = k·overlap` — spring
+only — while this module's own header says `f_rep` "is dominated by its DAMPING term, not the spring". I
+built `granular::contact_terms` to settle which, as ONE implementation (`contact_accel` is now
+`contact_terms(..).total()`, so a diagnostic cannot disagree with the law it diagnoses).
+
+**My hypothesis was wrong and the queue's method was right.** At step 2 the damping share is **0.0%** —
+`v_n = 2.7e-19`, the contact is static — and the spring-only inference is **exact, ratio 1.00×**.
+
+What did not survive is the queue's *input*. Measured at HEAD:
+
+| | `docs/72` item 2 | measured today |
+|---|---|---|
+| step-1 `\|v\|` | 8.98e-6 | **4.186e-6** |
+| step-2 `\|v\|` | **7.32** | **1.879e-2** |
+| implied overlap | 2.2 mm | **6.4 µm** |
+
+The queue's own two numbers are not consistent with each other either: at the `dt` it names (4.27e-7,
+which matches today exactly) one step of gravity is 4.19e-6, not the 8.98e-6 it calls "exactly one step
+of gravity". Those figures came from different eras and were never re-measured together.
+
+### Where a 6.4 µm overlap comes from when gravity can only move 1.8e-12 m
+
+One step of gravity from rest moves a member `1.8e-12 m`. The overlap that appeared is `6.4e-6 m` —
+**3.6 million times more**. So it was not made by motion. Measuring translation against shape change:
+
+> **step 1: max polyline point 5.9152e-1 m · max centre 5.3784e-4 m · shape/translation 1100×**
+
+A point on a **0.35 m** blade moved **0.59 m**. Four explanations died to measurement before the cause:
+the polyline is not re-segmented (point counts identical), the relaxation **is** idempotent (verified),
+the release's and the step's weight-per-length **are** equal (`ratio 1.000000`), and the mover was
+already active (not a forkful arriving). The geometry dump ended it: base fixed, `axis` and `normal`
+unchanged, and the **tip flipped from `y = +0.342` to `y = −0.250`**.
+
+### The cause: one question, two answers, opposite signs
+
+"What shape does this member take under its own weight" was asked in two places:
+
+| | called from | load passed to `Chain` |
+|---|---|---|
+| `relax_flex_under` | the **release** | `+w_transverse` |
+| `relax_flex` | **every step** | `−weight_per_m · mag` |
+
+Same `bend_dir`, opposite sign. On a horizontal blade: `relax_flex` puts the tip at **y = −0.295767**,
+`relax_flex_under` at **y = +0.295767** — exactly equal and opposite, `0.59153 m` apart, matching the
+`0.59152 m` measured in the live heap to five digits. **The release arched every member upward against
+its own weight**, and step 1 bent it back down.
+
+★★ **That is why row 79's eleventh hypothesis failed.** *"Releasing members already bent does NOT fix
+it"* — of course not. It bent them **the wrong way**.
+
+### The general law (`docs/46` row 84), which is the point
+
+- **Matter that moves without a velocity is invisible.** 0.59 m in a 4.27e-7 s step is an effective
+  `1.4e6 m/s` that no contact mediates, no impulse carries and no energy term accounts for — because it
+  is a change of *derived state*, not of position. **Any** body whose configuration is derived — a flex
+  chain, a de-resolved `LayeredBody`, an assembly rule, an LOD swap — does this the moment placement and
+  stepping derive it differently.
+- **The state a body is PLACED in must be the state the stepper would produce from it.** Row 81 is the
+  same rule broken in a different module (a GPU release that births overlapping grains). Two modules, two
+  mechanisms, one law.
+- **A magnitude cannot catch a sign.** `tip_sag_m` returns `((x−L)² + y²).sqrt()`, so a blade arching up
+  over its own weight reports *exactly* the same sag as one drooping down — and the module's sag test
+  passed throughout. Any derived quantity guarded only by `|x| > k` is blind to the error that inverts it.
+
+### Verified
+
+`relax_flex` now **delegates** to `relax_flex_under` — one implementation — and the sign is corrected
+there. New asserts: a member must sag **downward** (a *direction*, which is what no existing assert
+tested), and the two entry points must agree (kept as a ratchet, and honest about being trivially true
+while they are one function).
+
+| | before | after |
+|---|---|---|
+| step-1 shape/translation | **1100×** | **1.000×** (pure translation) |
+| step-2 `\|v\|max` | 1.879e-2 | **8.372e-6** |
+| step-3 `\|v\|max` | 3.469e-2 | **1.256e-5** |
+| hardest contact, steps 1–3 | 4↔9, \|a\| 4.4e4 | **none, \|a\| 0.0** |
+
+Those are `1×, 2×, 3× g·dt` to **ratio 1.000006** — free fall from rest. **There is no step-2 event.**
+
+**667/667 native** (660 + 7 new), 31 skipped, `mod app` compiles, numbering gate green. ★ Honest caveat:
+the heap's own settle tests are `#[ignore]`d and take ~47 M steps, so a green suite does **not** show the
+heap settles — what is verified is the opening steps and the law. Every packing number this module has
+produced was taken with members released in the wrong shape, which is one more reason they are void
+(row 79).
+
+
 ## 2026-09-15 — scene D has never measured an angle of repose; it has been timing an explosion
 
 `docs/46` row 81 asked whether the GPU grain path's 0.2° repose was a real physics failure or a diluted

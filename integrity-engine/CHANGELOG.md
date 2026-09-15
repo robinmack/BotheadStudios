@@ -9,6 +9,36 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★★ **Fixed: the release bent every member the wrong way** (`docs/46` row 84, `docs/72` item 2). "What
+  shape does this body take under load" was answered by two functions — `Rod::relax_flex_under` from the
+  release, `Rod::relax_flex` from every step — with **opposite signs**. On a horizontal blade they put the
+  tip at `y = −0.2958` and `y = +0.2958`: exactly equal and opposite, 169% of the member's own length
+  apart. The release arched every member **upward against its own weight**, and step 1 bent it back down,
+  **moving 0.59 m of matter in a 4.27e-7 s step with no velocity** — an effective 1.4e6 m/s that no
+  contact mediates and no energy term accounts for. `relax_flex` now delegates to `relax_flex_under`: one
+  question, one implementation. **Measured after:** shape/translation `1100× → 1.000×`, and `|v|max` grows
+  as `1×, 2×, 3× g·dt` (ratio 1.000006) — free fall from rest, with zero contacts. There is no step-2 event.
+
+- **The general law, not a grass fix:** any body whose configuration is *derived* — a flex chain, a
+  de-resolved `LayeredBody`, an assembly rule, an LOD swap — teleports its matter the moment placement and
+  stepping derive it differently. **The state a body is placed in must be the state the stepper would
+  produce from it.** Row 81 is the same law broken in another module (a GPU release that births
+  overlapping grains).
+
+- **`granular::contact_terms`** — the contact law reported term by term (spring, dashpot, `c_damp`,
+  `f_rep`, `f_coh`), with `contact_accel` now `contact_terms(..).total()` so a diagnostic cannot disagree
+  with the law it diagnoses. Built to settle whether a step-2 acceleration was spring or damping; the
+  answer was **spring, 0.0% damping share**, and the queue's inference method was sound — its *input* was
+  stale (measured step-2 `|v|` is 1.879e-2, not the 7.32 recorded).
+
+- **New assert: a member must sag DOWNWARD.** `tip_sag_m` returns a magnitude (`sqrt(..)`), so a blade
+  arching up over its own weight reported exactly the same sag as one drooping down and every sag test
+  passed. **A magnitude cannot catch a sign** — any derived quantity guarded only by `|x| > k` is blind to
+  the error that inverts it.
+
+- **`PILE_STEP_TRACE=<n>`** — per-step diagnostic: the hardest contact decomposed into its terms, plus
+  translation measured against shape change, with a guard that refuses to diff across a re-segmentation.
+
 - ★★★ **`gpu-verify` scene D has never measured an angle of repose** (`docs/46` rows 81, 83). Its release
   births overlapping grains — the lattice spacing is exactly one grain diameter, so the 0.1-of-a-spacing
   disorder it adds for flow cannot fit — and **113 of 6786 pairs overlap at `t = 0`, worst 0.1605 m**. The
