@@ -177,16 +177,68 @@ impl Contact {
     }
 }
 
+/// One contact, reported TERM BY TERM (`docs/46` rows 79, 81).
+///
+/// ★ **A total tells you nothing about which term produced it**, and that has cost this repo twice.
+/// `docs/72` queue item 2 infers an overlap of 2.2 mm from a step-2 acceleration by assuming
+/// `a = k·overlap` — spring only — while `pile`'s own module header records that `f_rep` "is dominated
+/// by its DAMPING term, not the spring". Both cannot be right, and only a decomposition settles it.
+///
+/// This is the SAME arithmetic [`contact_accel`] returns, not a second copy of the law: `contact_accel`
+/// is `contact_terms(..).total()`. Keeping one implementation is Law II — a diagnostic that re-derives
+/// the law it is diagnosing can disagree with it, which is how an instrument starts lying.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ContactTerms {
+    /// `touch − dist`: positive while compressing, negative when separated but inside cohesion range.
+    pub overlap: f64,
+    /// Relative normal speed. **Positive is separating, negative is approaching.**
+    pub v_n: f64,
+    /// `k·overlap` — the elastic term, and the ONLY one the 2.2 mm inference accounts for.
+    pub spring: f64,
+    /// `−c_damp·v_n` — the dashpot. Positive (repulsive) while approaching, because `v_n < 0` there.
+    pub damp: f64,
+    /// The damping coefficient actually used: `normal_damp + shock·|v_n|/(4r)`. ★ Note it is itself
+    /// linear in `|v_n|`, so `damp` is **quadratic** in approach speed — a term that can dominate a
+    /// spring without any large overlap at all.
+    pub c_damp: f64,
+    /// `(spring + damp).max(0.0)` — the clamped repulsion.
+    pub f_rep: f64,
+    /// Adhesion, tapered over `coh_range`.
+    pub f_coh: f64,
+    pub a_n: DVec3,
+    pub a_t: DVec3,
+}
+
+impl ContactTerms {
+    /// What [`contact_accel`] returns.
+    #[inline]
+    pub fn total(&self) -> DVec3 {
+        self.a_n + self.a_t
+    }
+    /// Fraction of the repulsion carried by the dashpot rather than the spring, in `0..=1`. `None`
+    /// when there is no repulsion to apportion.
+    pub fn damping_share(&self) -> Option<f64> {
+        let mag = self.spring.abs() + self.damp.abs();
+        (mag > 0.0).then(|| self.damp.abs() / mag)
+    }
+}
+
 /// Acceleration on grain *i* due to contact with grain *j* (equal radii). Zero unless they overlap.
 /// Symmetric: grain *j* receives the negation from its own evaluation, so momentum is conserved.
 #[inline]
 pub fn contact_accel(pi: DVec3, vi: DVec3, pj: DVec3, vj: DVec3, c: &Contact) -> DVec3 {
+    contact_terms(pi, vi, pj, vj, c).total()
+}
+
+/// [`contact_accel`]'s arithmetic, with every term kept. See [`ContactTerms`].
+#[inline]
+pub fn contact_terms(pi: DVec3, vi: DVec3, pj: DVec3, vj: DVec3, c: &Contact) -> ContactTerms {
     let d = pi - pj;
     let dist = d.length();
     let touch = 2.0 * c.radius;
     // Cohesion extends the interaction range beyond touch; beyond that the bond has let go.
     if dist >= touch + c.coh_range || dist < 1.0e-9 {
-        return DVec3::ZERO; // not in contact (or coincident — no defined normal)
+        return ContactTerms::default(); // not in contact (or coincident — no defined normal)
     }
     let n = d / dist; // unit normal, from j toward i
     let overlap = touch - dist; // >0 overlapping (compression); <0 separated but within cohesion range
@@ -199,8 +251,11 @@ pub fn contact_accel(pi: DVec3, vi: DVec3, pj: DVec3, vj: DVec3, c: &Contact) ->
     // `coh_range`. c.cohesion = 0 recovers the old push-only contact.
     // Damping = the calibrated constant + the sub-parcel shock closure (see `Contact::shock`).
     let c_damp = c.normal_damp + c.shock * v_n.abs() / (4.0 * c.radius);
+    // Kept as separate bindings so the decomposition is the SAME arithmetic, not a re-derivation.
+    let spring = c.stiffness * overlap;
+    let damp = -c_damp * v_n;
     let f_rep = if overlap > 0.0 {
-        (c.stiffness * overlap - c_damp * v_n).max(0.0)
+        (spring + damp).max(0.0)
     } else {
         0.0
     };
@@ -227,7 +282,17 @@ pub fn contact_accel(pi: DVec3, vi: DVec3, pj: DVec3, vj: DVec3, c: &Contact) ->
         DVec3::ZERO
     };
 
-    a_n + a_t
+    ContactTerms {
+        overlap,
+        v_n,
+        spring,
+        damp,
+        c_damp,
+        f_rep,
+        f_coh,
+        a_n,
+        a_t,
+    }
 }
 
 /// **How fine must grains be here?** (`docs/47` §1) — `particle_size ≈ L_contact / n_across`.
@@ -1844,5 +1909,163 @@ mod tests {
             pos.y
         );
         assert!(vel.length() < 0.05, "settled (speed {:.4})", vel.length());
+    }
+}
+
+#[cfg(test)]
+mod contact_decomposition_tests {
+    //! **The decomposition must account for the WHOLE force, or the instrument lies** (`docs/46` row 79).
+    //!
+    //! [`contact_terms`] exists so a step-2 acceleration can be attributed to the spring or the dashpot
+    //! instead of guessed at (`docs/72` queue item 2 reads an overlap of 2.2 mm off one by assuming
+    //! spring-only). That is only worth anything if the reported terms RECONSTRUCT what the law
+    //! actually applied — a diagnostic that omits a term reports a clean story about an incomplete
+    //! force, which is the row-79 failure mode exactly.
+    //!
+    //! These are also the ratchet behind the claim that there is ONE implementation: if someone later
+    //! re-derives `contact_accel` instead of delegating, the identity test goes red.
+
+    use super::*;
+
+    fn a_contact() -> Contact {
+        Contact {
+            radius: 0.02,
+            stiffness: 6.8e9,
+            normal_damp: 1.0e5,
+            shock: 2.0e5,
+            cohesion: 3.0e2,
+            coh_range: 0.004,
+            friction: 0.6,
+            tangent_damp: 1.0e4,
+        }
+    }
+
+    /// A spread of configurations as `(pi, vi, vj)` with grain *j* fixed at the origin: deep overlap,
+    /// grazing touch, separating, approaching fast, oblique (so the tangential term is live), far
+    /// apart, and inside the cohesion range but not touching.
+    fn cases() -> Vec<(DVec3, DVec3, DVec3)> {
+        let z = DVec3::ZERO;
+        vec![
+            (DVec3::new(0.030, 0.0, 0.0), z, z),
+            (DVec3::new(0.039, 0.0, 0.0), z, z),
+            (DVec3::new(0.041, 0.0, 0.0), z, z),
+            (DVec3::new(0.0399, 0.0, 0.0), DVec3::new(-50.0, 0.0, 0.0), z),
+            (DVec3::new(0.0399, 0.0, 0.0), DVec3::new(50.0, 0.0, 0.0), z),
+            (
+                DVec3::new(0.035, 0.0, 0.0),
+                DVec3::new(-1.0, 3.0, 0.0),
+                DVec3::new(0.0, -2.0, 1.0),
+            ),
+            (DVec3::new(0.500, 0.0, 0.0), z, z),
+            (
+                DVec3::new(0.030, 0.01, 0.02),
+                DVec3::new(2.0, -1.0, 0.5),
+                DVec3::new(-1.0, 0.0, 3.0),
+            ),
+        ]
+    }
+
+    #[test]
+    fn contact_accel_is_exactly_the_terms_totalled() {
+        // Bit-identical, not approximately: `contact_accel` IS `contact_terms(..).total()`. If this
+        // ever needs a tolerance, the law has been implemented twice and Law II is broken.
+        let c = a_contact();
+        for (pi, vi, vj) in cases() {
+            let pj = DVec3::ZERO;
+            let t = contact_terms(pi, vi, pj, vj, &c);
+            assert_eq!(
+                contact_accel(pi, vi, pj, vj, &c),
+                t.total(),
+                "contact_accel diverged from its own decomposition at pi {pi:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_reported_terms_reconstruct_the_normal_force() {
+        // f_rep must be exactly what the reported spring and damping make of it, and a_n must be
+        // exactly what f_rep and f_coh make of it. Omit a term and this goes red.
+        let c = a_contact();
+        for (pi, vi, vj) in cases() {
+            let pj = DVec3::ZERO;
+            let t = contact_terms(pi, vi, pj, vj, &c);
+            if t.overlap == 0.0 && t.v_n == 0.0 {
+                continue; // out of range: every term is zero by construction
+            }
+            let expect_rep = if t.overlap > 0.0 {
+                (t.spring + t.damp).max(0.0)
+            } else {
+                0.0
+            };
+            assert_eq!(t.f_rep, expect_rep, "f_rep is not spring+damp at pi {pi:?}");
+            let dist = (pi - pj).length();
+            if dist > 1.0e-9 {
+                let n = (pi - pj) / dist;
+                assert_eq!(
+                    t.a_n,
+                    n * (t.f_rep - t.f_coh),
+                    "a_n is not f_rep−f_coh at pi {pi:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_damping_term_is_quadratic_in_approach_speed() {
+        // ★ The property that makes the spring-only inference unsafe (`docs/72` item 2). `c_damp`
+        // itself carries `shock·|v_n|/(4r)`, so the dashpot force grows as v_n² while the spring does
+        // not grow with speed at all. Double the approach speed at a FIXED overlap and the damping
+        // term must more than double.
+        let c = a_contact();
+        let p = DVec3::new(0.0399, 0.0, 0.0);
+        let slow = contact_terms(p, DVec3::new(-10.0, 0.0, 0.0), DVec3::ZERO, DVec3::ZERO, &c);
+        let fast = contact_terms(p, DVec3::new(-20.0, 0.0, 0.0), DVec3::ZERO, DVec3::ZERO, &c);
+        assert_eq!(
+            slow.spring, fast.spring,
+            "the spring must not depend on speed"
+        );
+        assert!(
+            fast.damp > 2.0 * slow.damp,
+            "damping must grow FASTER than linearly in approach speed (shock closure): {:.4e} vs 2x {:.4e}",
+            fast.damp,
+            slow.damp
+        );
+    }
+
+    #[test]
+    fn damping_can_dominate_the_repulsion_at_a_tiny_overlap() {
+        // ★★ THE POINT, as a falsifiable statement. `docs/72` item 2 converts a step-2 acceleration
+        // into an overlap of 2.2 mm via `a = k·overlap`. That is only valid if the spring carries the
+        // force. Here is a contact with an overlap 1000x smaller than that, whose repulsion is
+        // nevertheless dominated by the dashpot — so the inference can overstate the overlap by
+        // orders of magnitude. This does not prove what the pile does; it proves the inference is
+        // not safe, which is why the pile is MEASURED rather than argued about.
+        let c = a_contact();
+        let overlap = 2.2e-6; // 1000x below the queue's inferred 2.2 mm
+        let dist = 2.0 * c.radius - overlap;
+        let t = contact_terms(
+            DVec3::new(dist, 0.0, 0.0),
+            DVec3::new(-30.0, 0.0, 0.0),
+            DVec3::ZERO,
+            DVec3::ZERO,
+            &c,
+        );
+        let share = t.damping_share().expect("a repulsion to apportion");
+        assert!(
+            share > 0.5,
+            "at overlap {overlap:.3e} m and 30 m/s approach the dashpot should carry most of the \
+             repulsion, but its share is {:.1}% (spring {:.3e}, damp {:.3e})",
+            100.0 * share,
+            t.spring,
+            t.damp
+        );
+        // And the spring-only inference would report an overlap far larger than the real one.
+        let implied = t.f_rep / c.stiffness;
+        assert!(
+            implied > 2.0 * t.overlap,
+            "spring-only inference should overstate the overlap here: implied {implied:.3e} m vs \
+             actual {:.3e} m",
+            t.overlap
+        );
     }
 }

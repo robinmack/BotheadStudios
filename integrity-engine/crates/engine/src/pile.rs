@@ -548,27 +548,29 @@ impl Rod {
     /// the two principal planes and gives each its own `I`. `Rod::normal` already fixes those planes,
     /// so the geometry is present and only the decomposition is missing — a blade edge-on to gravity
     /// currently bends as easily as one face-on, which it should not.
+    /// ★★★ **ONE QUESTION, ONE IMPLEMENTATION** (Law II; `docs/46` row 79, `docs/72` item 2).
+    ///
+    /// "What shape does this member take under load" was answered by TWO functions — this one from
+    /// [`step_one_rod`] every step, and [`Rod::relax_flex_under`] from the release — and they
+    /// disagreed **by 169% of a member's length**, one arching up while the other drooped down. Every
+    /// member was therefore placed in one shape and re-shaped into its mirror image on its very first
+    /// step, moving matter 0.59 m with **no velocity**: no contact saw it, no energy accounted for it,
+    /// and it is what opened the micron-scale overlaps that the step-2 investigation was chasing.
+    ///
+    /// This is now a thin wrapper, kept for its callers and for the degenerate guard it owns. The
+    /// physics lives in one place.
     pub fn relax_flex(&mut self, ei_nm2: f64, weight_per_m: f64, g: f64) {
         let along = self.axis.normalize_or(DVec3::X);
         let down = DVec3::NEG_Y;
         // The part of gravity that is across the member — the only part that bends it.
         let transverse = down - along * along.dot(down);
-        let mag = transverse.length();
-        if mag <= 1.0e-12 || weight_per_m <= 0.0 || g <= 0.0 {
+        if transverse.length() <= 1.0e-12 || weight_per_m <= 0.0 || g <= 0.0 {
             // End-on to gravity: nothing bends it, and a straight member is a one-segment polyline.
             self.flex.theta.clear();
             self.flex.bend_dir = DVec3::ZERO;
             return;
         }
-        self.flex.bend_dir = transverse / mag;
-        let chain = crate::flexure::Chain::relaxed(
-            ei_nm2,
-            2.0 * self.half_length_m,
-            Flex::SEGMENTS,
-            0.0,
-            |_| (0.0, -weight_per_m * mag),
-        );
-        self.flex.theta = chain.theta.clone();
+        self.relax_flex_under(ei_nm2, weight_per_m, &[]);
     }
 
     /// ★★★ **THE MEMBER'S ACTUAL SHAPE IN WORLD SPACE** — the nodes its matter occupies (docs/46 row
@@ -650,9 +652,16 @@ impl Rod {
             // quantity `Chain` integrates, so nothing special-cases a point.
             per_segment[k] += f.dot(dir) / ds;
         }
+        // ★★★ **SIGN** (`docs/46` row 79, `docs/72` item 2). `Chain`'s transverse load is NEGATIVE
+        // along `bend_dir`: a load resolved as `+x` along `dir` bends the member the way a load of
+        // `−x` physically would. Passing `+w_transverse` here arched every released member UPWARD,
+        // against its own weight — measured as a tip at `y = +0.2958` where the step's relaxation put
+        // it at `y = −0.2958`, exactly equal and opposite, a 0.59 m disagreement on a 0.35 m member.
+        // No assert in this module could see it: `tip_sag_m` returns a MAGNITUDE (`sqrt(..)`), so a
+        // blade arching up over its own weight reports exactly the same sag as one drooping down.
         let chain = crate::flexure::Chain::relaxed(ei_nm2, l, n, 0.0, |s| {
             let k = ((s / ds).floor() as usize).min(n - 1);
-            (0.0, w_transverse + per_segment[k])
+            (0.0, -(w_transverse + per_segment[k]))
         });
         self.flex.theta = chain.theta.clone();
     }
@@ -1278,8 +1287,21 @@ pub fn settle_traced(
     // integrator is impossible unless the loop never calls it. Three probes went to hypotheses before
     // anyone counted the calls.
     let (mut stepped, mut skipped) = (0u64, 0u64);
+    // ★★ **THE STEP-2 DECOMPOSITION** (`docs/72` queue item 2). Set `PILE_STEP_TRACE=<n>` to print, for
+    // the first `n` steps, the single hardest contact in the step broken into its terms. The queue
+    // reads an overlap of 2.2 mm off a step-2 acceleration by assuming `a = k·overlap` — spring only —
+    // while this module's own header records that `f_rep` is dominated by its DAMPING term. A total
+    // cannot distinguish those; a decomposition can, and eleven hypotheses have already been refuted
+    // by argument, so this one is measured (row 79).
+    let trace_steps: u64 = std::env::var("PILE_STEP_TRACE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let mut step_n = 0u64;
     while elapsed_s < CAP_S {
         let snapshot = rods.clone();
+        // Hardest contact THIS step: (|a|, i, j, terms, gap).
+        let mut hardest: Option<(f64, usize, usize, crate::granular::ContactTerms, f64)> = None;
         for i in 0..rods.len() {
             // ★ Not thrown on yet: a member waiting for its forkful is not in the world, so it neither
             // falls nor collides. Skipping it is what makes the release a SEQUENCE rather than a cloud.
@@ -1332,7 +1354,14 @@ pub fn settle_traced(
                 let arm_b = pb - other.centre;
                 let va = snapshot[i].velocity_at(arm_a);
                 let vb = other.velocity_at(arm_b);
-                let a_n = crate::granular::contact_accel(pa, va, pb, vb, &contact);
+                let terms = crate::granular::contact_terms(pa, va, pb, vb, &contact);
+                let a_n = terms.total();
+                if trace_steps > 0 {
+                    let mag = a_n.length();
+                    if hardest.map_or(true, |(m, ..)| mag > m) {
+                        hardest = Some((mag, i, j, terms, (pa - pb).length()));
+                    }
+                }
                 // ★★★ **AT THE POINT THE QUANTITY IS FORMED** (docs/46 row 79). Everything downstream —
                 // the floor impulse, the member's finiteness, the heap's every statistic — is a symptom.
                 // This is the first place a number can be wrong, so it says what it was given.
@@ -1387,6 +1416,152 @@ pub fn settle_traced(
             );
         }
         elapsed_s += dt;
+        if step_n < trace_steps {
+            let vmax = rods.iter().map(|r| r.vel.length()).fold(0.0f64, f64::max);
+            let wmax = rods
+                .iter()
+                .map(|r| r.ang_vel.length())
+                .fold(0.0f64, f64::max);
+            // ★★ **TRANSLATION vs SHAPE, separated.** An overlap can appear two ways: a member MOVED
+            // into its neighbour, or its SHAPE changed under it while its centre stayed put. One step
+            // of gravity from rest moves a centre ~1e-12 m, so a micron-scale overlap at step 2 cannot
+            // be translation — but that is elimination. This measures it: the largest displacement of
+            // any polyline POINT over the step, against the largest displacement of any CENTRE.
+            // ★ CHECK THE INSTRUMENT FIRST. This compares polylines point by point, which is only
+            // meaningful if both have the SAME number of points. If a member's flex chain is created
+            // or re-segmented during the step, the two polylines describe the same blade at different
+            // discretisations and a point-by-point diff is nonsense — it would report a huge "shape
+            // change" that is really an indexing mismatch. So report the counts and refuse to diff
+            // across a change.
+            let seg_before: Vec<usize> = snapshot.iter().map(|r| r.polyline().len()).collect();
+            let seg_after: Vec<usize> = rods.iter().map(|r| r.polyline().len()).collect();
+            let resegmented = seg_before != seg_after;
+            let mut mover = usize::MAX;
+            let max_point = if resegmented {
+                f64::NAN
+            } else {
+                let mut worst = 0.0f64;
+                for (i, (r, s0)) in rods.iter().zip(snapshot.iter()).enumerate() {
+                    let d = r
+                        .polyline()
+                        .iter()
+                        .zip(s0.polyline().iter())
+                        .map(|(a, b)| (*a - *b).length())
+                        .fold(0.0f64, f64::max);
+                    if d > worst {
+                        worst = d;
+                        mover = i;
+                    }
+                }
+                worst
+            };
+            if mover != usize::MAX && step_n == 0 {
+                // ★ THE DIRECT OBSERVATION. Four hypotheses about this displacement died to argument
+                // (re-segmentation, non-idempotent relaxation, mismatched weight-per-length, a member
+                // entering on this step). Stop guessing and print the geometry either side of it.
+                let (b, a) = (&snapshot[mover], &rods[mover]);
+                let (pb, pa) = (b.polyline(), a.polyline());
+                println!(
+                    "         GEOM before: centre {:?}\n                      axis {:?} normal {:?}\n                      poly[0] {:?} poly[last] {:?} n={}",
+                    b.centre, b.axis, b.normal, pb.first(), pb.last(), pb.len()
+                );
+                println!(
+                    "         GEOM after : centre {:?}\n                      axis {:?} normal {:?}\n                      poly[0] {:?} poly[last] {:?} n={}",
+                    a.centre, a.axis, a.normal, pa.first(), pa.last(), pa.len()
+                );
+                // Is it an ORDER flip? Compare forward against reversed.
+                let fwd = pa
+                    .iter()
+                    .zip(pb.iter())
+                    .map(|(x, y)| (*x - *y).length())
+                    .fold(0.0f64, f64::max);
+                let rev = pa
+                    .iter()
+                    .rev()
+                    .zip(pb.iter())
+                    .map(|(x, y)| (*x - *y).length())
+                    .fold(0.0f64, f64::max);
+                println!(
+                    "         forward-matched max {fwd:.4e} m · REVERSE-matched max {rev:.4e} m"
+                );
+            }
+            if mover != usize::MAX {
+                // ★ WHO moved, and was this the step it entered the world? A member waiting for its
+                // forkful is skipped entirely (`release_t_s > elapsed_s`), so the step it becomes
+                // active is a candidate explanation that has nothing to do with bending.
+                let r = &rods[mover];
+                println!(
+                    "         MOVER: member {mover} · release_t_s {:.6e} · elapsed {:.6e} · ACTIVE THIS STEP: {} · was active BEFORE: {}",
+                    r.release_t_s,
+                    elapsed_s,
+                    r.release_t_s <= elapsed_s,
+                    r.release_t_s <= elapsed_s - dt
+                );
+            }
+            if resegmented {
+                let b: Vec<usize> = seg_before.iter().take(4).copied().collect();
+                let a: Vec<usize> = seg_after.iter().take(4).copied().collect();
+                println!(
+                    "         ★ RE-SEGMENTED THIS STEP: polyline point counts {b:?}.. -> {a:?}.. — a \
+point-by-point shape diff is meaningless across this, so it is not reported."
+                );
+            }
+            let max_centre = rods
+                .iter()
+                .zip(snapshot.iter())
+                .map(|(r, s0)| (r.centre - s0.centre).length())
+                .fold(0.0f64, f64::max);
+            println!(
+                "         MOVED this step: max polyline point {max_point:.4e} m · max centre {max_centre:.4e} m · shape/translation {:.3e}x",
+                if max_centre > 0.0 { max_point / max_centre } else { f64::INFINITY }
+            );
+            match hardest {
+                None => println!(
+                    "step {:>3}: NO CONTACT AT ALL · |v|max {vmax:.6e} · |w|max {wmax:.6e}",
+                    step_n + 1
+                ),
+                Some((mag, i, j, t, gap)) => {
+                    let share = t.damping_share().unwrap_or(f64::NAN);
+                    let touch = 2.0 * contact.radius;
+                    let dir = if t.v_n < 0.0 {
+                        "approaching"
+                    } else {
+                        "separating"
+                    };
+                    // What the queue's 2.2 mm inference would read off this contact, and what the
+                    // overlap actually is. The ratio is the whole question.
+                    let implied = t.f_rep / contact.stiffness;
+                    let ratio = if t.overlap > 0.0 {
+                        implied / t.overlap
+                    } else {
+                        f64::NAN
+                    };
+                    let step = step_n + 1;
+                    println!(
+                        "step {step:>3}: |v|max {vmax:.6e} · |w|max {wmax:.6e} · hardest contact {i}<->{j} |a| {mag:.4e} m/s2"
+                    );
+                    println!(
+                        "         gap {gap:.6e} m (touch {touch:.6e}) · overlap {ov:.6e} m · v_n {vn:.4e} m/s ({dir})",
+                        ov = t.overlap,
+                        vn = t.v_n
+                    );
+                    println!(
+                        "         spring k*overlap {sp:.4e} · damp -c*v_n {dp:.4e} (c_damp {cd:.4e}) · DAMPING SHARE {share:.1}%",
+                        sp = t.spring,
+                        dp = t.damp,
+                        cd = t.c_damp,
+                        share = 100.0 * share
+                    );
+                    println!(
+                        "         f_rep {fr:.4e} · f_coh {fc:.4e} · implied overlap IF SPRING-ONLY {implied:.4e} m vs actual {ov:.4e} m (ratio {ratio:.2}x)",
+                        fr = t.f_rep,
+                        fc = t.f_coh,
+                        ov = t.overlap
+                    );
+                }
+            }
+        }
+        step_n += 1;
         // PEAK, not mean — the gauge's contract, and the right one: an average hides the single
         // member still bouncing, and one member crossing cells is a heap that has not settled.
         // ★★★ **A SPINNING BLADE IS NOT A SETTLED BLADE** (docs/46 row 60 step B). `SettleGauge` was
@@ -3199,5 +3374,218 @@ mod tests {
         );
         assert!((a - DVec3::new(1.0, 0.0, 0.0)).length() < 1e-9);
         assert!((b - DVec3::new(3.0, 0.0, 0.0)).length() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod relaxation_idempotence_tests {
+    //! ★★★ **IS THE SHAPE RELAXATION A FIXED POINT?** (`docs/72` queue item 2, `docs/46` row 79.)
+    //!
+    //! Measured in the 10-blade heap: at **step 1 a polyline point moves 0.59 m** — 1.7× the blade's
+    //! own 0.35 m arclength — while the fastest CENTRE moves 5.4e-4 m. A shape/translation ratio of
+    //! **1100×**, with the polyline point COUNT unchanged, so it is not an indexing artefact.
+    //!
+    //! That should be impossible here. `settle_traced` releases members already bent
+    //! ([`release_rods_bent`] with a real `flex_ei`), and at step 1 there are **no contacts at all**
+    //! (measured: `overlap 0`, `|a| 0`), so step 1 relaxes under gravity alone — the same load the
+    //! release used. A member released at its gravity-relaxed shape and relaxed again under gravity
+    //! should not move.
+    //!
+    //! So: does [`Rod::relax_flex_under`] return the same shape when applied twice to the same load?
+    //! If not, the "bend before the no-overlap rejection" guarantee is void — the release rejects
+    //! overlaps between shapes that the first step then replaces.
+
+    use super::*;
+
+    /// A horizontal member, so "which way does it sag" has an unambiguous right answer: DOWN.
+    fn a_horizontal_blade(length: f64, radius: f64, width: f64, thickness: f64) -> Rod {
+        Rod {
+            centre: DVec3::ZERO,
+            axis: DVec3::X,
+            half_length_m: length * 0.5,
+            radius_m: radius,
+            width_m: width,
+            thickness_m: thickness,
+            normal: DVec3::Z,
+            vel: DVec3::ZERO,
+            ang_vel: DVec3::ZERO,
+            release_t_s: 0.0,
+            flex: Flex::straight(),
+        }
+    }
+
+    /// ★ **THIS TEST IS NOW TRIVIALLY TRUE, AND THAT IS ITS POINT.** Since the fix, `relax_flex`
+    /// delegates to `relax_flex_under`, so the two names are one function and cannot disagree. It is
+    /// kept as a RATCHET: it goes red the day someone gives `relax_flex` its own body again. The test
+    /// that carries the physics is `a_member_sags_DOWNWARD_under_its_own_weight` — a direction, not an
+    /// agreement, because two implementations agreeing on a wrong answer is exactly what a magnitude-
+    /// only assert already let through here.
+    #[test]
+    fn the_two_shape_relaxations_must_agree_they_answer_one_question() {
+        // ★★★ **ONE QUESTION, TWO ANSWERS** (Law II, `docs/46` row 79, `docs/72` item 2).
+        //
+        // "What shape does this member take under its own weight" is asked in two places and answered
+        // by two different functions: the RELEASE calls `relax_flex_under` (pile.rs, `release_rods_bent`)
+        // and EVERY STEP calls `relax_flex` (`step_one_rod`). With no contact loads they are the same
+        // physical question, so they must give the same shape.
+        //
+        // They do not. `relax_flex` passes `-weight_per_m * mag` to `Chain::relaxed`; `relax_flex_under`
+        // passes `w_transverse = (NEG_Y · weight_per_m) · dir`, which has the OPPOSITE sign for the same
+        // configuration. The member is therefore bent one way at release and bent back the other way on
+        // its very first step.
+        //
+        // ★ MEASURED CONSEQUENCE in the 10-blade heap: at step 1 a polyline point moves **0.59 m** — 1.7x
+        // the blade's own 0.35 m arclength — while the fastest CENTRE moves 5.4e-4 m. A shape/translation
+        // ratio of 1100x, with the polyline point count unchanged and the relaxation itself verified
+        // idempotent. That displacement is how a 6.4 um overlap appears between two members at step 2
+        // when one step of gravity can only move them 1.8e-12 m.
+        let mats = crate::materials::load();
+        let blade = crate::assembly::compiled::parse(crate::assembly::compiled::GRASS_BLADE_DRY);
+        let (length, radius) = rod_for(&blade).expect("a blade is a rod");
+        let (width, thickness) = cross_section_for(&blade).expect("a blade has a section");
+        let member_mass = blade.mass_kg(&mats).expect("a mass").max(1e-12);
+        let material = blade
+            .parts
+            .first()
+            .map(|p| p.material.clone())
+            .unwrap_or_default();
+        let m = mats.iter().find(|m| m.id == material).expect("catalogued");
+        let ei = m.youngs_modulus as f64 * width * thickness.powi(3) / 12.0;
+        let w_per_m = member_mass / length * 9.81;
+
+        let mut by_step = a_horizontal_blade(length, radius, width, thickness);
+        by_step.relax_flex(ei, w_per_m, 9.81);
+        let mut by_release = a_horizontal_blade(length, radius, width, thickness);
+        by_release.relax_flex_under(ei, w_per_m, &[]);
+
+        let tip_step = *by_step.polyline().last().expect("a tip");
+        let tip_release = *by_release.polyline().last().expect("a tip");
+        let gap = (tip_step - tip_release).length();
+
+        // Gravity is -Y and the member is horizontal, so the correct tip is BELOW the centre.
+        println!(
+            "relax_flex tip y {:+.6} · relax_flex_under tip y {:+.6} · they differ by {gap:.4e} m              (member length {length:.3} m)",
+            tip_step.y, tip_release.y
+        );
+
+        assert!(
+            gap < 1.0e-6,
+            "the release and the step answer ONE question — what shape does this member take under its              own weight — and they disagree by {gap:.4e} m, {:.0}% of the member's {length:.3} m length.              `relax_flex` puts the tip at y {:+.6}, `relax_flex_under` at y {:+.6}; gravity is -Y, so at              most one of them is sagging. A body re-shaped between placement and its first step has              MOVED ITS MATTER WITH NO VELOCITY — no contact sees it and no energy accounts for it.",
+            100.0 * gap / length,
+            tip_step.y,
+            tip_release.y
+        );
+    }
+
+    #[test]
+    fn a_member_sags_DOWNWARD_under_its_own_weight() {
+        // ★★ THE ASSERT THAT DID NOT EXIST, and whose absence let a sign error live in the release.
+        // `tip_sag_m` returns a MAGNITUDE — `((x−L)² + y²).sqrt()` — so a member arching UP over its
+        // own weight reports exactly the same sag as one drooping down, and the module's sag test
+        // passed throughout. **A magnitude cannot catch a sign.** This asks the physical question
+        // instead: gravity is −Y, so the tip of a horizontal member must end up BELOW its base.
+        //
+        // General, not grass: any body whose shape is DERIVED state owes this check, because a
+        // magnitude-only assert on a derived quantity is blind to exactly the error that inverts it.
+        let mats = crate::materials::load();
+        let blade = crate::assembly::compiled::parse(crate::assembly::compiled::GRASS_BLADE_DRY);
+        let (length, radius) = rod_for(&blade).expect("a blade is a rod");
+        let (width, thickness) = cross_section_for(&blade).expect("a section");
+        let member_mass = blade.mass_kg(&mats).expect("a mass").max(1e-12);
+        let material = blade
+            .parts
+            .first()
+            .map(|p| p.material.clone())
+            .unwrap_or_default();
+        let m = mats.iter().find(|m| m.id == material).expect("catalogued");
+        let ei = m.youngs_modulus as f64 * width * thickness.powi(3) / 12.0;
+        let w_per_m = member_mass / length * 9.81;
+
+        for (name, relax) in [("relax_flex", 0u8), ("relax_flex_under", 1u8)] {
+            let mut rod = a_horizontal_blade(length, radius, width, thickness);
+            if relax == 0 {
+                rod.relax_flex(ei, w_per_m, 9.81);
+            } else {
+                rod.relax_flex_under(ei, w_per_m, &[]);
+            }
+            let poly = rod.polyline();
+            let base = poly.first().expect("a base");
+            let tip = poly.last().expect("a tip");
+            assert!(
+                tip.y < base.y,
+                "{name}: a horizontal member must SAG under its own weight, but its tip is at \
+                 y {:+.6} against a base at y {:+.6} — it is arching upward against gravity",
+                tip.y,
+                base.y
+            );
+        }
+    }
+
+    #[test]
+    fn relaxing_twice_under_the_same_load_gives_the_same_shape() {
+        let mats = crate::materials::load();
+        let blade = crate::assembly::compiled::parse(crate::assembly::compiled::GRASS_BLADE_DRY);
+        let (length, _radius) = rod_for(&blade).expect("a blade is a rod");
+        // Exactly what `settle_traced` computes, not a re-derivation of it.
+        let member_mass = blade.mass_kg(&mats).expect("a mass").max(1e-12);
+        let material = blade
+            .parts
+            .first()
+            .map(|p| p.material.clone())
+            .unwrap_or_default();
+        let m = mats
+            .iter()
+            .find(|m| m.id == material)
+            .expect("the blade's material is catalogued");
+        let ei = {
+            let (w, t) = cross_section_for(&blade).unwrap_or((0.0, 0.0));
+            m.youngs_modulus as f64 * w * t.powi(3) / 12.0
+        };
+        let w_per_m = member_mass / length * 9.81;
+
+        let mut rods = release_rods_bent(&blade, 10, 20260810, ei, w_per_m).expect("a release");
+        let mut worst = 0.0f64;
+        let mut worst_i = 0usize;
+        for (i, r) in rods.iter_mut().enumerate() {
+            let before = r.polyline();
+            // Exactly what step 1 does when nothing is touching: relax under gravity, no contact loads.
+            r.relax_flex_under(ei, w_per_m, &[]);
+            let after = r.polyline();
+            assert_eq!(
+                before.len(),
+                after.len(),
+                "member {i} was re-segmented by a relaxation; a point-by-point diff would be meaningless"
+            );
+            let d = before
+                .iter()
+                .zip(after.iter())
+                .map(|(a, b)| (*a - *b).length())
+                .fold(0.0f64, f64::max);
+            if d > worst {
+                worst = d;
+                worst_i = i;
+            }
+        }
+        // ★ THE TWO CALL SITES DO NOT AGREE ON WHAT "WEIGHT PER UNIT LENGTH" MEANS.
+        // The release divides the member's weight by `rod_for(member).0` — the blade's ARCLENGTH.
+        // `settle_traced`'s per-step call divides by `2.0 * rod.half_length_m` — the capsule's straight
+        // length. Those are the same number only while the member is straight.
+        let r0 = &rods[0];
+        let straight = 2.0 * r0.half_length_m;
+        println!(
+            "arclength {length:.6} m · 2*half_length_m {straight:.6} m · ratio {:.6} · w_per_m release \
+{w_per_m:.6} vs per-step {:.6}",
+            straight / length,
+            member_mass / straight * 9.81
+        );
+
+        assert!(
+            worst < 1.0e-6,
+            "the release bends each member under gravity, so relaxing again under the SAME gravity \
+             must be a fixed point — but member {worst_i} moved a polyline point {worst:.4e} m, which \
+             is {:.1}% of its own {length:.3} m length. Matter that moves without a velocity is seen \
+             by no contact and no energy accounting (docs/46 row 79).",
+            100.0 * worst / length
+        );
     }
 }
