@@ -3,6 +3,48 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-09-14 — the heap was never frozen: four wrong hypotheses and one counter
+
+**`step_one_rod` was called 13,809,390 times with 0 skips.** One run, one counter, and row 78 dissolved.
+
+The heap was never frozen. It **fell and settled in 0.589 s** — about 0.32 s falling at terminal speed
+plus the 0.267 s the gauge requires to call a member supported — and `peak centre 0.000000 m/s` is exactly
+what a settled heap should report. I had read a correct result as a catastrophic one for a week.
+
+### Every anomaly was in an instrument
+
+- **`contacting_fraction` tested `r.ends()`** — the straight AXIS — while contact has used the bent
+  polyline since row 76. A blade drooping nearly a full length out of its own axis registered as touching
+  nothing, which is where "contacting fraction 0.000" came from.
+- **The envelope walked `r.ends()` too**, sampling empty space and missing the matter.
+- **And the packing figure cannot see bending at all.** With both instruments corrected it still reads
+  **0.03798, identical to five figures** — and that is not a bug: `flex_ei` is right (3.8645e-5) and
+  **10/10 members are bent**. A bent blade and a straight one simply occupy the SAME cells at the current
+  `cell_m`. `Settled::cell_m` has said so all along: *"the number without which the envelope is
+  meaningless."*
+
+So the packing number was never evidence about bending, in either direction. It cannot resolve a blade
+0.54 mm thick on a cell about a hundred times that.
+
+### ★★★ Four hypotheses, all refuted by measurement
+
+NaN. The bend direction. The release gate. Frozen members. Every one wrong, and each cost a 400-second run
+plus the reasoning around it. **Counting the calls would have refuted three of them on day one**, and it
+is the cheapest thing I could have done — I reached for explanations before asking whether the code
+executed.
+
+That is the sharper form of a lesson this ledger keeps recording. The instruments have been wrong more
+often than the physics all month; what is new here is that the *diagnosis* was wrong too, four times, while
+a one-line counter sat unasked.
+
+### What to do with the packing figure
+
+Nothing, until it can see what it is being asked about. Re-measure the envelope at a cell small enough to
+resolve a blade's diameter, and **converge it** — report packing against cell size until it stops moving,
+the same treatment `substep` gave the timestep. Any packing claim before that is a claim about `cell_m`.
+
+**Verified.** 658/658 native, 31 skipped, `mod app` clean for wasm32.
+
 ## 2026-09-10 — gravity decides which way a blade sags; the heap is still frozen
 
 **Row 77 closed.** `relax_flex` handed `Chain` a body-frame constant and `polyline` laid the result out
