@@ -9,6 +9,30 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★★ **The heap re-measured on the corrected release** (`docs/46` row 85). **What works now:** a blade
+  falls to **2.030 m/s at 0.3 s** against its ~2.05 m/s terminal velocity, and the occupied set is no
+  longer degenerate — cell count `9 → … → 4939` under refinement where row 79 measured a constant 1.
+  **What does not:** by 0.5 s the peak is **22.4 m/s (11× terminal)** and by **0.7 s the heap is NaN**.
+  Energy still enters at contact, bracketed to `0.3 s … 0.7 s`. **Every packing figure remains void.**
+
+- **`Settled::all_finite`** — a DIRECT predicate over every member's centre, velocity, spin, axis and
+  polyline nodes. On first use it disagreed with the module's existing check, which read `f64::max` folds:
+  `finite: DIRECT false · folded-statistics say true ★ THEY DISAGREE`. `f64::max` returns the non-NaN
+  operand, so a heap of NaN reports peak speed `0.000000` and a tidy packing — row 79's fingerprint, now
+  caught instead of believed.
+
+- ★★ **`Settled::cells_vs_cell` and the dimension invariant.** Halving the measurement cell multiplies the
+  occupied count by ~1 for a **point**, ~2 for a **curve**, ~4 for a **surface**, ~8 for a **solid**. Ten
+  blades read **2.0** — curves in a box — so **a packing fraction is meaningless until the occupied set is
+  volume-filling at the measurement scale.** General to any occupancy measure of any matter.
+
+- **`PILE_CAP_S`** — a measurement cap (not physics: it can only make `quiet` false, never true), because
+  one 10-blade run is ~47 million steps and 782 s of wall clock.
+
+- New gates: `a_settled_heap_is_made_of_numbers` (**fails by design**, row 85) and
+  `a_falling_member_does_not_exceed_its_terminal_velocity` (**passes**, and runs in the deploy gate rather
+  than being `#[ignore]`d into an orphan — it guards the half of the pile that works).
+
 - ★★★ **Fixed: the release bent every member the wrong way** (`docs/46` row 84, `docs/72` item 2). "What
   shape does this body take under load" was answered by two functions — `Rod::relax_flex_under` from the
   release, `Rod::relax_flex` from every step — with **opposite signs**. On a horizontal blade they put the
