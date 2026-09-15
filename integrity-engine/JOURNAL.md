@@ -3,6 +3,50 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-09-14 — the torque is not a units bug: it is bending meeting a rigid body
+
+Asked to fix the torque, I checked the units first instead of editing the line. **They are correct.**
+`a_n` is per-mass (m/s²), `× member_mass` is a force, `arm × force` is N·m, and `ang_vel_from_impulse`
+takes N·m·s. Ninth hypothesis refuted, and this one by reading rather than by a 400-second run.
+
+So the 581 N·m torque is *legitimate given the acceleration*. The fault is the loop it sits in, and one
+table names it:
+
+| contact | arm_perp = radius (5.4e-4 m) | arm_perp = 0.175 m |
+|---|---|---|
+| a_n = 1e2 m/s² | 0.0 m/s tip | 1.7 m/s |
+| a_n = 1e3 m/s² | 0.1 m/s | 16.9 m/s |
+| a_n = 1e4 m/s² | **0.5 m/s** | **169.2 m/s** |
+
+`I_axial` is **3.4e-10 kg·m²**. With a straight capsule the contact arm perpendicular to the axis is just
+the radius, and even a violent contact produces a harmless spin — **which is exactly why the pile was
+stable before row 76.** Once members bend, their polyline swings up to a half-length off their own axis,
+the arm grows **325×**, and an ordinary contact produces a 169 m/s tip. That raises the point velocity,
+which raises the damping force `c·v_n`, which raises the spin.
+
+**A runaway seeded by geometry, not by a wrong line.** My earlier `ω·dt` stability check assumed
+`arm = radius`, which is why it declared the axial mode comfortably stable.
+
+### This is a modelling decision and I am not making it as a patch
+
+A real grass blade pushed sideways at one point does not spin to 6.6e5 rad/s. It **bends**, and its
+contact is spread over an area rather than concentrated at a point on a rigid axis. The model has a body
+that bends for *drawing* and is rigid for *responding*, and that contradiction is what exploded.
+
+Candidates, in order of honesty:
+
+1. **Let the contact force bend the member** — row 77's open half. The energy goes into shape, which is
+   what the matter actually does.
+2. **Resolve contact per SEGMENT of the chain**, so each arm is a segment's own short offset rather than a
+   half-length from the body centre.
+3. **Treat the axial rotational mode implicitly**, since it is the stiff one.
+
+★ What I will not do is clamp the torque or inflate `I_axial`. Both are Law V fudges, both would make the
+symptom disappear, and both would hide a real disagreement between a rigid-body model and a body that is
+not rigid. The explosion is the model telling the truth about its own assumption.
+
+**Verified.** 658/658 native, 31 skipped, `mod app` clean for wasm32. No physics changed.
+
 ## 2026-09-14 — found: the neighbour torque, through the one path no assert covered
 
 ```

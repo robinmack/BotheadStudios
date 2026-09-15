@@ -9,6 +9,12 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The torque is not a units bug** (docs/46 row 79): `a_n · mass · arm` is dimensionally correct. The
+  real mechanism is geometric — `I_axial` is 3.4e-10 kg·m², and once members bend their contact arm
+  grows from a radius (5.4e-4 m) to a half-length (0.175 m), **325×**, so an ordinary contact produces a
+  169 m/s tip speed instead of 0.5. That feeds the damping term and runs away. **This is why the pile
+  was stable before polyline contact.** A modelling decision, not a patch; no physics changed.
+
 - ★★★ **The pile's NaN is located** (docs/46 row 79): the neighbour torque produces `|Δω| = 6.6e5 rad/s`
   in one step, from a torque **760,000× the member's own weight-moment**, amplified by an axial inertia
   four orders below the others. Suspect: `torque += arm.cross(a_n * member_mass)` against
