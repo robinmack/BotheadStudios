@@ -48,7 +48,8 @@ cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # silently absorbed — that number moving is a physics change even when the verdict does not move.
 DECLARED=(
   "F5b|3|docs/46 row 80 — the GPU's implicit solve realises a DIFFERENT restitution than the native path from the same catalogued number. Confirmed by this tool (commit 17eddbf) after its first calibration proved circular. Row 80 records THREE non-equivalent fix routes; choosing between them is a modelling decision reserved for Robin (docs/72 §2), so this stays declared, not fixed."
-  "D|1|docs/46 row 81 — emergent angle of repose sits far below the material's friction angle: 0.1-0.4 deg measured for mu 0.55-0.84, against real friction angles of 30-45 deg. ★ THE CAUSE IS NOT ESTABLISHED, and the declaration says so on purpose. The tool's own comment (main.rs:1026-1029, :1063) attributes it to continuum parcels rolling like marbles; docs/45:129-130 QUOTES that comment rather than corroborating it, so there is one source and no measurement. Rolling spheres explain 20-25 deg, not 0.2: scene D drops 117 grains, a 30 deg cone of that volume is h = 3.3 m, and 0.2 deg over the same footprint is h = 0.02 m -- BELOW ONE GRAIN RADIUS. That is 'no heap formed', not 'a shallower heap'. Unexcluded alternative: the instrument. repose_angle (main.rs:469-506) least-squares fits ring maxima out to the OUTERMOST OCCUPIED BIN (r up to 30 m), so a few grains at rest far from the pile flatten the reported angle whatever the heap is doing. Declared because the failure is REAL on either account. Do NOT patch it by cranking mu (main.rs:1028-1029), and do not close it by fixing the terrain to match the grains (docs/45:134-135)."
+  "D|1|docs/46 row 81 -- SCENE D HAS NEVER MEASURED AN ANGLE OF REPOSE. Its release births overlapping grains: the lattice spacing is exactly one grain diameter (s = 1.0 = 2*PART_HALF), so the 0.1-of-a-spacing disorder it adds for flow cannot fit. MEASURED: 113 of 6786 pairs overlap at t=0, worst 0.1605 m (16% of a grain). The contact spring answers that on step 1 -- k*overlap*dt = 5e5 * 0.1605 * 1.04e-3 = 84 m/s predicted, 56 m/s measured -- and the column detonates: grains reach rmax 379 m, 0 of 117 end up stacked on another, and the settled height is 0.6 of ONE GRAIN. The 0.2 deg is the debris field of an explosion. ★ NOT the rolling-parcels story and NOT instrument dilution: dilution is real and severe (one stray grain at 25 m costs ~22 deg) but has a FLOOR near 5 deg, proven with no GPU in repose_instrument_tests. ★★ WITH A VALID RELEASE the model gives 31.9-40.8 deg across mu 0.55-0.84 against real friction angles of 30-45 -- comparable, NOT the gross under-prediction docs/45 attributes to rolling. STAYS DECLARED because the fix is a choice about the scene's initial packing density (s=1.2/jf=0.05 gives 41.5 deg, s=1.3/jf=0.10 gives 35.3 deg), and what the scene measures is Robin's call, not an implementation detail -- docs/72 section 2."
+  "D-E|1|docs/46 row 83 -- the same defect, caught by the energy budget this tool never applied to scene D. Gravity is the only source, yet E reaches +638% of E0 at STEP 1 (5167 -> 38133 J/kg, vmax 56 m/s from rest). Scene I is the FUDGE DETECTOR and guards only ITS OWN configuration; scene D ran for its whole life with no energy check, which is exactly how a detonating scene kept reporting a plausible-looking small number. This check is NEW (2026-09-15) and fails on arrival by design: it is the defect written down where a fix can turn it green. It goes green when scene D's release stops overlapping -- see row 81."
 )
 
 # ── GRADING ──────────────────────────────────────────────────────────────────────────────────────
@@ -57,6 +58,11 @@ DECLARED=(
 # (its first token); an indented line inherits it. `adapter:` and blank lines are skipped explicitly —
 # the tool reprints the adapter mid-run (deliberately, so hardware provenance stays in the output),
 # and without this skip scene O's indented results would be attributed to "adapter".
+#
+# ★ HAZARD, hit for real on 2026-09-15: attribution is POSITIONAL, so printing a new column-0 check
+# BETWEEN an existing check's header and its indented verdict silently re-attributes that verdict to
+# the newcomer. It shows up as "DECLARED BUT NOT FOUND" for the check that lost its line — which the
+# gate does report (exit 3), so it is visible rather than silent. Keep a check's output contiguous.
 grade() {
   local log="$1"
   [[ -r "$log" ]] || { echo "GRADE: cannot read log '$log'" >&2; return 3; }
@@ -148,6 +154,7 @@ F5b catalogued restitution through the GPU: asked e 0.600 -> got 0.497  FAIL
 F6 friction (mu=0.6, vacuum): decel 5.89 vs 5.89  PASS
 D emergent repose vs REAL material friction:
    -> settles: true, plausible repose (12-42 deg): false  FAIL
+D-E energy budget of the repose scene: E0 5167 -> worst 38133 J/kg at step 1 (+638%)  FAIL
 K terrain non-injecting + supportive: rebound 0.50  PASS
 EOF
 
