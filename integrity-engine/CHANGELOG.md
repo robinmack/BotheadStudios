@@ -17,8 +17,11 @@ because **we are our own first customers** and pin exact engine versions in our 
   in it. Local-only by design — CI has no GPU runner, and `ci.yml` runs `test.sh`, so `test.sh` is the
   wrong home. `--selftest` grades six fixtures with no GPU, including a negative control on the real log.
   ★ **Two declared failures, not one**: F5b ×3 (row 80) and **scene D's angle of repose** — measured
-  0.1°–0.4° against real friction angles of 30–45°, a model deficiency docs/45 analyses and explicitly
-  forbids "fixing" by tuning μ. The second one was invisible while nothing graded the tool's output.
+  0.1°–0.4° against real friction angles of 30–45°, now **docs/46 row 81**. The second one was invisible
+  while nothing graded the tool's output. ★ Its *cause* is explicitly NOT established: 0.2° over scene D's
+  117-grain footprint is a heap `0.02 m` high, below one grain radius, so it reads as "no heap formed"
+  rather than the shallower heap that rolling parcels would give — and `repose_angle` fits out to the
+  outermost occupied bin, so scattered at-rest grains flatten it regardless. Declared, not explained.
 
 - **docs/72 item 1 corrected**: it named `MESA_VK_DEVICE_SELECT`, which `gpu-verify` never reads. The
   variable is `GPU_VERIFY_ADAPTER`, and its `.cargo/config.toml` default applies only through `cargo run`.

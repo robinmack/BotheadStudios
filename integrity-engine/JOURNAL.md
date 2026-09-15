@@ -35,6 +35,36 @@ decide · `3` harness failure. The expected failing-line *count* is recorded so 
 1-of-3 is reported rather than absorbed — that number moving is a physics change even when the verdict
 does not move.
 
+### The adversarial pass refuted my own account of scene D, and that is the physics finding
+
+I was about to record scene D as *"a known deficiency: continuum parcels roll like marbles, fix with
+rolling resistance"*. A refuter agent (`.claude/agents/integrity-refuter.md`) took that apart:
+
+- **The two sources are one.** That explanation originates in the tool's own comment
+  (`main.rs:1026-1029`). `docs/45:129-130` **quotes that comment** rather than corroborating it. Nothing
+  has measured it.
+- ★ **The magnitude refutes it as a complete account.** Scene D drops **117 grains** of 1 m diameter
+  (`main.rs:1042`). A 30° cone of that volume is `r = 5.8 m, h = 3.3 m`; 0.2° over the same footprint is
+  `h = 0.02 m` — **below one grain radius**. That is *no heap formed*, not *a shallower heap*. Rolling
+  spheres are the textbook explanation for 20–25°, nowhere near 0.2°.
+- **An instrument path nobody excluded.** `repose_angle` (`main.rs:469-506`) least-squares fits ring
+  maxima out to the **outermost occupied bin** (r up to 30 m), so a few grains at rest far from the pile
+  flatten the reported angle whatever the heap does — and scene E's own line (`spread 33.1 m`) shows
+  grains do settle tens of metres out. Row 79's pattern exactly: *every instrument hid it*.
+- **I mis-cited the doc.** I had `docs/45` forbidding a "fix" to the *acceptance criterion*; it forbids
+  fixing **the terrain** to match the grains, and calls the agreement test the *correct* criterion. The
+  string I quoted is not in the repo. That is the failure this role exists to catch, and it caught mine.
+
+It also found that **row 80 already carries the F5b numbers verbatim**, so opening a row for those would
+have duplicated. All of this is now `docs/46` **row 81**, with the separation experiment named: refit over
+the connected heap only, and print the ratio between successive bin widths (§3.9) before proposing physics.
+
+Two stale statements in the tool surfaced and are **left alone deliberately** — this change adds no engine
+code — but are recorded here so the next reader is not misled: `main.rs:755-768` still declares F5b's
+verdict untrustworthy because "the ζ bisection … SATURATES at its 50.0 ceiling … `e = 18.3`", which the
+current run contradicts (ζ 0.7312/0.3545/0.1809, no `e > 1`); and `main.rs:884` / `JOURNAL.md:7874` record
+F6 over-predicting at "ratio ≈ 1.35" where this run measures **1.00**.
+
 ### Where it runs, and where it deliberately does not
 
 **Not in `scripts/test.sh`.** `.github/workflows/ci.yml:58` runs `test.sh` on `ubuntu-latest`; there are
