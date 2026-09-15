@@ -363,7 +363,7 @@ fn floor_contact(
 }
 
 /// What a settled heap turned out to be.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Settled {
     pub members: usize,
     /// Substance in the heap, m³ — exactly `members × the member's own`.
@@ -377,6 +377,10 @@ pub struct Settled {
     /// The grid cell the envelope was measured on — the number without which the envelope is
     /// meaningless.
     pub cell_m: f64,
+    /// ★★ **Packing against cell size** — `(cell_m, packing)`, coarse to fine. A single packing number
+    /// is a claim about `cell_m`; this is the evidence for or against it being a claim about the HEAP.
+    /// Look for a plateau: without one there is no bulk density to report (docs/46 row 78).
+    pub packing_vs_cell: Vec<(f64, f64)>,
     /// ★ **Did it actually come to rest**, by `recohere::SettleGauge` asked at the CONTACT radius —
     /// this simulation's own resolution, not the coarser cell the envelope is reported on. The module
     /// doc has always said "if a heap is still moving at the end its packing is not a settled
@@ -742,6 +746,40 @@ pub fn step_one_rod(
         let impulse = k.inverse() * (hit.vel - v_foot);
         rod.apply_impulse_at(mass_kg, arm, impulse);
     }
+}
+
+/// ★★★ **THE SPACE A HEAP OCCUPIES, AT A STATED RESOLUTION** — m³, by occupancy on `cell` (docs/46 row
+/// 78).
+///
+/// Walks each member's REAL shape (`Rod::polyline`), because contact has been resolved against the bent
+/// polyline since row 76 and an envelope drawn round the straight axis measures a rod that is not there.
+///
+/// ★★ **The cell is not a detail, it is the question.** Packing is matter over envelope, and that ratio
+/// has NO limit as the cell shrinks: a fine enough cell wraps each blade individually, the envelope
+/// approaches the matter, and packing approaches 1 — which is a statement about a blade, not about a
+/// heap. A bulk packing exists only as a PLATEAU, on cells coarse enough to bridge the gaps between
+/// members and fine enough to follow the heap's outline. If there is no plateau, the heap has no bulk
+/// density at that member count and saying one is inventing it.
+pub fn envelope_m3_at(rods: &[Rod], cell: f64) -> f64 {
+    if cell <= 0.0 {
+        return 0.0;
+    }
+    let mut cells = std::collections::HashSet::new();
+    for r in rods {
+        for w in r.polyline().windows(2) {
+            let (e0, e1) = (w[0], w[1]);
+            let n = ((e1 - e0).length() / cell).ceil().max(1.0) as usize;
+            for k in 0..=n {
+                let p = e0.lerp(e1, k as f64 / n as f64);
+                cells.insert((
+                    (p.x / cell).floor() as i64,
+                    (p.y / cell).floor() as i64,
+                    (p.z / cell).floor() as i64,
+                ));
+            }
+        }
+    }
+    cells.len() as f64 * cell * cell * cell
 }
 
 /// ★ **THE RELEASE — one owner.** `settle_traced` drops members with these positions and
@@ -1304,6 +1342,23 @@ pub fn settle_traced(
         },
         height_m: height,
         cell_m: cell,
+        packing_vs_cell: {
+            let mut v = Vec::new();
+            let mut c = length; // start at a whole member and refine toward its diameter
+            while c > radius {
+                let e = envelope_m3_at(&rods, c);
+                v.push((
+                    c,
+                    if e > 0.0 {
+                        (matter / e).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    },
+                ));
+                c *= 0.5;
+            }
+            v
+        },
         quiet,
         elapsed_s,
         peak_speed_ms: peak_speed,
@@ -2120,6 +2175,26 @@ mod tests {
                     );
                     // ★ The gauge asks about the fastest POINT, so report what it is actually seeing:
                     // a heap can be translationally dead and still be turning.
+                    // ★★★ IS THERE A PLATEAU? A packing number without this sweep is a claim about
+                    // `cell_m` (docs/46 row 78). Packing has no limit as the cell shrinks — it runs to
+                    // 1 as the envelope wraps each blade — so a bulk density exists only where the
+                    // curve flattens.
+                    println!("      packing vs cell (coarse -> fine):");
+                    let sweep = &s.packing_vs_cell;
+                    for (i, (c, pk)) in sweep.iter().enumerate() {
+                        let change = if i == 0 {
+                            String::from("      -")
+                        } else {
+                            format!(
+                                "{:+7.1}%",
+                                100.0 * (pk - sweep[i - 1].1) / sweep[i - 1].1.max(1e-12)
+                            )
+                        };
+                        println!(
+                            "        cell {c:.5} m ({:5.1}x blade dia) -> packing {pk:.5} {change}",
+                            c / (2.0 * radius)
+                        );
+                    }
                     let last_surf = tr.last().map(|x| x.peak_surface_speed_ms).unwrap_or(0.0);
                     println!(
                         "      peak |ω| {last_w:.5} rad/s -> surface {:.6} m/s · quiescent {:.5} m/s -> {}",

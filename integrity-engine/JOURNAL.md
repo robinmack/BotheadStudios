@@ -3,6 +3,59 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-09-14 (later) — the heap is one cell wide: every packing number is void
+
+Converging the packing against cell size was meant to decide whether 0.03798 meant anything. It decided
+more than that.
+
+| cell | vs blade dia | packing | change |
+|---|---|---|---|
+| 0.35000 m | 325× | 0.00007 | — |
+| 0.17500 m | 163× | 0.00059 | **+700%** |
+| 0.08750 m | 81× | 0.00475 | **+700%** |
+| 0.04375 m | 41× | 0.03798 | **+700%** |
+| 0.02187 m | 20× | 0.30386 | **+700%** |
+| 0.01094 m | 10× | 1.00000 | clamped |
+
+**Exactly +700% per halving is exactly ×8** — the pure `cell³` factor. That can only happen if the
+occupied cell COUNT is constant. It is: **1 cell, at every resolution, down to 0.68 mm.**
+
+Ten blades, each 0.35 m long, inside a volume smaller than a grain of sand. **The heap collapses to a
+point.** There is no pile, and there never was one to measure.
+
+### It explains every prior anomaly at once
+
+- `contacting fraction 0.000` — coincident members have no meaningful closest approach.
+- `quiet` almost immediately — nothing can move once collapsed.
+- Packing identical to five figures across runs with materially different bending physics — the number
+  depended only on `cell`, never on the configuration. I noted that identity as suspicious twice and drew
+  the wrong conclusion from it both times.
+
+### ★★★ What this costs
+
+Every packing figure this module has produced is void: the 0.00074 baseline, the 0.03798 "improvement",
+the comparison against loose hay, and row 60 step 1's convergence-with-member-count. Not wrong by a
+factor — **measurements of a configuration that does not exist.** Some of those were quoted in this
+journal as evidence.
+
+The physics work they were measuring is not invalidated — the contact law, the rotational dynamics, the
+air, the bending chain each have their own tests against independent references. What is invalidated is
+every claim about *how a heap packs*.
+
+### ★ The tell was arithmetic, and it was visible earlier
+
+A quantity that changes by exactly the geometric factor of its own bin size is not measuring anything
+about its subject. I had the sweep's first three rows before I looked at the ratio; the +700% column was
+what made it undeniable. Recording that because "print the ratio between successive refinements" is
+cheap, general, and would have caught this the first time a packing number was quoted.
+
+**Row 79** names the next probe, and it is the same cheap kind that cracked row 78: print the members'
+POSITIONS — bounding box and pairwise separations — at release, at first contact, and at rest, before
+touching any physics. A collapse this total is likely one missing or inverted term. Row 74 is already
+suspicious: the release's no-overlap invariant is checked at `t = 0` only.
+
+**Verified.** 658/658 native, 31 skipped, `mod app` clean for wasm32.
+
 ## 2026-09-14 — the heap was never frozen: four wrong hypotheses and one counter
 
 **`step_one_rod` was called 13,809,390 times with 0 skips.** One run, one counter, and row 78 dissolved.

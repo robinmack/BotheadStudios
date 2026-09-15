@@ -9,6 +9,14 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★★ **The settled heap occupies ONE CELL at every resolution** (docs/46 row 79) — ten 0.35 m blades
+  inside a volume smaller than a grain of sand. Packing rose by exactly the `cell³` factor (+700% per
+  halving), which is the signature of a constant cell count. **Every packing figure this module has
+  reported is void**, including the 0.00074 baseline and the 0.03798 "improvement".
+- `pile::envelope_m3_at` measures the heap's envelope at a stated cell, walking members' real bent
+  shapes; `Settled::packing_vs_cell` carries the sweep, so a packing number now ships with the evidence
+  for or against it meaning anything.
+
 - ★★★ **The heap was never frozen** (docs/46 row 78). `step_one_rod` ran 13,809,390 times with 0 skips;
   the pile falls and settles in 0.589 s and `peak centre 0.000000 m/s` is a correct report. The
   anomalies were instruments: `contacting_fraction` and the ENVELOPE both walked the straight axis while
