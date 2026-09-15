@@ -3,6 +3,80 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-09-15 — the heap re-measured: half of it works now, and the numbers are still void
+
+Row 84 fixed a release that arched every member upward against its own weight. Robin asked for the heap
+numbers to be re-taken on the corrected release. They are, and the answer is split.
+
+### What the fix bought, measured
+
+- **A blade falls correctly.** Peak centre speed `0.098 → 0.942 → 1.681 → 2.030 m/s` at
+  `0.01 / 0.1 / 0.2 / 0.3 s`. That last figure is the blade's **terminal velocity in air (~2.05 m/s)**.
+  Gravity and drag are right, and `a_falling_member_does_not_exceed_its_terminal_velocity` now holds that
+  half down so it cannot regress.
+- **The occupied set is no longer degenerate.** Its cell count now GROWS under refinement —
+  `9 → 23 → 40 → 86 → 174 → 330 → 643 → 1240 → 2487 → 4939` — where row 79 measured a **constant 1 cell
+  at every resolution**.
+
+### What it did not fix
+
+By **0.5 s** the peak centre speed is **22.4 m/s — 11× terminal**. By **0.7 s the heap is NaN.** Energy
+still enters at **contact**, bracketed to `0.3 s … 0.7 s`. The sign fix was necessary and not sufficient.
+
+### ★★ The instruments still lie, and now that is provable rather than suspected
+
+`Settled` gained **`all_finite`**: a direct predicate over every member's centre, velocity, spin, axis and
+polyline nodes. On its first use it disagreed with the module's existing check:
+
+```
+PILE_CAP_S=0.7
+finite: DIRECT false · folded-statistics say true ★ THEY DISAGREE — believe the direct one
+```
+
+The old check read `height_m` and `peak_speed_ms` out of the trace — both `f64::max` folds, and
+`f64::max` **returns the non-NaN operand**. Row 79 records clearing NaN twice through exactly those
+instruments; this is why. The full 20 s run is row 79's fingerprint **verbatim**: packing **0.03798**,
+rising **exactly +700% per halving**, peak centre **0.000000 m/s**, peak `|ω|` **0.00000**, `quiet true
+after 1.188 s` — a heap of NaN reported as a settled heap. The reported peak speed even *falls* from
+22.4 to 4.55 m/s as members go NaN, because the fold starts reading only the survivors.
+
+**So every packing figure this module produces remains VOID**, and
+`heap_validity_tests::a_settled_heap_is_made_of_numbers` now says so as a test that **fails by design**
+rather than as a comment.
+
+### ★★★ The general law this produced — the refinement ratio measures DIMENSION
+
+Row 79's tell was never the packing *value*; it was the packing's *scaling*. Halving the cell multiplies
+the occupied cell count by:
+
+| ratio | the matter is | seen here |
+|---|---|---|
+| ~1 | a **point** | row 79's collapsed heap (constant 1 cell) |
+| **~2** | a **curve** | **this heap: 2.0×, ten thin blades** |
+| ~4 | a **surface** | — |
+| ~8 | a **solid** | what a real bale must reach |
+
+**A packing fraction is meaningless until the occupied set is volume-filling at the measurement scale.**
+Ten blades read 2.0 — they are curves in a box, so "packing" is measuring the box, not the straw. A bale
+must approach 8 above the blade diameter before its packing number means anything.
+
+This is the cheap invariant that separates *a heap* from *a point* **without trusting any packing value**,
+and it is not about straw: it applies to any occupancy measure of any matter — grains, foam, fibre,
+debris, ejecta. `Settled::cells_vs_cell` exposes it, because until now a caller could not ask.
+
+### Verified
+
+**668/668 native** (one new test in the deploy gate), 32 skipped, `mod app` compiles, numbering gate
+green, `cargo fmt --check` clean. `--fast` skips the 12 s falling-member test via `SLOW_FILTER`; the full
+run does not, deliberately — an `#[ignore]`d test is an orphan (row 82), and this one guards the half of
+the pile that works.
+
+★ `PILE_CAP_S` is a **measurement** knob, not a physics one: it bounds how long a run may go before
+reporting, and can only ever make `quiet` false, never true. It exists because this heap is ~47 million
+steps at the default cap — 782 s of wall clock for one 10-blade run — and a measurement you cannot afford
+to take is a measurement you do not have.
+
+
 ## 2026-09-15 — matter that moves without a velocity
 
 `docs/72` queue item 2 asked for the pile's step-2 overlap to be *"explained by a measurement, not a

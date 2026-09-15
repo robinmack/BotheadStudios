@@ -24,10 +24,15 @@
 set -uo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# The five long-running integration tests. Kept in one place, in both the nextest filterset syntax
+# The long-running integration tests. `terminal_velocity` joined them 2026-09-15 (docs/46 row 85): a
+# single blade falling for 0.3 s of sim time is ~700,000 steps at this member's timestep and costs ~12 s.
+# It is here rather than `#[ignore]`d on purpose — an ignored test is an orphan (row 82), and this one
+# guards the half of the pile that WORKS (free fall to terminal velocity) while the contact half is
+# still NaN, so it must keep running or that half can regress unnoticed.
+# The five original long-running integration tests. Kept in one place, in both the nextest filterset syntax
 # and the libtest --skip form, so --fast means the same thing on either runner.
-SLOW_FILTER='test(theia) | test(birth_scene) | test(provenance) | test(sph_air_field) | test(dropped_moon_impact)'
-SLOW_SKIPS=(--skip theia --skip birth_scene --skip provenance --skip sph_air_field --skip dropped_moon_impact)
+SLOW_FILTER='test(theia) | test(birth_scene) | test(provenance) | test(sph_air_field) | test(dropped_moon_impact) | test(terminal_velocity)'
+SLOW_SKIPS=(--skip theia --skip birth_scene --skip provenance --skip sph_air_field --skip dropped_moon_impact --skip terminal_velocity)
 
 fast=0
 args=()

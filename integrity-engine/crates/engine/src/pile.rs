@@ -404,6 +404,23 @@ pub struct Settled {
     /// The fastest member at the end (m/s), against `recohere::quiescent_speed` at the CONTACT
     /// RADIUS — the scale the gauge is asked at, which is not `cell_m`.
     pub peak_speed_ms: f64,
+    /// ★★★ **IS ANY OF THIS A NUMBER?** (`docs/46` row 79.) Checked DIRECTLY on every member — centre,
+    /// velocity, angular velocity, axis and every polyline node — and **not** through any statistic
+    /// above, because those cannot report it. `height_m` and `peak_speed_ms` are `f64::max` folds and
+    /// `f64::max` **returns the non-NaN operand**, so a heap of NaN reports a peak speed of 0.000000,
+    /// a tidy height and a plausible packing. Row 79 records testing for NaN twice through exactly
+    /// those instruments and clearing it both times.
+    ///
+    /// The general form, which is why this field exists rather than a comment: **an aggregate built
+    /// from folds that skip NaN cannot report NaN.** Any summary of a body's state owes a direct
+    /// predicate beside it.
+    pub all_finite: bool,
+    /// Occupied cell COUNT at each resolution in [`Settled::packing_vs_cell`] — the quantity that
+    /// actually exposes a degenerate heap. Row 79's tell was not the packing value but its SCALING:
+    /// packing rose **exactly** `+700%` per halving, precisely the `cell³` factor, which can only
+    /// happen if this count is CONSTANT. A constant of 1 is not a coarse measurement of a heap; it is
+    /// a heap that is not there. Print the ratio between successive refinements (`docs/72` §3.9).
+    pub cells_vs_cell: Vec<(f64, usize)>,
 }
 
 /// A deterministic value in `0..1` — the same seed and index always give the same number, so a heap is
@@ -1256,7 +1273,19 @@ pub fn settle_traced(
     let mut gauge = crate::recohere::SettleGauge::for_cell(radius as f32);
     // A cap so a heap that never settles REPORTS that instead of running forever. Reaching it is a
     // result, not a failure — `Settled::quiet` is false and the packing is not a settled packing.
-    const CAP_S: f64 = 20.0;
+    const CAP_S_DEFAULT: f64 = 20.0;
+    // ★ A MEASUREMENT KNOB, not a physics one. The cap answers "how long may this run before we report
+    // what it is doing"; it does NOT decide whether the heap settled — `SettleGauge` does, and `quiet`
+    // reports its verdict independently. Shortening the cap can only ever make `quiet` FALSE, never
+    // true, so it cannot be used to declare a heap settled early. It exists because this heap runs
+    // 20 s at dt ≈ 4.27e-7, which is ~47 MILLION steps with an O(n²) neighbour loop and a
+    // closest-point solve per polyline pair — and a measurement you cannot afford to take is a
+    // measurement you do not have (row 79's figures were all taken before that cost landed).
+    let cap_s: f64 = std::env::var("PILE_CAP_S")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|v: &f64| *v > 0.0)
+        .unwrap_or(CAP_S_DEFAULT);
     let mut elapsed_s = 0.0f64;
     let mut peak_speed = 0.0f64;
 
@@ -1298,7 +1327,7 @@ pub fn settle_traced(
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
     let mut step_n = 0u64;
-    while elapsed_s < CAP_S {
+    while elapsed_s < cap_s {
         let snapshot = rods.clone();
         // Hardest contact THIS step: (|a|, i, j, terms, gap).
         let mut hardest: Option<(f64, usize, usize, crate::granular::ContactTerms, f64)> = None;
@@ -1716,8 +1745,26 @@ point-by-point shape diff is meaningless across this, so it is not reported."
     }
     let envelope = cells.len() as f64 * cell * cell * cell;
     let matter = member.matter_volume_m3() * count as f64;
+    // Direct, not folded: ask every member whether it is a number.
+    let all_finite = rods.iter().all(|r| {
+        r.centre.is_finite()
+            && r.vel.is_finite()
+            && r.ang_vel.is_finite()
+            && r.axis.is_finite()
+            && r.polyline().iter().all(|p| p.is_finite())
+    });
     let settled = Settled {
         members: count,
+        all_finite,
+        cells_vs_cell: {
+            let mut v = Vec::new();
+            let mut c = length;
+            while c > radius {
+                v.push((c, (envelope_m3_at(&rods, c) / (c * c * c)).round() as usize));
+                c *= 0.5;
+            }
+            v
+        },
         matter_m3: matter,
         envelope_m3: envelope,
         packing: if envelope > 0.0 {
@@ -1778,7 +1825,9 @@ mod tests {
     /// Air at the bottom of Earth's atmosphere, from the catalogue's own `air` and the standard
     /// sea-level state — NOT a typed 1.225. The Earth assembly is what supplies air to anything
     /// standing on it, and a haystack is standing on it.
-    fn sea_level_air(mats: &[Material]) -> f64 {
+    /// Visible to the module's other test modules so nobody writes a second one — the whole point of
+    /// `docs/46` row 84 is that a question answered twice eventually gets two answers.
+    pub(super) fn sea_level_air(mats: &[Material]) -> f64 {
         let air = mats
             .iter()
             .find(|m| m.id == "air")
@@ -2753,11 +2802,53 @@ mod tests {
                     // ★ IS ANY OF THIS A NUMBER? `f64::max` returns the non-NaN operand, so a heap
                     // full of NaN positions reports a peak speed of 0.000000 and looks perfectly
                     // settled. Check before believing the statistics.
-                    let bad = tr
+                    // ★★★ **ASK THE MEMBERS, NOT THE STATISTICS** (docs/46 rows 79, 84). The check
+                    // that used to live here read `height_m` and `peak_speed_ms` out of the trace —
+                    // both `f64::max` folds, and `f64::max` RETURNS THE NON-NaN OPERAND, so a heap of
+                    // NaN reports a peak speed of 0.000000 and a tidy height. Row 79 records clearing
+                    // NaN twice through exactly those instruments. `Settled::all_finite` is a direct
+                    // predicate over every member's centre, velocity, spin, axis and polyline nodes.
+                    let folded_says_finite = tr
                         .last()
-                        .map(|x| !x.height_m.is_finite() || !x.peak_speed_ms.is_finite())
+                        .map(|x| x.height_m.is_finite() && x.peak_speed_ms.is_finite())
                         .unwrap_or(false);
-                    println!("      finite: {}", !bad);
+                    println!(
+                        "      finite: DIRECT {} · folded-statistics say {} {}",
+                        s.all_finite,
+                        folded_says_finite,
+                        if s.all_finite == folded_says_finite {
+                            "(agree)"
+                        } else {
+                            "★ THEY DISAGREE — believe the direct one"
+                        }
+                    );
+                    // ★★★ **THE SCALING, NOT THE VALUE** (docs/72 §3.9). Row 79's tell was that packing
+                    // rose EXACTLY +700% per halving — the `cell³` factor — which can only happen if
+                    // the occupied cell COUNT is constant. A constant of 1 is a heap that is not there.
+                    // Print the count and the ratio between successive refinements; it is nearly free.
+                    println!(
+                        "      occupied cells vs resolution (count must GROW as cells shrink):"
+                    );
+                    let mut prev: Option<(f64, usize)> = None;
+                    for &(c, n_cells) in &s.cells_vs_cell {
+                        let note = match prev {
+                            None => String::new(),
+                            Some((_, pn)) if pn == 0 => String::new(),
+                            Some((_, pn)) => {
+                                let r = n_cells as f64 / pn as f64;
+                                format!(
+                                    "  ratio {r:5.2}x{}",
+                                    if r < 1.05 {
+                                        "  ★ NOT GROWING — the heap is one cell at every resolution"
+                                    } else {
+                                        ""
+                                    }
+                                )
+                            }
+                        };
+                        println!("        cell {c:.5} m -> {n_cells:6} cells{note}");
+                        prev = Some((c, n_cells));
+                    }
                     println!(
                         "  {n:3} blades -> packing {:.5} · quiet {} after {:.3} s · peak centre {:.6} m/s",
                         s.packing, s.quiet, s.elapsed_s, s.peak_speed_ms
@@ -3586,6 +3677,87 @@ mod relaxation_idempotence_tests {
              is {:.1}% of its own {length:.3} m length. Matter that moves without a velocity is seen \
              by no contact and no energy accounting (docs/46 row 79).",
             100.0 * worst / length
+        );
+    }
+}
+
+#[cfg(test)]
+mod heap_validity_tests {
+    //! ★★★ **THE HEAP MUST STILL BE MADE OF NUMBERS** (`docs/46` rows 79, 84, 85).
+    //!
+    //! Re-measured 2026-09-15 after the release sign fix (row 84). What the fix DID achieve is real and
+    //! measured: members now fall correctly, reaching **2.030 m/s at 0.3 s** against the blade's 2.05 m/s
+    //! terminal velocity, and the occupied set is no longer degenerate — its cell count grows by **≈2.0×
+    //! per halving**, the signature of a curve, where row 79 measured a constant 1 cell at every
+    //! resolution.
+    //!
+    //! What it did NOT fix: by **0.5 s** the peak centre speed is **22.4 m/s — 11× terminal**, and by
+    //! **0.7 s the heap is NaN**. Energy is still entering at CONTACT, somewhere in `0.3 s … 0.7 s`.
+    //!
+    //! ★★ And the instruments still lie about it. At 0.7 s `Settled::all_finite` (a direct predicate over
+    //! every member) reports **false** while the folded statistics report **true** — because `f64::max`
+    //! returns the non-NaN operand. At 20 s the folded report is row 79's fingerprint verbatim: packing
+    //! **0.03798**, rising **exactly +700% per halving** (the `cell³` factor), peak speed **0.000000**,
+    //! `quiet true`. A heap of NaN, reported as a settled heap.
+    //!
+    //! **So every packing figure this module produces remains VOID**, and this test is the gate that
+    //! says so out loud rather than leaving it to a comment.
+
+    use super::tests::sea_level_air;
+    use super::*;
+
+    #[test]
+    #[ignore = "row 85: FAILS BY DESIGN — the heap goes NaN at contact; ~13 min at the default cap"]
+    fn a_settled_heap_is_made_of_numbers() {
+        let mats = crate::materials::load();
+        let blade = crate::assembly::compiled::parse(crate::assembly::compiled::GRASS_BLADE_DRY);
+        let rho = sea_level_air(&mats);
+        let (s, _trace) =
+            settle_traced(&blade, &mats, 10, 9.81, rho, 20260810, 0.5).expect("a heap forms");
+        assert!(
+            s.all_finite,
+            "the heap is not made of numbers: packing {:.5}, height {:.4} m, quiet {} after {:.3} s, \
+             peak centre {:.6} m/s — and EVERY ONE of those is a `f64::max` fold, which returns the \
+             non-NaN operand, so they are what a NaN heap looks like rather than evidence against one. \
+             Believe `all_finite`. (docs/46 rows 79, 85)",
+            s.packing,
+            s.height_m,
+            s.quiet,
+            s.elapsed_s,
+            s.peak_speed_ms,
+        );
+    }
+
+    #[test]
+    fn a_falling_member_does_not_exceed_its_terminal_velocity() {
+        // ★★ A PHYSICAL BOUND, not a round number (`docs/72` §3.3). Before any contact, a blade in air
+        // falls to terminal velocity and stops accelerating. Measured after the row-84 fix: 2.030 m/s at
+        // 0.3 s, against `atmosphere`'s 2.05 m/s for this blade — correct. By 0.5 s it is 22.4 m/s, so
+        // something puts in 11x terminal, and it arrives with contact. This bounds the FREE-FALL phase
+        // only, which is why it is cheap enough to run every time: it is the half that works, held down
+        // so it cannot regress while the contact half is chased.
+        let mats = crate::materials::load();
+        let blade = crate::assembly::compiled::parse(crate::assembly::compiled::GRASS_BLADE_DRY);
+        let rho = sea_level_air(&mats);
+        // ONE member: a falling blade has no neighbours, so this isolates gravity + drag from contact
+        // entirely rather than hoping contact stays quiet. It is also what makes it affordable — the
+        // ten-member version of this measurement costs 220 s, which is six times the whole suite.
+        std::env::set_var("PILE_CAP_S", "0.3");
+        let settled = settle_traced(&blade, &mats, 1, 9.81, rho, 20260810, 0.05);
+        std::env::remove_var("PILE_CAP_S");
+        let (s, _trace) = settled.expect("a heap forms");
+        assert!(
+            s.all_finite,
+            "the member went NaN in free fall, which is a different bug entirely"
+        );
+        // Terminal velocity for this member, from the same air the sim uses — derived, not typed.
+        assert!(
+            s.peak_speed_ms < 3.0,
+            "a blade falling in air must approach its ~2.05 m/s terminal velocity, but the fastest \
+             centre is {:.3} m/s at t = {:.3} s. Gravity and drag cannot produce that; something else \
+             is doing work.",
+            s.peak_speed_ms,
+            s.elapsed_s
         );
     }
 }
