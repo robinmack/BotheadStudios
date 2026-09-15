@@ -3,6 +3,99 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-09-15 — scene D has never measured an angle of repose; it has been timing an explosion
+
+`docs/46` row 81 asked whether the GPU grain path's 0.2° repose was a real physics failure or a diluted
+fit. **It is neither, and the answer arrived in two halves — the cheaper half first.**
+
+### Half one: bound the instrument, with no GPU at all
+
+Feed `repose_angle` geometry whose answer is known in advance. It recovers a 30° cone as **28.89°**, so
+it works. Dilution is real and brutal — **one** stray grain at 25 m costs about 22° — but it has a
+**floor near 5°**, because the fit still spans the cone's 3.34 m drop. Scene D reports 0.1–0.4°, an order
+of magnitude *below* that floor. So dilution was never a sufficient explanation.
+
+The falsification run was the diagnostic one: flatten the synthetic cone to 0.05 m and the diluted fit
+reads **0.08°** — scene D's exact band. A real cone cannot get there; a flat configuration lands there
+immediately.
+
+### Half two: look at the geometry
+
+| | measured |
+|---|---|
+| settled height | **0.56 m = 0.6 of ONE GRAIN** |
+| grains stacked on another | **0 of 117** |
+| radial spread | r50 **22.5 m**, r90 **103.5 m**, rmax **376.5 m** |
+
+From a column of radius 2 m. Most grains end up outside `repose_angle`'s own 30 m window.
+
+### The cause: the release births overlapping grains
+
+`column()` lays a lattice of spacing `s = 1.0 m` while a grain's contact diameter is `2·PART_HALF =
+1.0 m` — **exactly touching, zero margin** — and then displaces each grain by up to `±0.1·s` per axis
+"so it packs randomly and can flow". Any inward displacement is therefore an overlap. Measured:
+**113 of 6786 pairs overlap at `t = 0`, worst 0.1605 m — 16% of a grain.**
+
+The contact spring answers on step 1. **Energy reaches +638% of E₀ with `vmax = 56 m/s`, from rest.** The
+arithmetic closes: `k·overlap·dt = 5e5 × 0.1605 × 1.04e-3 = 84 m/s` predicted against **56 measured**,
+lower as damping and opposing neighbours moderate it. Everything after is the debris arc — which is why
+the "settled" state is 0.6 of a grain tall and a quarter-kilometre wide.
+
+This is `docs/46` row 79's lesson in a second module: *the release must guarantee no overlap at `t = 0`.*
+`pile` learned it and got an invariant; `column()` never had one. Same disease, two code paths.
+
+### And the opposite release fails the opposite way
+
+Remove the disorder (`jf = 0`, the only value this lattice admits) and the column **never collapses**:
+height 8.00 m, 89% stacked, `rmax 2.0 m`, `vmax 0.03`. A perfect crystal has no symmetry to break, and at
+exactly touch the overlap is zero, so there is no normal force and hence no friction either. It reports
+0.0°. **The jitter exists precisely to prevent that.** The scene is trapped between a detonation and a
+pillar, and both land in the same small-number band — which no assertion could distinguish.
+
+### ★★★ With a valid release the model is fine, and that is the consequential part
+
+Widen the lattice so the disorder fits (0 overlapping pairs) and a real cone forms — height 2.7 m, ~35%
+stacked, `rmax 4.5 m`, energy strictly falling:
+
+| μ | 0.55 dirt | 0.60 granite | 0.67 sand | 0.70 basalt | 0.84 gravel |
+|---|---|---|---|---|---|
+| **emergent** | 35.3° | 36.9° | 32.5° | 31.9° | 40.8° |
+| real friction angle | 30° | 45° | 34° | 45° | 40° |
+
+Comparable, and every one inside the scene's own 12–42° band — it would **pass**.
+
+**So `docs/45`'s standing explanation — spherical parcels roll, therefore they under-predict, therefore
+terrain-vs-grain agreement is BLOCKED on rolling resistance (`docs/45:186`) — was fitted to a number
+produced by an invalid initial condition, and must be re-examined.** Not refuted outright: docs/45 may
+carry other evidence, and these angles do **not** order with μ, though at 63 grains that may be sampling
+noise rather than physics and needs a convergence test before anyone concludes.
+
+### Not fixed, deliberately — and what landed instead
+
+The repair is a choice about the scene's initial packing density, and **the answer moves with it**:
+`s=1.2, jf=0.05` → 41.5°; `s=1.3, jf=0.10` → 35.3°; grain count 117 → 72 → 63. What the scene measures is
+a modelling decision, which `docs/72` §2 reserves for Robin. So the defect is written down executably
+instead:
+
+- `release_invariant_tests::the_released_column_has_no_overlapping_pair` — `#[ignore]`d and **failing by
+  design**, carrying the measured overlap in its message.
+- **`D-E`, a new energy check on scene D** (`docs/46` **row 83**) — fails on arrival. Scene I is this
+  tool's "FUDGE DETECTOR" and guards **its own configuration only**; scene D ran its whole life with no
+  energy check, which is exactly how a detonating scene kept reporting a reasonable-looking number. A
+  conservation law checked in one scene is a spot check, not a law.
+- `repose_instrument_tests` — five tests that give `repose_angle` its **first test of any kind**. It has
+  been reporting numbers into a gate since it was written, against nothing.
+
+### Verified
+
+`scripts/gpu-gate.sh` **GREEN** with three declared failures (`D` 1/1, `F5b` 3/3, `D-E` 1/1), 28 check ids,
+30 PASS / 5 FAIL, on the RTX 5060 Ti. ★ The gate earned itself here: when `D-E` was added it reported
+**GATE RED — an UNDECLARED check failed**, which is precisely the job. It also caught a mistake I made
+adding it — printing a new column-0 check *between* scene D's header and its indented verdict silently
+re-attributed that verdict, and the gate surfaced it as `D DECLARED BUT NOT FOUND`. Attribution is
+positional; keep a check's output contiguous. Grader self-test 7/7. Engine untouched: 660/660 native.
+
+
 ## 2026-09-15 — something runs gpu-verify now, and it does not grade itself green
 
 `tools/gpu-verify` is the only thing that checks the GPU granular path's *physics* on real hardware,

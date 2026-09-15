@@ -9,6 +9,27 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★★ **`gpu-verify` scene D has never measured an angle of repose** (`docs/46` rows 81, 83). Its release
+  births overlapping grains — the lattice spacing is exactly one grain diameter, so the 0.1-of-a-spacing
+  disorder it adds for flow cannot fit — and **113 of 6786 pairs overlap at `t = 0`, worst 0.1605 m**. The
+  contact spring answers on step 1: **energy +638% of E₀, `vmax 56 m/s` from rest**, grains scattered to
+  **376 m** from a 2 m column, **0 of 117 stacked**, settled height 0.6 of one grain. The 0.2° was the
+  debris field of a detonation. Removing the disorder fails the opposite way — a perfect crystal that never
+  collapses (0.0°). **With a valid release the model gives 31.9–40.8° against real friction angles of
+  30–45°**, so `docs/45`'s "spherical parcels roll, therefore under-predict, therefore blocked on rolling
+  resistance" was fitted to an invalid initial condition and needs re-examination. **Not fixed** — the
+  repair is a choice about initial packing density and the answer moves with it (41.5° vs 35.3°), which
+  `docs/72` §2 reserves.
+
+- **New: `D-E`, an energy check on scene D**, and `release_invariant_tests` — both **fail by design**, both
+  declared in `scripts/gpu-gate.sh`'s manifest, so the defect is executable rather than prose. Scene I is
+  the "fudge detector" and guards only its own configuration; a conservation law checked in one scene is a
+  spot check, not a law (row 83).
+
+- **`repose_angle` has its first tests of any kind** (`repose_instrument_tests`, no GPU required): it
+  recovers a known 30° cone as 28.89°, one stray grain at 25 m costs ~22°, and dilution has a floor near 5°
+  — which is what proved dilution could not explain 0.2°.
+
 - **`scripts/gpu-gate.sh` — something runs `gpu-verify` now.** The only check of the GPU granular path's
   physics on real hardware had **no caller at all** (docs/72 item 1). The gate runs it on the pinned card
   and grades the result against a **declared-failure manifest**, so a new failure is distinguishable from

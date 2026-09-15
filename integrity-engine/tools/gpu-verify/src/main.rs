@@ -506,13 +506,136 @@ fn repose_angle(ps: &[Particle]) -> f32 {
     (-slope).max(0.0).atan().to_degrees()
 }
 
+/// ★★ **THE SEPARATION MEASUREMENT** (`docs/46` row 81). `repose_angle` returns one number, and two
+/// very different worlds produce a small one: a real heap whose fit has been diluted by a few grains at
+/// rest far away, or no heap at all. They demand opposite responses — fix the instrument, or fix the
+/// physics — so the number alone cannot be acted on.
+///
+/// `repose_instrument_tests` bounds the instrument half with no GPU: a real 3.34 m cone, diluted by any
+/// number of strays at the edge of the binned range, still reads above ~5°, because the fit still spans
+/// a 3.34 m drop. Scene D reports 0.1–0.4°. **So dilution is not sufficient and the geometry must be
+/// looked at directly.** This prints it.
+///
+/// The discriminator is `stacked` — grains more than three quarters of a grain above the floor. A cone
+/// of 117 grains has most of them stacked; a collapsed monolayer has almost none, whatever its radius.
+/// Set `GPU_VERIFY_REPOSE_DEBUG=1`. Deliberately emits no `PASS`/`FAIL` token: `scripts/gpu-gate.sh`
+/// attributes those to check ids, and a diagnostic must not invent one.
+fn repose_profile(ps: &[Particle]) -> String {
+    let n = ps.len();
+    if n == 0 {
+        return "   (no grains)".into();
+    }
+    let cx = ps.iter().map(|p| p.offset[0]).sum::<f32>() / n as f32;
+    let cz = ps.iter().map(|p| p.offset[2]).sum::<f32>() / n as f32;
+    let (lo, hi) = min_max(ps.iter().map(|p| p.offset[1]));
+    let grain = 2.0 * PART_HALF;
+
+    let mut radii: Vec<f32> = ps
+        .iter()
+        .map(|p| ((p.offset[0] - cx).powi(2) + (p.offset[2] - cz).powi(2)).sqrt())
+        .collect();
+    radii.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let q = |f: f32| radii[((n as f32 - 1.0) * f) as usize];
+
+    // Genuinely stacked: standing more than 3/4 of a grain above the lowest grain. A heap is grains on
+    // top of grains; this counts them without assuming any shape.
+    let stacked = ps.iter().filter(|p| p.offset[1] - lo > 0.75 * grain).count();
+
+    // The CONNECTED heap: bins contiguous from the peak, stopping at the first gap. This is the refit
+    // row 81 asks for — it is what the angle would be if the far strays were not in the fit.
+    let bin_w = 0.5f32;
+    let nbins = 60usize;
+    let mut maxh = vec![f32::MIN; nbins];
+    for p in ps {
+        let rr = ((p.offset[0] - cx).powi(2) + (p.offset[2] - cz).powi(2)).sqrt();
+        let b = (rr / bin_w) as usize;
+        if b < nbins {
+            maxh[b] = maxh[b].max(p.offset[1]);
+        }
+    }
+    let peak_bin = (0..nbins).filter(|&b| maxh[b] > f32::MIN).max_by(|&a, &b| {
+        maxh[a].partial_cmp(&maxh[b]).unwrap()
+    });
+    let mut connected: Vec<(f32, f32)> = Vec::new();
+    if let Some(pb) = peak_bin {
+        for b in pb..nbins {
+            if maxh[b] <= f32::MIN {
+                break; // the first empty ring is the heap's edge
+            }
+            connected.push(((b as f32 + 0.5) * bin_w, maxh[b]));
+        }
+    }
+    let connected_angle = if connected.len() >= 2 {
+        let m = connected.len() as f32;
+        let sr: f32 = connected.iter().map(|p| p.0).sum();
+        let sh: f32 = connected.iter().map(|p| p.1).sum();
+        let srr: f32 = connected.iter().map(|p| p.0 * p.0).sum();
+        let srh: f32 = connected.iter().map(|p| p.0 * p.1).sum();
+        let denom = m * srr - sr * sr;
+        if denom.abs() < 1.0e-9 {
+            0.0
+        } else {
+            (-((m * srh - sr * sh) / denom)).max(0.0).atan().to_degrees()
+        }
+    } else {
+        0.0
+    };
+    let edge = connected.last().map(|p| p.0).unwrap_or(0.0);
+
+    format!(
+        "     profile: height {:.2} m = {:.1} grains · stacked {}/{} ({:.0}%) · r50 {:.1} r90 {:.1} \
+r99 {:.1} rmax {:.1} m\n     connected heap: edge {:.1} m over {} rings -> refit {:.2}°  (all-bins fit \
+{:.2}°)",
+        hi - lo,
+        (hi - lo) / grain,
+        stacked,
+        n,
+        100.0 * stacked as f32 / n as f32,
+        q(0.50),
+        q(0.90),
+        q(0.99),
+        radii[n - 1],
+        edge,
+        connected.len(),
+        connected_angle,
+        repose_angle(ps),
+    )
+}
+
 /// A solid cylinder of grains (0.5 m lattice) of radius `rad`, height `h`, resting base at `y0`.
 fn column(rad: f32, h: f32, y0: f32) -> Vec<Particle> {
-    let s = 1.0f32;
+    column_jittered(rad, h, y0, 0.1)
+}
+
+/// `column` with the disorder amplitude exposed, as a FRACTION of the lattice spacing.
+///
+/// ★★★ **`jf = 0.1` births overlapping grains and that is `docs/46` row 81.** The lattice spacing is
+/// `s = 1.0` m and a grain's contact diameter is `2 × PART_HALF = 1.0` m, so neighbours start EXACTLY
+/// touching with zero margin — any inward displacement is an overlap. Measured: 113 of 6786 pairs
+/// overlap, worst 0.1605 m (16% of a grain). `jf = 0.0` is the only value of this parameter that
+/// satisfies the release invariant on THIS lattice, and it is what the row-81 diagnostic uses to ask
+/// what the scene does when it is not detonating.
+fn column_jittered(rad: f32, h: f32, y0: f32, jf: f32) -> Vec<Particle> {
+    column_lattice(rad, h, y0, 1.0, jf)
+}
+
+/// `column` with BOTH the lattice spacing and the disorder amplitude exposed (`docs/46` row 81).
+///
+/// The shipped scene uses `s = 1.0` (exactly a grain diameter) with `jf = 0.1`, and those two cannot
+/// both be satisfied: a lattice at exactly touch has **no margin for disorder**, so every jitter is an
+/// overlap. A valid release needs `s > touch` by enough to contain the displacement. Measured margins:
+///
+/// | s | jf | grains | overlapping pairs | min gap |
+/// |---|---|---|---|---|
+/// | 1.0 | 0.10 | 117 | **113** | **−0.1605** |
+/// | 1.0 | 0.00 | 117 | 0 | 0.0000 (a perfect crystal — it never collapses) |
+/// | 1.2 | 0.05 | 72 | 0 | +0.1071 |
+/// | 1.3 | 0.10 | 63 | 0 | +0.1016 |
+fn column_lattice(rad: f32, h: f32, y0: f32, s: f32, jf: f32) -> Vec<Particle> {
     let ri = (rad / s).ceil() as i32;
     let ny = (h / s).ceil() as i32;
     let mut v = Vec::new();
-    let j = 0.1 * s; // disorder so it packs randomly and can flow (see `jitter`)
+    let j = jf * s; // disorder so it packs randomly and can flow (see `jitter`)
     for iy in 0..ny {
         for ix in -ri..=ri {
             for iz in -ri..=ri {
@@ -1048,7 +1171,135 @@ fn main() {
             "   {:8} μ={:.2}  emergent repose {:5.1}°   (real friction_angle {:.0}°, atan μ {:.0}°)  settled {:.3} m/s",
             name, mu, ang, real_angle, mu.atan().to_degrees(), spd
         );
+        // ★ docs/46 row 81's separation measurement. Off by default so the gate's output is unchanged.
+        if std::env::var("GPU_VERIFY_REPOSE_DEBUG").is_ok() {
+            println!("{}", repose_profile(&out));
+            // ★★ THE ENERGY BUDGET. Scene I is the "fudge detector" and it covers its OWN scene; scene D
+            // has never had an energy check, and a grain 376 m from a 2 m column has to have been paid
+            // for. `total_energy` is SPECIFIC (per unit mass): 9.81·y + ½v². Nothing may exceed E0.
+            let start = column(2.0, 9.0, PART_HALF);
+            let e0 = total_energy(&start);
+            let e1 = total_energy(&out);
+            let vmax = out
+                .iter()
+                .map(|p| (p.vel[0] * p.vel[0] + p.vel[1] * p.vel[1] + p.vel[2] * p.vel[2]).sqrt())
+                .fold(0.0f32, f32::max);
+            let (ylo, yhi) = min_max(out.iter().map(|p| p.offset[1]));
+            println!(
+                "     energy: E0 {:.0} -> E {:.0} J/kg ({:+.0}%, MUST NOT RISE) · vmax {:.2} m/s · y {:.2}..{:.2}",
+                e0,
+                e1,
+                100.0 * (e1 - e0) / e0.abs(),
+                vmax,
+                ylo,
+                yhi
+            );
+        }
     }
+    // ★★★ **WHAT DOES THE SCENE DO WHEN IT IS NOT DETONATING?** (`docs/46` row 81.) Same scene, same
+    // physics, same grains — only the release changed, from one that births 113 overlapping pairs to
+    // one that births none. This is a MEASUREMENT, not a change to the shipped scene: what the honest
+    // angle of repose is has consequences (`docs/45` blocks terrain-vs-grain agreement on rolling
+    // resistance, an explanation that was fitted to the detonating number), so the permanent initial
+    // condition is Robin's call, not this diagnostic's.
+    if std::env::var("GPU_VERIFY_REPOSE_DEBUG").is_ok() {
+        // Candidate releases: the shipped one, the crystal, and two that satisfy the invariant WITH
+        // disorder. Only dirt (mu 0.55) — the question is what the release does, not what mu does.
+        println!("   -- CANDIDATE RELEASES, dirt mu=0.55 (invariant: no overlapping pair at t=0) --");
+        for &(lbl, sp, jf) in &[
+            ("s=1.0 jf=0.10 SHIPPED", 1.0f32, 0.1f32),
+            ("s=1.0 jf=0.00 crystal", 1.0, 0.0),
+            ("s=1.2 jf=0.05        ", 1.2, 0.05),
+            ("s=1.3 jf=0.10        ", 1.3, 0.1),
+        ] {
+            let scene = Scene::flat(40, 40, 6, 0.55);
+            let start = column_lattice(2.0, 9.0, PART_HALF, sp, jf);
+            let touch = 2.0 * PART_HALF;
+            let mut overlaps = 0usize;
+            for a in 0..start.len() {
+                for b in (a + 1)..start.len() {
+                    let (u, v) = (start[a].offset, start[b].offset);
+                    let d = ((u[0] - v[0]).powi(2) + (u[1] - v[1]).powi(2) + (u[2] - v[2]).powi(2)).sqrt();
+                    if touch - d > 0.0 {
+                        overlaps += 1;
+                    }
+                }
+            }
+            let e0 = total_energy(&start);
+            let out = simulate(&gpu, start.clone(), 700, &scene);
+            let e1 = total_energy(&out);
+            let vmax = out
+                .iter()
+                .map(|p| (p.vel[0] * p.vel[0] + p.vel[1] * p.vel[1] + p.vel[2] * p.vel[2]).sqrt())
+                .fold(0.0f32, f32::max);
+            println!(
+                "   {lbl}  n {:3}  overlaps {:3}  -> repose {:5.1}°  settled {:.3} m/s  E {:+.0}%  vmax {:7.2}",
+                start.len(),
+                overlaps,
+                repose_angle(&out),
+                mean_speed(&out),
+                100.0 * (e1 - e0) / e0.abs(),
+                vmax
+            );
+            println!("{}", repose_profile(&out));
+        }
+        // ★★ The scene's OWN stated assertion — "it rises MONOTONICALLY with mu" — has never been
+        // implemented, and could never have been tested on a detonating release. Test it on a valid one.
+        println!("   -- MONOTONICITY IN mu, VALID RELEASE (s=1.3 jf=0.10, 0 overlapping pairs) --");
+        for &(name, mu, real_angle) in &mats {
+            let scene = Scene::flat(40, 40, 6, mu);
+            let start = column_lattice(2.0, 9.0, PART_HALF, 1.3, 0.1);
+            let e0 = total_energy(&start);
+            let out = simulate(&gpu, start.clone(), 700, &scene);
+            let e1 = total_energy(&out);
+            let vmax = out
+                .iter()
+                .map(|p| (p.vel[0] * p.vel[0] + p.vel[1] * p.vel[1] + p.vel[2] * p.vel[2]).sqrt())
+                .fold(0.0f32, f32::max);
+            println!(
+                "   {:8} mu={:.2}  repose {:5.1}°  (real {:.0}°)  settled {:.3} m/s  E {:.0}->{:.0} ({:+.0}%)  vmax {:.2}",
+                name,
+                mu,
+                repose_angle(&out),
+                real_angle,
+                mean_speed(&out),
+                e0,
+                e1,
+                100.0 * (e1 - e0) / e0.abs(),
+                vmax
+            );
+            println!("{}", repose_profile(&out));
+        }
+    }
+
+    // ★★★ **WHERE DOES A GRAIN 376 m FROM A 2 m COLUMN GET ITS ENERGY?** (`docs/46` row 81.)
+    // The settled energy alone cannot answer that — everything is at rest by then, so E has only fallen.
+    // The violation, if there is one, is a TRANSIENT, so sample the ladder the way scene I does. E is
+    // specific (per unit mass); gravity is the only source, so **E must never exceed E0.**
+    if std::env::var("GPU_VERIFY_REPOSE_DEBUG").is_ok() {
+        let scene = Scene::flat(40, 40, 6, 0.55);
+        let start = column(2.0, 9.0, PART_HALF);
+        let e0 = total_energy(&start);
+        println!("   -- dirt energy ladder (E0 {e0:.0} J/kg, specific; gravity is the only source) --");
+        for f in [1u32, 2, 3, 5, 10, 25, 50, 100, 200, 400, 700] {
+            let o = simulate(&gpu, start.clone(), f, &scene);
+            let e = total_energy(&o);
+            let vmax = o
+                .iter()
+                .map(|p| (p.vel[0] * p.vel[0] + p.vel[1] * p.vel[1] + p.vel[2] * p.vel[2]).sqrt())
+                .fold(0.0f32, f32::max);
+            let rmax = o
+                .iter()
+                .map(|p| (p.offset[0] * p.offset[0] + p.offset[2] * p.offset[2]).sqrt())
+                .fold(0.0f32, f32::max);
+            println!(
+                "      step {f:>4}: E {e:>12.0} ({:>+8.1}% of E0) · vmax {vmax:>9.2} m/s · rmax {rmax:>8.1} m{}",
+                100.0 * (e - e0) / e0.abs(),
+                if e > e0 * 1.001 { "   <-- ENERGY GAINED" } else { "" }
+            );
+        }
+    }
+
     // The model produces a plausible granular pile (not a liquid-flat 0° nor an unphysical spike) and
     // settles. We do NOT assert it tracks μ tightly — spherical parcels roll, so it under-predicts and
     // barely separates materials (the flagged deficiency below). Verifying friction produces *a* pile
@@ -1063,6 +1314,41 @@ fn main() {
         "     NOTE: a grain is a continuum PARCEL (avg of ~1e9 molecules), so its emergent repose SHOULD\n     equal the material's friction_angle. It under-predicts (parcels roll like marbles) — a model\n     DEFICIENCY to fix with rolling resistance / parcel interlocking, NOT accepted, NOT patched by μ."
     );
     failures += !ok as i32;
+
+    // -- Scene D-E: THE ENERGY BUDGET OF THE REPOSE SCENE (`docs/46` rows 81, 83). ----------------
+    // Scene I is this tool's "FUDGE DETECTOR" and it guards ITS OWN configuration. Scene D never had an
+    // energy check, and that is how it reported an angle of repose for its whole life while holding
+    // **638% of the energy gravity gave it at step 1**. Gravity is the only source here, so E may fall
+    // (friction, damping) and must NEVER rise. Sampled early, because the injection is at the first
+    // contact resolution and decays as grains fly apart and dissipate.
+    //
+    // * EXPECTED TO FAIL until scene D's release is fixed -- it is declared in `scripts/gpu-gate.sh`'s
+    // manifest with that reason. A declared failure is an IOU with an address, not a tolerated one.
+    {
+        let scene = Scene::flat(40, 40, 6, 0.55);
+        let start = column(2.0, 9.0, PART_HALF);
+        let e0 = total_energy(&start);
+        let (mut worst, mut worst_step) = (e0, 0u32);
+        for f in [1u32, 3, 10, 50] {
+            let e = total_energy(&simulate(&gpu, start.clone(), f, &scene));
+            if e > worst {
+                worst = e;
+                worst_step = f;
+            }
+        }
+        let ok = worst <= e0 * 1.001;
+        println!(
+            "\nD-E energy budget of the repose scene: E0 {e0:.0} -> worst {worst:.0} J/kg at step {worst_step} ({:+.0}%; gravity is the only source, so E must never rise)  {}",
+            100.0 * (worst - e0) / e0.abs(),
+            pass(ok)
+        );
+        if !ok {
+            println!(
+                "   -> scene D's release births overlapping grains: the lattice spacing is exactly one grain diameter,\n      so its 0.1-of-a-spacing disorder cannot fit. 113 of 6786 pairs overlap at t=0, worst 0.1605 m. The\n      contact spring answers that on step 1 (k*overlap*dt = 5e5 * 0.1605 * 1.04e-3 = 84 m/s; 56 measured).\n      Everything scene D has ever reported as an angle of repose is the settling pattern of that. Row 81."
+            );
+        }
+        failures += !ok as i32;
+    }
 
     // Scene E: CRATER FILL. Pour grains into a square pit; they must reach the floor, spread across
     // it (flow, not a central spike), and mound to a slope — the real use case.
@@ -1903,3 +2189,222 @@ fn bench(gpu: &Gpu) {
     println!("# absolute frame times do not (gpu-perf §9). uniform rows should ~match the pre-hierarchy grid.");
 }
 
+
+#[cfg(test)]
+mod repose_instrument_tests {
+    //! **Can `repose_angle` see a heap at all?** (`docs/46` row 81.)
+    //!
+    //! Scene D reports an emergent angle of repose of 0.1–0.4° against real friction angles of 30–45°.
+    //! Two explanations were live and they demand opposite responses:
+    //!
+    //!   (a) **no heap forms** — the grains do not stack, and the physics is wrong;
+    //!   (b) **the fit is diluted** — `repose_angle` least-squares fits from the peak out to the
+    //!       OUTERMOST OCCUPIED BIN (`nbins 60 × bin_w 0.5` ⇒ r to 30 m), so a few grains at rest far
+    //!       from the pile flatten the reported angle however good the heap is.
+    //!
+    //! Row 79's lesson is to suspect the instrument, so (b) had to be excluded before (a) could be
+    //! claimed. These tests do that **with no GPU**, by feeding the real function geometry whose answer
+    //! is known in advance. That is the whole separation experiment: (b) is REAL and severe — one stray
+    //! grain costs ~22° — but it has a FLOOR around 5°, and scene D reports an order of magnitude below
+    //! that floor. Dilution cannot produce 0.2°. A monolayer can, and does: exactly 0.
+    //!
+    //! ★ These also give `repose_angle` its first test of any kind. It has been reporting numbers into
+    //! a gate since it was written, against nothing.
+
+    use super::{repose_angle, Particle};
+
+    /// Grains spread over the surface of a cone of height `h` and base radius `r_max`, area-uniform in
+    /// radius (so the outer rings are not under-sampled) and spun by the golden angle so no azimuthal
+    /// lattice artefact can align with the radial bins.
+    fn cone(h: f32, r_max: f32, n: usize, floor: f32) -> Vec<Particle> {
+        (0..n)
+            .map(|i| {
+                let r = r_max * ((i as f32 + 0.5) / n as f32).sqrt();
+                let th = i as f32 * 2.399_963_2; // golden angle, radians
+                Particle::at(r * th.cos(), floor + h * (1.0 - r / r_max), r * th.sin())
+            })
+            .collect()
+    }
+
+    /// The geometry scene D would produce if the grains stacked at a textbook 30°: 117 grains of 1 m
+    /// diameter, which is `r = 5.78 m, h = 3.34 m` for that volume.
+    fn scene_d_cone_at_30_deg() -> Vec<Particle> {
+        cone(3.34, 5.78, 117, FLOOR)
+    }
+
+    const FLOOR: f32 = -0.29;
+
+    #[test]
+    fn the_instrument_recovers_a_cone_whose_angle_is_known() {
+        // If this fails, nothing else here means anything — and scene D's number would be unreadable
+        // rather than merely low.
+        let a = repose_angle(&scene_d_cone_at_30_deg());
+        assert!(
+            (26.0..=32.0).contains(&a),
+            "a known 30° cone must read ~30°, got {a:.2}° — the instrument cannot see a heap at all"
+        );
+    }
+
+    #[test]
+    fn a_single_stray_grain_25_m_away_destroys_the_measurement() {
+        // THE DILUTION MECHANISM, demonstrated rather than asserted. The fit runs to the outermost
+        // OCCUPIED bin, so one grain at rest far from the pile stretches it fivefold.
+        let clean = repose_angle(&scene_d_cone_at_30_deg());
+        let mut with_stray = scene_d_cone_at_30_deg();
+        with_stray.push(Particle::at(25.0, FLOOR, 0.0));
+        let diluted = repose_angle(&with_stray);
+        assert!(
+            clean - diluted > 15.0,
+            "one stray grain should cost the fit >15°, but clean {clean:.2}° vs diluted {diluted:.2}°"
+        );
+        assert!(
+            diluted < 12.0,
+            "and it should fall out of scene D's own 12–42° plausible band, got {diluted:.2}°"
+        );
+    }
+
+    #[test]
+    fn dilution_has_a_floor_far_above_what_scene_d_reports() {
+        // ★★ THE DECISIVE ONE (docs/46 row 81). However badly a REAL cone is diluted — strays at the
+        // very edge of the binned range, in any number — the reported angle cannot approach scene D's
+        // 0.1–0.4°. The fit still spans a 3.34 m drop; stretching its baseline to the 30 m limit bounds
+        // the answer near atan(3.34/30) ≈ 6°, not 0.2°. So dilution is NOT a sufficient explanation,
+        // and the remaining candidate is that the heap is not there.
+        for strays in [1usize, 3, 6, 10, 30] {
+            let mut ps = scene_d_cone_at_30_deg();
+            for j in 0..strays {
+                let th = j as f32 * 1.7;
+                ps.push(Particle::at(29.0 * th.cos(), FLOOR, 29.0 * th.sin()));
+            }
+            let a = repose_angle(&ps);
+            assert!(
+                a > 3.0,
+                "a real 3.34 m cone diluted by {strays} strays still reads {a:.2}° — if this ever drops \
+                 to scene D's 0.2°, dilution WOULD explain scene D and row 81's conclusion must change"
+            );
+        }
+    }
+
+    #[test]
+    fn a_monolayer_reads_zero_and_that_is_scene_ds_signature() {
+        // The other hypothesis, given its own fingerprint. 117 grains one grain high over the footprint
+        // that volume demands (r = 6.1 m) — i.e. "the column collapsed and did not stack".
+        let mono: Vec<Particle> = (0..117)
+            .map(|i| {
+                let r = 6.1 * ((i as f32 + 0.5) / 117.0).sqrt();
+                let th = i as f32 * 2.399_963_2;
+                Particle::at(r * th.cos(), FLOOR, r * th.sin())
+            })
+            .collect();
+        let a = repose_angle(&mono);
+        assert!(
+            a < 1.0,
+            "a flat monolayer must read ~0°, got {a:.2}° — scene D reports 0.1–0.4°, which is THIS \
+             signature and not the diluted-cone one"
+        );
+    }
+
+    #[test]
+    fn the_reported_angle_does_not_merely_track_its_own_bin_size() {
+        // docs/72 §3.9: a number that changes by the geometric factor of its own bin is not measuring
+        // its subject. Printing the ratio between successive refinements is nearly free, so do it —
+        // this is the check that would have caught row 79's packing figure a week earlier.
+        let ps = scene_d_cone_at_30_deg();
+        let a = repose_angle(&ps);
+        // `repose_angle` fixes bin_w internally, so vary the SUBJECT instead: the same cone sampled at
+        // 4x the grain count must give the same angle. If the answer depends on sampling density, the
+        // fit is measuring the discretisation.
+        let dense = cone(3.34, 5.78, 468, FLOOR);
+        let a_dense = repose_angle(&dense);
+        assert!(
+            (a - a_dense).abs() < 3.0,
+            "the angle must not depend on how densely the same cone is sampled: {a:.2}° vs {a_dense:.2}°"
+        );
+    }
+}
+
+#[cfg(test)]
+mod release_invariant_tests {
+    //! ★★★ **SCENE D'S COLUMN IS BORN OVERLAPPING** (`docs/46` row 81).
+    //!
+    //! `column()` lays grains on a lattice of spacing `s = 1.0` m while a grain's contact diameter is
+    //! `2 × PART_HALF = 1.0` m — so neighbours start EXACTLY touching, with zero margin — and then
+    //! displaces each by up to `±0.1 m` per axis for disorder. Two lattice neighbours can therefore each
+    //! move 0.1 m toward the other, leaving 0.8 m between grains that repel below 1.0 m.
+    //!
+    //! A soft-sphere contact answers an overlap that size with an enormous impulse, and the measurement
+    //! agrees: **at step 1, from rest, the scene holds 638% of the energy gravity gave it, with
+    //! `vmax = 56 m/s`.** The "angle of repose" scene D has reported for its whole life is the settling
+    //! pattern of that detonation — grains scattered to `rmax 379 m` from a 2 m column.
+    //!
+    //! This is `docs/46` row 79's lesson in a different module: *the release must guarantee no overlap at
+    //! `t = 0`.* `pile` learned it and got an invariant; `column()` never had one. Same disease, two
+    //! code paths — which is the Law II observation, not a coincidence.
+    //!
+    //! ★ This test is EXPECTED TO FAIL until the release is fixed. It is the defect, written down as an
+    //! executable statement rather than prose, so that a fix has something to turn green.
+
+    use super::{column, column_jittered, PART_HALF};
+
+    /// Worst overlap in a released column, and how many pairs have one.
+    fn worst_overlap(ps: &[super::Particle]) -> (usize, f32) {
+        let touch = 2.0 * PART_HALF;
+        let (mut n, mut worst) = (0usize, 0.0f32);
+        for i in 0..ps.len() {
+            for j in (i + 1)..ps.len() {
+                let (a, b) = (ps[i].offset, ps[j].offset);
+                let d = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+                if touch - d > 0.0 {
+                    n += 1;
+                    worst = worst.max(touch - d);
+                }
+            }
+        }
+        (n, worst)
+    }
+
+    #[test]
+    fn a_release_without_disorder_satisfies_the_invariant() {
+        // The counterpart to the failing test below: it is the JITTER that breaks the invariant, not the
+        // lattice, because the lattice sits at exactly touch. This bounds the fix — any disorder at all
+        // on THIS spacing overlaps, so a fix must either widen the lattice or drop the disorder.
+        let (n, worst) = worst_overlap(&column_jittered(2.0, 9.0, PART_HALF, 0.0));
+        assert_eq!(n, 0, "an unjittered lattice at exactly touch must not overlap, worst {worst:.4} m");
+    }
+
+    #[test]
+    #[ignore = "row 81: FAILS BY DESIGN — scene D's column is born overlapping; this is the defect"]
+    fn the_released_column_has_no_overlapping_pair() {
+        let ps = column(2.0, 9.0, PART_HALF);
+        let touch = 2.0 * PART_HALF;
+        let mut worst = 0.0f32;
+        let mut worst_pair = (0usize, 0usize);
+        let mut overlapping = 0usize;
+        for i in 0..ps.len() {
+            for j in (i + 1)..ps.len() {
+                let (a, b) = (ps[i].offset, ps[j].offset);
+                let d = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+                let overlap = touch - d;
+                if overlap > 0.0 {
+                    overlapping += 1;
+                    if overlap > worst {
+                        worst = overlap;
+                        worst_pair = (i, j);
+                    }
+                }
+            }
+        }
+        assert!(
+            overlapping == 0,
+            "the release must guarantee no overlap at t=0 (docs/46 row 79's lesson), but {overlapping} \
+             of {} pairs overlap; worst is grains {}<->{} at {:.4} m overlap = {:.0}% of a grain \
+             diameter. A contact spring answers that on step 1, which is where scene D's +638% energy \
+             and 56 m/s come from.",
+            ps.len() * (ps.len() - 1) / 2,
+            worst_pair.0,
+            worst_pair.1,
+            worst,
+            100.0 * worst / touch,
+        );
+    }
+}
