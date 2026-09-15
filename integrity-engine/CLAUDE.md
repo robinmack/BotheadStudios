@@ -328,7 +328,11 @@ computation it defers** (Law V) — recorded in `docs/46`'s ledger, not a quiet 
    for this integration. Name the exception on the PR when you use it; do not let it quietly become the
    habit it replaced. **The fix is Sean accepting the invite, not a better bypass.**
 8. **Commit with `bash scripts/commit.sh <message-file>`** — write the message to a FILE first (an editor
-   or a file-writing tool), never inline in a shell command. Messages here are long and full of the exact
+   or a file-writing tool), never inline in a shell command. ★ **The same
+   applies to PR bodies** (`gh pr create --body-file`, `gh pr edit --body-file`): on 2026-09-14 an inline
+   `--body` ran its backticked identifiers as commands and silently deleted three words from a published
+   PR. Third instance of this exact trap; the rule is not about commit messages, it is about any long text
+   containing backticks, `$`, `!` or quotes reaching a shell. Messages here are long and full of the exact
    characters a shell eats: backticks around identifiers, `$`, `!`, quotes. A heredoc *looks* safe and is
    not — an unquoted one still does command substitution. That has bitten twice; the second time it
    silently deleted the subject of a sentence from a merge commit on its way to `main` (``​`pub mod arc;`
