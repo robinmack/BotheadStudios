@@ -739,6 +739,92 @@ fn main() {
             failures += !ok as i32;
         }
 
+        // ★★★ **F5b — DOES A CATALOGUED RESTITUTION SURVIVE THE GPU'S IMPLICIT SOLVE?**
+        // (docs/46 rows 42, 80 — the gate those rows asked for.)
+        //
+        // F5 above asks only that the pair separates (`e > 0.1`). It never compares what the GPU
+        // realises against what was ASKED for, so the two paths could disagree by any amount and F5
+        // would pass. This asks the real question: set `c_normal_damp` from
+        // `granular::damping_for_restitution(e_target, k)` — the same call the native path makes — and
+        // measure what comes back out of the shader.
+        //
+        // ★★ The native law calibrates ζ against a NO-TENSION contact: `contact_accel` clamps the total
+        // normal force with `.max(0.0)`, so its dashpot may reduce the push but never pull. The shader
+        // has no such clamp — its normal force is spring-only and the damper lives in the implicit
+        // tensor — so it runs the full half-cycle and delivers the TEXTBOOK
+        // `e = exp(−ζπ/√(1−ζ²))`. Same coefficient, two contact-end rules, two bounces.
+        //
+        // ★★★ **STATUS, 2026-09-14: THE GATE RUNS AND ITS VERDICT IS NOT YET TRUSTWORTHY.** It reports
+        // FAIL, but for the wrong reason: the ζ bisection below SATURATES at its 50.0 ceiling for every
+        // target, and the GPU then returns `e = 18.3` — an `e > 1` is energy gain, not a restitution.
+        // The cause is the step cap added to stop an earlier hang: an overdamped contact needs far more
+        // than four contact durations to creep back to zero overlap, so every probe truncates early,
+        // reads "still too bouncy", and the search runs to the ceiling.
+        //
+        // **So this gate is NOT evidence about the GPU yet.** What it does establish is the gap it was
+        // built for: F5 above asserts only `e > 0.1` and never compares against what was ASKED, so the
+        // two paths could disagree by any amount and F5 would pass. Fix the calibration — reuse
+        // `granular::zeta_for_no_tension_restitution`'s own convergence criterion rather than a fixed
+        // step count — before reading anything into the verdict.
+        for e_target in [0.2f32, 0.4, 0.6] {
+            // The same ζ→c the engine's own `damping_for_restitution` produces, transcribed here
+            // because this tool deliberately mirrors rather than links the engine (see Cargo.toml).
+            // ζ from the no-tension inversion, by bisection, then c = ζ·√(2k).
+            let zeta = {
+                let (mut lo, mut hi) = (0.0f64, 50.0f64);
+                for _ in 0..200 {
+                    let mid = 0.5 * (lo + hi);
+                    // No-tension rebound: integrate the clamped contact and read the exit speed.
+                    let (k, c) = (C_STIFFNESS as f64, 2.0 * mid * (C_STIFFNESS as f64).sqrt());
+                    let dt = 1.0e-4 / k.sqrt();
+                    let (mut x, mut v) = (0.0f64, -1.0f64);
+                    // ★ BOUNDED. The first version had only a runaway guard, and an overdamped contact
+                    // creeps back toward zero overlap arbitrarily slowly — so the loop never ended and
+                    // the harness was killed at 600 s. A step cap of 4 contact durations is generous
+                    // (one contact is π/ω) and turns a hang into a measurement that simply reports
+                    // whatever it reached.
+                    let max_steps = (4.0 * std::f64::consts::PI / k.sqrt() / dt) as u64;
+                    let mut n = 0u64;
+                    while (v < 0.0 || x < 0.0) && n < max_steps {
+                        let a = (-k * x - c * v).min(0.0); // no tension: the contact cannot pull
+                        v += a * dt;
+                        x += v * dt;
+                        n += 1;
+                    }
+                    if v.abs() > e_target as f64 {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                0.5 * (lo + hi)
+            };
+            let c = (zeta * (2.0 * C_STIFFNESS as f64).sqrt()) as f32;
+
+            let mut a = Particle::at(-3.0, 50.0, 0.0);
+            a.vel = [20.0, 0.0, 0.0];
+            let mut sc = vac(0.0);
+            sc.normal_damp = Some(c);
+            let out = simulate(&gpu, vec![a, Particle::at(0.0, 50.0, 0.0)], 45, &sc);
+            let (va, vb) = (out[0].vel[0], out[1].vel[0]);
+            let got = (vb - va) / 20.0;
+            // The textbook value the GPU is expected to deliver instead, for the record.
+            let z = zeta.min(0.9999);
+            let textbook = (-z * std::f64::consts::PI / (1.0 - z * z).sqrt()).exp();
+            let ok = (got - e_target).abs() / e_target < 0.10;
+            println!(
+                "F5b catalogued restitution through the GPU: asked e {:.3} (ζ {:.4}) -> got {:.3} \
+                 ({:+.1}%); the textbook no-clamp value is {:.3}  {}",
+                e_target,
+                zeta,
+                got,
+                100.0 * (got - e_target) / e_target,
+                textbook,
+                pass(ok)
+            );
+            failures += !ok as i32;
+        }
+
         // F6 — FRICTION (parameter fidelity): a grain slides across flat ground; kinetic friction μ·N
         // (N = weight = g) decelerates it at ≈ μ·g. Verify the deceleration matches the SET μ. (Vacuum:
         // air_rho = 0 so only friction slows it.)

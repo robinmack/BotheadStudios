@@ -9,6 +9,12 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **`gpu-verify` F5b — the gate rows 42/80 asked for**: sets `c_normal_damp` from a no-tension ζ and
+  measures what the shader returns. **Its verdict is explicitly not yet trustworthy** — the ζ bisection
+  saturates and the GPU reports `e = 18.3` (energy gain), because a step cap added to stop an earlier
+  hang truncates overdamped contacts. Recorded in the tool. What it does establish: F5 asserts only
+  `e > 0.1` and never compares against what was asked.
+
 - **The GPU restitution fix is specified, not applied** (docs/46 row 80). There is no expression to
   clamp: the shader's normal force is spring-only and damping enters solely as the implicit tensor
   coefficient. Three non-equivalent routes are recorded with their costs, and the required ordering —

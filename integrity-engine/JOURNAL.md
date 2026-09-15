@@ -3,6 +3,35 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-09-14 — the gate is built, and I am not trusting its verdict
+
+`gpu-verify` gains **F5b**: set `c_normal_damp` from a no-tension ζ — the same call the native path makes
+— and measure what the shader gives back. That is the test rows 42 and 80 asked for, and it is the right
+shape.
+
+**Its verdict is not yet trustworthy, and the tool says so in its own comment.** It reports FAIL, but for
+the wrong reason: ζ saturates at its 50.0 ceiling for all three targets, and the GPU then returns
+`e = 18.3`. An `e > 1` is energy gain, not a restitution.
+
+The cause is a defect I introduced two edits earlier. The first version of the bisection had an unbounded
+inner loop and the harness was killed at 600 s; I added a step cap of four contact durations, which is
+generous for an underdamped contact and far too short for an overdamped one. Every probe truncates early,
+reads "still too bouncy", and the search runs to the ceiling. **The fix is to reuse
+`granular::zeta_for_no_tension_restitution`'s own convergence criterion rather than a fixed step count.**
+
+### What it establishes anyway
+
+F5 has always asserted only `e > 0.1` — it never compares the result against what was *asked for*. So the
+two paths could disagree by any amount and F5 would pass. That gap is real, it is what F5b is built to
+close, and the structure to close it now exists.
+
+★ I could have reported "the gate fails, confirming row 80" and it would have read as success. It would
+also have been a measurement of my own broken calibration — the same error as the NaN check that used
+`f64::max`, and the fabricated ledger quote the verifier caught this morning. **A failing gate is only
+evidence if you know why it failed.**
+
+**Verified.** 660/660 native, 31 skipped. The shader is unchanged.
+
 ## 2026-09-14 — the GPU clamp: specified, not attempted
 
 Asked to fix the GPU contact clamp, I read the shader first. **There is nothing to clamp.**
