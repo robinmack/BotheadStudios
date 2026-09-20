@@ -3,6 +3,76 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-09-20 — the pile's energy gate, and the gate's own first lie
+
+Row 85 bracketed the heap's energy injection to `0.3 s … 0.7 s` and noted the shape of the gap: `pile`
+had **no energy gate at all**, the same hole row 83 records for `gpu-verify`. This builds it.
+
+### The meter was blind to the channel the pile fails through
+
+There were **two** energy meters. `Sample::energy_j` summed `½mv² + mgy` — translation and height. A test
+helper summed `½mv² + ½Iω² + mgy`. **Row 79's entire explosion was rotational** (`|Δω| = 6.60e5 rad/s` in
+one step), so a member could spin up without bound and the production trace would not move.
+
+A meter that cannot see the known failure mode is not a meter. There is now **one** —
+`pile::mechanical_energy_j`, spin included, used by the trace and the gate alike (Law II, the same
+delegation structure as row 84's `relax_flex`).
+
+### The control first, because a rise you cannot attribute is not evidence
+
+One member, in **vacuum**, stopped before it touches anything — no neighbour contact, no cohesion well,
+no terrain projection, and a shape that does not change (the release bends to equilibrium and that
+relaxation is idempotent, row 84). Every known omission absent by construction:
+
+```
+control: E0 2.251686e-3 J -> peak 2.251686e-3 J (-0.0000%)
+```
+
+Conserved to better than **1e-6**. That is what makes the heap reading below a statement about the heap
+rather than about arithmetic.
+
+### What the gate found
+
+```
+heap: E0 1.722527e-2 J -> peak inf J (+inf%) at t=0.4642 s
+      rotational at peak 5.8464e186 J · all_finite false
+      energy left the reals at Some(0.46422576874935545)
+```
+
+Row 85's bracket is now a **timestamp: t = 0.46423 s**. And the last finite peak is **rotational —
+5.85e186 J from a 1.7e-2 J release**, essentially the whole of it. Which is exactly why the old meter
+saw nothing: it omitted the only term that moved.
+
+### ★★★ The first version of this gate reported `+0.0%` on a NaN heap
+
+Mine. In the change that exists to catch that. Two causes, both general:
+
+- **`if e > peak` is FALSE when `e` is NaN**, so a plain comparison silently skips precisely the sample
+  that matters — the identical failure to `f64::max` returning the non-NaN operand (row 79).
+- I wrote a fallback: `if peak.is_finite() { peak } else { energy_at_release }`. That turns *"the heap
+  reached infinite energy"* into *"the heap gained exactly 0.0%"*.
+
+> **A fallback that replaces a non-finite measurement with a plausible one is a lie generator.**
+> Propagate the value; let the reader see `inf`. And check *is it a number* **before** any ratio —
+> `inf` has no percentage, and `NaN < tol` is false, so a ratio test reports either as a pass-shaped
+> nothing.
+
+The gate now asserts finiteness first, then the bound, and prints `inf` where `inf` is true.
+
+### Still uncounted — stated, not hidden
+
+`mgy` uses `centre.y` while a bent member's matter rides a polyline, so bending moves matter this meter
+does not weigh; the cohesion well is real (grass carries `cohesion = 12000 Pa`); and
+`terrain_contact_resolve`'s position projection lifts a member with no matching term. All three are
+bounded and small against a 5.8e186 J peak, and all three are named on `mechanical_energy_j` rather than
+left for the next reader to rediscover.
+
+### Verified
+
+**669/669 native**, 33 skipped, `mod app` compiles, numbering gate green, `cargo fmt --check` clean. The
+control runs in the suite (9.6 s); the heap gate is `#[ignore]`d at 440 s and **fails by design**.
+
+
 ## 2026-09-15 — the heap re-measured: half of it works now, and the numbers are still void
 
 Row 84 fixed a release that arched every member upward against its own weight. Robin asked for the heap

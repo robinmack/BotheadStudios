@@ -415,6 +415,24 @@ pub struct Settled {
     /// from folds that skip NaN cannot report NaN.** Any summary of a body's state owes a direct
     /// predicate beside it.
     pub all_finite: bool,
+    /// ★★★ **THE ENERGY GATE** (`docs/46` row 86). Gravity is the only source here, so the heap's
+    /// mechanical energy may FALL — drag, damping and friction all remove — and must never RISE.
+    /// `energy_j_at_release` is [`heap_energy_j`] at `t = 0`; `peak_energy_j` is its largest value over
+    /// the run, sampled EVERY STEP rather than at trace intervals, because a peak between samples is a
+    /// peak missed. `peak_energy_t_s` says when, which is what turns "it gained energy" into a place to
+    /// look.
+    ///
+    /// ★ Read against the two bounded omissions named on [`mechanical_energy_j`] (the cohesion well and
+    /// the terrain position projection). A small rise is those; a large one is not.
+    pub energy_j_at_release: f64,
+    pub peak_energy_j: f64,
+    pub peak_energy_t_s: f64,
+    /// The rotational share at the peak. The meter this replaced omitted rotation entirely, so this is
+    /// the number that says how much of the heap's energy the old trace could not see.
+    pub peak_rotational_energy_j: f64,
+    /// When the heap's energy first stopped being a number, if it ever did. `Some(t)` is a harder
+    /// failure than any ratio: an unbounded energy has no percentage.
+    pub first_non_finite_energy_t_s: Option<f64>,
     /// Occupied cell COUNT at each resolution in [`Settled::packing_vs_cell`] — the quantity that
     /// actually exposes a degenerate heap. Row 79's tell was not the packing value but its SCALING:
     /// packing rose **exactly** `+700%` per halving, precisely the `cell³` factor, which can only
@@ -1152,6 +1170,63 @@ pub struct Sample {
     pub energy_j: f64,
 }
 
+/// ★★★ **ONE MECHANICAL ENERGY, AND IT COUNTS THE SPIN** (`docs/46` rows 79, 84, 86).
+///
+/// This module had **two** energy meters and the production one was blind to the channel the pile
+/// actually fails through. `Sample::energy_j` summed `½mv² + mgy` — **translation and height only** —
+/// while a test helper summed `½mv² + ½Iω² + mgy`. Row 79's entire explosion was ROTATIONAL
+/// (`|Δω| = 6.60e5 rad/s in one step`), so **a member could spin up without bound and the trace would
+/// not move.** A meter that cannot see the known failure mode is not a meter.
+///
+/// One implementation, used by the trace and by the gate, so there is no second energy to disagree
+/// with the first (Law II — the same structure as `relax_flex` delegating, row 84).
+///
+/// ★ **WHAT IT STILL DOES NOT COUNT**, stated because a gate built on an unstated omission is how row
+/// 79 spent a week: (a) the **cohesion potential** — grass carries `cohesion = 12000 Pa`, so touching
+/// members sit in an attractive well this does not integrate, and sinking into it raises nothing here
+/// while climbing out lowers nothing; (b) `granular::terrain_contact_resolve`'s **position
+/// projection**, which lifts a member out of the surface with no matching term, so it can raise `mgy`
+/// for free. Both are BOUNDED and small; neither is zero. A rise is therefore evidence to chase, and
+/// the honest confirmation is the isolated single-body control in
+/// `energy_gate_tests::an_isolated_falling_member_conserves_energy`, where all three are absent by
+/// construction.
+pub fn mechanical_energy_j(rod: &Rod, mass_kg: f64, g: f64) -> f64 {
+    let i = rod.principal_inertia_kgm2(mass_kg);
+    let f = rod.frame();
+    let wb = DVec3::new(
+        rod.ang_vel.dot(f[0]),
+        rod.ang_vel.dot(f[1]),
+        rod.ang_vel.dot(f[2]),
+    );
+    0.5 * mass_kg * rod.vel.length_squared()
+        + 0.5 * (i.x * wb.x * wb.x + i.y * wb.y * wb.y + i.z * wb.z * wb.z)
+        + mass_kg * g * rod.centre.y
+}
+
+/// The heap's total mechanical energy — [`mechanical_energy_j`] summed. Gravity is the only source, so
+/// this may FALL (drag, damping, friction) and must never RISE beyond the bounded blind spots above.
+pub fn heap_energy_j(rods: &[Rod], mass_kg: f64, g: f64) -> f64 {
+    rods.iter()
+        .map(|r| mechanical_energy_j(r, mass_kg, g))
+        .sum()
+}
+
+/// The ROTATIONAL share alone, so the channel the old meter could not see is visible on its own.
+pub fn heap_rotational_energy_j(rods: &[Rod], mass_kg: f64) -> f64 {
+    rods.iter()
+        .map(|r| {
+            let i = r.principal_inertia_kgm2(mass_kg);
+            let f = r.frame();
+            let wb = DVec3::new(
+                r.ang_vel.dot(f[0]),
+                r.ang_vel.dot(f[1]),
+                r.ang_vel.dot(f[2]),
+            );
+            0.5 * (i.x * wb.x * wb.x + i.y * wb.y * wb.y + i.z * wb.z * wb.z)
+        })
+        .sum()
+}
+
 /// **`settle`, and it will tell you how it got there.** Same one implementation — `settle` is this
 /// with the trace discarded, so there is no second settling law to disagree with the first.
 ///
@@ -1201,6 +1276,10 @@ pub fn settle_traced(
     let w_per_m = member_mass / rod_for(member)?.0 * gravity_ms2;
     let rods_v = release_rods_bent(member, count, seed, flex_ei, w_per_m)?;
     let mut rods: Vec<Rod> = rods_v;
+    // The energy the release put in, measured on the shapes that will actually exist (row 84's lesson:
+    // the state a body is PLACED in must be the state the stepper would produce, so E0 is taken here
+    // and not from an idealised construction).
+    let energy_j_at_release = heap_energy_j(&rods, member_mass, gravity_ms2);
 
     // ★★★ **A CONTACT HAS TWO TIMESCALES AND THIS RULE USED TO SEE ONLY ONE.**
     //
@@ -1288,6 +1367,10 @@ pub fn settle_traced(
         .unwrap_or(CAP_S_DEFAULT);
     let mut elapsed_s = 0.0f64;
     let mut peak_speed = 0.0f64;
+    let mut peak_energy_j = f64::NEG_INFINITY;
+    let mut peak_energy_t_s = 0.0f64;
+    let mut peak_rotational_energy_j = 0.0f64;
+    let mut first_non_finite_energy_t_s: Option<f64> = None;
 
     // ★★★ **THE GAUGE IS NOT ARMED UNTIL THE HEAP HAS ACTUALLY BEEN DISTURBED, AND SKIPPING THAT
     // MADE IT REPORT A CLOUD AS A SETTLED HEAP.**
@@ -1606,6 +1689,26 @@ point-by-point shape diff is meaningless across this, so it is not reported."
         // comparable when they are not. Measured the wrong way first: folding tip speed into this
         // field made a 20-blade heap report "37.43 m/s", which is impossible for a body the air caps
         // at ~2 m/s, and the impossible number was the only reason the redefinition was noticed.
+        // ★ EVERY STEP, not every trace sample: an injection that spikes and dissipates between
+        // samples is exactly the shape of the thing being hunted (row 79's arrived in ONE step).
+        {
+            let e = heap_energy_j(&rods, member_mass, gravity_ms2);
+            // ★★★ **NaN-AWARE ON PURPOSE.** `e > peak` is FALSE when `e` is NaN, so a plain comparison
+            // silently ignores exactly the sample that matters — the identical failure to `f64::max`
+            // returning the non-NaN operand (row 79). An unbounded energy is not "no new peak"; it is
+            // the largest possible answer, and it is recorded as such.
+            if !e.is_finite() {
+                if first_non_finite_energy_t_s.is_none() {
+                    first_non_finite_energy_t_s = Some(elapsed_s);
+                }
+                peak_energy_j = f64::INFINITY;
+                peak_energy_t_s = first_non_finite_energy_t_s.unwrap_or(elapsed_s);
+            } else if e > peak_energy_j {
+                peak_energy_j = e;
+                peak_energy_t_s = elapsed_s;
+                peak_rotational_energy_j = heap_rotational_energy_j(&rods, member_mass);
+            }
+        }
         peak_speed = rods.iter().map(|r| r.vel.length()).fold(0.0f64, f64::max);
         // What the GAUGE is asked is a different question: is anything moving AT ALL? A rod turning
         // at ω has a tip moving at `ω·L/2`, and a heap tumbling in place with every centre still is
@@ -1653,13 +1756,12 @@ point-by-point shape diff is meaningless across this, so it is not reported."
                     a.y.max(b.y)
                 })
                 .fold(0.0f64, f64::max);
-            let energy: f64 = rods
-                .iter()
-                .map(|r| {
-                    0.5 * member_mass * r.vel.length_squared()
-                        + member_mass * gravity_ms2 * r.centre.y
-                })
-                .sum();
+            // ★ MEANING CHANGED 2026-09-20 and it is changed LOUDLY, because silently redefining a
+            // reported number is how old figures go on looking comparable when they are not. This was
+            // `½mv² + mgy`; it is now the COMPLETE mechanical energy, spin included. The old value was
+            // not a different convention, it was an incomplete one — blind to rotation, which is the
+            // channel row 79's explosion used.
+            let energy: f64 = heap_energy_j(&rods, member_mass, gravity_ms2);
             trace.push(Sample {
                 t_s: elapsed_s,
                 peak_speed_ms: peak_speed,
@@ -1756,6 +1858,17 @@ point-by-point shape diff is meaningless across this, so it is not reported."
     let settled = Settled {
         members: count,
         all_finite,
+        energy_j_at_release,
+        // ★★★ **NO FALLBACK.** The first version of this line read
+        // `if peak_energy_j.is_finite() { peak_energy_j } else { energy_j_at_release }`, which turned
+        // "the heap reached INFINITE energy" into "the heap gained exactly 0.0%" — and the gate built
+        // to catch that class of lie duly reported PASS on a heap whose own `all_finite` was false.
+        // **A fallback that replaces a non-finite measurement with a plausible one is a lie
+        // generator.** Propagate the value; let the reader see `inf`.
+        peak_energy_j,
+        first_non_finite_energy_t_s,
+        peak_energy_t_s,
+        peak_rotational_energy_j,
         cells_vs_cell: {
             let mut v = Vec::new();
             let mut c = length;
@@ -1809,18 +1922,7 @@ mod tests {
     /// ~100× the angular speed. Measured — a blade whose `|ω|` ran 20 → 290 rad/s had **27% of its
     /// starting energy left**, and the sweep showed it converging as `dt` fell 128×, so it was never an
     /// instability at all. Asserting on `|ω|` called correct physics a blow-up and sent me to revert it.
-    fn mechanical_energy_j(rod: &Rod, mass_kg: f64, g: f64) -> f64 {
-        let i = rod.principal_inertia_kgm2(mass_kg);
-        let f = rod.frame();
-        let wb = DVec3::new(
-            rod.ang_vel.dot(f[0]),
-            rod.ang_vel.dot(f[1]),
-            rod.ang_vel.dot(f[2]),
-        );
-        0.5 * mass_kg * rod.vel.length_squared()
-            + 0.5 * (i.x * wb.x * wb.x + i.y * wb.y * wb.y + i.z * wb.z * wb.z)
-            + mass_kg * g * rod.centre.y
-    }
+    pub(super) use super::mechanical_energy_j;
 
     /// Air at the bottom of Earth's atmosphere, from the catalogue's own `air` and the standard
     /// sea-level state — NOT a typed 1.225. The Earth assembly is what supplies air to anything
@@ -3758,6 +3860,122 @@ mod heap_validity_tests {
              is doing work.",
             s.peak_speed_ms,
             s.elapsed_s
+        );
+    }
+}
+
+#[cfg(test)]
+mod energy_gate_tests {
+    //! ★★★ **THE PILE'S ENERGY GATE** (`docs/46` row 86).
+    //!
+    //! `docs/46` row 83 records the shape of this defect in the other module: `gpu-verify`'s scene I is
+    //! labelled the FUDGE DETECTOR and guards **its own configuration only**, so scene D ran its whole
+    //! life with no energy check and reported a plausible small number while holding **+638% of E₀**.
+    //! `pile` had the same hole and worse: **no energy check at all**, and a meter that could not have
+    //! seen the failure anyway, because it omitted rotation — the very channel row 79's explosion used.
+    //!
+    //! Two tests, because one configuration is not a conservation law:
+    //!
+    //! 1. **The control** — one member, in vacuum, stopped before it touches anything. Every known
+    //!    omission is absent by construction, so energy must be conserved. This is what makes the gate
+    //!    below *readable*: it validates the meter and the integrator, so a rise in the heap is a
+    //!    statement about the heap rather than about arithmetic.
+    //! 2. **The gate** — the real heap. Expected to FAIL while row 85's contact injection is open.
+
+    use super::tests::sea_level_air;
+    use super::*;
+
+    fn dry_blade() -> (Assembly, Vec<crate::materials::Material>) {
+        (
+            crate::assembly::compiled::parse(crate::assembly::compiled::GRASS_BLADE_DRY),
+            crate::materials::load(),
+        )
+    }
+
+    #[test]
+    fn an_isolated_falling_member_conserves_energy() {
+        // ★ THE CONTROL, and it is the negative control the rest of this module kept lacking. ONE
+        // member so there is no neighbour contact and no cohesion well; **vacuum** so nothing
+        // dissipates; stopped long before the ground so `terrain_contact_resolve` never projects a
+        // position. The release already bends the member to its gravity equilibrium and that
+        // relaxation is idempotent (row 84), so its SHAPE does not change either — which matters,
+        // because `mechanical_energy_j` measures height at `centre.y` while the matter is distributed
+        // along a bent polyline, so a shape that moved would move energy this meter cannot see.
+        //
+        // With all of that absent, gravity is conservative and E must not move at all.
+        let (blade, mats) = dry_blade();
+        std::env::set_var("PILE_CAP_S", "0.25");
+        let settled = settle_traced(&blade, &mats, 1, 9.81, 0.0, 20260810, 0.05);
+        std::env::remove_var("PILE_CAP_S");
+        let (s, _t) = settled.expect("a single member");
+        assert!(
+            s.all_finite,
+            "the control member went NaN, which is a different bug"
+        );
+        let drift = (s.peak_energy_j - s.energy_j_at_release) / s.energy_j_at_release.abs();
+        println!(
+            "control: E0 {:.6e} J -> peak {:.6e} J ({:+.4}%) at t={:.4} s · rotational share at peak {:.3e} J",
+            s.energy_j_at_release, s.peak_energy_j, 100.0 * drift, s.peak_energy_t_s,
+            s.peak_rotational_energy_j
+        );
+        assert!(
+            drift < 1.0e-6,
+            "an isolated member falling in vacuum has ONE force on it and that force is conservative, \
+             so its mechanical energy must not rise at all — but it gained {:+.4}% by t={:.4} s. If \
+             this fails, the meter or the integrator is wrong and NOTHING measured with them means \
+             anything, including the heap gate below.",
+            100.0 * drift,
+            s.peak_energy_t_s,
+        );
+    }
+
+    #[test]
+    #[ignore = "row 86: FAILS BY DESIGN — the heap gains energy at contact (row 85); ~4 min"]
+    fn the_heap_gains_no_energy() {
+        // Gravity is the only source. Drag, damping and friction can only REMOVE. So the heap's
+        // mechanical energy may fall and must never rise — beyond the two bounded omissions named on
+        // `mechanical_energy_j` (the cohesion well, the terrain position projection), which are small.
+        let (blade, mats) = dry_blade();
+        let rho = sea_level_air(&mats);
+        std::env::set_var("PILE_CAP_S", "0.7");
+        let settled = settle_traced(&blade, &mats, 10, 9.81, rho, 20260810, 0.1);
+        std::env::remove_var("PILE_CAP_S");
+        let (s, _t) = settled.expect("a heap forms");
+        let gain = (s.peak_energy_j - s.energy_j_at_release) / s.energy_j_at_release.abs();
+        println!(
+            "heap: E0 {:.6e} J -> peak {:.6e} J ({:+.1}%) at t={:.4} s · rotational at peak {:.4e} J · all_finite {} · energy left the reals at {:?}",
+            s.energy_j_at_release,
+            s.peak_energy_j,
+            100.0 * gain,
+            s.peak_energy_t_s,
+            s.peak_rotational_energy_j,
+            s.all_finite,
+            s.first_non_finite_energy_t_s,
+        );
+        // ★ UNBOUNDED IS NOT A PERCENTAGE. Checked before the ratio, because `inf - x / x` is `inf`
+        // and `NaN < 0.01` is FALSE — a ratio test would report either as a pass-shaped nothing.
+        assert!(
+            s.first_non_finite_energy_t_s.is_none(),
+            "the heap's mechanical energy stopped being a number at t={:?} — there is no percentage for \
+             that. E0 was {:.4e} J. (docs/46 rows 85, 86)",
+            s.first_non_finite_energy_t_s,
+            s.energy_j_at_release,
+        );
+        assert!(
+            s.all_finite,
+            "the heap's members are not finite, so every energy figure above describes a heap that is \
+             no longer made of numbers (docs/46 row 85)"
+        );
+        assert!(
+            gain < 0.01,
+            "the heap gained {:+.1}% of its release energy by t={:.4} s (E0 {:.4e} -> {:.4e} J), and \
+             gravity is the only source. The rotational share at the peak is {:.4e} J — the channel \
+             the old meter omitted entirely. See docs/46 rows 85, 86.",
+            100.0 * gain,
+            s.peak_energy_t_s,
+            s.energy_j_at_release,
+            s.peak_energy_j,
+            s.peak_rotational_energy_j,
         );
     }
 }

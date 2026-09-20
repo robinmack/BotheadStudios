@@ -9,6 +9,27 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★★ **`pile` has an energy gate** (`docs/46` row 86). It had none — the same hole row 83 records for
+  `gpu-verify` — and the meter it did have was **blind to the channel it fails through**: `Sample::energy_j`
+  summed `½mv² + mgy` while row 79's explosion was entirely **rotational**. There is now one
+  `pile::mechanical_energy_j` (spin included) used by both the trace and the gate, with `heap_energy_j`,
+  `heap_rotational_energy_j`, and `Settled::{energy_j_at_release, peak_energy_j, peak_energy_t_s,
+  peak_rotational_energy_j, first_non_finite_energy_t_s}` sampled **every step**.
+
+- **The control passes, so the gate is readable:** one member in vacuum, untouched, conserves energy to
+  better than **1e-6** (`E0 2.251686e-3 J → peak 2.251686e-3 J`). **The gate fails by design:** the heap's
+  energy **leaves the reals at t = 0.46423 s**, last finite peak **5.8464e186 J and rotational** from a
+  1.7e-2 J release. Row 85's `0.3 s … 0.7 s` bracket is now a timestamp.
+
+- ★★ **The first version of this gate reported `+0.0%` on a NaN heap.** `if e > peak` is false when `e` is
+  NaN, and a fallback `if peak.is_finite() { peak } else { e0 }` turned "reached infinite energy" into
+  "gained exactly zero". **A fallback that replaces a non-finite measurement with a plausible one is a lie
+  generator** — propagate, never substitute, and check *is it a number* before any ratio, because `inf`
+  has no percentage and `NaN < tol` is false.
+
+- **`Sample::energy_j` changed meaning** (loudly, not silently): it is now the complete mechanical energy
+  including rotation. The old value was not a different convention, it was an incomplete one.
+
 - ★★★ **The heap re-measured on the corrected release** (`docs/46` row 85). **What works now:** a blade
   falls to **2.030 m/s at 0.3 s** against its ~2.05 m/s terminal velocity, and the occupied set is no
   longer degenerate — cell count `9 → … → 4939` under refinement where row 79 measured a constant 1.
