@@ -1342,3 +1342,287 @@ mod tests {
         );
     }
 }
+
+/// ★★★ **A RIBBON SWEPT ALONG A POLYLINE** — the geometry for anything long, thin and **bent**.
+///
+/// Every mesher here builds a body from a PRIMITIVE placed by a transform: a sphere, a box, a tube, a
+/// cap. That covers matter whose shape is a pose, and covers nothing whose shape is a CURVE. So a
+/// grass blade drooping 99.7% of its length, a rope, a hair, a cable, a bent nail, a splintered plank
+/// and a tree's own branch all had no way to be drawn as the shape they actually are — only as the
+/// straight thing they started as. `build_tube` is *"a tube along +X"* (`mesher.rs:242`): straight, and
+/// capped with flat annuli.
+///
+/// This takes the centreline as it IS and sweeps a rectangular section along it, so the drawn shape is
+/// the shape the physics holds rather than the shape it was authored with. That matters beyond looks:
+/// `pile`'s contact already resolves against `Rod::polyline()` (`docs/46` row 76), so a straight
+/// drawing of a bent member is a picture that disagrees with the collision — the exact class of
+/// mismatch `docs/68`'s illusion test forbids, because something *does* interact with it.
+///
+/// `normal` fixes the ribbon's ROLL — a blade is a ribbon, not a wire, and which way its face points
+/// decides both how it looks and how it bends. It is projected perpendicular to the local tangent at
+/// each node, so a caller hands over the body's own normal and does not have to track the sweep.
+///
+/// Flat-shaded, one normal per quad, matching [`build_box`]. Two nodes give a straight box, so a rigid
+/// member costs exactly what it did before.
+pub fn build_swept_ribbon(
+    nodes: &[[f32; 3]],
+    normal: [f32; 3],
+    width_m: f32,
+    thickness_m: f32,
+    mat: u32,
+    color: [f32; 3],
+) -> Mesh {
+    let mut vertices: Vec<Vertex> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    if nodes.len() < 2 || width_m <= 0.0 || thickness_m <= 0.0 {
+        return Mesh { vertices, indices };
+    }
+    let sub = |a: [f32; 3], b: [f32; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    let add = |a: [f32; 3], b: [f32; 3]| [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+    let mul = |a: [f32; 3], k: f32| [a[0] * k, a[1] * k, a[2] * k];
+    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let cross = |a: [f32; 3], b: [f32; 3]| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let norm = |a: [f32; 3]| {
+        let l = dot(a, a).sqrt();
+        if l > 1.0e-20 {
+            mul(a, 1.0 / l)
+        } else {
+            [0.0, 0.0, 0.0]
+        }
+    };
+
+    // One ring of four corners per node, in a frame carried along the curve.
+    let (hw, ht) = (0.5 * width_m, 0.5 * thickness_m);
+    let mut rings: Vec<[[f32; 3]; 4]> = Vec::with_capacity(nodes.len());
+    for i in 0..nodes.len() {
+        // Tangent from the neighbours, so an interior node miters between its two segments instead of
+        // stepping — a swept curve drawn segment-by-segment cracks open at every bend.
+        let prev = nodes[i.saturating_sub(1)];
+        let next = nodes[(i + 1).min(nodes.len() - 1)];
+        let mut t = norm(sub(next, prev));
+        if dot(t, t) == 0.0 {
+            t = [1.0, 0.0, 0.0];
+        }
+        // The face normal, made perpendicular to the local tangent. If the caller's normal happens to
+        // lie along the tangent the frame is degenerate, so fall back to any perpendicular — a roll
+        // nobody specified is better than a collapsed section.
+        let mut n = norm(sub(normal, mul(t, dot(normal, t))));
+        if dot(n, n) == 0.0 {
+            let seed = if t[0].abs() < 0.9 {
+                [1.0, 0.0, 0.0]
+            } else {
+                [0.0, 1.0, 0.0]
+            };
+            n = norm(cross(t, seed));
+        }
+        let b = norm(cross(t, n)); // across the ribbon's width
+        let c = nodes[i];
+        rings.push([
+            add(add(c, mul(b, hw)), mul(n, ht)),
+            add(add(c, mul(b, -hw)), mul(n, ht)),
+            add(add(c, mul(b, -hw)), mul(n, -ht)),
+            add(add(c, mul(b, hw)), mul(n, -ht)),
+        ]);
+    }
+
+    // ★ WOUND OUTWARD, and the winding was wrong first. Built the obvious way, every face came out
+    // facing IN — the enclosed volume measured exactly `w·t·L` and exactly NEGATIVE, so the geometry
+    // was right and the orientation was inverted. A vertex-count or not-empty test would have passed
+    // it, and the mesh would have drawn as an inside-out shell lit from within. Reversing the section
+    // order flips the triangle winding AND the face normal derived from it, which is why it is done
+    // here once rather than at each of the three call sites.
+    let mut quad = |p: [[f32; 3]; 4]| {
+        let p = [p[3], p[2], p[1], p[0]];
+        let e1 = sub(p[1], p[0]);
+        let e2 = sub(p[3], p[0]);
+        let nrm = norm(cross(e1, e2));
+        let base = vertices.len() as u32;
+        for c in p.iter() {
+            vertices.push(Vertex {
+                pos: *c,
+                nrm,
+                col: color,
+                mat,
+                // The mesh resolves its own surface at this scale: no unresolved residual to report.
+                rough: 0.0,
+            });
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    };
+
+    for w in rings.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        for k in 0..4 {
+            let k2 = (k + 1) % 4;
+            quad([a[k], a[k2], b[k2], b[k]]);
+        }
+    }
+    // End caps, wound so both face outward along the curve's ends.
+    let first = rings[0];
+    quad([first[3], first[2], first[1], first[0]]);
+    let last = rings[rings.len() - 1];
+    quad([last[0], last[1], last[2], last[3]]);
+
+    Mesh { vertices, indices }
+}
+
+#[cfg(test)]
+mod swept_ribbon_tests {
+    //! **Does the swept ribbon enclose the matter it claims to?**
+    //!
+    //! A mesh is easy to check the wrong way — vertex counts, index counts, "it is not empty". None of
+    //! those would notice a section built inside-out, a ring mitered the wrong way, or a cap facing in.
+    //! The honest question is the physical one: **what VOLUME does this surface enclose**, against the
+    //! volume the body actually has. That is computable in closed form from the triangles themselves
+    //! (divergence theorem), so the test never has to trust the thing it is testing.
+
+    use super::*;
+
+    /// Signed volume of a closed triangle soup: `V = Σ v0 · (v1 × v2) / 6`. Positive when the winding
+    /// is outward, which makes this a WINDING check as well as a size check — a surface built
+    /// inside-out reports its volume negative rather than passing quietly.
+    fn enclosed_volume(m: &Mesh) -> f64 {
+        let mut v6 = 0.0f64;
+        for tri in m.indices.chunks(3) {
+            let p: Vec<[f64; 3]> = tri
+                .iter()
+                .map(|&i| {
+                    let q = m.vertices[i as usize].pos;
+                    [q[0] as f64, q[1] as f64, q[2] as f64]
+                })
+                .collect();
+            let cr = [
+                p[1][1] * p[2][2] - p[1][2] * p[2][1],
+                p[1][2] * p[2][0] - p[1][0] * p[2][2],
+                p[1][0] * p[2][1] - p[1][1] * p[2][0],
+            ];
+            v6 += p[0][0] * cr[0] + p[0][1] * cr[1] + p[0][2] * cr[2];
+        }
+        v6 / 6.0
+    }
+
+    const W: f32 = 0.004;
+    const T: f32 = 0.0002;
+
+    #[test]
+    fn a_straight_ribbon_encloses_exactly_its_own_box() {
+        let len = 0.35f32;
+        let m = build_swept_ribbon(
+            &[[0.0, 0.0, 0.0], [len, 0.0, 0.0]],
+            [0.0, 0.0, 1.0],
+            W,
+            T,
+            0,
+            [0.5, 0.5, 0.5],
+        );
+        let want = (W * T * len) as f64;
+        let got = enclosed_volume(&m);
+        assert!(
+            (got - want).abs() / want < 1.0e-5,
+            "a straight ribbon must enclose w*t*L = {want:.6e} m³, got {got:.6e} (ratio {:.6}). A \
+             NEGATIVE value means the surface is wound inside-out.",
+            got / want
+        );
+    }
+
+    #[test]
+    fn subdividing_a_straight_ribbon_does_not_change_what_it_encloses() {
+        // ★ RESOLUTION INDEPENDENCE (`docs/72` §3.5). The same body described with more nodes is the
+        // same body: if the enclosed volume tracks the node count, the mesh is measuring its own
+        // discretisation rather than the matter — which is the defect row 85 caught in the packing
+        // figures, in a different guise.
+        let len = 0.35f64;
+        let mut last: Option<f64> = None;
+        for n in [2usize, 3, 5, 9, 17, 33] {
+            let nodes: Vec<[f32; 3]> = (0..n)
+                .map(|i| [(len * i as f64 / (n - 1) as f64) as f32, 0.0, 0.0])
+                .collect();
+            let v = enclosed_volume(&build_swept_ribbon(
+                &nodes,
+                [0.0, 0.0, 1.0],
+                W,
+                T,
+                0,
+                [0.5; 3],
+            ));
+            if let Some(p) = last {
+                assert!(
+                    (v - p).abs() / p < 1.0e-4,
+                    "volume moved with node count: {p:.6e} -> {v:.6e} at n={n}"
+                );
+            }
+            last = Some(v);
+        }
+    }
+
+    #[test]
+    fn a_bent_ribbon_still_encloses_its_own_matter() {
+        // A quarter circle of the same arclength. Sweeping a section round a bend cannot create or
+        // destroy matter; mitering redistributes it, so allow a few percent but not a factor.
+        let arc = 0.35f64;
+        let r = arc / (std::f64::consts::FRAC_PI_2);
+        let n = 33;
+        let nodes: Vec<[f32; 3]> = (0..n)
+            .map(|i| {
+                let a = std::f64::consts::FRAC_PI_2 * i as f64 / (n - 1) as f64;
+                [(r * a.sin()) as f32, (r * (1.0 - a.cos())) as f32, 0.0]
+            })
+            .collect();
+        let m = build_swept_ribbon(&nodes, [0.0, 0.0, 1.0], W, T, 0, [0.5; 3]);
+        let want = (W as f64) * (T as f64) * arc;
+        let got = enclosed_volume(&m);
+        assert!(
+            got > 0.0,
+            "a bent ribbon wound inside-out encloses a negative volume: {got:.6e}"
+        );
+        assert!(
+            (got - want).abs() / want < 0.05,
+            "a bend must not create or destroy matter: want ~{want:.6e} m³, got {got:.6e} \
+             (ratio {:.4})",
+            got / want
+        );
+    }
+
+    #[test]
+    fn a_degenerate_sweep_returns_nothing_rather_than_garbage() {
+        for (nodes, w, t) in [
+            (vec![[0.0, 0.0, 0.0]], W, T),
+            (vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], 0.0, T),
+            (vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], W, 0.0),
+        ] {
+            let m = build_swept_ribbon(&nodes, [0.0, 0.0, 1.0], w, t, 0, [0.5; 3]);
+            assert!(
+                m.vertices.is_empty() && m.indices.is_empty(),
+                "a sweep with nothing to sweep must return an empty mesh, not a malformed one"
+            );
+        }
+    }
+
+    #[test]
+    fn a_roll_along_the_tangent_does_not_collapse_the_section() {
+        // The caller's normal can point anywhere, including straight down the curve. A frame built
+        // naively from it would collapse to zero width and the ribbon would vanish — silently, since
+        // an empty-looking mesh still draws.
+        let m = build_swept_ribbon(
+            &[[0.0, 0.0, 0.0], [0.35, 0.0, 0.0]],
+            [1.0, 0.0, 0.0], // parallel to the tangent: degenerate if taken at face value
+            W,
+            T,
+            0,
+            [0.5; 3],
+        );
+        let v = enclosed_volume(&m);
+        let want = (W * T * 0.35) as f64;
+        assert!(
+            (v - want).abs() / want < 1.0e-5,
+            "a normal parallel to the tangent must fall back to a real frame, not a collapsed one: \
+             enclosed {v:.6e} m³ against {want:.6e}"
+        );
+    }
+}

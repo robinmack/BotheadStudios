@@ -1170,6 +1170,63 @@ pub struct Sample {
     pub energy_j: f64,
 }
 
+/// **The member's own geometry, as a mesh** — the shape it is actually in, not the shape it was
+/// authored with.
+///
+/// Same rule as [`crate::assembly::Assembly::mesh`]: derived from the body, never authored beside it.
+/// The centreline is [`Rod::polyline`] — which is what `pile`'s CONTACT already resolves against
+/// (`docs/46` row 76) — so the drawn shape and the collided shape are the same shape. Drawing a bent
+/// member straight would put a picture on screen that disagrees with the physics, and `docs/68`'s
+/// illusion test permits an illusion only while **nothing interacts with it**; a blade's neighbours
+/// interact with exactly this curve.
+///
+/// A rigid member is a two-node polyline, so it costs one box, as it always did.
+pub fn rod_mesh(rod: &Rod, mat: u32, color: [f32; 3]) -> crate::mesher::Mesh {
+    let nodes: Vec<[f32; 3]> = rod
+        .polyline()
+        .iter()
+        .map(|p| [p.x as f32, p.y as f32, p.z as f32])
+        .collect();
+    let n = rod.normal;
+    crate::mesher::build_swept_ribbon(
+        &nodes,
+        [n.x as f32, n.y as f32, n.z as f32],
+        rod.width_m as f32,
+        rod.thickness_m as f32,
+        mat,
+        color,
+    )
+}
+
+/// The whole heap as one mesh — every member in the shape it is in, concatenated.
+///
+/// ★ **Members that are not numbers are DROPPED, and the count of them is returned** rather than
+/// silently skipped or silently drawn. `docs/46` rows 85/86: this heap goes NaN at contact, and a NaN
+/// vertex does not draw as anything — it disappears, or it takes its whole triangle strip with it. A
+/// renderer that quietly omitted them would produce a thinning, plausible-looking haystack while the
+/// simulation was destroying itself, which is precisely how this module's other instruments lied. The
+/// caller is told, so the picture can say so.
+pub fn heap_mesh(rods: &[Rod], mat: u32, color: [f32; 3]) -> (crate::mesher::Mesh, usize) {
+    let mut out = crate::mesher::Mesh {
+        vertices: Vec::new(),
+        indices: Vec::new(),
+    };
+    let mut dropped = 0usize;
+    for r in rods {
+        if !(r.centre.is_finite() && r.axis.is_finite() && r.normal.is_finite())
+            || !r.polyline().iter().all(|p| p.is_finite())
+        {
+            dropped += 1;
+            continue;
+        }
+        let m = rod_mesh(r, mat, color);
+        let base = out.vertices.len() as u32;
+        out.vertices.extend_from_slice(&m.vertices);
+        out.indices.extend(m.indices.iter().map(|i| i + base));
+    }
+    (out, dropped)
+}
+
 /// ★★★ **ONE MECHANICAL ENERGY, AND IT COUNTS THE SPIN** (`docs/46` rows 79, 84, 86).
 ///
 /// This module had **two** energy meters and the production one was blind to the channel the pile
@@ -1239,12 +1296,53 @@ pub fn settle_traced(
     mats: &[Material],
     count: usize,
     gravity_ms2: f64,
+    air_density_kgm3: f64,
+    seed: u64,
+    trace_every_s: f64,
+) -> Option<(Settled, Vec<Sample>)> {
+    settle_watched(
+        member,
+        mats,
+        count,
+        gravity_ms2,
+        air_density_kgm3,
+        seed,
+        trace_every_s,
+        0.0,
+        &mut |_, _| {},
+    )
+}
+
+/// ★★★ **THE SETTLE, WITH SOMEONE WATCHING** — the same one implementation, which is the point.
+///
+/// Until now this module returned **statistics and never state**: `Settled` and a `Vec<Sample>` of
+/// scalars. Nothing could ask *what the heap looked like* at a moment, so nothing could draw it, and the
+/// only way to see a haystack form was to infer it from numbers. That is the same gap `Settled::
+/// all_finite` closed for "is it a number" (row 85) — a summary is not the state it summarises.
+///
+/// `on_frame(t, rods)` is handed the members themselves, every `watch_every_s` seconds of simulated
+/// time (`0.0` = never). It is an OBSERVER: it may read and copy, and the settle does not care what it
+/// does. `settle_traced` is this with an observer that does nothing and `settle` is that with the trace
+/// discarded, so there is still exactly one settling law and no second one to disagree with it
+/// (`docs/46` row 84).
+///
+/// ★ The caller sees the members in whatever shape they are actually in, bent polylines and all —
+/// `Rod::polyline()` is the matter, not the capsule (row 76). A renderer asking this question gets the
+/// truth the physics holds, rather than a summary someone chose to keep.
+#[allow(clippy::too_many_arguments)]
+pub fn settle_watched(
+    member: &Assembly,
+    mats: &[Material],
+    count: usize,
+    gravity_ms2: f64,
     // Air density at the pile, kg/m³ — **0.0 is a vacuum**. The Earth assembly supplies this; the Moon
     // supplies zero. A parameter and not a constant because whether there is air is a property of
     // where the pile IS, not of piles.
     air_density_kgm3: f64,
     seed: u64,
     trace_every_s: f64,
+    watch_every_s: f64,
+    on_frame: &mut dyn FnMut(f64, &[Rod]),
 ) -> Option<(Settled, Vec<Sample>)> {
     let (length, radius) = rod_for(member)?;
     let material = member.dominant_material()?;
@@ -1395,6 +1493,7 @@ pub fn settle_traced(
     let mut disturbed = false;
     let mut trace: Vec<Sample> = Vec::new();
     let mut next_sample = 0.0f64;
+    let mut next_watch = 0.0f64;
     // ★★★ THE DIRECT QUESTION (docs/46 row 78). `peak centre 0.000000` with gravity inside the
     // integrator is impossible unless the loop never calls it. Three probes went to hypotheses before
     // anyone counted the calls.
@@ -1689,6 +1788,11 @@ point-by-point shape diff is meaningless across this, so it is not reported."
         // comparable when they are not. Measured the wrong way first: folding tip speed into this
         // field made a 20-blade heap report "37.43 m/s", which is impossible for a body the air caps
         // at ~2 m/s, and the impossible number was the only reason the redefinition was noticed.
+        // The observer sees the members themselves, on its own clock.
+        if watch_every_s > 0.0 && elapsed_s >= next_watch {
+            on_frame(elapsed_s, &rods);
+            next_watch += watch_every_s;
+        }
         // ★ EVERY STEP, not every trace sample: an injection that spikes and dissipates between
         // samples is exactly the shape of the thing being hunted (row 79's arrived in ONE step).
         {
@@ -3890,6 +3994,115 @@ mod energy_gate_tests {
             crate::assembly::compiled::parse(crate::assembly::compiled::GRASS_BLADE_DRY),
             crate::materials::load(),
         )
+    }
+
+    #[test]
+    fn a_heap_mesh_carries_every_member_and_reports_the_ones_it_cannot() {
+        // ★ The drawn shape must be the SIMULATED shape, and what cannot be drawn must be COUNTED.
+        let (blade, mats) = dry_blade();
+        let (length, _r) = rod_for(&blade).expect("a rod");
+        let member_mass = blade.mass_kg(&mats).expect("a mass").max(1e-12);
+        let material = blade
+            .parts
+            .first()
+            .map(|p| p.material.clone())
+            .unwrap_or_default();
+        let m = mats.iter().find(|m| m.id == material).expect("catalogued");
+        let (w, t) = cross_section_for(&blade).expect("a section");
+        let ei = m.youngs_modulus as f64 * w * t.powi(3) / 12.0;
+        let mut rods = release_rods_bent(&blade, 6, 20260810, ei, member_mass / length * 9.81)
+            .expect("release");
+
+        let (mesh, dropped) = heap_mesh(&rods, 0, [0.4, 0.5, 0.2]);
+        assert_eq!(dropped, 0, "a healthy release has no undrawable members");
+        assert!(
+            !mesh.vertices.is_empty() && mesh.indices.len() % 3 == 0,
+            "six members must produce a closed triangle mesh, got {} verts / {} indices",
+            mesh.vertices.len(),
+            mesh.indices.len()
+        );
+        assert!(
+            mesh.vertices
+                .iter()
+                .all(|v| v.pos.iter().all(|c| c.is_finite())),
+            "a mesh built from finite members must be finite"
+        );
+        // The bent shape, not the straight one: a rigid capsule would give 2 nodes and 6 quads per
+        // member; a bent member gives Flex::SEGMENTS + 1 nodes and many more.
+        let straight_quads_per_member = 6;
+        assert!(
+            mesh.indices.len() / 6 > 6 * straight_quads_per_member,
+            "the mesh must follow the members' BENT centreline, but it has only {} quads for 6              members — that is the straight-capsule count, so the picture would disagree with the              collision (docs/46 row 76)",
+            mesh.indices.len() / 6
+        );
+
+        // ★ AND A MEMBER THAT IS NOT A NUMBER MUST BE REPORTED, NOT QUIETLY OMITTED (rows 85, 86).
+        rods[2].centre.y = f64::NAN;
+        let (mesh2, dropped2) = heap_mesh(&rods, 0, [0.4, 0.5, 0.2]);
+        assert_eq!(
+            dropped2, 1,
+            "a NaN member must be counted as undrawable so the picture can say so"
+        );
+        assert!(
+            mesh2
+                .vertices
+                .iter()
+                .all(|v| v.pos.iter().all(|c| c.is_finite())),
+            "no NaN may reach the vertex buffer — it does not draw as anything, it just vanishes"
+        );
+    }
+
+    #[test]
+    fn the_settle_can_be_watched_and_hands_over_real_members() {
+        // ★ A summary is not the state it summarises. Before `settle_watched` this module returned
+        // statistics only, so nothing could draw a haystack forming — it could only be inferred from
+        // scalars. This asserts the observer is handed the MEMBERS, in the shape they are actually in.
+        let (blade, mats) = dry_blade();
+        let mut frames: Vec<(f64, usize, f64)> = Vec::new();
+        std::env::set_var("PILE_CAP_S", "0.05");
+        let out = settle_watched(
+            &blade,
+            &mats,
+            4,
+            9.81,
+            0.0,
+            20260810,
+            0.05,
+            0.01,
+            &mut |t, rods| {
+                // Copy only what the assertion needs; the observer must not hold the borrow.
+                let top = rods
+                    .iter()
+                    .flat_map(|r| r.polyline())
+                    .map(|p| p.y)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                frames.push((t, rods.len(), top));
+            },
+        );
+        std::env::remove_var("PILE_CAP_S");
+        let (_s, _t) = out.expect("a heap");
+        assert!(
+            frames.len() >= 3,
+            "watching every 0.01 s of a 0.05 s run should yield several frames, got {}",
+            frames.len()
+        );
+        assert!(
+            frames.iter().all(|f| f.1 == 4),
+            "every frame must carry all four members, got {:?}",
+            frames.iter().map(|f| f.1).collect::<Vec<_>>()
+        );
+        assert!(
+            frames.iter().all(|f| f.2.is_finite()),
+            "the members handed over must be real geometry, not folded statistics"
+        );
+        // Time must advance, and the observer must not be called twice for one instant.
+        for w in frames.windows(2) {
+            assert!(
+                w[1].0 > w[0].0,
+                "observer time went backwards: {:?}",
+                frames
+            );
+        }
     }
 
     #[test]

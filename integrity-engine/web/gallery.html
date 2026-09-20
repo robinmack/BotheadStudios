@@ -146,10 +146,24 @@
                 lastGroup = group;
               }
               const fig = document.createElement("figure");
-              const img = document.createElement("img");
-              img.loading = "lazy";
-              img.src = s.url;
-              img.alt = s.name;
+              // ★ A MOVIE IS EVIDENCE A STILL CANNOT BE (2026-09-20). `CLAUDE.md` rule 4b: motion is a
+              // property of the SEQUENCE — stutter, freezes, popping and teleports are invisible in any
+              // single frame, and those are the failures worth reviewing. The manifest STATES the kind
+              // rather than leaving the page to guess from an extension.
+              const isVideo = s.kind === "video" || /\.mp4$/i.test(s.url || "");
+              const img = document.createElement(isVideo ? "video" : "img");
+              if (isVideo) {
+                img.src = s.url;
+                img.muted = true;
+                img.loop = true;
+                img.playsInline = true;
+                img.controls = true;
+                img.preload = "metadata";
+              } else {
+                img.loading = "lazy";
+                img.src = s.url;
+                img.alt = s.name;
+              }
               const cap = document.createElement("figcaption");
               cap.textContent = s.name;
               const when = document.createElement("span");
@@ -157,7 +171,11 @@
               when.textContent = ago(s.mtime_ms);
               cap.appendChild(when);
               fig.append(img, cap);
-              fig.addEventListener("click", () => open(s.url, s.name));
+              // A video owns its own clicks (play/pause, scrub); stealing them into the lightbox makes
+              // it unreviewable, which is the one thing it is for.
+              if (!isVideo) {
+                fig.addEventListener("click", () => open(s.url, s.name));
+              }
               grid.appendChild(fig);
             }
           }
