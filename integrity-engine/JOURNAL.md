@@ -3,6 +3,78 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-09-20 — the spin is fed by the floor and finished by the precession
+
+Row 86 named the channel (rotational) and the moment (`t = 0.46423 s`). It could not name the **term**,
+because `ang_vel` is written in three separate places in a step. `pile::spin_probe_*` attributes the
+rotational energy change to each writer, the way `granular::ContactTerms` attributes a contact force.
+
+### What it measured, over 0.10 s, 12 members, 2.81 M rod-steps
+
+| term | contribution | entitled to |
+|---|---|---|
+| neighbour torque | `+0.0000e0 J` | add or remove (no contact yet) |
+| free precession | `+1.9238e-11 J` | **nothing** — torque-free motion conserves energy |
+| **floor impulse** | **`+1.5172e-5 J`** | only remove (non-injecting, row 36) |
+
+### ★★ The floor is a net sink and a net spin source at the same time
+
+Its linear term is `−3.3268e-4 J` and its **net is `−2.4770e-4 J`**. So no energy gate watching totals
+would ever flag it — while it feeds the one degree of freedom that carries an instability.
+
+**A constraint that removes energy overall can still destroy a simulation by feeding the unstable
+channel.** That is the general lesson, and it is why row 86's gate was necessary but not sufficient.
+
+### And its position projection is energy from nothing — now quantified
+
+`centre += dpos` hands a member `m·g·Δy` with no velocity paying for it: `+6.9804e-5 J` at 0.1 s. The
+heap's **entire** measured gain at 0.2 s is `+6.9796e-5 J` against a lift of `+6.9821e-5 J` — **ratio
+1.000**. That is the blind spot this module's own header named and nobody had measured.
+
+It is bounded, though — `6.98e-5 → 7.56e-5 J` from 0.1 s to 0.47 s — so it is a one-off at first
+touchdown and **not** the pump.
+
+### ★★★ Two refutations, both mine, both from measuring at one operating point
+
+1. **"Free precession is the pump."** It is `+1.9e-11 J` at 0.1 s. An instability invisible at small
+   amplitude is not absent — but neither is it the source. It overflows **last**, at
+   `|ω| = 1.9580e96 rad/s`, twelve rod-steps after everything else is already gone. **Chasing the first
+   NON-FINITE value finds what overflowed last, not what grew anything.** Row 79's rule is the first
+   EXCESSIVE value, and I had to be told that by my own instrument twice.
+2. **"The floor's steady feed explains it."** It does not. `|ω|` first passes a derived physical bound of
+   **117.1 rad/s at step 4,322,483 = t 0.154 s**, while a constant feed at the measured rate reaches only
+   **5.5 rad/s by 0.46 s**. The growth is faster than linear, so it is a **loop**, not a source.
+
+### The loop has the right shape, and is not yet confirmed
+
+The floor solves on `v_foot = v + ω × r` and applies its correction **at an arm**:
+`ω ↑ → v_foot ↑ → impulse ↑ → Δω ↑`. That is row 79's amplifier, on the floor's path rather than the
+neighbour's.
+
+At the crossing step `|ω|` moves `1.1715e2 → 1.1715e2` with neighbour `+0.0` and precession `+9.66e-14 J`
+— neither probed term did it — **and the probe sits before the floor block, so the floor's contribution
+at that step is precisely what was not captured.**
+
+**NEXT, and only this:** move the attribution point to after the floor and read the loop gain directly.
+Do not change any physics until that line is read.
+
+Derived alongside: the explicit torque-free step `ω += I⁻¹(−ω × Iω)·dt` is unstable above
+`ω_crit = I_axial / ((I_perp − I_axial)·dt) = 177.2 rad/s` for this member (`I` ratio 13,227,
+`dt = 4.27e-7`) — **just above the 117 rad/s the loop reaches**, which is why precession finishes it.
+
+### ★ The probe was NaN-poisoned first, which is the third time
+
+A running sum is destroyed by one NaN delta, so the first measurement past the blow-up reported
+`neighbour NaN · precession NaN` and attributed nothing. Same defect as `f64::max` returning the non-NaN
+operand (row 79) and the energy gate's own first version (row 86) — committed a third time, **in a probe
+built to study it**. It now folds only finite deltas and records which term stopped being a number first.
+
+### Verified
+
+Five instrumented runs (~475 s each). `docs/46` row 87 carries the numbers.
+`spin_attribution_tests::which_term_puts_the_spin_in` **fails by design** on the position projection.
+
+
 ## 2026-09-20 — the pile's energy gate, and the gate's own first lie
 
 Row 85 bracketed the heap's energy injection to `0.3 s … 0.7 s` and noted the shape of the gap: `pile`
