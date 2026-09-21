@@ -9218,6 +9218,124 @@ mod tests {
 mod native_render_tests {
     use super::*;
 
+    /// ★★★ **WHICH WAY IS UP IN A RENDERED FRAME?** — the test that should have existed before any
+    /// sequence was published.
+    ///
+    /// Robin, looking at the published movie: *"it seems the hay falls up?"* She was right, and nothing
+    /// in this file could have contradicted her: the two older native render tests assert statistics
+    /// (not black, not uniform, frames differ), and the haystack test asserts that hay DIFFERS from
+    /// empty ground. **Every one of those is true of a vertically mirrored frame.** I "fixed" a flip by
+    /// eye, judging a still by which half looked like ground — which is a guess dressed as an
+    /// observation, and it inverted the motion of everything.
+    ///
+    /// So: draw a post whose world orientation is KNOWN — a ribbon from the ground straight up — and
+    /// ask where its top lands in the image. World `+Y` must appear at a SMALLER image row than world
+    /// `0`, because image rows count downward from the top. No eyeballing, no interpretation.
+    #[test]
+    #[ignore]
+    fn world_up_is_up_in_the_picture() {
+        let (w, h) = (480u32, 320u32);
+        let mut terra = match pollster::block_on(crate::app::Terra::headless(w, h)) {
+            Ok(t) => t,
+            Err(_) => {
+                eprintln!("no GPU adapter — skipping");
+                return;
+            }
+        };
+        let (json, lm, ev, lc) = shipped_earth();
+        terra
+            .load_world(
+                &json,
+                &lm.data,
+                lm.w as u32,
+                lm.h as u32,
+                &ev.data,
+                ev.w as u32,
+                ev.h as u32,
+                &lc.data,
+                lc.w as u32,
+                lc.h as u32,
+            )
+            .expect("the shipped Earth loads");
+        terra.set_alt_bounds(0.05, 8.0e10);
+        terra.set_epoch_sun_over_lon(-9.45);
+        // Stand where the post will be, plant it, then step back 2 m and look at it LEVEL. The
+        // emplacement uses the camera's own lat/lon, so the order matters; a post at the eye is not in
+        // frame at all.
+        terra.place_camera(53.10, -9.45, 0.4, 0.0, 0.0);
+        terra.emplace_cannon(0.0);
+        terra.place_camera(53.10 - 2.0 / 111_320.0, -9.45, 0.4, 0.0, 0.0);
+        // Dump the frame so a human can look at the same picture the assertion is reading.
+        if std::env::var("ORIENT_PNG").is_ok() {
+            terra.render().expect("f");
+            let q = terra.frame_pixels().expect("p");
+            let f = std::fs::File::create("/tmp/orient-post.png").unwrap();
+            let mut e = png::Encoder::new(std::io::BufWriter::new(f), w, h);
+            e.set_color(png::ColorType::Rgba);
+            e.set_depth(png::BitDepth::Eight);
+            e.write_header().unwrap().write_image_data(&q).unwrap();
+        }
+        terra.set_draw_flora(false);
+        for _ in 0..4 {
+            terra.render().expect("warm-up");
+        }
+
+        // A post 1.5 m tall standing at the emplacement, in the local frame the emplacement uses.
+        let mat = crate::materials::index_of(&crate::materials::load(), "grass") as u32;
+        let post = crate::mesher::build_swept_ribbon(
+            &[[0.0, 0.02, 0.0], [0.0, 1.5, 0.0]],
+            [0.0, 0.0, 1.0],
+            0.05,
+            0.05,
+            mat,
+            [0.9, 0.9, 0.2],
+        );
+        terra.set_emplaced_mesh(&post);
+        terra.render().expect("a frame");
+        let px = terra.frame_pixels().expect("pixels");
+
+        // The post is the only strongly yellow thing in frame: ground is pale green (G−B ≈ 39).
+        let mut rows: Vec<usize> = Vec::new();
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let o = (y * w as usize + x) * 4;
+                if px[o + 1] as i16 - px[o + 2] as i16 > 70 {
+                    rows.push(y);
+                }
+            }
+        }
+        assert!(
+            rows.len() > 50,
+            "the post is not in the picture at all ({} pixels) — nothing below can be concluded",
+            rows.len()
+        );
+        let (top, bottom) = (*rows.iter().min().unwrap(), *rows.iter().max().unwrap());
+        // `frame_pixels` hands back rows in the order the GPU holds them. Whatever that order is, the
+        // TOP of a standing post must occupy a smaller row index than its base once written top-down.
+        let mid = (h / 2) as usize;
+        println!(
+            "post spans image rows {top}..{bottom} (frame {w}x{h}, mid {mid}) · {} lit pixels",
+            rows.len()
+        );
+        assert!(bottom > top, "degenerate span: {top}..{bottom}");
+        // ★★★ ASYMMETRY, NOT STRADDLING. The first version of this assert required the post to straddle
+        // the horizon — which a MIRRORED post does just as well, so it could not detect the one thing it
+        // exists to detect. The usable fact is that the post is NOT centred on the eye: its top is 1.1 m
+        // above the camera and its base only 0.38 m below, so a correct frame must show ~3x more of it
+        // above the horizon than below. Mirrored, that ratio inverts.
+        let above = mid.saturating_sub(top);
+        let below = bottom.saturating_sub(mid);
+        println!("  above horizon {above} rows · below {below} rows (expect ~3:1 above:below)");
+        assert!(
+            above > below,
+            "a 1.5 m post seen from a 0.4 m eye reaches 1.1 m above it and 0.38 m below, so a correct \
+             frame shows MORE of it above the horizon than below — but this frame has {above} rows \
+             above and {below} below. The image is mirrored vertically, and every sequence rendered \
+             from it shows motion inverted (Robin, looking at the published movie: \"it seems the hay \
+             falls up?\")."
+        );
+    }
+
     /// ★★★ **WATCH A HAYSTACK FORM, ON EARTH, WITH NO BROWSER.**
     ///
     /// Robin, 2026-09-20: *"a scene on Earth where we drop a mass of hay a bit at a time and it forms a
@@ -9445,19 +9563,19 @@ mod native_render_tests {
                     100.0 * frac
                 );
             }
-            // ★★★ **ROW ORDER.** The offscreen texture's rows come back in GPU order and a PNG is
-            // written top-down; taken literally the ground came out at the TOP of the picture and the
-            // sky at the bottom. Nothing caught it before because nothing had ever LOOKED: the two
-            // existing native render tests assert statistics (not black, not uniform, frames differ)
-            // and never write an image, and every one of those assertions is true of a frame that is
-            // upside down. A picture nobody looks at is not a picture.
-            let mut top_down = vec![0u8; px.len()];
-            let stride = (w * 4) as usize;
-            for row in 0..h as usize {
-                let src = (h as usize - 1 - row) * stride;
-                top_down[row * stride..(row + 1) * stride].copy_from_slice(&px[src..src + stride]);
-            }
-            let px = top_down;
+            // ★★★ **NO FLIP — AND THE FLIP THAT WAS HERE WAS THE BUG.** `frame_pixels` already hands
+            // rows back top-down, which `world_up_is_up_in_the_picture` now proves with a post of known
+            // orientation rather than by eye. I had added a vertical flip after judging a STILL by
+            // which half "looked like ground" — a guess dressed as an observation — and it inverted the
+            // motion of every sequence rendered from it. Robin, watching the published movie: *"it
+            // seems the hay falls up?"* It did. Measured afterwards: the hay's centroid row ran
+            // 154.9 → 44.0 over the falling phase, i.e. upward, for 35 straight frames.
+            //
+            // ★ Nothing here could have contradicted her. The two older native tests assert statistics
+            // (not black, not uniform, frames differ) and this one asserts hay DIFFERS from empty
+            // ground — **every one of those is true of a vertically mirrored frame.** A still cannot
+            // show you which way anything is falling; only a sequence can, and only if something
+            // checks the axis.
             let path = format!("{out}/haystack-{i:04}.png");
             let file = std::fs::File::create(&path).expect("frame file");
             let mut enc = png::Encoder::new(BufWriter::new(file), w, h);
