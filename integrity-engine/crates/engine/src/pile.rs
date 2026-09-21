@@ -847,6 +847,8 @@ pub fn step_one_rod(
     let mut d_neighbour_this_step = 0.0f64;
     #[allow(unused_assignments)]
     let mut d_precession_this_step = 0.0f64;
+    #[allow(unused_assignments)]
+    let mut d_floor_this_step = 0.0f64;
     let e_before_torque = if probe {
         rod_rotational_energy_j(rod, mass_kg)
     } else {
@@ -923,24 +925,6 @@ pub fn step_one_rod(
         }
     }
 
-    if probe {
-        let w_now = rod.ang_vel.length();
-        SPIN_BUDGET.with(|b| {
-            let mut b = b.borrow_mut();
-            if b.first_excess_step == u64::MAX
-                && b.omega_bound_rads > 0.0
-                && w_now.is_finite()
-                && w_now > b.omega_bound_rads
-            {
-                b.first_excess_step = b.steps;
-                b.omega_before_excess = w_at_step_start;
-                b.omega_after_excess = w_now;
-                b.excess_d_neighbour_j = d_neighbour_this_step;
-                b.excess_d_precession_j = d_precession_this_step;
-                b.excess_d_floor_j = 0.0; // the floor runs after this point in the step
-            }
-        });
-    }
     rod.centre += rod.vel * dt;
     rod.spin(dt);
 
@@ -1016,8 +1000,23 @@ pub fn step_one_rod(
         } else {
             0.0
         };
+        let w_pre_floor = if probe { rod.ang_vel.length() } else { 0.0 };
         rod.apply_impulse_at(mass_kg, arm, impulse);
         if probe {
+            let w_post = rod.ang_vel.length();
+            if w_pre_floor.is_finite() && w_post.is_finite() && w_pre_floor > 1.0e-6 {
+                let g = (w_post - w_pre_floor) / w_pre_floor;
+                if g.is_finite() {
+                    SPIN_BUDGET.with(|b| {
+                        let mut b = b.borrow_mut();
+                        b.floor_dw_over_w_sum += g;
+                        b.floor_dw_over_w_n += 1;
+                        if b.floor_first_w_rads == 0.0 {
+                            b.floor_first_w_rads = w_pre_floor;
+                        }
+                    });
+                }
+            }
             let d_rot = rod_rotational_energy_j(rod, mass_kg) - e_before_floor;
             let d_lin = 0.5 * mass_kg * rod.vel.length_squared() - ke_before_floor;
             SPIN_BUDGET.with(|b| {
@@ -1036,7 +1035,31 @@ pub fn step_one_rod(
                     b.floor_linear_j += d_lin;
                 }
             });
+            d_floor_this_step = d_rot;
         }
+    }
+
+    // ★ THE CROSSING CHECK LIVES HERE NOW — AFTER THE FLOOR. It used to sit before the floor block, so
+    // the one term that could have moved |ω| at the crossing step was the one term not captured, and
+    // the measurement reported "neither probed term did it" (row 87). A probe placed upstream of the
+    // suspect cannot see the suspect.
+    if probe {
+        let w_now = rod.ang_vel.length();
+        SPIN_BUDGET.with(|b| {
+            let mut b = b.borrow_mut();
+            if b.first_excess_step == u64::MAX
+                && b.omega_bound_rads > 0.0
+                && w_now.is_finite()
+                && w_now > b.omega_bound_rads
+            {
+                b.first_excess_step = b.steps;
+                b.omega_before_excess = w_at_step_start;
+                b.omega_after_excess = w_now;
+                b.excess_d_neighbour_j = d_neighbour_this_step;
+                b.excess_d_precession_j = d_precession_this_step;
+                b.excess_d_floor_j = d_floor_this_step;
+            }
+        });
     }
 }
 
@@ -1348,6 +1371,16 @@ pub struct SpinBudget {
     pub excess_d_neighbour_j: f64,
     pub excess_d_precession_j: f64,
     pub excess_d_floor_j: f64,
+    /// ★★★ **THE LOOP GAIN.** The floor solves on `v_foot = v + ω × r` and applies its correction AT AN
+    /// ARM, so it can feed the spin it is reading. These accumulate the FRACTIONAL change in `|ω|` the
+    /// floor's impulse makes, per contact step: `Σ (|ω|after − |ω|before)/|ω|before`, and the count. A
+    /// mean `g > 0` is exponential growth at `(1+g)` per contact step — which is what a constant source
+    /// cannot produce and a loop can, and row 87 measured that the growth IS faster than linear.
+    pub floor_dw_over_w_sum: f64,
+    pub floor_dw_over_w_n: u64,
+    /// `|ω|` the first time the floor acted on a member with meaningful spin — the `ω₀` any growth rate
+    /// must start from to reach the bound in the observed time.
+    pub floor_first_w_rads: f64,
     pub max_finite_neighbour_j: f64,
     pub max_finite_precession_j: f64,
     pub max_finite_floor_j: f64,
@@ -1388,6 +1421,9 @@ thread_local! {
             excess_d_neighbour_j: 0.0,
             excess_d_precession_j: 0.0,
             excess_d_floor_j: 0.0,
+            floor_dw_over_w_sum: 0.0,
+            floor_dw_over_w_n: 0,
+            floor_first_w_rads: 0.0,
             max_finite_omega_rads: 0.0,
             omega_at_precession_failure: 0.0,
             max_finite_neighbour_j: 0.0,
@@ -4563,9 +4599,37 @@ mod spin_attribution_tests {
             budget.omega_after_excess
         );
         println!(
-            "    that step's rotational energy change: neighbour {:+.4e} J · precession {:+.4e} J",
-            budget.excess_d_neighbour_j, budget.excess_d_precession_j
+            "    that step's rotational energy change: neighbour {:+.4e} J · precession {:+.4e} J · \
+             FLOOR {:+.4e} J",
+            budget.excess_d_neighbour_j, budget.excess_d_precession_j, budget.excess_d_floor_j
         );
+        // ★★★ THE LOOP GAIN, and what it predicts. If the floor multiplies |ω| by (1+g) on every
+        // contact step, then reaching the bound from ω₀ takes ln(bound/ω₀)/ln(1+g) contact steps. That
+        // prediction is checked against the MEASURED crossing, which is what turns "it looks like a
+        // loop" into "it is this loop".
+        if budget.floor_dw_over_w_n > 0 {
+            let g = budget.floor_dw_over_w_sum / budget.floor_dw_over_w_n as f64;
+            println!(
+                "  ★ FLOOR LOOP GAIN: mean Δ|ω|/|ω| = {:+.6e} per contact step over {} contacts \
+                 (ω₀ {:.4e} rad/s)",
+                g, budget.floor_dw_over_w_n, budget.floor_first_w_rads
+            );
+            if g > 0.0 && budget.floor_first_w_rads > 0.0 {
+                let need =
+                    (budget.omega_bound_rads / budget.floor_first_w_rads).ln() / (1.0 + g).ln();
+                println!(
+                    "    ⇒ predicts {:.3e} contact steps to reach {:.1} rad/s from ω₀; \
+                     measured crossing at step {}",
+                    need,
+                    budget.omega_bound_rads,
+                    if budget.first_excess_step == u64::MAX {
+                        "never".to_string()
+                    } else {
+                        budget.first_excess_step.to_string()
+                    }
+                );
+            }
+        }
         println!(
             "  |ω| largest finite {:.4e} rad/s · |ω| entering the step that diverged {:.4e} rad/s",
             budget.max_finite_omega_rads, budget.omega_at_precession_failure
