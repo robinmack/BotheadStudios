@@ -5479,6 +5479,47 @@ mod app {
     }
 
     impl Terra {
+        /// ★★★ **PUT ARBITRARY MATTER ON THE GROUND AND LOOK AT IT** — native only.
+        ///
+        /// The emplacement already knows how to stand a body on Earth: `assembly::place_on_surface`
+        /// supplies the transform, the uniform is written beside the surface it stands on, and the
+        /// draw happens through the same pipeline the ground and the gun use. **Which** body is drawn
+        /// there was the only thing hard-wired. This makes it a parameter.
+        ///
+        /// It exists so a simulation that is not a scene — a settling haystack, a heap, anything the
+        /// engine can produce a mesh for — can be SEEN on the real Earth, with the real sky and the
+        /// real sun, without inventing a second renderer to look at it through and without adding a
+        /// third scene (`docs/46` row 14, `docs/65`: *"Do not add a third scene this way"*).
+        ///
+        /// ★ Native only, deliberately, exactly as [`Terra::set_draw_flora`] is: it must not become a
+        /// scene verb. `laws::scene_api_tests` scans `web/src/*.ts`, so a
+        /// `#[cfg(not(target_arch = "wasm32"))]` method is invisible to the ratchet — which is a reason
+        /// to be careful with it, not a licence. The browser cannot call this and should not.
+        ///
+        /// The caller supplies vertices already in the emplacement's LOCAL frame, metres, `+Y` up —
+        /// the same frame an assembly's own mesh is in, which is why a `pile` heap can be handed over
+        /// unchanged.
+        #[cfg(not(target_arch = "wasm32"))]
+        pub fn set_emplaced_mesh(&mut self, mesh: &crate::mesher::Mesh) {
+            if mesh.vertices.is_empty() || mesh.indices.is_empty() {
+                self.cannon_gpu = None;
+                return;
+            }
+            // Rebuilt rather than rewritten: the index buffer is immutable in `make_dynamic_mesh`, so
+            // a different body is a different allocation. At a few thousand vertices per frame that is
+            // cheap, and it is honest — a stale index buffer would draw the new vertices in the old
+            // body's topology, which is the kind of picture that looks plausible and is not.
+            let gpu = make_dynamic_mesh(
+                &self.device,
+                "terra-emplaced",
+                mesh.vertices.len(),
+                &mesh.indices,
+            );
+            self.queue
+                .write_buffer(&gpu.vertex_buf, 0, bytemuck::cast_slice(&mesh.vertices));
+            self.cannon_gpu = Some(gpu);
+        }
+
         /// This world's air, as the shared Rayleigh model wants it: the optical depth derived from the
         /// DECLARED atmosphere's mass (a world never declares τ, and never declares surface pressure —
         /// both fall out of the air's own weight), at the one canonical exposure. A world with no
@@ -9176,6 +9217,275 @@ mod tests {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod native_render_tests {
     use super::*;
+
+    /// ★★★ **WATCH A HAYSTACK FORM, ON EARTH, WITH NO BROWSER.**
+    ///
+    /// Robin, 2026-09-20: *"a scene on Earth where we drop a mass of hay a bit at a time and it forms a
+    /// haystack"*, and *"we should probably also be able to record movies to the gallery as well so we
+    /// can inspect/review"*.
+    ///
+    /// The forkful release was already there (`pile`'s `release_t_s`, `docs/46` row 60 step C — a
+    /// haystack IS built a forkful at a time). What was missing was any way to SEE it: `pile` returned
+    /// statistics and never state, nothing could mesh a bent member, and the only screenshot path in
+    /// the repo drove a browser. `settle_watched` + `pile::heap_mesh` + `Terra::set_emplaced_mesh`
+    /// close that, and this writes the frames.
+    ///
+    /// ★★ **THE PICTURE MUST NOT BECOME THE TWELFTH INSTRUMENT THAT LIES.** `docs/46` rows 85/86: this
+    /// heap's energy leaves the reals at **t = 0.46423 s**, and a NaN member does not draw as a broken
+    /// shape — **it vanishes**. So a renderer that simply drew whatever was finite would show a
+    /// thinning, entirely plausible haystack while the simulation destroyed itself, which is precisely
+    /// how this module's other instruments lied. Every frame therefore records how many members were
+    /// undrawable and whether the heap was still made of numbers, and the run PRINTS that ledger
+    /// beside the frame count. Believe the ledger, not the picture.
+    ///
+    /// `#[ignore]` because it needs a GPU and takes minutes: `cargo test -- --ignored`.
+    /// `HAYSTACK_OUT` sets the frame directory (default `/tmp/rigshot/haystack`).
+    #[test]
+    #[ignore]
+    fn a_haystack_forms_on_earth_and_is_recorded() {
+        use std::io::BufWriter;
+
+        let out = std::env::var("HAYSTACK_OUT").unwrap_or_else(|_| "/tmp/rigshot/haystack".into());
+        std::fs::create_dir_all(&out).expect("frame directory");
+        let (w, h) = (960u32, 600u32);
+
+        let mut terra = match pollster::block_on(crate::app::Terra::headless(w, h)) {
+            Ok(t) => t,
+            Err(_) => {
+                eprintln!("no GPU adapter — skipping");
+                return;
+            }
+        };
+        // ★ THE REAL EARTH, AND IT IS NOT OPTIONAL. `Terra::render` draws the emplacement only in its
+        // `surface_loaded` branch; without a world it draws SHELL SPHERES instead — a planet seen from
+        // space, with no ground and no hay anywhere in it. A frame-count assertion would have passed
+        // happily on those, which is why the negative control below exists as well.
+        let (json, lm, ev, lc) = shipped_earth();
+        terra
+            .load_world(
+                &json,
+                &lm.data,
+                lm.w as u32,
+                lm.h as u32,
+                &ev.data,
+                ev.w as u32,
+                ev.h as u32,
+                &lc.data,
+                lc.w as u32,
+                lc.h as u32,
+            )
+            .expect("the shipped Earth loads");
+        terra.set_alt_bounds(0.05, 8.0e10);
+        terra.set_epoch_sun_over_lon(-9.45); // daylight at Galway
+
+        // Stand the hay on the ground at a real coordinate, then step back to look at it. `emplace`
+        // uses the camera's own position, so the order is: be where it should stand, place it, retreat.
+        const LAT: f64 = 53.10;
+        const LON: f64 = -9.45;
+        terra.place_camera(LAT, LON, 0.4, 0.0, -0.10);
+        terra.emplace_cannon(0.0);
+        // ★ TERRA'S OWN MEADOW OFF. The first framed attempt came back full of beautiful grass — and
+        // none of it was the haystack. A camera crouched at 0.35 m at Galway stands INSIDE the flora,
+        // which buried a dozen blades of hay among thousands of drawn ones; the difference-against-
+        // empty-ground measure read 0.165% and was counting hay among grass. This is a PHOTOGRAPH of
+        // one heap, so the meadow is turned off for it — `set_draw_flora` is native-only for exactly
+        // this kind of use and cannot become a scene verb.
+        terra.set_draw_flora(false);
+        // The camera AIMS ITSELF at the heap's base rather than being hand-tuned: given a stand-off and
+        // an eye height, the pitch that looks at the foot of the pile is `-atan(alt/dist)`. Hand-picked
+        // angles are how the first attempt ended up pointing at nothing.
+        let dist_m: f64 = std::env::var("HAY_DIST_M")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1.0);
+        let eye_m: f64 = std::env::var("HAY_EYE_M")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.40);
+        // Aim at a point part-way UP the falling column, not at the ground: the release drops members
+        // from a ceiling, so early frames have the hay above the eye and a base-aimed camera looks
+        // under it.
+        let aim_m: f64 = std::env::var("HAY_AIM_M")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.55);
+        let pitch = ((aim_m - eye_m) / dist_m).atan();
+        let back_deg = dist_m / 111_320.0; // metres of latitude, in degrees
+                                           // ~3 m south of the heap, crouched, looking north at it. 3 m is 2.7e-5° of latitude.
+                                           // ★ PITCH IS IN RADIANS — `place_camera` says so ("look yaw/pitch radians") and I first wrote
+                                           // -6.0 meaning degrees, which is -344° and pointed the camera at nothing. Every frame came back
+                                           // PURE BLACK, 0 non-black pixels in 576,000, and the frame COUNT was still fifty-one. Looking
+                                           // down at a heap 3 m away from 0.6 m up is atan(0.6/3) ≈ 0.20 rad.
+        terra.place_camera(LAT - back_deg, LON, eye_m, 0.0, pitch);
+        // The segment mesh and the flora build on the frame that needs them.
+        for _ in 0..4 {
+            terra.render().expect("a warm-up frame");
+        }
+
+        let mats = crate::materials::load();
+        let blade = crate::assembly::compiled::parse(crate::assembly::compiled::GRASS_BLADE_DRY);
+        let rho = {
+            let air = mats
+                .iter()
+                .find(|m| m.id == "air")
+                .expect("air is catalogued");
+            crate::atmosphere::air_density_at(101_325.0, air, 288.15, 9.81, 0.0)
+        };
+
+        // Collect the heap's own geometry as it forms. The observer hands over the MEMBERS; meshing
+        // and drawing happen here, outside the settle, because the settle's job is matter and time.
+        let hay_mat = crate::materials::index_of(&mats, "grass") as u32;
+        let mut frames: Vec<(f64, crate::mesher::Mesh, usize)> = Vec::new();
+        // ★ HOW MUCH HAY IS AFFORDABLE, MEASURED RATHER THAN WISHED FOR. `docs/46` row 69 predicted
+        // this and row 85 measured it: row 67's honest stem stiffness cut the timestep 194x and the
+        // neighbour loop is O(n²) on top, so one 10-member run to 0.7 s costs 440 s of wall clock and
+        // the 400-blade run "did not complete in 19 minutes and was abandoned". A hundred blades is
+        // hours. **So this films what the engine can actually do today, and the count is stated rather
+        // than implied** — a dozen falling members is not yet a haystack, and calling it one would be
+        // the fakery the Laws forbid. The picture gets better when the physics gets cheaper (row 69),
+        // not when the test asks for more than it can pay for.
+        // ★ Overridable so the FRAMING can be solved without paying for the PHYSICS. Getting a camera
+        // onto a half-metre heap took several attempts, and at ~8 minutes a settle that is a bad way to
+        // ask "is it in shot". `HAY_MEMBERS=4 HAY_CAP_S=0.01` answers the framing question in seconds;
+        // the defaults are the real run.
+        let hay_members: usize = std::env::var("HAY_MEMBERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(12);
+        let cap_s = std::env::var("HAY_CAP_S").unwrap_or_else(|_| "0.50".into());
+        std::env::set_var("PILE_CAP_S", &cap_s);
+        let settled = crate::pile::settle_watched(
+            &blade,
+            &mats,
+            hay_members,
+            9.81,
+            rho,
+            20260810,
+            0.05,
+            0.01,
+            &mut |t, rods| {
+                // ★ THE MATERIAL INDEX IS NOT A FREE PARAMETER. It selects the layer sampled from the
+                // procedural texture array, and the first version passed a bare `0` — whatever
+                // material happens to sit at index 0 — which drew the hay BLACK. A blade is grass, so
+                // it says grass, and the catalogue answers where that is.
+                let (mesh, dropped) = crate::pile::heap_mesh(rods, hay_mat, [0.62, 0.55, 0.28]);
+                frames.push((t, mesh, dropped));
+            },
+        );
+        std::env::remove_var("PILE_CAP_S");
+        let (s, _trace) = settled.expect("a heap forms");
+
+        assert!(!frames.is_empty(), "the observer produced no frames at all");
+
+        // ★★★ THE NEGATIVE CONTROL. "Ten frames were written" is not evidence that any hay is in them
+        // — the same ground, the same sky and the same sun would have produced ten perfectly good
+        // frames with nothing standing on it. So: photograph the empty ground first, and require the
+        // hay frames to DIFFER from it. Without this the test asserts that a camera works.
+        terra.set_emplaced_mesh(&crate::mesher::Mesh {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+        });
+        terra.render().expect("a frame of the empty ground");
+        let empty = terra.frame_pixels().expect("offscreen pixels");
+
+        // ★★★ AND AN ABSOLUTE CHECK, BECAUSE A DIFFERENCE IS NOT A PICTURE. Comparing hay against
+        // empty ground cannot see "the whole scene failed to render" — two black frames differ by
+        // nothing, and a handful of stray pixels would still pass a ratio test. This is the same
+        // standard `a_scene_renders_a_frame_with_no_browser_anywhere` already holds every frame to:
+        // the ground must be THERE, and it must not be one flat colour.
+        let lit = empty
+            .chunks(4)
+            .filter(|p| p[0] > 8 || p[1] > 8 || p[2] > 8)
+            .count();
+        assert!(
+            lit > (w * h) as usize / 20,
+            "the empty ground is not in the picture either: only {lit} of {} pixels are lit. The \
+             camera is pointing at nothing, so nothing that follows means anything. (place_camera \
+             takes yaw/pitch in RADIANS.)",
+            w * h
+        );
+
+        let mut written = 0usize;
+        let mut first_loss: Option<(usize, f64, usize)> = None;
+        for (i, (t, mesh, dropped)) in frames.iter().enumerate() {
+            if *dropped > 0 && first_loss.is_none() {
+                first_loss = Some((i, *t, *dropped));
+            }
+            terra.set_emplaced_mesh(mesh);
+            if terra.render().is_err() {
+                eprintln!("frame {i} failed to render");
+                break;
+            }
+            let px = match terra.frame_pixels() {
+                Some(p) => p,
+                None => break,
+            };
+            if i == 0 {
+                let changed = px
+                    .chunks(4)
+                    .zip(empty.chunks(4))
+                    .filter(|(a, b)| {
+                        (a[0] as i16 - b[0] as i16).abs()
+                            + (a[1] as i16 - b[1] as i16).abs()
+                            + (a[2] as i16 - b[2] as i16).abs()
+                            > 12
+                    })
+                    .count();
+                let frac = changed as f64 / (w * h) as f64;
+                println!(
+                    "          hay covers {:.3}% of the frame vs empty ground",
+                    100.0 * frac
+                );
+                assert!(
+                    frac > 0.001,
+                    "the hay is not in the picture: only {changed} of {} pixels differ from the empty \
+                     ground ({:.4}%). Frames were written, so the camera works — that is exactly what \
+                     makes a frame count worthless as evidence.",
+                    w * h,
+                    100.0 * frac
+                );
+            }
+            // ★★★ **ROW ORDER.** The offscreen texture's rows come back in GPU order and a PNG is
+            // written top-down; taken literally the ground came out at the TOP of the picture and the
+            // sky at the bottom. Nothing caught it before because nothing had ever LOOKED: the two
+            // existing native render tests assert statistics (not black, not uniform, frames differ)
+            // and never write an image, and every one of those assertions is true of a frame that is
+            // upside down. A picture nobody looks at is not a picture.
+            let mut top_down = vec![0u8; px.len()];
+            let stride = (w * 4) as usize;
+            for row in 0..h as usize {
+                let src = (h as usize - 1 - row) * stride;
+                top_down[row * stride..(row + 1) * stride].copy_from_slice(&px[src..src + stride]);
+            }
+            let px = top_down;
+            let path = format!("{out}/haystack-{i:04}.png");
+            let file = std::fs::File::create(&path).expect("frame file");
+            let mut enc = png::Encoder::new(BufWriter::new(file), w, h);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.write_header()
+                .expect("png header")
+                .write_image_data(&px)
+                .expect("png data");
+            written += 1;
+        }
+
+        // ★ THE LEDGER, printed beside the pictures. A frame count alone would say nothing about
+        // whether the frames mean anything.
+        println!(
+            "haystack: {written} frames -> {out}/haystack-%04d.png · members {} · all_finite {} · \
+first undrawable member at {:?}",
+            s.members, s.all_finite, first_loss
+        );
+        println!(
+            "          energy E0 {:.4e} J -> peak {:.4e} J · left the reals at {:?}",
+            s.energy_j_at_release, s.peak_energy_j, s.first_non_finite_energy_t_s
+        );
+        assert!(
+            written >= 10,
+            "expected a sequence to review, wrote only {written} frames"
+        );
+    }
 
     /// ★★★ **THE VIEWER, TESTED — a real frame, on a real GPU, with no browser** (docs/69 §3).
     ///

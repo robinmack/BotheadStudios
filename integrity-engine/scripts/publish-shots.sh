@@ -24,7 +24,7 @@ KEEP="${SHOTS_KEEP:-160}"
 
 mkdir -p "$DEST"
 # Start clean so a deleted shot actually disappears rather than lingering forever.
-find "$DEST" -maxdepth 1 -name '*.png' -delete 2>/dev/null || true
+find "$DEST" -maxdepth 1 \( -name '*.png' -o -name '*.mp4' \) -delete 2>/dev/null || true
 
 # ★ SUBDIRECTORIES TOO. Rigs are routinely run with `OUT=/tmp/rigshot/<run>`, which puts every shot one
 # level down — so the old `-maxdepth 1` scan silently found NONE of them. Measured 2026-08-09: 225 of
@@ -35,10 +35,15 @@ find "$DEST" -maxdepth 1 -name '*.png' -delete 2>/dev/null || true
 tmp_list="$(mktemp)"
 for src in "${SOURCES[@]}"; do
   [ -d "$src" ] || continue
-  find "$src" -name '*.png' -printf '%T@\t%p\n' 2>/dev/null >> "$tmp_list" || true
+  # ★ MOVIES TOO (2026-09-20). `CLAUDE.md` rule 4b: **motion is a property of the SEQUENCE, not of any
+  # frame** — a still cannot show a stutter, a freeze, a pop or a teleport, which are exactly the
+  # failures worth reviewing. A gallery that can only carry stills can only carry half the evidence.
+  find "$src" \( -name '*.png' -o -name '*.mp4' \) -printf '%T@\t%p\n' 2>/dev/null >> "$tmp_list" || true
 done
 total=$(wc -l < "$tmp_list")
 n=0
+n_png=0
+n_vid=0
 while IFS=$'\t' read -r _mt f; do
   [ -n "$f" ] || continue
   [ "$n" -ge "$KEEP" ] && break
@@ -50,6 +55,10 @@ while IFS=$'\t' read -r _mt f; do
   esac
   cp -p "$f" "$DEST/$name"
   n=$((n + 1))
+  case "$name" in
+    *.mp4) n_vid=$((n_vid + 1)) ;;
+    *) n_png=$((n_png + 1)) ;;
+  esac
 done < <(sort -rn "$tmp_list")
 if [ "$total" -gt "$n" ]; then
   echo "  (kept the $n newest of $total; SHOTS_KEEP=$KEEP)"
@@ -63,9 +72,10 @@ import json, os, re, sys
 dest = sys.argv[1]
 rows = []
 for name in os.listdir(dest):
-    if not name.endswith(".png"):
+    if not (name.endswith(".png") or name.endswith(".mp4")):
         continue
     p = os.path.join(dest, name)
+    kind = "video" if name.endswith(".mp4") else "image"
     stem = name[:-4]
     # Group = the leading words before the first numeric-ish segment.
     parts = stem.split("-")
@@ -80,6 +90,9 @@ for name in os.listdir(dest):
         "url": f"/shots/{name}",
         "mtime_ms": int(os.path.getmtime(p) * 1000),
         "group": group,
+        # ★ The gallery must not guess from the extension: a manifest that states the kind can carry a
+        # format the page has never seen without the page silently rendering it as a broken <img>.
+        "kind": kind,
     })
 # Newest first, and keep a run together once its newest member has placed it.
 rows.sort(key=lambda r: -r["mtime_ms"])
@@ -92,5 +105,8 @@ with open(os.path.join(dest, "manifest.json"), "w") as f:
 print(f"  manifest: {len(rows)} shots in {len(seen)} groups")
 PY
 
-echo "✓ published $n PNGs → $DEST"
+# Say what was actually published. It read "$n PNGs" unconditionally, which quietly called a movie a
+# PNG the moment this script learned to carry both — a small lie, but the gallery exists so a human can
+# check what is there, and a count that misdescribes its own contents is the wrong habit to keep.
+echo "✓ published $n file(s) ($n_png PNG, $n_vid MP4) → $DEST"
 echo "  gallery: https://integrity.bothead.net/gallery.html  (or /gallery.html on the dev server)"
