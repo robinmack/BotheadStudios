@@ -9,6 +9,23 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★★ **The floor's loop gain, measured** (`docs/46` row 87, confirmed). Mean `Δ|ω|/|ω| = +1.199914e-5`
+  per contact step over 1,040,536 contacts — strictly positive, so `|ω|` **compounds**. Predicts 1.31e6
+  contact steps to reach the 117 rad/s bound against ~8.0e5 measured: same order over **6.8 decades**.
+  **A source adds; a loop multiplies** — which is why the constant-feed model gave 5.5 rad/s and reality
+  gives 117.
+
+- **It is not energy creation.** The floor is dissipative in total (`NET −7.9e-4 J`) and individual
+  contacts remove (`−3.86e-10 J` at the crossing). It **converts translation into rotation** — physical,
+  it is how a blade topples — with a positive fractional gain on the rotational channel.
+
+- ★★ **So the defect is the damping, and it is already a row.** Row 72 is *"MOSTLY CLOSED — damped 63x,
+  not stopped"*. That is sufficient against a bounded source and **insufficient against a positive-gain
+  loop**. The two rows are one defect; row 72 should be reopened.
+
+- **A probe placed upstream of the suspect cannot see the suspect** — the attribution point had been
+  sitting before the floor block, which is why the crossing step reported "neither probed term did it".
+
 - ★★★ **The spin is fed by the floor and finished by the precession** (`docs/46` row 87). New
   `pile::spin_probe_*` / `SpinBudget` attributes rotational energy to each of the three writers of
   `ang_vel`. Measured over 0.10 s: neighbour torque `+0.0e0`, free precession `+1.9e-11 J`, **floor

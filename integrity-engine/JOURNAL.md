@@ -3,6 +3,57 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-09-20 — the floor's loop gain, and why "damped 63x, not stopped" was not enough
+
+Row 87 left one instruction: move the attribution point to **after** the floor block and read the loop
+gain directly. A probe placed upstream of the suspect cannot see the suspect — mine had been sitting
+before the floor, which is why the crossing step reported "neither probed term did it".
+
+### The loop is real, and its gain is measured
+
+> **mean `Δ|ω|/|ω| = +1.199914e-5` per contact step, over 1,040,536 contacts**
+
+Strictly positive, so `|ω|` multiplies by `(1+g)` on every contact and **compounds**. From
+`ω₀ = 1.7685e-5 rad/s` that predicts **1.309e6 contact steps** to reach the 117.1 rad/s bound; the
+crossing was measured at rod-step 4,322,471 ≈ **8.0e5 contact steps**. Same order across **6.8 decades**
+of growth, the real growth a little faster than a constant mean implies — which is what a loop whose gain
+rises with `ω` does.
+
+**That is why the constant-source model failed** (5.5 rad/s by 0.46 s against a measured 117 at 0.154 s):
+**a source adds; a loop multiplies.**
+
+### ★★ And it is not energy creation
+
+At the crossing step the floor's own contribution is `−3.8566e-10 J` — *negative*. Individual contacts
+remove; only the **mean** feeds. The floor delegates to `granular::terrain_contact_resolve`, which is row
+36's non-injecting contact and is dissipative in total (`floor NET −7.9e-4 J`).
+
+What it does is **systematically convert translation into rotation** — which is physical, it is how a
+blade standing on its end topples — with a positive fractional gain on the rotational channel.
+
+### ★★★ So the defect is not the feed. It is the damping that does not match it — and that is already a row
+
+Row 72 reads **"MOSTLY CLOSED — damped 63x, not stopped."**
+
+Damping that reduces but does not stop is sufficient against a bounded source and **insufficient against
+a positive-gain loop.** The two rows are one defect, and neither could be judged without the other: row
+72 looked closed enough because nobody had measured that something was feeding it, and row 87 looked like
+an injection because nobody had checked what removes spin. **Row 72 should be reopened against this
+measurement.**
+
+### Next
+
+The honest quantity is the loop's **net** gain: the floor's `+1.2e-5` per contact against what row 72's
+channel removes per contact. If the net is positive, **the heap cannot settle at any timestep** — which
+is a statement about the physics, not about tuning, and is exactly the kind of claim that must be
+measured before it is believed.
+
+### Verified
+
+676/676 native, 35 skipped, `mod app` compiles, numbering gate green, `cargo fmt --check` clean. One
+instrumented run at 0.20 s. No physics changed.
+
+
 ## 2026-09-20 — the spin is fed by the floor and finished by the precession
 
 Row 86 named the channel (rotational) and the moment (`t = 0.46423 s`). It could not name the **term**,
