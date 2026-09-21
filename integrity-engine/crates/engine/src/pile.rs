@@ -842,7 +842,35 @@ pub fn step_one_rod(
         extra_torque,
         rod.principal_inertia_kgm2(mass_kg)
     );
+    let probe = spin_probe_on();
+    let w_at_step_start = if probe { rod.ang_vel.length() } else { 0.0 };
+    let mut d_neighbour_this_step = 0.0f64;
+    #[allow(unused_assignments)]
+    let mut d_precession_this_step = 0.0f64;
+    let e_before_torque = if probe {
+        rod_rotational_energy_j(rod, mass_kg)
+    } else {
+        0.0
+    };
     rod.ang_vel += dw_n;
+    if probe {
+        let d = rod_rotational_energy_j(rod, mass_kg) - e_before_torque;
+        d_neighbour_this_step = d;
+        SPIN_BUDGET.with(|b| {
+            let mut b = b.borrow_mut();
+            b.steps += 1;
+            let step = b.steps;
+            let (mut t, mut m, mut f) = (
+                b.neighbour_torque_j,
+                b.max_finite_neighbour_j,
+                b.first_nonfinite_neighbour_step,
+            );
+            fold_delta(&mut t, &mut m, &mut f, d, step);
+            b.neighbour_torque_j = t;
+            b.max_finite_neighbour_j = m;
+            b.first_nonfinite_neighbour_step = f;
+        });
+    }
     // Free precession: a body whose principal moments differ does not spin about a fixed world axis.
     // τ_gyro = −ω × (I·ω), in the body frame where I is diagonal.
     {
@@ -856,9 +884,63 @@ pub fn step_one_rod(
         let iw = wb * i;
         let g = -(wb.cross(iw));
         let world = f[0] * g.x + f[1] * g.y + f[2] * g.z;
+        let e_before_prec = if probe {
+            rod_rotational_energy_j(rod, mass_kg)
+        } else {
+            0.0
+        };
+        let w_before = if probe { rod.ang_vel.length() } else { 0.0 };
         rod.ang_vel += rod.ang_vel_from_impulse(mass_kg, world * dt);
+        if probe {
+            let d = rod_rotational_energy_j(rod, mass_kg) - e_before_prec;
+            d_precession_this_step = d;
+            SPIN_BUDGET.with(|b| {
+                let mut b = b.borrow_mut();
+                let step = b.steps;
+                let (mut t, mut m, mut f) = (
+                    b.free_precession_j,
+                    b.max_finite_precession_j,
+                    b.first_nonfinite_precession_step,
+                );
+                fold_delta(&mut t, &mut m, &mut f, d, step);
+                b.free_precession_j = t;
+                b.max_finite_precession_j = m;
+                b.first_nonfinite_precession_step = f;
+                if d.is_finite() && d > b.worst_precession_j {
+                    b.worst_precession_j = d;
+                }
+                if w_before.is_finite() {
+                    if w_before > b.max_finite_omega_rads {
+                        b.max_finite_omega_rads = w_before;
+                    }
+                    if !d.is_finite() && b.omega_at_precession_failure == 0.0 {
+                        // The spin the body HAD going into the step that diverged — which is the
+                        // number the stability bound predicts.
+                        b.omega_at_precession_failure = w_before;
+                    }
+                }
+            });
+        }
     }
 
+    if probe {
+        let w_now = rod.ang_vel.length();
+        SPIN_BUDGET.with(|b| {
+            let mut b = b.borrow_mut();
+            if b.first_excess_step == u64::MAX
+                && b.omega_bound_rads > 0.0
+                && w_now.is_finite()
+                && w_now > b.omega_bound_rads
+            {
+                b.first_excess_step = b.steps;
+                b.omega_before_excess = w_at_step_start;
+                b.omega_after_excess = w_now;
+                b.excess_d_neighbour_j = d_neighbour_this_step;
+                b.excess_d_precession_j = d_precession_this_step;
+                b.excess_d_floor_j = 0.0; // the floor runs after this point in the step
+            }
+        });
+    }
     rod.centre += rod.vel * dt;
     rod.spin(dt);
 
@@ -895,6 +977,16 @@ pub fn step_one_rod(
     let v_foot = rod.velocity_at(arm);
     let hit = floor_contact(rod, v_foot, contact.radius, contact.friction);
     if hit.hit {
+        if probe {
+            // The lift, valued as the potential it hands over: m·g·Δy, with no velocity to pay for it.
+            let d = mass_kg * gravity_ms2 * hit.dpos.y;
+            SPIN_BUDGET.with(|b| b.borrow_mut().floor_lift_j += d);
+        }
+        let ke_before_floor = if probe {
+            0.5 * mass_kg * rod.vel.length_squared()
+        } else {
+            0.0
+        };
         rod.centre += hit.dpos;
         // The constraint says what the FOOT should now be doing. Distributing that between travelling
         // and turning needs the effective mass at the foot: `Δv = K·J`, so `J = K⁻¹·Δv`. A point far
@@ -919,7 +1011,32 @@ pub fn step_one_rod(
             arm,
             k.determinant()
         );
+        let e_before_floor = if probe {
+            rod_rotational_energy_j(rod, mass_kg)
+        } else {
+            0.0
+        };
         rod.apply_impulse_at(mass_kg, arm, impulse);
+        if probe {
+            let d_rot = rod_rotational_energy_j(rod, mass_kg) - e_before_floor;
+            let d_lin = 0.5 * mass_kg * rod.vel.length_squared() - ke_before_floor;
+            SPIN_BUDGET.with(|b| {
+                let mut b = b.borrow_mut();
+                let step = b.steps;
+                let (mut t, mut m, mut f) = (
+                    b.floor_impulse_j,
+                    b.max_finite_floor_j,
+                    b.first_nonfinite_floor_step,
+                );
+                fold_delta(&mut t, &mut m, &mut f, d_rot, step);
+                b.floor_impulse_j = t;
+                b.max_finite_floor_j = m;
+                b.first_nonfinite_floor_step = f;
+                if d_lin.is_finite() {
+                    b.floor_linear_j += d_lin;
+                }
+            });
+        }
     }
 }
 
@@ -1168,6 +1285,161 @@ pub struct Sample {
     /// So: read a rise as "go and find out why", never as "the integrator violates conservation". The
     /// honest confirmation is a mechanism you can point at, or an isolated single-body control.
     pub energy_j: f64,
+}
+
+/// ★★★ **WHERE A STEP'S SPIN CAME FROM** (`docs/46` row 87).
+///
+/// Row 86 measured that the heap's energy leaves the reals at `t = 0.46423 s` and that the last finite
+/// peak is **rotational — 5.85e186 J from a 1.7e-2 J release**. That says WHICH CHANNEL and says nothing
+/// about WHICH TERM, and `ang_vel` is written in three different places in a step. Row 79 died eleven
+/// times on plausible reasoning about exactly this, so this attributes the rotational energy change to
+/// the term that caused it, the same way [`crate::granular::ContactTerms`] attributes a contact force.
+///
+/// The three writers, and what each is entitled to do:
+/// - **neighbour torque** — a contact's moment perpendicular to the member's axis. May add or remove.
+/// - **free precession** — `τ = −ω × (I·ω)`, torque-free rotation. ★ **This one is entitled to add
+///   NOTHING.** Torque-free motion conserves both angular momentum and energy exactly, so any energy it
+///   gains is integration error, not physics — and with `I = (3.4e-10, 4.6e-6, 4.6e-6)` the axial moment
+///   is four orders below the others, which is precisely when an explicit step of Euler's equations goes
+///   unstable.
+/// - **floor impulse** — a constraint. May only remove (`docs/46` row 36's non-injecting contact).
+#[derive(Default, Clone, Copy, Debug, PartialEq)]
+pub struct SpinBudget {
+    pub neighbour_torque_j: f64,
+    pub free_precession_j: f64,
+    pub floor_impulse_j: f64,
+    /// The floor's change to TRANSLATIONAL kinetic energy. A constraint that removes into-surface
+    /// velocity should make this strongly negative.
+    pub floor_linear_j: f64,
+    /// ★ The floor's **position projection** (`centre += dpos`), valued as `m·g·Δy`. It lifts a member
+    /// out of the surface with no velocity change and no matching term anywhere — the blind spot this
+    /// module's own header names. Energy from nothing, if it is positive.
+    pub floor_lift_j: f64,
+    pub steps: u64,
+    /// The single worst one-step gain from free precession, and when.
+    pub worst_precession_j: f64,
+    pub worst_precession_t_s: f64,
+    /// ★★★ **WHICH TERM STOPPED BEING A NUMBER FIRST** — by rod-step index, `u64::MAX` for "never".
+    ///
+    /// A running sum is destroyed by a single NaN delta: the first measurement past the blow-up turned
+    /// `neighbour_torque_j` and `free_precession_j` into `NaN` and the attribution said nothing at all.
+    /// That is the same defect as `f64::max` returning the non-NaN operand (row 79) and the energy
+    /// gate's own first version (row 86), committed a third time, in a probe built to study it.
+    ///
+    /// So: **only finite deltas are summed, and the first non-finite one is RECORDED per term.** The
+    /// term that goes bad first is the term the explosion enters through — which is the whole question.
+    pub first_nonfinite_neighbour_step: u64,
+    pub first_nonfinite_precession_step: u64,
+    pub first_nonfinite_floor_step: u64,
+    /// Largest FINITE one-step gain seen per term, so a spike that precedes the NaN is still visible.
+    /// ★ The largest FINITE `|ω|` seen, and the `|ω|` on the step precession stopped being a number.
+    /// The derived stability bound for the explicit torque-free step is `ω_crit = I_axial /
+    /// ((I_perp − I_axial)·dt)`; these are what close the arithmetic against it (`docs/46` row 87).
+    pub max_finite_omega_rads: f64,
+    pub omega_at_precession_failure: f64,
+    /// ★★★ **THE FIRST EXCESSIVE SPIN, AND WHO PUT IT THERE.** Chasing the first NON-FINITE value found
+    /// precession overflowing at `|ω| = 1.96e96` — which says only that it overflowed last, not that it
+    /// grew anything. Row 79's rule is to instrument the first EXCESSIVE value instead: the step where
+    /// `|ω|` first passes a bound physics cannot reach, with each term's contribution to that step.
+    pub omega_bound_rads: f64,
+    pub first_excess_step: u64,
+    pub omega_before_excess: f64,
+    pub omega_after_excess: f64,
+    pub excess_d_neighbour_j: f64,
+    pub excess_d_precession_j: f64,
+    pub excess_d_floor_j: f64,
+    pub max_finite_neighbour_j: f64,
+    pub max_finite_precession_j: f64,
+    pub max_finite_floor_j: f64,
+}
+
+/// Fold one finite delta into a total, or record where it stopped being a number.
+#[inline]
+fn fold_delta(total: &mut f64, max: &mut f64, first_bad: &mut u64, d: f64, step: u64) {
+    if d.is_finite() {
+        *total += d;
+        if d > *max {
+            *max = d;
+        }
+    } else if *first_bad == u64::MAX {
+        *first_bad = step;
+    }
+}
+
+static SPIN_PROBE_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+thread_local! {
+    static SPIN_BUDGET: std::cell::RefCell<SpinBudget> = const {
+        std::cell::RefCell::new(SpinBudget {
+            neighbour_torque_j: 0.0,
+            free_precession_j: 0.0,
+            floor_impulse_j: 0.0,
+            floor_linear_j: 0.0,
+            floor_lift_j: 0.0,
+            steps: 0,
+            worst_precession_j: 0.0,
+            worst_precession_t_s: 0.0,
+            first_nonfinite_neighbour_step: u64::MAX,
+            first_nonfinite_precession_step: u64::MAX,
+            first_nonfinite_floor_step: u64::MAX,
+            omega_bound_rads: 0.0,
+            first_excess_step: u64::MAX,
+            omega_before_excess: 0.0,
+            omega_after_excess: 0.0,
+            excess_d_neighbour_j: 0.0,
+            excess_d_precession_j: 0.0,
+            excess_d_floor_j: 0.0,
+            max_finite_omega_rads: 0.0,
+            omega_at_precession_failure: 0.0,
+            max_finite_neighbour_j: 0.0,
+            max_finite_precession_j: 0.0,
+            max_finite_floor_j: 0.0,
+        })
+    };
+}
+
+/// Start attributing rotational energy. Off by default and read through an atomic, so a normal run pays
+/// one relaxed load per step rather than six inertia-tensor evaluations per member.
+/// Set the bound `|ω|` may not pass — DERIVED, not typed: ten times what a member falling at its own
+/// terminal velocity could spin at (`10·v_term / half_length`), which is already far beyond anything
+/// gravity and air can produce and close to the explicit torque-free step's own stability limit.
+pub fn spin_probe_set_bound(omega_bound_rads: f64) {
+    SPIN_BUDGET.with(|b| b.borrow_mut().omega_bound_rads = omega_bound_rads);
+}
+
+pub fn spin_probe_begin() {
+    SPIN_BUDGET.with(|b| {
+        *b.borrow_mut() = SpinBudget {
+            first_nonfinite_neighbour_step: u64::MAX,
+            first_nonfinite_precession_step: u64::MAX,
+            first_nonfinite_floor_step: u64::MAX,
+            first_excess_step: u64::MAX,
+            ..Default::default()
+        }
+    });
+    SPIN_PROBE_ON.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Stop attributing, and hand over what was attributed.
+pub fn spin_probe_take() -> SpinBudget {
+    SPIN_PROBE_ON.store(false, std::sync::atomic::Ordering::Relaxed);
+    SPIN_BUDGET.with(|b| *b.borrow())
+}
+
+#[inline]
+fn spin_probe_on() -> bool {
+    SPIN_PROBE_ON.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// One member's rotational kinetic energy, `½ ω·(I ω)` in its own principal frame.
+pub fn rod_rotational_energy_j(rod: &Rod, mass_kg: f64) -> f64 {
+    let i = rod.principal_inertia_kgm2(mass_kg);
+    let f = rod.frame();
+    let wb = DVec3::new(
+        rod.ang_vel.dot(f[0]),
+        rod.ang_vel.dot(f[1]),
+        rod.ang_vel.dot(f[2]),
+    );
+    0.5 * (i.x * wb.x * wb.x + i.y * wb.y * wb.y + i.z * wb.z * wb.z)
 }
 
 /// **The member's own geometry, as a mesh** — the shape it is actually in, not the shape it was
@@ -4189,6 +4461,163 @@ mod energy_gate_tests {
             s.energy_j_at_release,
             s.peak_energy_j,
             s.peak_rotational_energy_j,
+        );
+    }
+}
+
+#[cfg(test)]
+mod spin_attribution_tests {
+    //! ★★★ **WHICH TERM PUTS THE SPIN IN?** (`docs/46` row 87.)
+    //!
+    //! Row 86 measured that the heap's energy leaves the reals at `t = 0.46423 s` and that the last
+    //! finite peak is **rotational, 5.85e186 J from a 1.7e-2 J release**. That names the CHANNEL and not
+    //! the TERM — and `ang_vel` is written in three separate places in a step. Row 79 refuted eleven
+    //! plausible causes by measurement before finding one, so this measures rather than argues.
+
+    use super::tests::sea_level_air;
+    use super::*;
+
+    #[test]
+    #[ignore = "row 87: a measurement, minutes long — cargo test -- --ignored"]
+    fn which_term_puts_the_spin_in() {
+        let mats = crate::materials::load();
+        let blade = crate::assembly::compiled::parse(crate::assembly::compiled::GRASS_BLADE_DRY);
+        let rho = sea_level_air(&mats);
+        let cap = std::env::var("SPIN_CAP_S").unwrap_or_else(|_| "0.10".into());
+        let n: usize = std::env::var("SPIN_MEMBERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(12);
+
+        std::env::set_var("PILE_CAP_S", &cap);
+        spin_probe_begin();
+        // The bound, derived from the member: ten times the spin a blade falling at its own ~2.05 m/s
+        // terminal velocity could carry on a 0.175 m half-length.
+        let (length, _r) = rod_for(&blade).expect("a rod");
+        spin_probe_set_bound(10.0 * 2.05 / (0.5 * length));
+        let settled = settle_traced(&blade, &mats, n, 9.81, rho, 20260810, 0.05);
+        let budget = spin_probe_take();
+        std::env::remove_var("PILE_CAP_S");
+        let (s, _t) = settled.expect("a heap");
+
+        let total = budget.neighbour_torque_j + budget.free_precession_j + budget.floor_impulse_j;
+        println!(
+            "spin budget over {cap} s, {n} members ({} rod-steps):",
+            budget.steps
+        );
+        println!(
+            "  neighbour torque  {:+.4e} J   ({:+.1}% of the total change)",
+            budget.neighbour_torque_j,
+            100.0 * budget.neighbour_torque_j / total.abs().max(f64::MIN_POSITIVE)
+        );
+        println!(
+            "  free precession   {:+.4e} J   ({:+.1}%)  ★ ENTITLED TO ZERO — torque-free motion \
+             conserves energy exactly, so anything here is integration error",
+            budget.free_precession_j,
+            100.0 * budget.free_precession_j / total.abs().max(f64::MIN_POSITIVE)
+        );
+        println!(
+            "  floor impulse     {:+.4e} J   ({:+.1}%)  ★ MAY ONLY REMOVE (non-injecting, row 36)",
+            budget.floor_impulse_j,
+            100.0 * budget.floor_impulse_j / total.abs().max(f64::MIN_POSITIVE)
+        );
+        println!(
+            "  floor LINEAR      {:+.4e} J   (a constraint removing into-surface velocity should be \
+             strongly negative)",
+            budget.floor_linear_j
+        );
+        println!(
+            "  floor LIFT (m·g·Δy) {:+.4e} J ★ the position projection — no velocity pays for this",
+            budget.floor_lift_j
+        );
+        println!(
+            "  floor NET         {:+.4e} J",
+            budget.floor_impulse_j + budget.floor_linear_j + budget.floor_lift_j
+        );
+        // ★★★ WHICH TERM STOPPED BEING A NUMBER FIRST — the question the poisoned sums could not answer.
+        let name = |v: u64| {
+            if v == u64::MAX {
+                "never".to_string()
+            } else {
+                format!("step {v}")
+            }
+        };
+        println!(
+            "  FIRST NON-FINITE: neighbour {} · precession {} · floor {}",
+            name(budget.first_nonfinite_neighbour_step),
+            name(budget.first_nonfinite_precession_step),
+            name(budget.first_nonfinite_floor_step)
+        );
+        let nm = |v: u64| {
+            if v == u64::MAX {
+                "never".to_string()
+            } else {
+                format!("step {v}")
+            }
+        };
+        println!(
+            "  ★ FIRST EXCESSIVE |ω| (bound {:.1} rad/s): {} · |ω| {:.4e} -> {:.4e} rad/s",
+            budget.omega_bound_rads,
+            nm(budget.first_excess_step),
+            budget.omega_before_excess,
+            budget.omega_after_excess
+        );
+        println!(
+            "    that step's rotational energy change: neighbour {:+.4e} J · precession {:+.4e} J",
+            budget.excess_d_neighbour_j, budget.excess_d_precession_j
+        );
+        println!(
+            "  |ω| largest finite {:.4e} rad/s · |ω| entering the step that diverged {:.4e} rad/s",
+            budget.max_finite_omega_rads, budget.omega_at_precession_failure
+        );
+        println!(
+            "  largest FINITE one-step gain: neighbour {:+.4e} · precession {:+.4e} · floor {:+.4e} J",
+            budget.max_finite_neighbour_j,
+            budget.max_finite_precession_j,
+            budget.max_finite_floor_j
+        );
+        println!(
+            "  worst single precession step {:+.4e} J · heap all_finite {} · E0 {:.4e} -> peak {:.4e}",
+            budget.worst_precession_j, s.all_finite, s.energy_j_at_release, s.peak_energy_j
+        );
+
+        // ★★★ THE CLAIM THAT MATTERS, and it is not the one I set out to test. The floor's ROTATIONAL
+        // gain is a legitimate TRANSFER — a blade landing on its end converts travelling into turning,
+        // which is what makes it topple — and the floor's NET is strongly negative, so it is a sink.
+        // What is not legitimate is the LIFT: `centre += dpos` hands a member potential energy with no
+        // velocity paying for it, and the heap's whole measured gain equals it.
+        let gain = s.peak_energy_j - s.energy_j_at_release;
+        println!(
+            "  ★ heap gain {:+.4e} J vs floor lift {:+.4e} J — ratio {:.3}",
+            gain,
+            budget.floor_lift_j,
+            gain / budget.floor_lift_j
+        );
+        assert!(
+            budget.floor_lift_j <= 1.0e-6 * s.energy_j_at_release.abs(),
+            "the floor's POSITION PROJECTION created {:+.4e} J against a release energy of {:.4e} J, \
+             and the heap's entire measured gain ({:+.4e} J) is that number. `centre += dpos` lifts a \
+             member out of the surface with no velocity change and no matching term anywhere, so it is \
+             potential energy from nothing. A constraint may REMOVE energy; it may not hand any over. \
+             (docs/46 rows 36, 86, 87)",
+            budget.floor_lift_j,
+            s.energy_j_at_release,
+            gain
+        );
+        assert!(
+            budget.floor_impulse_j + budget.floor_linear_j + budget.floor_lift_j <= 0.0,
+            "the floor is a net energy SOURCE, which a constraint may never be"
+        );
+        // A torque-free term cannot do work either.
+        assert!(
+            budget.free_precession_j <= 1.0e-9 * s.energy_j_at_release.abs(),
+            "free precession put {:+.4e} J of rotational energy in, against a release energy of \
+             {:.4e} J. τ = −ω × (I·ω) is TORQUE-FREE: it conserves angular momentum and kinetic \
+             energy exactly, so every joule of that is integration error, not physics. With \
+             I = (3.4e-10, 4.6e-6, 4.6e-6) the axial moment is four orders below the others, which is \
+             exactly when an explicit step of Euler's equations goes unstable. (docs/46 rows 79, 86, 87)",
+            budget.free_precession_j,
+            s.energy_j_at_release
         );
     }
 }

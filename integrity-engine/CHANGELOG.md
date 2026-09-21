@@ -9,6 +9,27 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★★ **The spin is fed by the floor and finished by the precession** (`docs/46` row 87). New
+  `pile::spin_probe_*` / `SpinBudget` attributes rotational energy to each of the three writers of
+  `ang_vel`. Measured over 0.10 s: neighbour torque `+0.0e0`, free precession `+1.9e-11 J`, **floor
+  impulse `+1.5172e-5 J` — 100%, and positive.**
+
+- ★★ **A constraint that removes energy overall can still destroy a simulation by feeding the unstable
+  channel.** The floor's linear term is `−3.3e-4 J` and its NET is `−2.5e-4 J`, so a gate watching totals
+  would never flag it — while it feeds the one DOF carrying an instability.
+
+- **The position projection is energy from nothing, quantified:** `+6.98e-5 J` at 0.1 s, and the heap's
+  entire gain at 0.2 s matches it to **ratio 1.000**. Bounded (`6.98e-5 → 7.56e-5 J` by 0.47 s), so a
+  one-off at touchdown and **not** the pump.
+
+- **Two refutations, both mine:** free precession is *not* the pump (it overflows **last**, at
+  `|ω| = 1.96e96`) — **chasing the first non-finite value finds what overflowed last, not what grew
+  anything**; and the floor's *steady* feed cannot explain the timing (117 rad/s at t = 0.154 s vs 5.5
+  rad/s from a constant feed), so the growth is a **loop**, not a source.
+
+- Derived: the explicit torque-free step is unstable above `ω_crit = 177.2 rad/s` for this member — just
+  above the 117 rad/s the loop reaches.
+
 - ★★★ **`pile` has an energy gate** (`docs/46` row 86). It had none — the same hole row 83 records for
   `gpu-verify` — and the meter it did have was **blind to the channel it fails through**: `Sample::energy_j`
   summed `½mv² + mgy` while row 79's explosion was entirely **rotational**. There is now one
