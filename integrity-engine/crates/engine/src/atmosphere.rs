@@ -3229,3 +3229,58 @@ mod sky_irradiance_tests {
         assert_eq!(e, [0.0; 3], "vacuum scatters nothing onto anything");
     }
 }
+
+#[cfg(test)]
+mod green_sky_investigation {
+    //! **Why is the sky green?** (Robin, 2026-09-23, looking at a rendered frame.)
+    //!
+    //! Measured off the frame: `R 171.6 · G 209.3 · B 170.7` — green dominant, and **R ≈ B to within one
+    //! part in 200**. Rayleigh cannot do that: `rayleigh_tau` is `λ^−4.05` at 650/550/450 nm, so
+    //! `τ = [0.050, 0.099, 0.223]` and blue scatters **4.4×** red. And no MONOTONIC tonemap can turn
+    //! `R < G < B` into `G` highest with `R ≈ B`.
+    //!
+    //! So either the CPU integral disagrees with its own coefficients, or the picture disagrees with the
+    //! CPU integral. This asks the CPU.
+
+    use super::*;
+
+    fn earth_air() -> AirColumn {
+        AirColumn {
+            tau: rayleigh_tau(1.0),
+            scale_height: 8400.0,
+            radius: 6.371e6,
+        }
+    }
+
+    #[test]
+    fn what_colour_does_the_cpu_integral_call_the_sky() {
+        let air = earth_air();
+        println!("tau (R,G,B) = {:?}", air.tau);
+        println!("sun_zenith  view          inscatter R,G,B              ratios B/R  G/R");
+        for sun_deg in [0.0f64, 30.0, 60.0, 80.0] {
+            let mu_s = sun_deg.to_radians().cos();
+            for (vname, mu_v) in [("zenith", 1.0f64), ("45deg", 0.7071), ("horizon", 0.02)] {
+                // cos_theta: angle between view and sun directions. For a zenith view with the sun at
+                // `sun_deg` from zenith, that is cos(sun_deg).
+                let cos_theta = mu_v * mu_s;
+                let s = air_inscatter(
+                    &air,
+                    0.0,
+                    mu_v,
+                    mu_s,
+                    cos_theta,
+                    f64::INFINITY,
+                    SUN_GAIN as f64,
+                    32,
+                    8,
+                );
+                let [r, g, b] = s.inscatter;
+                println!(
+                    "  {sun_deg:4.0}°     {vname:8}  {r:10.4} {g:10.4} {b:10.4}   {:6.2} {:6.2}",
+                    b / r.max(1e-9),
+                    g / r.max(1e-9)
+                );
+            }
+        }
+    }
+}
