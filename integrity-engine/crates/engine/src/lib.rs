@@ -9218,6 +9218,89 @@ mod tests {
 mod native_render_tests {
     use super::*;
 
+    /// ★★ **WHAT COLOUR IS THE SKY, AT A STATED ELEVATION?** (Robin, 2026-09-23: *"look into the green
+    /// sky"*.)
+    ///
+    /// The frame that prompted it was a camera at 0.4 m looking nearly level, so **every visible pixel
+    /// of sky was within a few degrees of the horizon** — the longest possible air path, where blue is
+    /// extinguished and the colour goes pale. `atmosphere::air_inscatter` says exactly that on the CPU:
+    /// zenith `(0.395, 0.740, 1.472)` with `B/R = 3.7` (blue), horizon `(2.66, 3.18, 2.75)` with
+    /// `B/R = 1.03` (pale, green-leaning). The measured pixel was `B/R = 0.99, G/R = 1.22`.
+    ///
+    /// So this points the camera UP and asks the picture directly. A sky that is blue overhead and pale
+    /// at the horizon is the model working; one that is green overhead is not.
+    #[test]
+    #[ignore]
+    fn the_sky_is_blue_overhead() {
+        let (w, h) = (480u32, 320u32);
+        let mut terra = match pollster::block_on(crate::app::Terra::headless(w, h)) {
+            Ok(t) => t,
+            Err(_) => {
+                eprintln!("no GPU adapter — skipping");
+                return;
+            }
+        };
+        let (json, lm, ev, lc) = shipped_earth();
+        terra
+            .load_world(
+                &json,
+                &lm.data,
+                lm.w as u32,
+                lm.h as u32,
+                &ev.data,
+                ev.w as u32,
+                ev.h as u32,
+                &lc.data,
+                lc.w as u32,
+                lc.h as u32,
+            )
+            .expect("the shipped Earth loads");
+        terra.set_alt_bounds(0.05, 8.0e10);
+        terra.set_epoch_sun_over_lon(-9.45);
+        terra.set_draw_flora(false);
+
+        for (name, pitch) in [
+            ("level    ", 0.0f64),
+            ("30deg up ", 0.5236),
+            ("60deg up ", 1.0472),
+            ("zenith   ", 1.5533),
+        ] {
+            terra.place_camera(53.10, -9.45, 2.0, 0.0, pitch);
+            for _ in 0..3 {
+                terra.render().expect("a frame");
+            }
+            let px = terra.frame_pixels().expect("pixels");
+            if std::env::var("SKY_PNG").is_ok() {
+                let f = std::fs::File::create(format!("/tmp/sky-{}.png", name.trim())).unwrap();
+                let mut e = png::Encoder::new(std::io::BufWriter::new(f), w, h);
+                e.set_color(png::ColorType::Rgba);
+                e.set_depth(png::BitDepth::Eight);
+                e.write_header().unwrap().write_image_data(&px).unwrap();
+            }
+            // Sample the middle of the frame, which is where the camera is pointed.
+            let (mut r, mut g, mut b, mut n) = (0u64, 0u64, 0u64, 0u64);
+            for y in (h / 2 - 20)..(h / 2 + 20) {
+                for x in (w / 2 - 40)..(w / 2 + 40) {
+                    let o = ((y * w + x) * 4) as usize;
+                    r += px[o] as u64;
+                    g += px[o + 1] as u64;
+                    b += px[o + 2] as u64;
+                    n += 1;
+                }
+            }
+            let (r, g, b) = (
+                r as f64 / n as f64,
+                g as f64 / n as f64,
+                b as f64 / n as f64,
+            );
+            println!(
+                "  {name} R{r:6.1} G{g:6.1} B{b:6.1}   B/R {:5.2}  G/R {:5.2}",
+                b / r.max(1.0),
+                g / r.max(1.0)
+            );
+        }
+    }
+
     /// ★★★ **WHICH WAY IS UP IN A RENDERED FRAME?** — the test that should have existed before any
     /// sequence was published.
     ///
@@ -9265,16 +9348,7 @@ mod native_render_tests {
         terra.place_camera(53.10, -9.45, 0.4, 0.0, 0.0);
         terra.emplace_cannon(0.0);
         terra.place_camera(53.10 - 2.0 / 111_320.0, -9.45, 0.4, 0.0, 0.0);
-        // Dump the frame so a human can look at the same picture the assertion is reading.
-        if std::env::var("ORIENT_PNG").is_ok() {
-            terra.render().expect("f");
-            let q = terra.frame_pixels().expect("p");
-            let f = std::fs::File::create("/tmp/orient-post.png").unwrap();
-            let mut e = png::Encoder::new(std::io::BufWriter::new(f), w, h);
-            e.set_color(png::ColorType::Rgba);
-            e.set_depth(png::BitDepth::Eight);
-            e.write_header().unwrap().write_image_data(&q).unwrap();
-        }
+
         terra.set_draw_flora(false);
         for _ in 0..4 {
             terra.render().expect("warm-up");
@@ -9293,6 +9367,14 @@ mod native_render_tests {
         terra.set_emplaced_mesh(&post);
         terra.render().expect("a frame");
         let px = terra.frame_pixels().expect("pixels");
+        // Dump EXACTLY what the assertion reads — flora off, post set, same frame.
+        if std::env::var("ORIENT_PNG").is_ok() {
+            let f = std::fs::File::create("/tmp/orient-post.png").unwrap();
+            let mut e = png::Encoder::new(std::io::BufWriter::new(f), w, h);
+            e.set_color(png::ColorType::Rgba);
+            e.set_depth(png::BitDepth::Eight);
+            e.write_header().unwrap().write_image_data(&px).unwrap();
+        }
 
         // The post is the only strongly yellow thing in frame: ground is pale green (G−B ≈ 39).
         let mut rows: Vec<usize> = Vec::new();
