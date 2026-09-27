@@ -5500,6 +5500,76 @@ mod app {
         /// the same frame an assembly's own mesh is in, which is why a `pile` heap can be handed over
         /// unchanged.
         #[cfg(not(target_arch = "wasm32"))]
+        /// ★ **Where the eye is, against the ground under it** — native only, a diagnostic.
+        ///
+        /// Returns `(alt_m, ground_m, eye_above_sphere_m)`. ★★ **`alt_m` is ALREADY ABOVE GROUND** —
+        /// `fly_camera::view_basis` places the eye at `r + ground + alt_m·ds`, so a camera at `2.0` is
+        /// two metres above the terrain, not two metres above the reference sphere. The first version
+        /// of this accessor subtracted the ground from `alt_m` and duly reported a camera at Galway as
+        /// "34 m inside the hill", which was an artefact of the accessor and not a fact about the eye.
+        /// It is written down here because the mistake is easy and the units are not stated anywhere
+        /// the caller can see them.
+        #[cfg(not(target_arch = "wasm32"))]
+        pub fn eye_against_ground_m(&self) -> (f64, f64, f64) {
+            let ground_m = self.ground_disp_at(self.fly.lat, self.fly.lon) / display_scale();
+            (self.fly.alt_m, ground_m, ground_m + self.fly.alt_m)
+        }
+
+        /// ★★★ **WHERE THE SEGMENT'S TRIANGLES ACTUALLY ARE, RELATIVE TO THE EYE** — native only.
+        ///
+        /// Every hypothesis about the sky occlusion so far argued about what the mesh OUGHT to contain:
+        /// its extent, its relief, the camera's height against it. None of them looked at the
+        /// triangles. The probe that finally named the occluding pass worked by asking the FRAME
+        /// rather than the source; this is the same move applied to the geometry.
+        ///
+        /// Returns `(n, max_elevation_deg, fraction_above_horizon)`. A ground disc that reaches the
+        /// horizon and no further has a maximum elevation of about **zero** — every vertex at or below
+        /// the eye's horizontal plane. Anything materially positive is ground drawn into the sky.
+        #[cfg(not(target_arch = "wasm32"))]
+        pub fn segment_vertex_elevations(&self) -> (usize, f64, f64) {
+            let Some(built) = self.segment_built else {
+                return (0, 0.0, 0.0);
+            };
+            let ds = display_scale();
+            let (up, _, _) = self.fly.frame();
+            let ground0 = self.ground_disp_at(self.fly.lat, self.fly.lon);
+            let r_disp = self.planet_radius * ds;
+            let eye = up * (r_disp + ground0 + self.fly.alt_m * ds);
+            let (mut max_deg, mut above) = (f64::NEG_INFINITY, 0usize);
+            for v in &self.segment_verts {
+                // Vertices are emitted relative to the build anchor (see `CapTierBuild::anchor`).
+                let p = glam::DVec3::new(v.pos[0] as f64, v.pos[1] as f64, v.pos[2] as f64)
+                    + built.anchor;
+                let d = p - eye;
+                let len = d.length();
+                if !(len > 0.0) {
+                    continue;
+                }
+                let elev = (d.dot(up) / len).clamp(-1.0, 1.0).asin().to_degrees();
+                if elev > max_deg {
+                    max_deg = elev;
+                }
+                if elev > 0.0 {
+                    above += 1;
+                }
+            }
+            let n = self.segment_verts.len();
+            (
+                n,
+                if max_deg.is_finite() { max_deg } else { 0.0 },
+                if n > 0 { above as f64 / n as f64 } else { 0.0 },
+            )
+        }
+
+        /// The last segment rebuild's relief probe: `(measured, mesh generated, model generated,
+        /// worst generated over the patch)`, metres. **If `worst generated` exceeds the camera's
+        /// altitude, the eye is inside the DRAWN ground even though it is correctly above the
+        /// MEASURED ground** (`docs/46` rows 52, 53).
+        #[cfg(not(target_arch = "wasm32"))]
+        pub fn segment_relief_probe_m(&self) -> (f64, f64, f64, f64) {
+            self.seg_relief_probe
+        }
+
         pub fn set_emplaced_mesh(&mut self, mesh: &crate::mesher::Mesh) {
             if mesh.vertices.is_empty() || mesh.indices.is_empty() {
                 self.cannon_gpu = None;
@@ -6137,6 +6207,9 @@ mod app {
         /// Where the eye actually WAS last frame, metres from the planet centre — the start of
         /// the shell's swept resolve, so a fast camera cannot tunnel through the surface skin.
         last_eye_m: Option<glam::DVec3>,
+        /// `(measured_m, mesh_generated_m, model_generated_m, worst_generated_m)` from the last
+        /// segment rebuild — see the relief probe in `build_segment` (docs/46 rows 52, 53).
+        seg_relief_probe: (f64, f64, f64, f64),
         /// What the camera is riding, if anything (`camera_follow`).
         ride: Option<Ride>,
         /// Rig knobs for PRICING the ground ladder: how many tiers to build, and how many octaves of
@@ -6442,6 +6515,7 @@ mod app {
                 appearance_probes_pinned: 0,
                 cam_pose: None,
                 last_eye_m: None,
+                seg_relief_probe: (0.0, 0.0, 0.0, 0.0),
                 ride: None,
                 draw_matter: 2,
                 drawn_buf: Vec::new(),
@@ -8783,6 +8857,11 @@ mod app {
                     probe_relief - probe_model,
                     relief_absmax.get(),
                 );
+                // ★ KEEP them, do not only log them. This is the number that decides whether a 2 m eye
+                // is above the DRAWN ground or inside it, and until now the only way to see it was to
+                // have logging wired up in whatever was running.
+                self.seg_relief_probe =
+                    (probe_elev, probe_relief, probe_model, relief_absmax.get());
                 // One rebuild is one unit of work: fold its real cost back into the budget. The side
                 // REALLY used is the smaller of what we allowed and what the data supports — passing
                 // the allowance alone would let a cheap, data-bound rebuild argue for a bigger budget.
@@ -9259,13 +9338,44 @@ mod native_render_tests {
         terra.set_epoch_sun_over_lon(-9.45);
         terra.set_draw_flora(false);
 
-        for (name, pitch) in [
-            ("level    ", 0.0f64),
-            ("30deg up ", 0.5236),
-            ("60deg up ", 1.0472),
-            ("zenith   ", 1.5533),
-        ] {
-            terra.place_camera(53.10, -9.45, 2.0, 0.0, pitch);
+        // ★ ALTITUDE SWEEP AT A FIXED ZENITH VIEW. `segment::visible_angle` at 2 m gives a disc of
+        // 5.1 km radius and the horizon from 2 m is sqrt(2Rh) = 5.0 km — so the EXTENT is right and the
+        // ground should never reach the zenith. If the sky appears as the eye climbs, the mesh is
+        // collapsing at low altitude (f32 in display units: `atmos.wgsl` records that a 2 m eye is
+        // 3e-7 of a radius and "f32 cannot hold that against 1.0"). If it is covered at every altitude,
+        // the geometry is wrong instead.
+        let sweep: Vec<(String, f64, f64)> = std::env::var("SKY_ALT_SWEEP")
+            .map(|_| {
+                [2.0f64, 20.0, 200.0, 2_000.0, 20_000.0, 200_000.0]
+                    .iter()
+                    .map(|a| (format!("zenith @{a:>9.0} m"), 1.5533f64, *a))
+                    .collect()
+            })
+            .unwrap_or_else(|_| {
+                vec![
+                    ("level    ".into(), 0.0, 2.0),
+                    ("30deg up ".into(), 0.5236, 2.0),
+                    ("60deg up ".into(), 1.0472, 2.0),
+                    ("zenith   ".into(), 1.5533, 2.0),
+                ]
+            });
+        for (name, pitch, alt) in sweep {
+            let name = name.as_str();
+            terra.place_camera(53.10, -9.45, alt, 0.0, pitch);
+            for _ in 0..3 {
+                terra.render().expect("settle the placement");
+            }
+            let (a, g, c) = terra.eye_against_ground_m();
+            let (meas, mesh_gen, model_gen, worst) = terra.segment_relief_probe_m();
+            println!(
+                "    alt {a:9.2} m ABOVE GROUND · ground {g:7.2} m · eye {c:9.2} m above sphere"
+            );
+            let (nv, maxel, frac) = terra.segment_vertex_elevations();
+            println!("      segment: {nv} verts · max elevation {maxel:+7.2} deg · {:.1}% above the eye's horizon{}",
+                100.0 * frac,
+                if maxel > 1.0 { "   ★ GROUND DRAWN INTO THE SKY" } else { "" });
+            println!("      relief: measured {meas:8.2} m · mesh generated {mesh_gen:+8.3} m · model {model_gen:+8.3} m · WORST generated over patch {worst:8.3} m{}",
+                if worst > a { "   ★ DRAWN GROUND RISES ABOVE THE EYE" } else { "" });
             for _ in 0..3 {
                 terra.render().expect("a frame");
             }
