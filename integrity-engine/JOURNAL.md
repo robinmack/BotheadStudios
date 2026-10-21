@@ -3,6 +3,55 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-10-21 — row 53's second opening: one function, two sets of arguments
+
+**What.** `docs/46` row 53 ("two answers to how high is the ground here") closed on 2026-08-12 with
+the mesh and the model calling one relief function, `Terra::ground_relief_m`. It was still open on the
+placement path: `ground_disp_at` — the ground the camera shell, every plant and the cannon stand on —
+fed that function the land-cover class's *first-listed* material and a per-point slope, while
+`build_segment` fed it the class's *dominant* material and one slope per segment sampled at the camera.
+The probe that closed the row compared the function with itself (both calls inside `build_segment`,
+both with the mesh's arguments), so it read 0.000 m.
+
+**Why it mattered.** The shipped data holds an exact tie: IGBP class 11, permanent wetland, is
+`water 0.5 + grass 0.5`, and Galway is in it. Rust's `max_by` keeps the last maximum (grass, +4.787 m of
+generated relief); `first()` keeps the first (water, relief 0). So a 2 m camera at Galway was placed
+2.79 m *under* the ground it was drawn into, at every altitude — the "green sky" that PRs #150 and #151
+correctly traced to the ground mesh and not to the sky. The "camera footprint" question those PRs left
+open was moot: there is no hillock beside the eye; the eye was inside the ground at its own point.
+
+**Fix.** One comparator, `globe_mesh::share_order` (larger share first, an equal share to the lower
+material index) and one `dominant_constituent` over it. The sampler, the appearance integral's texture
+layer and the new `Terra::ground_material_at` all use it; `ground_disp_at`, `ground_biome`, the grain
+shell and the diagnostic probe all call `ground_material_at`; `Terra::surface_sampler` is the one place
+the sampler is built. The mesh now asks `local_slope_at` per vertex and the per-segment `tier_slope`
+block is gone. The tie-break is an *order*, not physics — a 50/50 class has no single material — so the
+honest answer (relief from the mixture) is recorded in row 53 as an IOU for Robin to decide.
+
+**Verified.**
+- `native_render_tests::the_eye_stands_on_the_ground_it_sees` (GPU, Galway, 2 m, zenith): model and
+  mesh both `grass`, slope `0.002227`, base `19,546 m`, relief `+3.218 m`; the drawn vertex under the
+  eye is `−2.000 m` below it; after subtracting the band limit (`−0.1 mm`) the residual is
+  `−6.05e-7 m`.
+- `SKY_ALT_SWEEP=1 the_sky_is_blue_overhead`: at 2 m the segment's maximum elevation fell from
+  `+90.00°` to `+0.35°` and the fraction of vertices above the horizon from 53.5% to 22.8% (the
+  remainder is real relief within the 5 km disc); the zenith pixel went from `B/R 0.99` (green) to
+  `1.74` (blue). Band limit by altitude: 2 m → 0.000, 200 m → 0.001, 2 km → 0.005, 200 km → 0.022 m,
+  converging as the row's own convergence test says it must.
+- The generated term fell from 4.787 m to 3.218 m because the per-point slope (0.00223) is 0.674× the
+  camera's (0.00331) and relief is linear in it: 3.218 / 4.787 = 0.672.
+- `laws::ground_material_tests::one_rule_names_the_ground_material` and the three
+  `globe_mesh::constituent_tests` pass; `the_grass_at_galway_is_in_the_picture` (1,200 plants, 93% of
+  the ground half changed) and `world_up_is_up_in_the_picture` still pass with the camera and the plants
+  3.2 m higher.
+- Full `bash scripts/test.sh`: **681 passed, 38 skipped**, and `mod app` compiles for wasm32.
+
+**Trap paid for.** A probe that compares a function with itself proves only that the function is
+deterministic. Row 53's closure probe lived inside the mesh builder and borrowed the mesh's arguments
+for the "model" call; the model's own call site was never in the comparison. The replacement,
+`ground_relief_inputs_at_eye`, reports the *inputs* each caller feeds, and the native test asserts on
+those before it asserts on the heights.
+
 ## 2026-09-20 — the floor's loop gain, and why "damped 63x, not stopped" was not enough
 
 Row 87 left one instruction: move the attribution point to **after** the floor block and read the loop

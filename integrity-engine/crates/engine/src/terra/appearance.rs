@@ -182,10 +182,13 @@ impl Appearance {
             }
         }
         // Largest share first — the shader takes `mix[0]` as its texture layer, and a stable order
-        // keeps a vertex from flickering between two materials that are nearly tied.
-        mix.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        // keeps a vertex from flickering between two materials that are nearly tied. THE SAME ORDER
+        // the sampler and the model name a ground's material by (`globe_mesh::share_order`), so the
+        // texture layer, the relief layer and the ground the camera stands on cannot disagree on a
+        // tie (docs/46 row 53, second opening).
+        mix.sort_by(crate::terra::globe_mesh::share_order);
         let albedo = crate::materials::aggregate_albedo(&mix, materials);
-        let material = mix.first().map_or(0, |&(m, _)| m);
+        let material = crate::terra::globe_mesh::dominant_constituent(&mix).unwrap_or(0);
         Appearance {
             mix,
             albedo,
@@ -412,15 +415,16 @@ mod tests {
             .unwrap_or(0);
         let biome_mats: Vec<usize> = (0..=n_classes)
             .map(|i| {
-                let id = biomes
+                let mix: Vec<(usize, f32)> = biomes
                     .get(&i.to_string())
-                    .and_then(|m| {
+                    .map(|m| {
                         m.iter()
-                            .max_by(|a, b| a.1.total_cmp(&b.1))
-                            .map(|(id, _)| id.as_str())
+                            .map(|(id, f)| (crate::materials::index_of(&mats, id), *f))
+                            .collect()
                     })
-                    .unwrap_or("granite");
-                crate::materials::index_of(&mats, id)
+                    .unwrap_or_default();
+                crate::terra::globe_mesh::dominant_constituent(&mix)
+                    .unwrap_or_else(|| crate::materials::index_of(&mats, "granite"))
             })
             .collect();
         let (lat, lon) = (39.0, -106.0); // the scale ladder's own site

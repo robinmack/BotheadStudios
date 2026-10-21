@@ -2384,3 +2384,63 @@ mod obliquity_tests {
         );
     }
 }
+
+/// ★★ **ONE RULE NAMES THE GROUND'S MATERIAL** (docs/46 row 53, second opening).
+///
+/// *"Which single material is the ground made of here"* was answered four times in `lib.rs` and twice
+/// more in `terra/`: five by the land-cover class's largest share, one — `ground_disp_at`, the ground
+/// the camera, the flora and the cannon STAND on — by the class's first-listed share. They agree
+/// everywhere a class has a strict majority, and the shipped data holds an exact tie (IGBP 11,
+/// wetland: `water 0.5 + grass 0.5`). Measured at Galway, 2026-10-15: the mesh drew grass with
+/// +4.787 m of relief, the model stood the eye on flat water, and a 2 m camera was 2.79 m under the
+/// ground it was looking at. Nothing had diverged in the code — identical-looking code with one
+/// different method call, which is the case a grep cannot find and a count can.
+#[cfg(test)]
+mod ground_material_tests {
+    /// The rule exists once (`globe_mesh::share_order` + `dominant_constituent`), and neither of the
+    /// two idioms the six copies were written in survives in the surface code. A new copy of either
+    /// is a seventh answer and fails here.
+    #[test]
+    fn one_rule_names_the_ground_material() {
+        let dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
+        let mut all = String::new();
+        super::material_property_tests::collect_rs(dir, &mut all);
+        let defs = all.matches("pub fn dominant_constituent(").count();
+        assert_eq!(
+            defs, 1,
+            "`dominant_constituent` is defined {defs} times; the rule that names a mixture's single \
+             material must exist exactly once"
+        );
+        let orders = all.matches("pub fn share_order(").count();
+        assert_eq!(orders, 1, "`share_order` is defined {orders} times");
+
+        // The surface code: the scene file and everything under `terra/`. Comments and test modules
+        // are stripped, so prose may describe the old idioms freely; code may not use them.
+        let mut surface = super::single_source_tests::strip(
+            &std::fs::read_to_string(dir.join("lib.rs")).expect("lib.rs"),
+        );
+        super::material_property_tests::collect_rs(&dir.join("terra"), &mut surface);
+        let by_last_max = surface.matches("total_cmp(&b.1)").count();
+        assert_eq!(
+            by_last_max, 0,
+            "{by_last_max} place(s) in lib.rs/terra pick a mixture's material with `max_by(.. \
+             total_cmp(&b.1))` — Rust's `max_by` keeps the LAST maximum, which is one way to break a \
+             50/50 tie. Call `globe_mesh::dominant_constituent` instead (docs/46 row 53)."
+        );
+        let by_first = surface.matches(".first().map(|&(m, _)| m)").count();
+        assert_eq!(
+            by_first, 0,
+            "{by_first} place(s) in lib.rs/terra pick a mixture's material with `.first()` — the \
+             FIRST-listed share, which is the other way to break a 50/50 tie, and the one that put the \
+             camera 2.79 m under the ground at Galway. Call `globe_mesh::dominant_constituent` \
+             (docs/46 row 53)."
+        );
+        // And the model's ground height asks the one rule, by name — not a private re-derivation.
+        let model_asks = surface.matches("self.ground_material_at(lat, lon)").count();
+        assert!(
+            model_asks >= 3,
+            "expected `ground_disp_at`, `ground_biome` and the grain shell (at least) to ask \
+             `ground_material_at`; found {model_asks} call(s)"
+        );
+    }
+}
