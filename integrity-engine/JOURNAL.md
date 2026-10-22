@@ -52,6 +52,18 @@ for the "model" call; the model's own call site was never in the comparison. The
 `ground_relief_inputs_at_eye`, reports the *inputs* each caller feeds, and the native test asserts on
 those before it asserts on the heights.
 
+**Owed, as Robin specified it (2026-10-22).** The tie-break is an order. Her answer to what the
+mixture's ground should be: *"some grass grows fine submerged by water, some doesn't, so this would
+be informed by biome and/or grass assembly bio data."* An emergent grass shares its ground with the
+water (the surface is the water at relief 0, the plants stand through it); a pasture grass stands
+beside it (hummocks and pools, the wet share flat, the dry share rough, the plants on the dry share).
+The datum that tells them apart is a property of the plant, and nothing carries it: the assembly
+files have no bio block, a biome names materials rather than plant assemblies, and one tuft stands
+for "grass" everywhere. Row 53 carries the build order. Also recorded there, not acted on: IGBP
+defines class 11 as 30–60% water, whose midpoint — `earth.json`'s own stated rule — is 45%, a strict
+grass majority rather than a tie. Whether that fraction changes is hers. She accepted the row's
+status words.
+
 ## 2026-09-20 — the floor's loop gain, and why "damped 63x, not stopped" was not enough
 
 Row 87 left one instruction: move the attribution point to **after** the floor block and read the loop
