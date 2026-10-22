@@ -5561,6 +5561,95 @@ mod app {
             )
         }
 
+        /// ★ **HOW FAR FROM THE EYE DOES THE DRAWN GROUND RISE ABOVE IT** — native only, and the
+        /// number the camera-footprint decision turns on. For each radius in `radii_m`, the highest
+        /// drawn vertex within that HORIZONTAL distance of the eye, as metres above the eye (negative
+        /// = all of it is below the eye), and how many vertices lie inside the radius. A footprint
+        /// rule that takes the max over radius `R` would lift the eye by exactly `max(0, value at R)`
+        /// — so this table IS the repercussion of each candidate radius, read off the artefact.
+        #[cfg(not(target_arch = "wasm32"))]
+        pub fn segment_rise_within_m(&self, radii_m: &[f64]) -> Vec<(f64, f64, usize)> {
+            let Some(built) = self.segment_built else {
+                return radii_m.iter().map(|&r| (r, f64::NAN, 0)).collect();
+            };
+            let ds = display_scale();
+            let (up, _, _) = self.fly.frame();
+            let ground0 = self.ground_disp_at(self.fly.lat, self.fly.lon);
+            let r_disp = self.planet_radius * ds;
+            let eye = up * (r_disp + ground0 + self.fly.alt_m * ds);
+            let mut out: Vec<(f64, f64, usize)> =
+                radii_m.iter().map(|&r| (r, f64::NEG_INFINITY, 0)).collect();
+            for v in &self.segment_verts {
+                let p = glam::DVec3::new(v.pos[0] as f64, v.pos[1] as f64, v.pos[2] as f64)
+                    + built.anchor;
+                let d = p - eye;
+                let rise_m = d.dot(up) / ds;
+                let horiz_m = (d - d.dot(up) * up).length() / ds;
+                for (r, best, n) in out.iter_mut() {
+                    if horiz_m <= *r {
+                        *n += 1;
+                        if rise_m > *best {
+                            *best = rise_m;
+                        }
+                    }
+                }
+            }
+            out
+        }
+
+        /// ★ **THE TWO ANSWERS, INPUT BY INPUT** — native only. `ground_disp_at` (which places the
+        /// eye, the flora and the cannon) and the mesh call the SAME `ground_relief_m`; if they
+        /// disagree it is because they feed it different arguments. This returns, at the camera's
+        /// own point, `(is_land, measured_m, model: (material, slope, base_m, relief_m),
+        /// mesh: (material, slope, base_m))` so the differing argument can be named rather than
+        /// argued about.
+        #[cfg(not(target_arch = "wasm32"))]
+        #[allow(clippy::type_complexity)]
+        pub fn ground_relief_inputs_at_eye(
+            &self,
+        ) -> (bool, f64, (String, f64, f64, f64), (String, f64, f64)) {
+            let (lat, lon) = (self.fly.lat, self.fly.lon);
+            let is_land = self
+                .landmask
+                .as_ref()
+                .map(|r| r.land_at(lat, lon))
+                .unwrap_or(false);
+            let (e, base_feature_m) = Self::ground_elev_m(
+                self.elevation.as_ref(),
+                &self.tiles,
+                self.elev_range[0],
+                self.elev_range[1],
+                self.raster_step_m(),
+                lat,
+                lon,
+            );
+            let water_idx = materials::index_of(&self.mats, "water");
+            // Exactly what `ground_disp_at` feeds — the same call, not a copy of its reasoning.
+            let sampler_material = self.ground_material_at(lat, lon);
+            let slope = self.local_slope_at(lat, lon);
+            let relief = Self::ground_relief_m(
+                &self.mats,
+                &self.detail,
+                self.cap_octave_budget,
+                sampler_material,
+                water_idx,
+                self.planet_radius,
+                lat,
+                lon,
+                base_feature_m,
+                slope,
+                GROUND_DETAIL_FLOOR_M,
+            );
+            let name = |i: usize| self.mats.get(i).map_or("?".to_string(), |m| m.id.clone());
+            let (mi, ms, mb) = self.seg_relief_inputs;
+            (
+                is_land,
+                e,
+                (name(sampler_material), slope, base_feature_m, relief),
+                (name(mi), ms, mb),
+            )
+        }
+
         /// The last segment rebuild's relief probe: `(measured, mesh generated, model generated,
         /// worst generated over the patch)`, metres. **If `worst generated` exceeds the camera's
         /// altitude, the eye is inside the DRAWN ground even though it is correctly above the
@@ -6210,6 +6299,10 @@ mod app {
         /// `(measured_m, mesh_generated_m, model_generated_m, worst_generated_m)` from the last
         /// segment rebuild — see the relief probe in `build_segment` (docs/46 rows 52, 53).
         seg_relief_probe: (f64, f64, f64, f64),
+        /// The INPUTS the mesh fed `ground_relief_m` at the probe point: `(material, slope,
+        /// base_feature_m)` — so they can be held against the inputs `ground_disp_at` feeds the same
+        /// function at the same point. Diagnostic; native only reads it.
+        seg_relief_inputs: (usize, f64, f64),
         /// What the camera is riding, if anything (`camera_follow`).
         ride: Option<Ride>,
         /// Rig knobs for PRICING the ground ladder: how many tiers to build, and how many octaves of
@@ -6516,6 +6609,7 @@ mod app {
                 cam_pose: None,
                 last_eye_m: None,
                 seg_relief_probe: (0.0, 0.0, 0.0, 0.0),
+                seg_relief_inputs: (usize::MAX, 0.0, 0.0),
                 ride: None,
                 draw_matter: 2,
                 drawn_buf: Vec::new(),
@@ -7419,17 +7513,9 @@ mod app {
             if !is_land {
                 return "ocean".to_string();
             }
-            let biome = self
-                .landcover
-                .as_ref()
-                .map_or(1, |r| r.biome_at(lat, lon) as usize);
-            // The class's dominant constituent stands for it where ONE material is wanted.
-            let mi = self
-                .biome_mix
-                .get(biome)
-                .and_then(|m| m.iter().max_by(|a, b| a.1.total_cmp(&b.1)))
-                .map(|&(m, _)| m)
-                .unwrap_or(0);
+            // The class's dominant constituent stands for it where ONE material is wanted — by the
+            // one rule (`ground_material_at`), so the HUD names the material the ground is built from.
+            let mi = self.ground_material_at(lat, lon);
             self.mats.get(mi).map(|m| m.id.clone()).unwrap_or_default()
         }
 
@@ -7745,16 +7831,7 @@ mod app {
                         .unwrap_or_else(|| crate::planet::earth_surface_material(dir) == "granite");
                     // Land: biome material (land-cover) + real elevation displacement. Ocean: water at sea level.
                     let (mat_idx, elev_m) = if is_land {
-                        let biome = self
-                            .landcover
-                            .as_ref()
-                            .map_or(1, |r| r.biome_at(lat, lon) as usize);
-                        let mi = self
-                            .biome_mix
-                            .get(biome)
-                            .and_then(|m| m.iter().max_by(|a, b| a.1.total_cmp(&b.1)))
-                            .map(|&(m, _)| m)
-                            .unwrap_or(water_idx);
+                        let mi = self.ground_material_at(lat, lon);
                         let e = self
                             .elevation
                             .as_ref()
@@ -8125,6 +8202,36 @@ mod app {
             (dn * dn + de * de).sqrt()
         }
 
+        /// **THE surface sampler for this body, built in ONE place** — the mesh, the model's ground
+        /// height, the HUD's "what am I standing on" and the pre-surface grain shell all construct it
+        /// here, so no caller can hand it a different raster, mixture table or exaggeration than the
+        /// others. The clock (`at_epoch`) is the renderer's to add: it changes colour, never material.
+        fn surface_sampler(&self) -> crate::terra::globe_mesh::SurfaceSampler<'_> {
+            crate::terra::globe_mesh::SurfaceSampler::new(
+                &self.mats,
+                &self.biome_mix,
+                self.landmask.as_ref(),
+                self.elevation.as_ref(),
+                self.landcover.as_ref(),
+                self.elev_range,
+                display_scale(),
+                self.relief_exag,
+            )
+        }
+
+        /// ★★ **WHICH ONE MATERIAL THE GROUND IS MADE OF HERE — THE ONE ANSWER** (docs/46 row 53,
+        /// second opening). The sampler's rule, and nothing else's: `globe_mesh::share_order`. This
+        /// function exists because the question was answered FOUR times in this file — three by the
+        /// class's largest share, one (`ground_disp_at`, the ground everything STANDS on) by the
+        /// class's FIRST-LISTED share — and the data holds an exact tie (IGBP 11, wetland: water 0.5 +
+        /// grass 0.5). Measured at Galway, 2026-10-15: the mesh drew grass with +4.787 m of relief;
+        /// the model stood the eye, the flora and the cannon on flat water, 2.79 m under the drawn
+        /// ground. Nothing had diverged in the code — identical-looking code with one different
+        /// method call, which is the case a grep cannot find and `laws::ground_material_tests` can.
+        fn ground_material_at(&self, lat: f64, lon: f64) -> usize {
+            self.surface_sampler().material_at(lat, lon) as usize
+        }
+
         /// [`ground_elev_m`] for callers that hold a plain `&self`, in DISPLAY units above the
         /// sea-level sphere (so relief exaggeration is applied, as the mesh applies it).
         fn ground_disp_at(&self, lat: f64, lon: f64) -> f64 {
@@ -8150,13 +8257,11 @@ mod app {
             // the patch. Asked at the MODEL's floor, so the answer is the same however finely the
             // renderer chooses to draw it.
             let water_idx = materials::index_of(&self.mats, "water");
-            let sampler_material = self
-                .landcover
-                .as_ref()
-                .map(|r| r.biome_at(lat, lon) as usize)
-                .and_then(|class| self.biome_mix.get(class))
-                .and_then(|mix| mix.first().map(|&(m, _)| m))
-                .unwrap_or(water_idx);
+            // ★ The SAME material the mesh keys its relief on (`ground_material_at`), by the same
+            // rule. This read `mix.first()` until 2026-10-21, which at a wetland's 50/50 tie named
+            // WATER where the mesh named GRASS — relief 0 against +4.787 m, and a 2 m eye placed
+            // 2.79 m under the surface it was looking at (docs/46 row 53, second opening).
+            let sampler_material = self.ground_material_at(lat, lon);
             let relief = Self::ground_relief_m(
                 &self.mats,
                 &self.detail,
@@ -8613,49 +8718,21 @@ mod app {
             let planet_radius = self.planet_radius;
             let octave_budget = self.cap_octave_budget;
             let raster_step_m = self.raster_step_m();
-            // How steep this ground measures, as a fraction of what the material can hold — from the
-            // TILES where they cover (a metres-long baseline, so the ratio means what its name says) and
-            // from the raster otherwise. Same rule as the cap's, sampled once for the segment.
-            let tier_slope = {
-                let (lat, lon) = (self.fly.lat, self.fly.lon);
-                let from_tiles = self.tiles.pixel_ground_m(lat).and_then(|px_m| {
-                    let run = (2.0 * px_m).max(1.0);
-                    let dlat = run / 2.0 / 111_320.0;
-                    let dlon = dlat / lat.to_radians().cos().abs().max(1e-6);
-                    let e = |la: f64, lo: f64| self.tiles.elevation_m_at(la, lo).map(|(e, _)| e);
-                    let (n, s_, e_, w_) = (
-                        e(lat + dlat, lon)?,
-                        e(lat - dlat, lon)?,
-                        e(lat, lon + dlon)?,
-                        e(lat, lon - dlon)?,
-                    );
-                    Some((((n - s_) / run).powi(2) + (((e_ - w_) / run).powi(2))).sqrt())
-                });
-                from_tiles.unwrap_or_else(|| {
-                    let d = 360.0 / self.elevation.as_ref().map_or(2048, |r| r.w.max(1)) as f64;
-                    let e_at = |la: f64, lo: f64| {
-                        self.elevation
-                            .as_ref()
-                            .map_or(0.0, |r| r.elevation_m_at(la, lo, elev_lo, elev_hi))
-                    };
-                    let run = (2.0 * raster_step_m).max(1.0);
-                    let dn = (e_at(lat + d, lon) - e_at(lat - d, lon)) / run;
-                    let de = (e_at(lat, lon + d) - e_at(lat, lon - d)) / run;
-                    (dn * dn + de * de).sqrt()
-                })
-            };
-            let sampler = crate::terra::globe_mesh::SurfaceSampler::new(
-                &self.mats,
-                &self.biome_mix,
-                self.landmask.as_ref(),
-                self.elevation.as_ref(),
-                self.landcover.as_ref(),
-                self.elev_range,
-                ds,
-                exag,
-            )
-            // The clock the sky is drawn with, so the leaves and the light agree about the date.
-            .at_epoch(self.celestial_epoch_s());
+            // ★ The slope the relief scales by is `local_slope_at`, PER VERTEX — the model's own
+            // function at the model's own baseline, asked inside the sample closure below. Until
+            // 2026-10-21 a block here sampled ONE slope at the camera and applied it to the whole
+            // patch (`tier_slope`: 0.00331 at Galway) while `ground_disp_at` asked per point
+            // (0.00223). Row 53's closure note said the slope was per point, and it was — on the
+            // model's side only (docs/46 row 53, second opening).
+            //
+            // The vertex buffer leaves `self` BEFORE the sampler borrows it: the sampler and the
+            // per-vertex slope both read `&self`, and the buffer is the one thing written while they
+            // are alive.
+            let mut verts = std::mem::take(&mut self.segment_verts);
+            let sampler = self
+                .surface_sampler()
+                // The clock the sky is drawn with, so the leaves and the light agree about the date.
+                .at_epoch(self.celestial_epoch_s());
             // A cache of the view, the same rule the tiers use: re-derive only when re-deriving would
             // change something. Anchored to the surface point under the camera, so the eye moving is
             // carried by the model matrix and touches no vertex.
@@ -8673,7 +8750,6 @@ mod app {
                 _ => fresh,
             };
             let rebuild = self.segment_built != Some(built);
-            let mut verts = std::mem::take(&mut self.segment_verts);
             if rebuild {
                 let rings_f = res.rings as f64;
                 // **ONE answer to "how high is the ground here, and how fine is the data that says
@@ -8697,13 +8773,17 @@ mod app {
                 // The finest grid the DATA under this segment could support, over the whole rebuild —
                 // the budget's convergence ceiling (see `WorkBudget::observe`).
                 let max_want = std::cell::Cell::new(1usize);
-                // ★ **THE TWO ANSWERS TO "HOW HIGH IS THE GROUND HERE", MEASURED** (docs/46 row 52).
-                // The mesh displaces its vertices by measured elevation PLUS generated sub-raster
+                // ★ **THE TWO ANSWERS TO "HOW HIGH IS THE GROUND HERE", MEASURED** (docs/46 rows 52,
+                // 53). The mesh displaces its vertices by measured elevation PLUS generated sub-raster
                 // relief; `ground_disp_at` — which places the flora AND resolves the camera shell —
-                // returns the measured elevation ALONE. Whatever this probe reports as `relief` is
-                // how far the drawn ground sits from where the model believes it is. Recorded at the
-                // sample nearest the segment centre, plus the worst over the patch.
+                // computes the same two terms from the same inputs, so what this probe reports as
+                // `relief` against `model` is the band limit alone. Recorded at the sample nearest
+                // the segment centre, plus the worst over the patch — AND the inputs beside them,
+                // because row 53's second opening was two callers feeding one function different
+                // arguments (material: first-listed vs dominant; slope: per segment vs per point),
+                // which a probe comparing the function with itself could not see.
                 let relief_probe = std::cell::Cell::new((f64::INFINITY, 0.0f64, 0.0f64, 0.0f64));
+                let relief_probe_in = std::cell::Cell::new((usize::MAX, 0.0f64, 0.0f64));
                 let relief_absmax = std::cell::Cell::new(0.0f64);
                 let t_appearance = crate::clock::now_seconds();
                 let sample = |dir: glam::DVec3| -> crate::terra::globe_mesh::SurfaceSample {
@@ -8713,6 +8793,8 @@ mod app {
                     // Measured beats generated, exactly as the cap does it — one surface, one rule.
                     let (lat, lon) = crate::geo::lat_lon_from_dir(dir);
                     let (elev_m, base_feature_m) = ground_m(lat, lon);
+                    // The model's own slope at THIS point — the same call `ground_disp_at` makes.
+                    let slope = self.local_slope_at(lat, lon);
                     if mi != water_idx {
                         off = elev_m * ds * exag;
                     }
@@ -8753,7 +8835,7 @@ mod app {
                         lat,
                         lon,
                         base_feature_m,
-                        tier_slope,
+                        slope,
                         cell_m,
                     );
                     off += relief * ds * exag;
@@ -8771,10 +8853,11 @@ mod app {
                             lat,
                             lon,
                             base_feature_m,
-                            tier_slope,
+                            slope,
                             GROUND_DETAIL_FLOOR_M,
                         );
                         relief_probe.set((a_ang, elev_m, relief, model));
+                        relief_probe_in.set((mi, slope, base_feature_m));
                     }
                     relief_absmax.set(relief_absmax.get().max(relief.abs()));
                     // **THE APPEARANCE INTEGRAL** (docs/63). The mesh carries this cell's mean shape;
@@ -8842,8 +8925,9 @@ mod app {
                 // ★ **THE TWO ANSWERS, IN METRES OF REAL GROUND** (docs/46 row 53). The mesh's own
                 // vertex is `measured + generated`; every OTHER caller — the flora that stands on it,
                 // the camera shell that rests on it, the cannon — asks `ground_disp_at`, which is the
-                // measured term ALONE. `generated` is therefore exactly how far the drawn surface sits
-                // from where the model believes it is, and `worst` is that over the whole patch.
+                // same two terms at the model's band limit. `generated − model` is therefore exactly
+                // the band limit the renderer chose, and `worst` bounds the generated term over the
+                // whole patch.
                 let (_, probe_elev, probe_relief, probe_model) = relief_probe.get();
                 // ★ The probe that FOUND row 53 now reports its closure: the mesh's generated term and
                 // the model's are one function, so the number to watch is the DISAGREEMENT, which
@@ -8862,6 +8946,8 @@ mod app {
                 // have logging wired up in whatever was running.
                 self.seg_relief_probe =
                     (probe_elev, probe_relief, probe_model, relief_absmax.get());
+                let (probe_mat, probe_slope, probe_base) = relief_probe_in.get();
+                self.seg_relief_inputs = (probe_mat, probe_slope, probe_base);
                 // One rebuild is one unit of work: fold its real cost back into the budget. The side
                 // REALLY used is the smaller of what we allowed and what the data supports — passing
                 // the allowance alone would let a cheap, data-bound rebuild argue for a bigger budget.
@@ -9376,6 +9462,18 @@ mod native_render_tests {
                 if maxel > 1.0 { "   ★ GROUND DRAWN INTO THE SKY" } else { "" });
             println!("      relief: measured {meas:8.2} m · mesh generated {mesh_gen:+8.3} m · model {model_gen:+8.3} m · WORST generated over patch {worst:8.3} m{}",
                 if worst > a { "   ★ DRAWN GROUND RISES ABOVE THE EYE" } else { "" });
+            // ★ WHERE the drawn ground rises above the eye — the footprint decision's own table.
+            let rise =
+                terra.segment_rise_within_m(&[0.35, 1.0, 2.0, 5.0, 10.0, 50.0, 500.0, 5000.0]);
+            let cells: Vec<String> = rise
+                .iter()
+                .map(|(r, h, n)| format!("≤{r:>5.2} m: {h:+8.3} m ({n} v)"))
+                .collect();
+            println!("      rise above eye within: {}", cells.join(" · "));
+            let (land, e, (mm, msl, mb, mr), (xm, xsl, xb)) = terra.ground_relief_inputs_at_eye();
+            println!(
+                "      inputs at eye: land {land} · measured {e:.3} m · MODEL mat {mm} slope {msl:.5} base {mb:.0} m → relief {mr:+.3} m · MESH mat {xm} slope {xsl:.5} base {xb:.0} m"
+            );
             for _ in 0..3 {
                 terra.render().expect("a frame");
             }
@@ -9409,6 +9507,125 @@ mod native_render_tests {
                 g / r.max(1.0)
             );
         }
+    }
+
+    /// ★★★ **THE EYE STANDS ON THE GROUND IT SEES** (docs/46 row 53, second opening; Robin,
+    /// 2026-10-21: *"go ahead with the row-53 fix"*).
+    ///
+    /// Row 53 closed on 2026-08-12 with the mesh and the model calling ONE relief function. The probe
+    /// that closed it compared that function with itself — fed the MESH's arguments both times — and
+    /// read 0.000 m. Fed each caller's own arguments it read +4.787 m at Galway: the mesh named the
+    /// wetland's material GRASS (last of a 50/50 tie) and the model named it WATER (first of the same
+    /// tie, relief 0), and the mesh took one slope per segment where the model took one per point.
+    /// So a 2 m eye stood 2.79 m UNDER the surface it was drawn into — the "green sky" of PRs
+    /// #150/#151, which were right that the sky and the extent were innocent.
+    ///
+    /// This asks the artefact, not the source: at the camera's own point the drawn vertex and the
+    /// model's ground must differ by the band limit ALONE — the one difference docs/68 §1b permits —
+    /// and the inputs the two callers fed the relief function must be IDENTICAL. The band limit is
+    /// not a tolerance picked here: it is read off the segment's own probe (`mesh − model`), so the
+    /// assertion is an identity up to f32, not a number anyone could widen.
+    #[test]
+    #[ignore]
+    fn the_eye_stands_on_the_ground_it_sees() {
+        let (w, h) = (480u32, 320u32);
+        let mut terra = match pollster::block_on(crate::app::Terra::headless(w, h)) {
+            Ok(t) => t,
+            Err(_) => {
+                eprintln!("no GPU adapter — skipping");
+                return;
+            }
+        };
+        let (json, lm, ev, lc) = shipped_earth();
+        terra
+            .load_world(
+                &json,
+                &lm.data,
+                lm.w as u32,
+                lm.h as u32,
+                &ev.data,
+                ev.w as u32,
+                ev.h as u32,
+                &lc.data,
+                lc.w as u32,
+                lc.h as u32,
+            )
+            .expect("the shipped Earth loads");
+        terra.set_alt_bounds(0.05, 8.0e10);
+        terra.set_epoch_sun_over_lon(-9.45);
+        terra.set_draw_flora(false);
+        // Galway, looking at the zenith: the segment centres on the nadir, so its centre vertex is
+        // the ground directly under the eye — the one point where "what I stand on" and "what I see"
+        // can be compared without interpolation. (The shipped Earth's relief exaggeration is 1.0, so
+        // metres of ground and metres of mesh are the same metres.)
+        let alt_m = 2.0;
+        terra.place_camera(53.10, -9.45, alt_m, 0.0, 1.5533);
+        for _ in 0..3 {
+            terra.render().expect("settle the placement");
+        }
+        let (a, ground_m, _) = terra.eye_against_ground_m();
+        let (meas, mesh_gen, model_gen, _worst) = terra.segment_relief_probe_m();
+        let (
+            land,
+            e,
+            (mat_model, slope_model, base_model, relief_model),
+            (mat_mesh, slope_mesh, base_mesh),
+        ) = terra.ground_relief_inputs_at_eye();
+        let (_, rise_m, n_under) = terra.segment_rise_within_m(&[0.35])[0];
+        println!(
+            "galway @ {a} m: ground {ground_m:.3} m (measured {e:.3} + relief {relief_model:+.3}) · \
+             probe measured {meas:.3} mesh {mesh_gen:+.3} model {model_gen:+.3} · vertex underfoot \
+             {rise_m:+.3} m vs eye ({n_under} within 0.35 m)"
+        );
+        println!(
+            "  inputs — model: {mat_model} slope {slope_model:.6} base {base_model:.1} m · mesh: \
+             {mat_mesh} slope {slope_mesh:.6} base {base_mesh:.1} m"
+        );
+        assert!(land, "Galway is land");
+        assert!(
+            n_under >= 1,
+            "no drawn vertex within 0.35 m of the eye's foot — the segment is not centred under a \
+             zenith view, so nothing below can be concluded"
+        );
+        // ★ The INPUTS are one set — material, slope and base feature — not merely nearby numbers.
+        assert_eq!(
+            mat_model, mat_mesh,
+            "the model and the mesh name different ground materials at the same point"
+        );
+        // ★ Not bit-identical, and the reason is stated: the mesh's vertex carries its coordinate
+        // through `dir → (lat, lon)` while the model asks at the camera's own (lat, lon), so the two
+        // points agree to f64 round-off (~1e-9 m on a 6.4e6 m sphere) and a smooth slope field
+        // evaluated at them agrees to ~1e-13 relative (measured on first run: 0.002227027171209079
+        // vs 0.0022270271712088157, which the first version of this test, asserting bit identity,
+        // duly failed on). 1e-9 relative is four decades above that round-off and seven below
+        // anything the relief law could notice; the DIFFERENT slope rule this replaces — one per
+        // segment at the camera against one per point — disagreed by 48% at this very spot.
+        let same = |a: f64, b: f64| (a - b).abs() <= 1.0e-9 * a.abs().max(b.abs()).max(1e-300);
+        assert!(
+            same(slope_model, slope_mesh),
+            "the model and the mesh feed the relief law different slopes at the same point: \
+             {slope_model} vs {slope_mesh}"
+        );
+        assert!(
+            same(base_model, base_mesh),
+            "different base feature lengths at the same point: {base_model} vs {base_mesh}"
+        );
+        // ★ The drawn vertex under the eye sits `alt_m` below it, up to the band limit the renderer
+        // chose — which is (mesh − model) read off the probe, not a tolerance chosen here. What is
+        // left is f32 in display units at the anchor, where a vertex is ~0 and the ULP is ~1e-10 R.
+        let band_limit_m = mesh_gen - model_gen;
+        let drawn_minus_model_m = rise_m + alt_m;
+        let residual_m = drawn_minus_model_m - band_limit_m;
+        println!(
+            "  drawn − model at the eye's point: {drawn_minus_model_m:+.4} m, of which band limit \
+             {band_limit_m:+.4} m, residual {residual_m:+.2e} m"
+        );
+        assert!(
+            residual_m.abs() < 1.0e-2,
+            "the eye is {drawn_minus_model_m:+.3} m from the ground it sees at its own point, and the \
+             band limit accounts for only {band_limit_m:+.3} m of it: the model and the mesh still \
+             answer 'how high is the ground here' differently (docs/46 row 53)"
+        );
     }
 
     /// ★★★ **WHICH WAY IS UP IN A RENDERED FRAME?** — the test that should have existed before any

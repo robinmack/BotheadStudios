@@ -9,6 +9,15 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- ★★★ **A 2 m camera at Galway no longer stands 2.79 m under the ground it sees** (`docs/46` row 53,
+  reopened and closed again). One rule now names a land-cover class's single material
+  (`globe_mesh::share_order` / `dominant_constituent`; `Terra::ground_material_at`), and the ground mesh
+  takes the model's per-point slope instead of one slope per segment. The shipped wetland class is an
+  exact `water 0.5 + grass 0.5` tie that the two old pickers broke in opposite directions. Consequence:
+  cameras, flora and the cannon placed in a tied class rise to the drawn surface (+3.218 m at Galway);
+  the zenith sky from 2 m is blue (`B/R 1.74`, was 0.99). The tie-break is an order, not physics —
+  relief from the mixture is an IOU for Robin.
+
 - ★★★ **The floor's loop gain, measured** (`docs/46` row 87, confirmed). Mean `Δ|ω|/|ω| = +1.199914e-5`
   per contact step over 1,040,536 contacts — strictly positive, so `|ω|` **compounds**. Predicts 1.31e6
   contact steps to reach the 117 rad/s bound against ~8.0e5 measured: same order over **6.8 decades**.
