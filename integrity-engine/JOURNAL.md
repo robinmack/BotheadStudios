@@ -3,6 +3,54 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-10-24 — the terrain arrived as spikes on the way down, and it was four seams deep
+
+**What.** Robin, from the live site: *"there is an odd point where terrain becomes a bunch of very
+tall points rather than normal terrain, then as I move closer they resolve into hills"* — *"not the
+smooth as-you-approach more details resolve I was looking for."* Measured natively rather than argued,
+first on the raster alone (no spike anywhere: steepest mesh edge 0.125 over three sites and fourteen
+altitudes) and then with the streamed tiles fetched exactly as the engine asks for them, in the three
+states a descending browser passes through — first tile landed, half, all. Recorded as `docs/46` row 89
+with four causes and their fixes.
+
+**The four causes, each named by the probe's own record before it was touched.**
+1. The tile fade was drawn around the camera point while the tiles are held around the camera's tile,
+   so half a tile of fade band fell outside the held set — a hard seam with every tile present — and a
+   tile that had not arrived left its neighbour at full weight. Fix: the fade is a property of the tiles
+   held, toward any unmeasured edge.
+2. The slope the relief law scales by was the blended height differentiated over a tile pixel wherever
+   any tile was held; across a seam it read up to 324 and the law clamped it to 1 against a 19.5 km
+   ladder: single vertices 1.9 km tall over flat Sahara. Fix: blend the derivative, never differentiate
+   the blend.
+3. The data. Six of nine terrarium tiles at zooms 14 and 15 over the Alps are a valid PNG of the void
+   sentinel, read as sea level — 2.3 km pits — and the real tiles beside them carry a one-pixel mosaic
+   seam 2–7 km below both its neighbours. Fix: void is unmeasured (held, answers `None`, the zoom stops
+   above it); the seam is repaired from its neighbours as a declared, counted one-pixel stand-in.
+4. The deepest: the relief law's octave wavelengths came from a BLENDED base feature, and the noise
+   lattice is anchored at the origin, so a 0.3% change in wavelength 5,000 km out moves the lattice
+   phase by four cells — neighbours 0.5 m apart differed by 133 m with identical measured height,
+   slope, cell and base. That is a field of very tall points. Fix: the ladder is fixed in space and the
+   finer datum replaces the rungs it resolves in proportion to its trust — which exposed (5): a tile's
+   5 m gradient was scaling 10 km rungs, so each rung now takes the slope measured at its own scale.
+
+**Measured, steepest mesh edge before → after.** Alps 1 km `255 → 0.646`, 200 m `4,112 → 0.778`,
+10 km with all tiles `29.2 → 0.558`; Sahara 20 km first tile `6.81 → 0.023`, 200 m `44.2 → 0.398`;
+Galway 1 km `3.28 → 0.214`. Edges over 45° in the Alps at 1 km `1,928 → 0`. Largest generated term over
+the Sahara `2,137 m → 0.76 m`. Gates derived from the data: raster-only steepest < 0.5; with tiles
+steepest anywhere < 2, flat ground < 1 and generated < 50 m, and a half-arrived patch no steeper than
+twice the complete one. The row-53 eye gate, the Galway grass and the two flora probes still pass.
+
+**Traps paid for.** A spike's HIGH end lies about its cause — only when the probe reported BOTH ends did
+the 133 m between identical neighbours name the lattice. A probe that does not feed tiles cannot see a
+tile defect, and the host feeds them: the first sweep was clean and wrong. A data provider can answer
+200 with a void. Fixing the ladder made the Sahara worse before it made the Alps right — the per-scale
+slope was the second half of the same fix. And `where_the_meadow_ends_in_the_picture` had been merged
+failing by design at its own 3 m pose (zero plants in frame IS the finding); it now asserts the right
+answer for each pose.
+
+**Not yet looked at in the browser.** The sentence came from Robin's screen; the numbers come from the
+segment's triangles. Deploying and descending is the picture this still owes.
+
 ## 2026-10-24 — the deploy erased the gallery, and an empty publish can no longer do that
 
 **What happened.** Robin: *"Merge #156 and deploy."* Full gate green (682 passed, 40 skipped, `mod

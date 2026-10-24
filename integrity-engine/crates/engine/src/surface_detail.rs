@@ -140,22 +140,91 @@ pub fn micro_relief_m(
     h_crit_m: f64,
     slope_fraction: f64,
 ) -> f64 {
-    if octaves <= 0.0 || base_feature_m <= 0.0 || slope_fraction <= 0.0 {
+    micro_relief_blended_m(
+        x_m,
+        z_m,
+        base_feature_m,
+        octaves,
+        mu,
+        h_crit_m,
+        slope_fraction,
+        slope_fraction,
+        base_feature_m,
+        0.0,
+    )
+}
+
+/// [`micro_relief_m`] where a FINER datum also measures this ground — the streamed tile under the
+/// coarse raster — with `measured_to_m` its pixel and `trust` how far it is believed here (the tile
+/// store's fade weight, 0..1).
+///
+/// ★★★ **THE OCTAVE LADDER IS FIXED IN SPACE; THE MEASURED DATUM REPLACES THE OCTAVES IT RESOLVES**
+/// (docs/46 row 89). What stood here handed the relief law a BLENDED base feature,
+/// `raster·(pixel/raster)^trust`, so every octave's wavelength moved continuously with the fade
+/// weight — and the noise lattice is anchored at the origin, so a 0.3% change in wavelength at a
+/// position 5,000 km from it shifts the lattice phase by four whole cells. Two vertices half a metre
+/// apart in a fade band sampled the coarsest octave at unrelated phases and came out ±150 m apart:
+/// measured 2026-10-24 in the Alps, 133 m between neighbours 0.5 m apart with identical measured
+/// height, slope and cell. That is the field of "very tall points" Robin saw on the way down, and it
+/// is what the fade band of every streamed tile was made of.
+///
+/// So the wavelengths come from the coarsest datum alone and never move. An octave the finer datum
+/// resolves — wavelength at least two of its pixels, Nyquist — is attenuated by `1 − trust`, because
+/// where the tile is believed the tile already says what that wavelength does; the octaves below its
+/// pixel stay generated at full weight, as unmeasured ground must. At `trust = 0` this is
+/// [`micro_relief_m`] exactly; at `trust = 1` it is the sub-pixel octaves alone.
+#[allow(clippy::too_many_arguments)]
+pub fn micro_relief_blended_m(
+    x_m: f64,
+    z_m: f64,
+    base_feature_m: f64,
+    octaves: f64,
+    mu: f64,
+    h_crit_m: f64,
+    // ★ TWO slope fractions, one per scale. Relief and slope correlate because the same erosion
+    // produced both — AT THE SAME SCALE. The raster's gradient over 19.5 km says how rough the
+    // kilometre rungs are; a tile's gradient over 5 m says how rough the metre rungs are, and says
+    // nothing about kilometres. Scaling the coarse rungs by a tile's slope put 200 m bumps on flat
+    // Sahara the moment a tile arrived (measured 2026-10-24: slope 0.17 at 4.8 m pixels, +204 m at
+    // a 9.8 km rung). So the rungs the finer datum resolves take the coarse fraction, and the rungs
+    // below its pixel take the fine one.
+    slope_fraction_coarse: f64,
+    slope_fraction_fine: f64,
+    measured_to_m: f64,
+    trust: f64,
+) -> f64 {
+    if octaves <= 0.0 || base_feature_m <= 0.0 {
         return 0.0;
     }
+    if slope_fraction_coarse <= 0.0 && slope_fraction_fine <= 0.0 {
+        return 0.0;
+    }
+    let trust = if measured_to_m > 0.0 {
+        trust.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     let whole = octaves.floor() as u32;
     let frac = octaves - whole as f64;
     let mut relief = 0.0;
     for i in 0..=whole.min(24) {
         // Strictly sub-raster: the first generated octave is half the measured feature.
         let wavelength = base_feature_m / (1u64 << (i + 1)) as f64;
+        // The finer datum resolves this wavelength (two of its pixels, Nyquist): generate it only as
+        // far as the datum is not believed here, and scale it by the slope measured at ITS scale.
+        let resolved = wavelength >= 2.0 * measured_to_m;
+        let (unmeasured, slope_fraction) = if resolved {
+            (1.0 - trust, slope_fraction_coarse)
+        } else {
+            (1.0, slope_fraction_fine)
+        };
         let amp = relief_amplitude_m(wavelength, mu, h_crit_m) * slope_fraction.clamp(0.0, 1.0);
         // Centred on zero: this is roughness, not a change of elevation. The measured raster stays the
         // truth about height.
         let n = crate::world::value_noise(x_m as f32, z_m as f32, (1.0 / wavelength) as f32) as f64
             - 0.5;
         let weight = if i == whole { frac } else { 1.0 };
-        relief += n * 2.0 * amp * weight;
+        relief += n * 2.0 * amp * weight * unmeasured;
     }
     relief
 }
@@ -163,6 +232,73 @@ pub fn micro_relief_m(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ★★★ **A FADE BAND MUST NOT MOVE THE NOISE LATTICE** (docs/46 row 89). The old blend handed the
+    /// relief law a base feature that varied with the fade weight, so the octave wavelengths varied
+    /// with it and the lattice phase at a continental position jumped by whole cells between
+    /// neighbouring vertices. The fixed ladder keeps neighbours' relief within what the slope law
+    /// permits across their separation, whatever the datum under them.
+    #[test]
+    fn the_octave_ladder_does_not_move_with_the_datum() {
+        let mats = crate::materials::load();
+        let g = &mats[crate::materials::index_of(&mats, "granite")];
+        let mu = g.friction_coefficient as f64;
+        let h_crit =
+            crate::granular::critical_bank_height(g.fracture_strength, g.density, 9.81) as f64;
+        // A continental position, where f32 lattice phase is most sensitive to wavelength.
+        let (x, z) = (7.6e5, 5.17e6);
+        let raster = 19_546.0;
+        let octaves = (raster / 30.0f64).log2();
+        // The OLD form: two neighbours 0.5 m apart whose blended base differs by 0.3% (fade weights
+        // 0.110 and 0.111 with a 3.3 m pixel) — the lattice phase of the coarsest octave moves by
+        // `z/λ` ≈ 4 cells, so the two answers are unrelated.
+        let base_of = |w: f64| raster * (3.3f64 / raster).powf(w);
+        let old_a = micro_relief_m(x, z, base_of(0.110), octaves, mu, h_crit, 0.16);
+        let old_b = micro_relief_m(x, z + 0.5, base_of(0.111), octaves, mu, h_crit, 0.16);
+        // The FIXED ladder, same two points, same two trusts.
+        let new_a =
+            micro_relief_blended_m(x, z, raster, octaves, mu, h_crit, 0.16, 0.16, 3.3, 0.110);
+        let new_b = micro_relief_blended_m(
+            x,
+            z + 0.5,
+            raster,
+            octaves,
+            mu,
+            h_crit,
+            0.16,
+            0.16,
+            3.3,
+            0.111,
+        );
+        println!(
+            "old neighbours differ by {:.2} m; fixed ladder by {:.4} m",
+            (old_a - old_b).abs(),
+            (new_a - new_b).abs()
+        );
+        // Half a metre of ground cannot carry more than the steepest permitted slope's worth of drop
+        // — and the generated term must be well under even that.
+        assert!(
+            (new_a - new_b).abs() < 0.5 * mu,
+            "neighbours 0.5 m apart differ by {:.3} m of generated relief",
+            (new_a - new_b).abs()
+        );
+        // The old form is the defect this test exists for: state it, so the gate is seen to bite.
+        assert!(
+            (old_a - old_b).abs() > 10.0 * (new_a - new_b).abs().max(1e-3),
+            "the moving ladder no longer misbehaves here (old {:.3} vs new {:.3}) — re-examine the test",
+            (old_a - old_b).abs(),
+            (new_a - new_b).abs()
+        );
+        // At zero trust the blended form IS the plain one; at full trust nothing coarser than two
+        // pixels is generated, and the sub-pixel octaves survive.
+        let plain = micro_relief_m(x, z, raster, octaves, mu, h_crit, 0.16);
+        let zero = micro_relief_blended_m(x, z, raster, octaves, mu, h_crit, 0.16, 0.16, 3.3, 0.0);
+        assert_eq!(plain, zero);
+        let full = micro_relief_blended_m(x, z, raster, octaves, mu, h_crit, 0.16, 0.16, 3.3, 1.0);
+        let sub_only = micro_relief_m(x, z, raster, octaves, mu, h_crit, 0.16)
+            - micro_relief_blended_m(x, z, raster, octaves, mu, h_crit, 0.16, 0.16, 3.3, 1.0);
+        assert!(full.abs() < plain.abs().max(1.0) && sub_only.is_finite());
+    }
 
     /// ★★★ **THE BAND LIMIT MUST CONVERGE** (docs/46 row 53) — what makes a renderer's smoothed ground
     /// an approximation rather than a fudge.
