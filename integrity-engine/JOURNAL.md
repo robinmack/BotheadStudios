@@ -3,6 +3,40 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-10-24 — the plants turn in the picture, and the light does not
+
+**What.** `docs/72` queue item 3 — row 58's missing control. The row had wired the plants to the one
+senescence model and could not confirm it in a picture: the June/December pair at Galway was
+dominated by the Sun's own elevation (December +61% brighter, hue 2.6% the wrong way), because at
+53 N the noon Sun moves 47° between the solstices. The control is a THIRD frame at the SAME instant
+with the plants' season held at summer (`Terra::pin_plant_season`, native only), so Sun, sky and
+ground are common-mode and the pigment is the only difference; flora pixels are measured through the
+drawn/not-drawn mask rather than a ground band. Row 58 is closed as a picture claim.
+
+**Measured** (`native_render_tests::the_plants_turn_in_the_picture_and_the_light_does_not`, Galway
+53.27 N, eye 1.6 m, local noon on each date, 46,771 plant pixels):
+- December solstice (turned 1.000, Sun 13.3°): model's season `R105.1 G148.5 B66.0` against the
+  same pixels held at summer `R95.3 G139.7 B66.3` — **R ×1.102, G ×1.063, B ×0.995**. Brighter in
+  red and green, blue flat: the hue toward yellow. Non-plant pixels moved: 0.
+- June solstice (turned 0.000, Sun 60.2°): the pin changes nothing — ×1.000 in all three channels,
+  0 pixels. The control's own control.
+- The ratios sit below the endmembers' 1.29 / 1.20 / 1.05 (albedo) because shading and the ground's
+  share of each pixel dilute them.
+
+**A cache bug fell out of it.** `flora::Built` was keyed on position, ground and altitude and not on
+the season, so a mesh built in June stayed June through a change of epoch until the camera moved —
+row 52's lesson, one input short. `turned` is in the key now
+(`cache_tests::a_new_season_makes_the_mesh_stale`).
+
+**Not published.** Publishing to the gallery is Robin's call (`docs/72` §2). The measurement supports
+a June/December pair if she wants one.
+
+**Trap paid for.** The first gate put the red threshold at ×1.10 and the measurement came back
+×1.102 — a gate one hair above its first measurement is a flake that has not happened yet. The bound
+is derived now: the endmembers differ by 1.29 / 1.20 / 1.05, the pixel dilutes that, so the gate asks
+for the ORDER (red above green above blue, blue near 1) and a margin far above the noise of a
+46,771-pixel mean.
+
 ## 2026-10-24 — the meadow ends at 2.32 m, and the web's eye never sees it
 
 **What.** Robin, from the live site: *"flora does not seem to extend realistically from my POV, it
