@@ -23,8 +23,6 @@ SOURCES=("${RIGSHOT_DIR:-/tmp/rigshot}" "web/shots")
 KEEP="${SHOTS_KEEP:-160}"
 
 mkdir -p "$DEST"
-# Start clean so a deleted shot actually disappears rather than lingering forever.
-find "$DEST" -maxdepth 1 \( -name '*.png' -o -name '*.mp4' \) -delete 2>/dev/null || true
 
 # ★ SUBDIRECTORIES TOO. Rigs are routinely run with `OUT=/tmp/rigshot/<run>`, which puts every shot one
 # level down — so the old `-maxdepth 1` scan silently found NONE of them. Measured 2026-08-09: 225 of
@@ -41,6 +39,22 @@ for src in "${SOURCES[@]}"; do
   find "$src" \( -name '*.png' -o -name '*.mp4' \) -printf '%T@\t%p\n' 2>/dev/null >> "$tmp_list" || true
 done
 total=$(wc -l < "$tmp_list")
+# ★★ NOTHING TO PUBLISH MEANS THE GALLERY KEEPS WHAT IT HAS (2026-10-24). "Start clean" used to run
+# BEFORE this list was built, so a publish with empty sources — which is every deploy after a reboot,
+# because `/tmp/rigshot` does not survive one — erased every shot on the live site and wrote an empty
+# manifest. That is how the haystack still and movie vanished on 2026-10-24: the deploy that had been
+# asked for called this script, found nothing in `/tmp`, and deleted the gallery it was meant to
+# refresh. Commit 103e7aa closed one door to this failure (the rsync --delete); this was the other.
+# Refuse, and say so — an empty publish is not a request to empty the gallery.
+if [ "$total" -eq 0 ]; then
+  existing=$(find "$DEST" -maxdepth 1 \( -name '*.png' -o -name '*.mp4' \) 2>/dev/null | wc -l)
+  echo "  publish-shots: nothing to publish (sources: ${SOURCES[*]}); the gallery keeps its $existing file(s)"
+  rm -f "$tmp_list"
+  exit 0
+fi
+# Start clean so a deleted shot actually disappears rather than lingering forever — now that there
+# is something to put in its place.
+find "$DEST" -maxdepth 1 \( -name '*.png' -o -name '*.mp4' \) -delete 2>/dev/null || true
 n=0
 n_png=0
 n_vid=0
