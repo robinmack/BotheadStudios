@@ -197,6 +197,72 @@ impl SurfaceSample {
     }
 }
 
+/// ★★ **ONE ORDER FOR THE CONSTITUENTS OF A MIXTURE** (docs/46 row 53, second opening). The larger
+/// share ranks first; an EQUAL share ranks the lower material index first. Every question of the form
+/// *"which single material stands for this ground"* — the mesh's relief layer, the appearance
+/// integral's texture layer, the model's ground height that the camera, the flora and the cannon stand
+/// on — sorts by this one comparator, because the data contains exact ties: IGBP class 11 (permanent
+/// wetland) is declared `water 0.5 + grass 0.5`, and at Galway the mesh broke that tie one way
+/// (`max_by` keeps the LAST maximum: grass, +4.787 m of relief) while `ground_disp_at` broke it the
+/// other (`first()`: water, "the sea is flat") — so a 2 m eye was placed 2.79 m UNDER the ground it was
+/// drawn into.
+///
+/// The tie-break is an ORDER, not physics: a class that is half water and half grass has no single
+/// material, and the honest answer is relief from the MIXTURE — a modelling decision recorded as an IOU
+/// in row 53, not taken here. What this guarantees is Law II's minimum: one question, one answer.
+pub fn share_order(a: &(usize, f32), b: &(usize, f32)) -> std::cmp::Ordering {
+    b.1.total_cmp(&a.1).then(a.0.cmp(&b.0))
+}
+
+/// **The single material that stands for a mixture**, by [`share_order`] — `None` only for an empty
+/// mixture. Order-independent: the same constituents in any listed order name the same material.
+pub fn dominant_constituent(mix: &[(usize, f32)]) -> Option<usize> {
+    mix.iter().min_by(|a, b| share_order(a, b)).map(|&(m, _)| m)
+}
+
+#[cfg(test)]
+mod constituent_tests {
+    use super::{dominant_constituent, share_order};
+
+    /// The wetland class as the shipped Earth declares it: an exact tie. `first()` and `max_by` were
+    /// the two answers; this is the one.
+    #[test]
+    fn a_tie_names_the_same_material_whichever_way_it_is_listed() {
+        let (water, grass) = (36usize, 14usize);
+        let listed = [(water, 0.5f32), (grass, 0.5)];
+        let reversed = [(grass, 0.5f32), (water, 0.5)];
+        assert_eq!(dominant_constituent(&listed), Some(grass));
+        assert_eq!(dominant_constituent(&reversed), Some(grass));
+        // And the two old idioms disagree on exactly this input, which is why it was invisible
+        // everywhere a class has a strict majority.
+        assert_ne!(
+            listed.first().map(|&(m, _)| m),
+            listed
+                .iter()
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|&(m, _)| m),
+            "if these agree the data no longer holds the tie this test is about"
+        );
+    }
+
+    #[test]
+    fn a_strict_majority_wins_regardless_of_index() {
+        assert_eq!(dominant_constituent(&[(36, 0.3), (14, 0.7)]), Some(14));
+        assert_eq!(dominant_constituent(&[(3, 0.6), (14, 0.4)]), Some(3));
+        assert_eq!(dominant_constituent(&[]), None);
+    }
+
+    /// The sort the appearance integral orders its mixture by IS this comparator, so `mix[0]` (the
+    /// shader's texture layer) and the dominant constituent cannot name different materials.
+    #[test]
+    fn sorting_by_the_order_puts_the_dominant_constituent_first() {
+        let mut mix = vec![(12usize, 0.2f32), (36, 0.4), (14, 0.4)];
+        mix.sort_by(share_order);
+        assert_eq!(mix[0].0, dominant_constituent(&mix).unwrap());
+        assert_eq!(mix[0].0, 14, "equal shares: the lower index ranks first");
+    }
+}
+
 /// **THE surface sampler: one answer to "what is this body's surface in direction `dir`?"**
 /// (albedo, radial offset in display units, material index). The globe mesh builder, Terra's
 /// ground cap and the space band's descent-corridor cap all sample the surface through this one
@@ -310,11 +376,12 @@ impl<'a> SurfaceSampler<'a> {
         }
         let biome = self.landcover.map_or(1, |r| r.biome_at(lat, lon) as usize);
         // The class's DOMINANT constituent — this answers "which material is here", and the caller
-        // wants one. The full mixture is what `sample` spends on colour.
+        // wants one. The full mixture is what `sample` spends on colour. By `share_order`, the ONE
+        // rule (docs/46 row 53): `Terra::ground_material_at` routes here, so what the camera stands
+        // on and what the mesh draws name the same material even at a 50/50 tie.
         self.biome_mix
             .get(biome)
-            .and_then(|m| m.iter().max_by(|a, b| a.1.total_cmp(&b.1)))
-            .map(|&(m, _)| m)
+            .and_then(|m| dominant_constituent(m))
             .unwrap_or(self.water_idx) as u32
     }
 
@@ -350,11 +417,7 @@ impl<'a> SurfaceSampler<'a> {
                 .unwrap_or(&fallback);
             // The class's dominant constituent still names the SurfaceSample's material, which is what
             // the appearance integral and the contact law key on. The COLOUR is the whole mixture.
-            let mi = mix
-                .iter()
-                .max_by(|a, b| a.1.total_cmp(&b.1))
-                .map(|&(m, _)| m)
-                .unwrap_or(self.water_idx);
+            let mi = dominant_constituent(mix).unwrap_or(self.water_idx);
             let e = self.elevation.map_or(0.0, |r| {
                 r.elevation_m_at(lat, lon, self.elev_range[0], self.elev_range[1])
             });
