@@ -9,6 +9,15 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The terrain no longer arrives as spikes on the way down** (`docs/46` row 89): the tile fade follows
+  the tiles actually held; the relief slope is each datum's own, blended; void terrarium tiles are
+  unmeasured (the zoom stops above them) and the provider's one-pixel mosaic seam is repaired and
+  counted; the relief law's octave ladder is fixed in space with the tile replacing the rungs it
+  resolves, each rung scaled by the slope at its own scale. Steepest mesh edge in the Alps at 200 m:
+  4,112 → 0.78. Native GPU gates: `the_ground_does_not_arrive_as_spikes{,_when_tiles_do}`.
+- `Terra::segment_spikes` and a per-vertex record of what built each segment vertex (native probes).
+- `where_the_meadow_ends_in_the_picture` asserts the right answer at each pose (zero plants in frame at
+  3 m is the finding, not a failure).
 - **Row 58 is closed as a picture claim**: the plants' autumn reaches the picture, measured against
   the same instant with the pigment held at summer (`Terra::pin_plant_season`, native only; at
   Galway's December noon R ×1.102, G ×1.063, B ×0.995, 0 non-plant pixels moved; in June the pin

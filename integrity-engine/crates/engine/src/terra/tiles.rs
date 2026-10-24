@@ -116,25 +116,180 @@ pub struct Tile {
     pub px: u32,
     pub chans: usize,
     pub data: Vec<u8>,
+    /// ★ **Every pixel is the void sentinel** — the tile exists on the server and measures nothing.
+    /// The terrarium set answers a request past its local coverage with a valid PNG of `0,0,0`
+    /// (−32,768 m), not a 404: over the Alps at 46.5 N 10 E, six of the nine zoom-14 tiles and six of
+    /// the nine zoom-15 tiles are this (measured 2026-10-24), and the engine read them as ground at
+    /// sea level — a 2.3 km pit under every vertex they covered (docs/46 row 89). A void tile is held,
+    /// so the host is not asked for it again, and it answers `None` like ground no tile covers.
+    pub void: bool,
+    /// ★ **Pixels the provider's mosaic seam ran through, repaired from their lateral neighbours** —
+    /// a DECLARED stand-in (Law V), counted so it is never silent. The real Alps tiles beside the
+    /// void ones carry a one-pixel-wide column, the full height of the tile, of values 2,000–7,000 m
+    /// below BOTH its neighbours while those neighbours agree with each other to within metres
+    /// (zoom 14 column 26: 2,396 m · −4,156 m · 2,391 m; zoom 15 column 53, the same seam). No
+    /// ground is a canyon one pixel wide and three kilometres deep; that is where two source DEMs
+    /// were stitched. Read as ground it drew a trench with a 2.9 km step, and fed the slope law a
+    /// gradient of 435 that became a 583 m generated spike beside it (docs/46 row 89).
+    pub seams_repaired: u32,
+}
+
+/// The terrarium byte triple that means "no measurement": `0,0,0` decodes to −32,768 m, a depth no
+/// ground on Earth reaches (the Challenger Deep is −10,935 m), so it cannot be confused with bathymetry.
+#[inline]
+pub fn is_void_rgb(r: u8, g: u8, b: u8) -> bool {
+    r == 0 && g == 0 && b == 0
+}
+
+/// How far below BOTH neighbours a one-pixel line has to sit, along at least nine tenths of a tile's
+/// width or height, to be a mosaic seam rather than ground. The deepest slot canyons on Earth are a few
+/// hundred metres deep and tens of metres wide; nothing is one pixel wide and this deep with its two
+/// walls at the same height.
+pub const SEAM_NOTCH_M: f64 = 200.0;
+
+/// Metres → the terrarium byte triple, the inverse of [`terrarium_elevation_m`].
+fn terrarium_bytes(metres: f64) -> (u8, u8, u8) {
+    let v = (metres + 32768.0).clamp(0.0, 65535.996);
+    let r = (v / 256.0).floor();
+    let g = (v - r * 256.0).floor();
+    let b = ((v - r * 256.0 - g) * 256.0).floor();
+    (r as u8, g as u8, b as u8)
 }
 
 impl Tile {
+    /// Decoded bytes → a tile, with its void-ness measured once rather than guessed later, and the
+    /// provider's seam lines repaired and counted.
+    pub fn new(id: TileId, px: u32, chans: usize, mut data: Vec<u8>) -> Tile {
+        let n = (px as usize) * (px as usize);
+        let complete = chans >= 3 && data.len() >= n * chans;
+        let void = complete
+            && (0..n).all(|i| {
+                let o = i * chans;
+                is_void_rgb(data[o], data[o + 1], data[o + 2])
+            });
+        let mut seams_repaired = 0u32;
+        if complete && !void && px >= 3 {
+            let w = px as usize;
+            let e_at = |d: &[u8], x: usize, y: usize| -> Option<f64> {
+                let o = (y * w + x) * chans;
+                let (r, g, b) = (d[o], d[o + 1], d[o + 2]);
+                if is_void_rgb(r, g, b) {
+                    None
+                } else {
+                    Some(terrarium_elevation_m(r, g, b))
+                }
+            };
+            // A notch: the middle sits more than SEAM_NOTCH_M below both sides, and the two sides agree
+            // with each other — a real cliff has sides that do not.
+            let notch = |a: Option<f64>, m: Option<f64>, b: Option<f64>| -> bool {
+                match (a, m, b) {
+                    (Some(a), Some(m), Some(b)) => {
+                        m < a.min(b) - SEAM_NOTCH_M
+                            && (a - b).abs() < 0.2 * a.abs().max(b.abs()).max(1.0)
+                    }
+                    _ => false,
+                }
+            };
+            let seam_cols: Vec<usize> = (1..w - 1)
+                .filter(|&x| {
+                    let notched = (0..w)
+                        .filter(|&y| {
+                            notch(
+                                e_at(&data, x - 1, y),
+                                e_at(&data, x, y),
+                                e_at(&data, x + 1, y),
+                            )
+                        })
+                        .count();
+                    notched * 10 >= w * 9
+                })
+                .collect();
+            let seam_rows: Vec<usize> = (1..w - 1)
+                .filter(|&y| {
+                    let notched = (0..w)
+                        .filter(|&x| {
+                            notch(
+                                e_at(&data, x, y - 1),
+                                e_at(&data, x, y),
+                                e_at(&data, x, y + 1),
+                            )
+                        })
+                        .count();
+                    notched * 10 >= w * 9
+                })
+                .collect();
+            for &x in &seam_cols {
+                for y in 0..w {
+                    if let (Some(a), Some(b)) = (e_at(&data, x - 1, y), e_at(&data, x + 1, y)) {
+                        let (r, g, bb) = terrarium_bytes(0.5 * (a + b));
+                        let o = (y * w + x) * chans;
+                        data[o] = r;
+                        data[o + 1] = g;
+                        data[o + 2] = bb;
+                        seams_repaired += 1;
+                    }
+                }
+            }
+            for &y in &seam_rows {
+                for x in 0..w {
+                    if let (Some(a), Some(b)) = (e_at(&data, x, y - 1), e_at(&data, x, y + 1)) {
+                        let (r, g, bb) = terrarium_bytes(0.5 * (a + b));
+                        let o = (y * w + x) * chans;
+                        data[o] = r;
+                        data[o + 1] = g;
+                        data[o + 2] = bb;
+                        seams_repaired += 1;
+                    }
+                }
+            }
+            if seams_repaired > 0 {
+                log::info!(
+                    "tile {}/{}/{}: repaired {} seam pixel(s) across {} column(s) and {} row(s)",
+                    id.z,
+                    id.x,
+                    id.y,
+                    seams_repaired,
+                    seam_cols.len(),
+                    seam_rows.len()
+                );
+            }
+        }
+        Tile {
+            id,
+            px,
+            chans,
+            data,
+            void,
+            seams_repaired,
+        }
+    }
+
     /// Bilinear elevation (m) at a fractional pixel, clamped at the tile's own edges. Interpolating the
     /// DECODED metres rather than the packed bytes, for the same reason `Raster::elevation_m_at` does:
     /// the packing is not linear, so lerping the bytes would blend two different powers of 256.
-    fn elevation_at_px(&self, px: f64, py: f64) -> f64 {
+    ///
+    /// `None` when any of the four pixels is the void sentinel: a measurement interpolated with "no
+    /// measurement" is not a measurement. The provider's mosaic seam — a one-pixel line of garbage that
+    /// is NOT the sentinel — is repaired at decode (`Tile::new`, `seams_repaired`), so by the time a
+    /// sample is asked for here it is gone.
+    fn elevation_at_px(&self, px: f64, py: f64) -> Option<f64> {
         let n = self.px as i64;
-        let at = |ix: i64, iy: i64| {
+        let at = |ix: i64, iy: i64| -> Option<f64> {
             let ix = ix.clamp(0, n - 1) as usize;
             let iy = iy.clamp(0, n - 1) as usize;
             let o = (iy * self.px as usize + ix) * self.chans;
-            terrarium_elevation_m(self.data[o], self.data[o + 1], self.data[o + 2])
+            let (r, g, b) = (self.data[o], self.data[o + 1], self.data[o + 2]);
+            if is_void_rgb(r, g, b) {
+                None
+            } else {
+                Some(terrarium_elevation_m(r, g, b))
+            }
         };
         let (x0, y0) = (px.floor() as i64, py.floor() as i64);
         let (tx, ty) = (px - x0 as f64, py - y0 as f64);
-        let top = at(x0, y0) * (1.0 - tx) + at(x0 + 1, y0) * tx;
-        let bot = at(x0, y0 + 1) * (1.0 - tx) + at(x0 + 1, y0 + 1) * tx;
-        top * (1.0 - ty) + bot * ty
+        let top = at(x0, y0)? * (1.0 - tx) + at(x0 + 1, y0)? * tx;
+        let bot = at(x0, y0 + 1)? * (1.0 - tx) + at(x0 + 1, y0 + 1)? * tx;
+        Some(top * (1.0 - ty) + bot * ty)
     }
 }
 
@@ -145,6 +300,8 @@ pub struct TileStore {
     /// The patch the engine last asked for — centre and zoom. Sampling blends OUT to the patch edge, so
     /// this is what says where the edge is.
     want: Option<(f64, f64, u32, i32)>, // lat, lon, zoom, radius
+    /// Tiles that arrived entirely void — where the data stops, remembered so the zoom stops there too.
+    known_void: std::collections::HashSet<TileId>,
 }
 
 impl TileStore {
@@ -182,7 +339,35 @@ impl TileStore {
                 return;
             }
         }
+        if tile.void {
+            // Remembered past eviction: this is where the DATA stops, and the zoom must not ask past
+            // it again next frame (`deepest_measured_zoom`).
+            self.known_void.insert(tile.id);
+        }
         self.tiles.insert(tile.id, tile);
+    }
+
+    /// ★ **The deepest zoom at which the data has measured THIS ground**, no deeper than `z`. The set
+    /// publishes to zoom 15 globally, but its coverage at the deep zooms is local — over the Alps the
+    /// zoom-14 and zoom-15 tiles are void where the zoom-13 ones are real. `zoom_for_ground_size`
+    /// says what the viewer could resolve; this says what the data can answer, and the patch is asked
+    /// for at the shallower of the two. A void is learned by fetching it once (`insert`), so a descent
+    /// pays one empty tile per step past the data, not an empty surface.
+    pub fn deepest_measured_zoom(&self, lat: f64, lon: f64, z: u32) -> u32 {
+        let mut z = z;
+        while z > 0 {
+            let (fx, fy) = tile_coords(lat, lon, z);
+            let id = TileId {
+                z,
+                x: (fx.floor() as i64).rem_euclid(1i64 << z) as u32,
+                y: fy.floor() as u32,
+            };
+            if !self.known_void.contains(&id) {
+                break;
+            }
+            z -= 1;
+        }
+        z
     }
 
     /// The ground size of one held pixel at this latitude — what the generated relief must key off where
@@ -201,28 +386,84 @@ impl TileStore {
     /// "detail fades in rather than popping" rule the octave count and the cap cross-fade already use, and
     /// at weight 0 the surface is exactly the raster it always was, so the two never disagree at the seam.
     pub fn elevation_m_at(&self, lat: f64, lon: f64) -> Option<(f64, f64)> {
-        let (clat, clon, z, radius) = self.want?;
+        let (_clat, _clon, z, _radius) = self.want?;
+        let n = 1i64 << z;
         let (fx, fy) = tile_coords(lat, lon, z);
+        let (tx, ty) = (fx.floor() as i64, fy.floor() as i64);
         let tile = self.tiles.get(&TileId {
             z,
-            x: (fx.floor() as i64).rem_euclid(1i64 << z) as u32,
+            x: tx.rem_euclid(n) as u32,
             y: fy.floor() as u32,
         })?;
+        if tile.void {
+            return None; // held so it is not fetched again; answers like ground no tile covers
+        }
         let px = tile.px as f64;
-        let e = tile.elevation_at_px((fx.fract()) * px - 0.5, (fy.fract()) * px - 0.5);
+        let e = tile.elevation_at_px((fx.fract()) * px - 0.5, (fy.fract()) * px - 0.5)?;
 
-        // Distance from the patch centre in TILES, against the radius the patch was built with. The last
-        // tile of the patch is the fade band, so the blend width is a property of the patch, not a dial.
-        let (cfx, cfy) = tile_coords(clat, clon, z);
-        let d = ((fx - cfx).abs()).max((fy - cfy).abs());
-        let outer = (radius as f64 + 0.5).max(0.5);
-        let inner = (outer - 1.0).max(0.0);
-        let w = if d <= inner {
-            1.0
-        } else {
-            let t = ((outer - d) / (outer - inner)).clamp(0.0, 1.0);
-            t * t * (3.0 - 2.0 * t) // smoothstep, so the seam has no visible crease
+        // ★★ **THE FADE IS A PROPERTY OF THE TILES HELD, NOT OF THE PATCH THAT WAS ASKED FOR**
+        // (docs/46 row 89). It used to run from the camera POINT out to `radius + 0.5` tiles, while the
+        // tiles actually held are the 3×3 around the camera's TILE — two different squares. Up to half
+        // a tile of the fade band fell outside the held set, where the lookup above returns `None` and
+        // the surface drops to the raster with the weight still at ~0.35: a hard seam, hundreds of
+        // metres tall in the Alps, with every tile present. And a tile that had not ARRIVED yet left
+        // its neighbour's edge at weight 1 — the state a descending camera is in most of the way down.
+        // Measured 2026-10-24 on the segment's own edges: slopes of 20–38 with all nine tiles held,
+        // 273 with one, against 0.1 on the raster alone.
+        //
+        // So the weight falls to zero toward any edge of THIS tile whose neighbour across it is not
+        // held, over the tile's own width, and is 1 everywhere else. A tile surrounded by held tiles is
+        // trusted throughout; the outermost held tiles fade to the raster at their outer edges; a tile
+        // that arrived alone is a smooth bump of measured detail that widens as its neighbours land.
+        // Every seam is continuous by construction, in every state the stream passes through — the
+        // same "detail fades in rather than popping" rule, now applied to what is actually there.
+        // "Held" means held AND measured: a void tile is kept so the host is not asked for it again,
+        // but it is unmeasured ground, and the fade treats it exactly like a tile that never came.
+        let held = |dx: i64, dy: i64| -> bool {
+            let y = ty + dy;
+            y >= 0
+                && y < n
+                && self
+                    .tiles
+                    .get(&TileId {
+                        z,
+                        x: (tx + dx).rem_euclid(n) as u32,
+                        y: y as u32,
+                    })
+                    .is_some_and(|t| !t.void)
         };
+        // Where inside this tile, 0..1 each way.
+        let (ux, uy) = (fx.fract(), fy.fract());
+        // Distance, in tiles, to the nearest ground that is NOT measured: a missing side neighbour is a
+        // half-plane (distance to the edge), a missing corner neighbour a quadrant (distance to the
+        // corner). 1.0 means nothing unmeasured within a tile's width.
+        let mut reach = 1.0f64;
+        if !held(-1, 0) {
+            reach = reach.min(ux);
+        }
+        if !held(1, 0) {
+            reach = reach.min(1.0 - ux);
+        }
+        if !held(0, -1) {
+            reach = reach.min(uy);
+        }
+        if !held(0, 1) {
+            reach = reach.min(1.0 - uy);
+        }
+        if !held(-1, -1) {
+            reach = reach.min(ux.hypot(uy));
+        }
+        if !held(1, -1) {
+            reach = reach.min((1.0 - ux).hypot(uy));
+        }
+        if !held(-1, 1) {
+            reach = reach.min(ux.hypot(1.0 - uy));
+        }
+        if !held(1, 1) {
+            reach = reach.min((1.0 - ux).hypot(1.0 - uy));
+        }
+        let t = reach.clamp(0.0, 1.0);
+        let w = t * t * (3.0 - 2.0 * t); // smoothstep, so the seam has no visible crease
         Some((e, w))
     }
 }
@@ -324,6 +565,56 @@ mod tests {
         );
     }
 
+    /// ★ **A ONE-PIXEL TRENCH THROUGH A WHOLE TILE IS A MOSAIC SEAM, NOT A CANYON** (docs/46 row 89).
+    /// The real Alps tiles beside the void ones carry exactly this, full height, 2–7 km below both
+    /// neighbours; read as ground it was a 2.9 km trench and a 583 m generated spike. A real cliff —
+    /// whose two sides disagree — must be left exactly as measured.
+    #[test]
+    fn a_seam_column_is_repaired_and_a_cliff_is_not() {
+        let px = 8usize;
+        let enc = |m: f64| -> [u8; 3] {
+            let (r, g, b) = terrarium_bytes(m);
+            [r, g, b]
+        };
+        // A 2,500 m plateau with column 3 reading −563 m in every row.
+        let mut data = Vec::with_capacity(px * px * 3);
+        for _y in 0..px {
+            for x in 0..px {
+                data.extend_from_slice(&enc(if x == 3 { -563.0 } else { 2500.0 }));
+            }
+        }
+        let id = TileId {
+            z: 15,
+            x: 17294,
+            y: 11591,
+        };
+        let t = Tile::new(id, px as u32, 3, data);
+        assert!(!t.void);
+        assert_eq!(
+            t.seams_repaired, px as u32,
+            "every pixel of the seam column"
+        );
+        let e = t.elevation_at_px(3.0, 4.0).expect("measured");
+        assert!(
+            (e - 2500.0).abs() < 0.01,
+            "the seam reads as its neighbours: {e}"
+        );
+        // A real cliff: 2,500 m on the left, 1,000 m on the right, step between columns 3 and 4.
+        let mut cliff = Vec::with_capacity(px * px * 3);
+        for _y in 0..px {
+            for x in 0..px {
+                cliff.extend_from_slice(&enc(if x < 4 { 2500.0 } else { 1000.0 }));
+            }
+        }
+        let c = Tile::new(id, px as u32, 3, cliff);
+        assert_eq!(
+            c.seams_repaired, 0,
+            "a cliff is ground and stays as measured"
+        );
+        let lo = c.elevation_at_px(5.0, 2.0).expect("measured");
+        assert!((lo - 1000.0).abs() < 0.01, "{lo}");
+    }
+
     fn flat_tile(id: TileId, metres: f64) -> Tile {
         // Encode `metres` into every pixel of a small tile.
         let v = metres + 32768.0;
@@ -334,12 +625,68 @@ mod tests {
         for _ in 0..px * px {
             data.extend_from_slice(&[r, g, 0]);
         }
-        Tile {
-            id,
-            px,
-            chans: 3,
-            data,
+        Tile::new(id, px, 3, data)
+    }
+
+    /// ★ **A VOID TILE IS NOT GROUND AT SEA LEVEL** (docs/46 row 89). The set answers past its local
+    /// coverage with a valid PNG of `0,0,0` — −32,768 m — and six of the nine Alps tiles at zoom 14 and
+    /// again at zoom 15 were exactly that; the engine clamped them to 0 m and dug a 2.3 km pit under
+    /// every vertex they covered, with the real ground standing around it as pillars.
+    #[test]
+    fn a_void_tile_measures_nothing_and_its_neighbour_fades_toward_it() {
+        let mut store = TileStore::default();
+        let (lat, lon, z, r) = (46.5, 10.0, 14, 1);
+        store.want_patch(lat, lon, z, r);
+        let ids = tiles_around(lat, lon, z, r);
+        let centre = ids[0];
+        let east = TileId {
+            z,
+            x: centre.x + 1,
+            y: centre.y,
+        };
+        for id in &ids {
+            if *id == east {
+                let px = 8u32;
+                store.insert(Tile::new(*id, px, 3, vec![0u8; (px * px * 3) as usize]));
+            } else {
+                store.insert(flat_tile(*id, 2500.0));
+            }
         }
+        assert!(
+            store.missing().is_empty(),
+            "a void tile is held, so the host is not asked for it again"
+        );
+        let n = (1u64 << z) as f64;
+        let lon_of = |fx: f64| fx / n * 360.0 - 180.0;
+        // Inside the void tile: no measurement, exactly as if no tile covered it.
+        let in_void = lon_of(east.x as f64 + 0.5);
+        assert!(store.elevation_m_at(lat, in_void).is_none());
+        // In the real tile beside it, the weight falls to zero toward the edge that faces the void…
+        let at = |fx: f64| store.elevation_m_at(lat, lon_of(fx)).expect("covered").1;
+        let (w_mid, w_near, w_edge) = (
+            at(centre.x as f64 + 0.5),
+            at(centre.x as f64 + 0.95),
+            at(centre.x as f64 + 0.999),
+        );
+        assert!(
+            w_mid > w_near && w_near > w_edge && w_edge < 0.01,
+            "toward the void: mid {w_mid} near {w_near} edge {w_edge}"
+        );
+        // …and stays trusted on the side that faces measured ground.
+        let w_west = at(centre.x as f64 + 0.05);
+        assert!(w_west > 0.99, "west edge faces a real tile: {w_west}");
+        // The zoom ladder stops above the void, and nowhere else.
+        assert_eq!(store.deepest_measured_zoom(lat, in_void, z), z - 1);
+        assert_eq!(store.deepest_measured_zoom(lat, lon, z), z);
+        // A single void pixel inside a real tile is not a measurement either, and does not make the
+        // tile void.
+        let mut t = flat_tile(centre, 2500.0);
+        t.data[0] = 0;
+        t.data[1] = 0;
+        t.data[2] = 0;
+        assert!(!t.void);
+        assert!(t.elevation_at_px(0.0, 0.0).is_none());
+        assert!(t.elevation_at_px(4.0, 4.0).is_some());
     }
 
     /// **The seam must not be visible, and at the patch edge the surface must be EXACTLY the raster it

@@ -5627,6 +5627,9 @@ mod app {
             // Exactly what `ground_disp_at` feeds — the same call, not a copy of its reasoning.
             let sampler_material = self.ground_material_at(lat, lon);
             let slope = self.local_slope_at(lat, lon);
+            let (s_coarse, s_fine, _) = self.ground_slopes_at(lat, lon);
+            let (measured_to_m, trust) =
+                Self::ground_datum(&self.tiles, self.raster_step_m(), lat, lon);
             let relief = Self::ground_relief_m(
                 &self.mats,
                 &self.detail,
@@ -5636,9 +5639,12 @@ mod app {
                 self.planet_radius,
                 lat,
                 lon,
-                base_feature_m,
-                slope,
+                self.raster_step_m(),
+                s_coarse,
+                s_fine,
                 GROUND_DETAIL_FLOOR_M,
+                measured_to_m,
+                trust,
             );
             let name = |i: usize| self.mats.get(i).map_or("?".to_string(), |m| m.id.clone());
             let (mi, ms, mb) = self.seg_relief_inputs;
@@ -5657,6 +5663,94 @@ mod app {
         #[cfg(not(target_arch = "wasm32"))]
         pub fn segment_relief_probe_m(&self) -> (f64, f64, f64, f64) {
             self.seg_relief_probe
+        }
+
+        /// ★ **IS THE DRAWN GROUND A FIELD OF SPIKES?** — native only (docs/46 row 89). Robin, from a
+        /// descent on the live site: *"there is an odd point where terrain becomes a bunch of very
+        /// tall points rather than normal terrain, then as I move closer they resolve into hills."* A
+        /// spike is a vertex whose height differs from a neighbour's by more than the ground between
+        /// them could carry, so this walks the segment's own triangle edges and reports the steepest,
+        /// how many exceed a slope of 1 (45°) and of 0.3, the mesh's nominal cell, and — for the
+        /// higher end of the steepest edge — which term made it:
+        /// `(n_edges, max_slope, n_over_1, n_over_0p3, cell_m, worst)` with
+        /// `worst = [measured_m, generated_m, base_m, cell_m, slope, dh_m, run_m]`.
+        #[cfg(not(target_arch = "wasm32"))]
+        #[allow(clippy::type_complexity)]
+        pub fn segment_spikes(&self) -> (usize, f64, usize, usize, f64, [f64; 10], [f64; 6]) {
+            let Some(built) = self.segment_built else {
+                return (0, 0.0, 0, 0, 0.0, [0.0; 10], [0.0; 6]);
+            };
+            let n = self.segment_verts.len();
+            if n == 0 || self.seg_diag.len() != n {
+                return (0, 0.0, 0, 0, built.cell_m, [0.0; 10], [0.0; 6]);
+            }
+            let ds = display_scale();
+            let res = crate::terra::segment::SegmentRes::new(TERRA_SEG_RINGS, TERRA_SEG_SPOKES);
+            let idx = crate::terra::segment::segment_indices(res);
+            let at = |i: u32| {
+                let v = &self.segment_verts[i as usize];
+                glam::DVec3::new(v.pos[0] as f64, v.pos[1] as f64, v.pos[2] as f64) + built.anchor
+            };
+            let (mut edges, mut max_slope, mut over1, mut over03) =
+                (0usize, 0.0f64, 0usize, 0usize);
+            let mut worst = [0.0f64; 10];
+            // The LOW end's own record, so a step can be blamed on the right vertex: `[measured_m,
+            // generated_m, base_m, cell_m, slope, material]`.
+            let mut worst_low = [0.0f64; 6];
+            let mut edge = |a: u32, b: u32| {
+                if a as usize >= n || b as usize >= n {
+                    return;
+                }
+                let (pa, pb) = (at(a), at(b));
+                let up = pa.normalize();
+                let e = pb - pa;
+                let dh = e.dot(up);
+                let run = (e - up * dh).length();
+                if !(run > 0.0) {
+                    return;
+                }
+                let s = dh.abs() / run;
+                edges += 1;
+                if s > 1.0 {
+                    over1 += 1;
+                }
+                if s > 0.3 {
+                    over03 += 1;
+                }
+                if s > max_slope {
+                    max_slope = s;
+                    let (hi, low) = if dh > 0.0 { (b, a) } else { (a, b) };
+                    let d = self.seg_diag[hi as usize];
+                    let (la, lo) = crate::geo::lat_lon_from_dir(at(hi).normalize());
+                    worst = [
+                        d[0],
+                        d[1],
+                        d[2],
+                        d[3],
+                        d[4],
+                        dh.abs() / ds,
+                        run / ds,
+                        la,
+                        lo,
+                        d[5],
+                    ];
+                    worst_low = self.seg_diag[low as usize];
+                }
+            };
+            for t in idx.chunks_exact(3) {
+                edge(t[0], t[1]);
+                edge(t[1], t[2]);
+                edge(t[2], t[0]);
+            }
+            (
+                edges,
+                max_slope,
+                over1,
+                over03,
+                built.cell_m,
+                worst,
+                worst_low,
+            )
         }
 
         pub fn set_emplaced_mesh(&mut self, mesh: &crate::mesher::Mesh) {
@@ -6312,6 +6406,12 @@ mod app {
         /// base_feature_m)` — so they can be held against the inputs `ground_disp_at` feeds the same
         /// function at the same point. Diagnostic; native only reads it.
         seg_relief_inputs: (usize, f64, f64),
+        /// Per-vertex record of the last segment rebuild, in emission order:
+        /// `[measured_m, generated_m, base_m, cell_m, slope]`. Read by `segment_spikes` (native
+        /// only): the spike Robin saw on a descent (docs/46 row 89) is a vertex whose height differs
+        /// from its neighbours' by more than the ground between them could carry, and this says which
+        /// term put it there instead of leaving it to be argued.
+        seg_diag: Vec<[f64; 6]>,
         /// What the camera is riding, if anything (`camera_follow`).
         ride: Option<Ride>,
         /// Rig knobs for PRICING the ground ladder: how many tiers to build, and how many octaves of
@@ -6619,6 +6719,7 @@ mod app {
                 last_eye_m: None,
                 seg_relief_probe: (0.0, 0.0, 0.0, 0.0),
                 seg_relief_inputs: (usize::MAX, 0.0, 0.0),
+                seg_diag: Vec::new(),
                 ride: None,
                 draw_matter: 2,
                 drawn_buf: Vec::new(),
@@ -7265,12 +7366,12 @@ mod app {
                 return;
             }
             let before = self.tiles.len();
-            self.tiles.insert(crate::terra::tiles::Tile {
-                id: crate::terra::tiles::TileId { z, x, y },
+            self.tiles.insert(crate::terra::tiles::Tile::new(
+                crate::terra::tiles::TileId { z, x, y },
                 px,
                 chans,
-                data: data.to_vec(),
-            });
+                data.to_vec(),
+            ));
             // New measured ground is exactly the kind of change the tier cache CANNOT see: it is keyed on
             // where the camera is, and the camera did not move. Without this the tiles would arrive and
             // the mesh would keep drawing the surface it was built from — the same failure `set_cap_ladder`
@@ -7746,6 +7847,12 @@ mod app {
             {
                 let want_m = self.detail.camera_grain_radius(alt_m.max(1e-3));
                 let z = crate::terra::tiles::zoom_for_ground_size(want_m, self.fly.lat, 256);
+                // ★ No deeper than the DATA goes here (docs/46 row 89): the set publishes to zoom 15
+                // everywhere and measures to zoom 15 only in places. A void tile, once seen, stops
+                // the ladder at the zoom above it instead of being drawn as ground at sea level.
+                let z = self
+                    .tiles
+                    .deepest_measured_zoom(self.fly.lat, self.fly.lon, z);
                 self.tiles.want_patch(self.fly.lat, self.fly.lon, z, 1);
             }
 
@@ -8163,8 +8270,19 @@ mod app {
             lat: f64,
             lon: f64,
             base_feature_m: f64,
-            local_slope: f64,
+            // ★ Two slopes, one per scale (`ground_slopes_at`): the raster's gradient over its own
+            // step scales the rungs a streamed tile resolves, the tile's gradient over its pixel
+            // scales the rungs below it. Relief and slope correlate at the SAME scale, and a 5 m
+            // gradient knows nothing about a 10 km rung (docs/46 row 89).
+            slope_coarse: f64,
+            slope_fine: f64,
             finest_m: f64,
+            // ★ The finer datum under this point and how far it is believed here (`ground_datum`):
+            // the octaves it resolves are generated only as far as it is NOT believed. The ladder's
+            // wavelengths come from `base_feature_m` — the coarsest datum, the raster — and never
+            // move with the blend (docs/46 row 89; `surface_detail::micro_relief_blended_m`).
+            measured_to_m: f64,
+            trust: f64,
         ) -> f64 {
             if material_idx == water_idx || finest_m <= 0.0 || base_feature_m <= 0.0 {
                 return 0.0; // the sea is flat, and there is nothing finer than nothing
@@ -8183,10 +8301,42 @@ mod app {
             if octaves <= 0.0 {
                 return 0.0;
             }
-            let frac = (local_slope / mu).clamp(0.0, 1.0);
+            let frac_coarse = (slope_coarse / mu).clamp(0.0, 1.0);
+            let frac_fine = (slope_fine / mu).clamp(0.0, 1.0);
             let px = lon.to_radians() * planet_radius * lat.to_radians().cos();
             let pz = lat.to_radians() * planet_radius;
-            crate::surface_detail::micro_relief_m(px, pz, base_feature_m, octaves, mu, h_crit, frac)
+            crate::surface_detail::micro_relief_blended_m(
+                px,
+                pz,
+                base_feature_m,
+                octaves,
+                mu,
+                h_crit,
+                frac_coarse,
+                frac_fine,
+                measured_to_m,
+                trust,
+            )
+        }
+
+        /// **The finer datum under a point, and how far it is believed there**: `(pixel_m, trust)`,
+        /// the streamed tile's pixel and the store's fade weight where a tile covers the point, and
+        /// `(raster_step_m, 0)` where none does. The relief law's inputs beside the raster's step
+        /// (docs/46 row 89): the ladder is the raster's, and this says which of its rungs the tile has
+        /// already measured.
+        fn ground_datum(
+            tiles: &crate::terra::tiles::TileStore,
+            raster_step_m: f64,
+            lat: f64,
+            lon: f64,
+        ) -> (f64, f64) {
+            match tiles.elevation_m_at(lat, lon) {
+                Some((_, w)) if w > 0.0 => (
+                    tiles.pixel_ground_m(lat).unwrap_or(raster_step_m).max(1e-3),
+                    w,
+                ),
+                _ => (raster_step_m, 0.0),
+            }
         }
 
         /// **How steep the ground is at a point**, as a gradient magnitude — the input the relief law
@@ -8196,22 +8346,69 @@ mod app {
         /// ★ Per-POINT, not per-segment. The mesh took one slope at the camera and applied it across
         /// the whole patch, which is fine for a picture and wrong for an answer the model owns: the
         /// ground's roughness at a coordinate cannot depend on where the camera happens to be.
+        ///
+        /// ★★★ **BLEND THE DERIVATIVE; NEVER DIFFERENTIATE THE BLEND** (docs/46 row 89). This used to
+        /// take the blended ground height at ±`run` and divide — with `run` the streamed tile's pixel
+        /// whenever ANY tile was held, even at a point only the raster answers. Where the two samples
+        /// straddled a tile's edge, the "slope" was the step between a 19.5 km raster and a 30 m tile
+        /// over a 30 m baseline: 0.6 to 324, where the raster's own gradient was 0.002. The relief law
+        /// clamps that to a slope fraction of 1 and scales its amplitude by the datum's base feature —
+        /// which, at a point the raster answers, is 19.5 km — so a single vertex rose 1.9 km over flat
+        /// Sahara. That is the "bunch of very tall points" Robin saw on the way down (measured
+        /// 2026-10-24: `the_ground_does_not_arrive_as_spikes_when_tiles_do`), and it is why they
+        /// "resolve into hills" as the tiles cover the near field.
+        ///
+        /// Each datum's slope is now taken over ITS OWN baseline from ITS OWN samples, and the two
+        /// slopes are blended with the same weight the heights are. The raster's slope is smooth by
+        /// construction; the tile's exists only where the tile covers all four samples. At a seam the
+        /// weight carries the answer across, exactly as it carries the height.
         fn local_slope_at(&self, lat: f64, lon: f64) -> f64 {
+            let (s_raster, s_fine, w) = self.ground_slopes_at(lat, lon);
+            s_raster + w * (s_fine - s_raster)
+        }
+
+        /// **The ground's slope at a point, at each datum's own scale**: `(raster, fine, trust)` —
+        /// the raster's gradient over its 19.5 km step, the streamed tile's gradient over its pixel
+        /// where a tile covers the point and all four of its samples (the raster's again where it
+        /// does not), and how far the tile is believed here. `local_slope_at` is their blend; the
+        /// relief law takes them apart, because each scales the rungs of its own scale.
+        fn ground_slopes_at(&self, lat: f64, lon: f64) -> (f64, f64, f64) {
             let (lo, hi) = (self.elev_range[0], self.elev_range[1]);
-            let step = self.raster_step_m();
-            let e = |la: f64, lo_: f64| {
-                Self::ground_elev_m(self.elevation.as_ref(), &self.tiles, lo, hi, step, la, lo_).0
+            let step = self.raster_step_m().max(1.0);
+            let cos_lat = lat.to_radians().cos().abs().max(1e-6);
+            // Gradient magnitude of `e` over a baseline `run`, or None if `e` cannot answer everywhere.
+            let grad = |e: &dyn Fn(f64, f64) -> Option<f64>, run: f64| -> Option<f64> {
+                let dlat = run / 111_320.0;
+                let dlon = dlat / cos_lat;
+                let dn = (e(lat + dlat, lon)? - e(lat - dlat, lon)?) / (2.0 * run);
+                let de = (e(lat, lon + dlon)? - e(lat, lon - dlon)?) / (2.0 * run);
+                Some((dn * dn + de * de).sqrt())
             };
-            let run = self
-                .tiles
-                .pixel_ground_m(lat)
-                .map_or(step, |px| px.max(1.0))
-                .max(1.0);
-            let dlat = run / 111_320.0;
-            let dlon = dlat / lat.to_radians().cos().abs().max(1e-6);
-            let dn = (e(lat + dlat, lon) - e(lat - dlat, lon)) / (2.0 * run);
-            let de = (e(lat, lon + dlon) - e(lat, lon - dlon)) / (2.0 * run);
-            (dn * dn + de * de).sqrt()
+            // Sea level is the floor for both, as it is for `ground_elev_m`: the ground stands on it.
+            let raster = |la: f64, lo_: f64| -> Option<f64> {
+                Some(
+                    self.elevation
+                        .as_ref()
+                        .map_or(0.0, |r| r.elevation_m_at(la, lo_, lo, hi))
+                        .max(0.0),
+                )
+            };
+            let s_raster = grad(&raster, step).unwrap_or(0.0);
+            match self.tiles.elevation_m_at(lat, lon) {
+                Some((_, w)) if w > 0.0 => {
+                    let px = self.tiles.pixel_ground_m(lat).unwrap_or(step).max(1.0);
+                    let tile = |la: f64, lo_: f64| -> Option<f64> {
+                        self.tiles.elevation_m_at(la, lo_).map(|(e, _)| e.max(0.0))
+                    };
+                    match grad(&tile, px) {
+                        Some(s_tile) => (s_raster, s_tile, w),
+                        // The tile does not cover all four samples: its slope is unknown here, and the
+                        // raster's is the only honest answer.
+                        None => (s_raster, s_raster, 0.0),
+                    }
+                }
+                _ => (s_raster, s_raster, 0.0),
+            }
         }
 
         /// **THE surface sampler for this body, built in ONE place** — the mesh, the model's ground
@@ -8274,6 +8471,10 @@ mod app {
             // WATER where the mesh named GRASS — relief 0 against +4.787 m, and a 2 m eye placed
             // 2.79 m under the surface it was looking at (docs/46 row 53, second opening).
             let sampler_material = self.ground_material_at(lat, lon);
+            let (measured_to_m, trust) =
+                Self::ground_datum(&self.tiles, self.raster_step_m(), lat, lon);
+            let _ = base_feature_m; // the datum's size is the appearance integral's input, not the ladder's
+            let (s_coarse, s_fine, _) = self.ground_slopes_at(lat, lon);
             let relief = Self::ground_relief_m(
                 &self.mats,
                 &self.detail,
@@ -8283,9 +8484,12 @@ mod app {
                 self.planet_radius,
                 lat,
                 lon,
-                base_feature_m,
-                self.local_slope_at(lat, lon),
+                self.raster_step_m(),
+                s_coarse,
+                s_fine,
                 GROUND_DETAIL_FLOOR_M,
+                measured_to_m,
+                trust,
             );
             (e + relief) * display_scale() * self.relief_exag
         }
@@ -8835,6 +9039,8 @@ mod app {
                 let relief_probe = std::cell::Cell::new((f64::INFINITY, 0.0f64, 0.0f64, 0.0f64));
                 let relief_probe_in = std::cell::Cell::new((usize::MAX, 0.0f64, 0.0f64));
                 let relief_absmax = std::cell::Cell::new(0.0f64);
+                let seg_diag =
+                    std::cell::RefCell::new(Vec::<[f64; 6]>::with_capacity(res.vertex_count()));
                 let t_appearance = crate::clock::now_seconds();
                 let sample = |dir: glam::DVec3| -> crate::terra::globe_mesh::SurfaceSample {
                     let point = sampler.sample(dir);
@@ -8843,8 +9049,12 @@ mod app {
                     // Measured beats generated, exactly as the cap does it — one surface, one rule.
                     let (lat, lon) = crate::geo::lat_lon_from_dir(dir);
                     let (elev_m, base_feature_m) = ground_m(lat, lon);
-                    // The model's own slope at THIS point — the same call `ground_disp_at` makes.
-                    let slope = self.local_slope_at(lat, lon);
+                    // The model's own slopes at THIS point — the same call `ground_disp_at` makes —
+                    // and their blend, which is what the probes record as "the slope".
+                    let (s_coarse, s_fine, w_slope) = self.ground_slopes_at(lat, lon);
+                    let slope = s_coarse + w_slope * (s_fine - s_coarse);
+                    // And the finer datum under it, with its trust — the same call too.
+                    let (measured_to_m, trust) = Self::ground_datum(tiles, raster_step_m, lat, lon);
                     if mi != water_idx {
                         off = elev_m * ds * exag;
                     }
@@ -8884,9 +9094,12 @@ mod app {
                         planet_radius,
                         lat,
                         lon,
-                        base_feature_m,
-                        slope,
+                        raster_step_m,
+                        s_coarse,
+                        s_fine,
                         cell_m,
+                        measured_to_m,
+                        trust,
                     );
                     off += relief * ds * exag;
                     if a_ang < relief_probe.get().0 {
@@ -8902,14 +9115,25 @@ mod app {
                             planet_radius,
                             lat,
                             lon,
-                            base_feature_m,
-                            slope,
+                            raster_step_m,
+                            s_coarse,
+                            s_fine,
                             GROUND_DETAIL_FLOOR_M,
+                            measured_to_m,
+                            trust,
                         );
                         relief_probe.set((a_ang, elev_m, relief, model));
                         relief_probe_in.set((mi, slope, base_feature_m));
                     }
                     relief_absmax.set(relief_absmax.get().max(relief.abs()));
+                    seg_diag.borrow_mut().push([
+                        elev_m,
+                        relief,
+                        base_feature_m,
+                        cell_m,
+                        slope,
+                        mi as f64,
+                    ]);
                     // **THE APPEARANCE INTEGRAL** (docs/63). The mesh carries this cell's mean shape;
                     // everything finer than the cell — the material MIXTURE and the slope SPREAD — is
                     // integrated here and carried as colour and roughness. Without it those sixteen
@@ -8998,6 +9222,7 @@ mod app {
                     (probe_elev, probe_relief, probe_model, relief_absmax.get());
                 let (probe_mat, probe_slope, probe_base) = relief_probe_in.get();
                 self.seg_relief_inputs = (probe_mat, probe_slope, probe_base);
+                self.seg_diag = seg_diag.into_inner();
                 // One rebuild is one unit of work: fold its real cost back into the budget. The side
                 // REALLY used is the smaller of what we allowed and what the data supports — passing
                 // the allowance alone would let a cheap, data-bound rebuild argue for a bigger budget.
@@ -10381,10 +10606,23 @@ first undrawable member at {:?}",
                 }
             }
             assert!(n > 0, "no plants resolved at Galway");
-            assert!(
-                far_in_picture_m > 0.0,
-                "the plants changed no row of the picture"
-            );
+            // ★ Zero is the RIGHT answer when the frame's nearest ground row already lies beyond the
+            // farthest plant — that is the 3 m finding itself (row 88), not a failure of the probe.
+            // The first version asserted plants in the picture at every pose and failed by design at
+            // the very pose that proved Robin's point.
+            if nearest_row_m <= far_m {
+                assert!(
+                    far_in_picture_m > 0.0,
+                    "plants stand inside the frame's ground (nearest row {nearest_row_m:.2} m, farthest \
+                     plant {far_m:.2} m) yet changed no row of the picture"
+                );
+            } else {
+                assert!(
+                    far_in_picture_m == 0.0,
+                    "no plant stands inside the frame's ground (nearest row {nearest_row_m:.2} m, \
+                     farthest plant {far_m:.2} m) yet the plants changed a row out to {far_in_picture_m:.2} m"
+                );
+            }
         }
     }
 
@@ -10591,6 +10829,368 @@ first undrawable member at {:?}",
                 jun.model[c] - jun.summer[c]
             );
         }
+    }
+
+    /// ★★★ **DOES THE GROUND ARRIVE AS SPIKES ON THE WAY DOWN?** (docs/46 row 89)
+    ///
+    /// Robin, from a descent on the live site (2026-10-24): *"there is an odd point where terrain
+    /// becomes a bunch of very tall points rather than normal terrain, then as I move closer they
+    /// resolve into hills"* — and *"not the smooth as-you-approach more details resolve I was looking
+    /// for."* This descends natively over three sites and, at each altitude, walks the segment's own
+    /// triangle edges (`Terra::segment_spikes`): the steepest edge, how many edges exceed 45° and
+    /// 0.3, and for the steepest one which term built its high end — measured elevation, generated
+    /// relief, the datum's base feature, the mesh cell and the slope the relief was scaled by.
+    ///
+    /// No streamed tiles here (the host fetches those), so this is the raster path alone; if the band
+    /// Robin saw is above the tile altitude, this is the whole mechanism. What is asserted today is
+    /// only that the probe saw a mesh at every altitude; the gate follows the named term.
+    ///
+    /// `#[ignore]`: needs a GPU. `cargo test -- --ignored --nocapture the_ground_does_not_arrive`.
+    #[test]
+    #[ignore]
+    fn the_ground_does_not_arrive_as_spikes() {
+        const W: u32 = 640;
+        const H: u32 = 480;
+        let (json, lm, ev, lc) = shipped_earth();
+        let mut terra = pollster::block_on(app::Terra::headless(W, H)).expect("headless Terra");
+        terra
+            .load_world(
+                &json,
+                &lm.data,
+                lm.w as u32,
+                lm.h as u32,
+                &ev.data,
+                ev.w as u32,
+                ev.h as u32,
+                &lc.data,
+                lc.w as u32,
+                lc.h as u32,
+            )
+            .expect("the shipped Earth loads");
+        terra.set_alt_bounds(0.05, 8.0e10);
+        let sites = [
+            ("terra's start, 20N 0E", 20.0f64, 0.0f64),
+            ("alps, 46.5N 10E", 46.5, 10.0),
+            ("galway, 53.27N 9.05W", 53.27, -9.05),
+        ];
+        let alts_m = [
+            8.0e6, 3.0e6, 1.0e6, 5.0e5, 2.0e5, 1.0e5, 5.0e4, 2.0e4, 1.0e4, 5.0e3, 2.0e3, 1.0e3,
+            500.0, 200.0,
+        ];
+        let mut seen = 0usize;
+        let mut steepest = 0.0f64;
+        for (name, lat, lon) in sites {
+            terra.set_epoch_sun_over_lon(lon);
+            println!("== {name}");
+            println!(
+                "  {:>10} {:>9} {:>9} {:>9} {:>7} {:>8} {:>6} {:>6}  worst edge's high end: measured \
+                 generated base cell slope | dh run",
+                "alt_m", "cell_m", "worst_gen", "max_elev°", "edges", "maxslope", ">1", ">0.3"
+            );
+            for alt in alts_m {
+                terra.place_camera(lat, lon, alt, 0.0, -1.2);
+                for _ in 0..3 {
+                    terra.render().expect("a frame");
+                }
+                let (_, _, _, worst_gen) = terra.segment_relief_probe_m();
+                let (_, max_elev, _) = terra.segment_vertex_elevations();
+                let (edges, max_slope, o1, o03, cell, w, lo) = terra.segment_spikes();
+                if edges > 0 {
+                    seen += 1;
+                }
+                steepest = steepest.max(max_slope);
+                if max_slope > 1.0 {
+                    println!(
+                        "             ↳ next row's steepest edge stands at {:.4}, {:.4} · material {} · \
+                         its LOW end: measured {:.1} generated {:+.2} base {:.0} cell {:.1} slope {:.4}",
+                        w[7], w[8], w[9] as usize, lo[0], lo[1], lo[2], lo[3], lo[4]
+                    );
+                }
+                println!(
+                    "  {:>10.0} {:>9.1} {:>9.2} {:>9.2} {:>7} {:>8.3} {:>6} {:>6}  {:.1} {:+.2} {:.0} \
+                     {:.1} {:.4} | {:.1} {:.1}",
+                    alt, cell, worst_gen, max_elev, edges, max_slope, o1, o03, w[0], w[1], w[2],
+                    w[3], w[4], w[5], w[6]
+                );
+            }
+        }
+        assert!(seen > 0, "the probe never saw a segment mesh");
+        // ★ THE GATE. The raster is 19.5 km per texel, bilinear, and the generated relief below it is
+        // bounded by the slope law, so no edge of the drawn ground may be steeper than the steepest
+        // ground the raster can hold between two texels — measured 0.125 over three sites and
+        // fourteen altitudes (docs/46 row 89). A spike reads as 4 and upward.
+        assert!(
+            steepest < 0.5,
+            "an edge of the drawn ground has slope {steepest:.3} on the raster alone — a spike, not ground"
+        );
+    }
+
+    /// ★★★ **AND WITH THE STREAMED TILES ARRIVING** — the state the browser is actually in on the way
+    /// down (docs/46 row 89). The raster-only sweep above found no spike at any altitude, so the band
+    /// Robin saw must involve the measured tiles the host streams: which zoom is wanted, which tiles
+    /// have landed, and the seam between a tile and the raster beside it. This fetches the tiles the
+    /// engine itself asks for (`tiles_wanted`, nearest first, from the same AWS terrarium set the
+    /// browser uses, cached under `TILE_CACHE`), decodes them the way `Raster::decode_png` does, and
+    /// probes THREE states at each altitude — the first tile landed, half of them, all of them — because
+    /// "an odd point" on a descent is a transient, and the transient is where the half-arrived patch
+    /// meets the raster.
+    ///
+    /// Needs the network and a GPU. `#[ignore]`.
+    #[test]
+    #[ignore]
+    fn the_ground_does_not_arrive_as_spikes_when_tiles_do() {
+        const W: u32 = 640;
+        const H: u32 = 480;
+        let cache = std::env::var("TILE_CACHE").unwrap_or_else(|_| "/tmp/rigshot/tiles".into());
+        std::fs::create_dir_all(&cache).expect("a tile cache directory");
+        let fetch = |z: u32, x: u32, y: u32| -> Option<(Vec<u8>, u32)> {
+            let path = std::path::PathBuf::from(&cache).join(format!("{z}-{x}-{y}.png"));
+            if !path.exists() {
+                let url = format!(
+                    "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
+                );
+                let st = std::process::Command::new("curl")
+                    .args(["-fsS", "--max-time", "30", "-o"])
+                    .arg(&path)
+                    .arg(&url)
+                    .status()
+                    .ok()?;
+                if !st.success() {
+                    let _ = std::fs::remove_file(&path);
+                    return None;
+                }
+            }
+            let file = std::fs::File::open(&path).ok()?;
+            let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
+            decoder.set_transformations(png::Transformations::EXPAND);
+            let mut reader = decoder.read_info().ok()?;
+            let mut buf = vec![0u8; reader.output_buffer_size()];
+            let info = reader.next_frame(&mut buf).ok()?;
+            if info.bit_depth != png::BitDepth::Eight || info.width != info.height {
+                return None;
+            }
+            buf.truncate(info.buffer_size());
+            Some((buf, info.width))
+        };
+        let wanted = |terra: &app::Terra| -> Vec<(u32, u32, u32)> {
+            let s = terra.tiles_wanted();
+            let nums: Vec<u32> = s
+                .split(|c: char| !c.is_ascii_digit())
+                .filter(|t| !t.is_empty())
+                .filter_map(|t| t.parse().ok())
+                .collect();
+            nums.chunks_exact(3).map(|c| (c[0], c[1], c[2])).collect()
+        };
+
+        let (json, lm, ev, lc) = shipped_earth();
+        let mut terra = pollster::block_on(app::Terra::headless(W, H)).expect("headless Terra");
+        terra
+            .load_world(
+                &json,
+                &lm.data,
+                lm.w as u32,
+                lm.h as u32,
+                &ev.data,
+                ev.w as u32,
+                ev.h as u32,
+                &lc.data,
+                lc.w as u32,
+                lc.h as u32,
+            )
+            .expect("the shipped Earth loads");
+        terra.set_alt_bounds(0.05, 8.0e10);
+        let sites = [
+            ("alps, 46.5N 10E", 46.5f64, 10.0f64),
+            ("galway, 53.27N 9.05W", 53.27, -9.05),
+            ("terra's start, 20N 0E", 20.0, 0.0),
+        ];
+        let alts_m = [
+            1.0e5, 5.0e4, 2.0e4, 1.0e4, 5.0e3, 2.0e3, 1.0e3, 500.0, 200.0,
+        ];
+        let mut probed = 0usize;
+        let mut worst_over_all = (0.0f64, String::new());
+        // The gates' own tallies: the steepest edge in any state anywhere, and over the one site that
+        // is flat to the data (terra's start, where the tiles say 400–440 m for kilometres) the
+        // steepest edge and the largest generated term.
+        let mut steepest_anywhere = 0.0f64;
+        let mut flat_site = (0.0f64, 0.0f64);
+        for (name, lat, lon) in sites {
+            terra.set_epoch_sun_over_lon(lon);
+            println!("== {name}");
+            println!(
+                "  {:>8} {:>5} {:>5} {:>9} {:>9} {:>8} {:>5} {:>5}  worst edge's high end: measured \
+                 generated base cell slope | dh run",
+                "alt_m", "zoom", "tiles", "cell_m", "worst_gen", "maxslope", ">1", ">0.3"
+            );
+            for alt in alts_m {
+                terra.place_camera(lat, lon, alt, 0.0, -1.2);
+                for _ in 0..2 {
+                    terra.render().expect("a frame");
+                }
+                let want = wanted(&terra);
+                let zoom = want.first().map_or(0, |t| t.0);
+                let n = want.len();
+                // The three states a descending browser passes through: first tile, half, all.
+                let marks = [1usize.min(n), n.div_ceil(2), n];
+                let mut by_state = [0.0f64; 3];
+                let mut added = 0usize;
+                for (si, &mark) in marks.iter().enumerate() {
+                    while added < mark {
+                        let (z, x, y) = want[added];
+                        if let Some((data, px)) = fetch(z, x, y) {
+                            terra.add_tile(z, x, y, &data, px);
+                        }
+                        added += 1;
+                    }
+                    for _ in 0..2 {
+                        terra.render().expect("a frame");
+                    }
+                    let (_, _, _, worst_gen) = terra.segment_relief_probe_m();
+                    let (edges, max_slope, o1, o03, cell, w, lo) = terra.segment_spikes();
+                    if edges > 0 {
+                        probed += 1;
+                    }
+                    steepest_anywhere = steepest_anywhere.max(max_slope);
+                    if name.starts_with("terra") {
+                        flat_site = (flat_site.0.max(max_slope), flat_site.1.max(worst_gen));
+                    }
+                    let state = ["first", "half", "all"][si];
+                    by_state[si] = max_slope;
+                    println!(
+                        "  {:>8.0} {:>5} {:>2}/{:<2} {:>9.1} {:>9.2} {:>8.3} {:>5} {:>5}  {:.1} {:+.2} \
+                         {:.0} {:.1} {:.4} | {:.1} {:.1}   [{state}]",
+                        alt,
+                        zoom,
+                        terra.tile_count(),
+                        n,
+                        cell,
+                        worst_gen,
+                        max_slope,
+                        o1,
+                        o03,
+                        w[0],
+                        w[1],
+                        w[2],
+                        w[3],
+                        w[4],
+                        w[5],
+                        w[6]
+                    );
+                    if max_slope > 1.0 {
+                        println!(
+                            "             ↳ that edge's high end stands at {:.4}, {:.4} · material {} · \
+                             its LOW end: measured {:.1} generated {:+.2} base {:.0} cell {:.1} slope {:.4}",
+                            w[7], w[8], w[9] as usize, lo[0], lo[1], lo[2], lo[3], lo[4]
+                        );
+                    }
+                    if max_slope > worst_over_all.0 {
+                        worst_over_all = (max_slope, format!("{name} @ {alt:.0} m [{state}]"));
+                    }
+                    if n == 0 {
+                        break;
+                    }
+                }
+                // ★ THE TRANSIENT GATE: the arrival of tiles must not create ground their completion
+                // removes. A half-arrived patch may be no steeper than the complete one, within the
+                // factor a fade band legitimately adds (the measured ratio is below 1 at every
+                // altitude; 2 is the margin) — this is the "odd point on the way down" itself.
+                if n > 0 {
+                    let complete = by_state[2];
+                    for (si, partial) in by_state[..2].iter().enumerate() {
+                        assert!(
+                            *partial <= (2.0 * complete).max(0.5),
+                            "{name} @ {alt:.0} m: with {} the steepest edge is {partial:.3}, but with every \
+                             tile it is {complete:.3} — tiles arriving made ground that their completion \
+                             took away",
+                            ["the first tile", "half the tiles"][si]
+                        );
+                    }
+                }
+                // ★ And the state the engine SETTLES into. Having seen a void tile it wants the zoom
+                // above it, and those tiles have to arrive too — up to three rounds, which is what a
+                // browser does over the next few frames.
+                let mut rounds = 0usize;
+                loop {
+                    let more = wanted(&terra);
+                    if more.is_empty() || rounds >= 3 {
+                        break;
+                    }
+                    for (z, x, y) in more {
+                        if let Some((data, px)) = fetch(z, x, y) {
+                            terra.add_tile(z, x, y, &data, px);
+                        }
+                    }
+                    for _ in 0..2 {
+                        terra.render().expect("a frame");
+                    }
+                    rounds += 1;
+                }
+                if rounds > 0 {
+                    let (_, _, _, worst_gen) = terra.segment_relief_probe_m();
+                    let (edges, max_slope, o1, o03, cell, w, lo) = terra.segment_spikes();
+                    if edges > 0 {
+                        probed += 1;
+                    }
+                    steepest_anywhere = steepest_anywhere.max(max_slope);
+                    if name.starts_with("terra") {
+                        flat_site = (flat_site.0.max(max_slope), flat_site.1.max(worst_gen));
+                    }
+                    println!(
+                        "  {:>8.0} {:>5} {:>2}/{:<2} {:>9.1} {:>9.2} {:>8.3} {:>5} {:>5}  {:.1} {:+.2} \
+                         {:.0} {:.1} {:.4} | {:.1} {:.1}   [settled after {rounds} more round(s)]",
+                        alt,
+                        "-",
+                        terra.tile_count(),
+                        "-",
+                        cell,
+                        worst_gen,
+                        max_slope,
+                        o1,
+                        o03,
+                        w[0],
+                        w[1],
+                        w[2],
+                        w[3],
+                        w[4],
+                        w[5],
+                        w[6]
+                    );
+                    if max_slope > 1.0 {
+                        println!(
+                            "             ↳ that edge's high end stands at {:.4}, {:.4} · material {} · \
+                             its LOW end: measured {:.1} generated {:+.2} base {:.0} cell {:.1} slope {:.4}",
+                            w[7], w[8], w[9] as usize, lo[0], lo[1], lo[2], lo[3], lo[4]
+                        );
+                    }
+                    if max_slope > worst_over_all.0 {
+                        worst_over_all = (max_slope, format!("{name} @ {alt:.0} m [settled]"));
+                    }
+                }
+            }
+        }
+        println!(
+            "steepest edge anywhere: slope {:.3} at {}",
+            worst_over_all.0, worst_over_all.1
+        );
+        assert!(probed > 0, "the probe never saw a segment mesh");
+        // ★ THE GATES, derived from the data rather than the first run. Real ground in the Alps at
+        // 5 m pixels holds faces near 45°; a mesh edge across such a face reads about 1 (measured
+        // 0.78 after the fix, against 270 and 4,112 before it), so 2 is the bound past which an edge
+        // is a seam, a void or a moving lattice and not a mountain. Over ground the tiles say is
+        // flat for kilometres (400–440 m), no edge may approach 45° and the generated term must stay
+        // within what the raster's own slope permits there (measured 0.40 and 17.6 m; 1 and 50 m are
+        // the bounds).
+        assert!(
+            steepest_anywhere < 2.0,
+            "an edge of the drawn ground has slope {steepest_anywhere:.3} at {} — a spike, not ground",
+            worst_over_all.1
+        );
+        assert!(
+            flat_site.0 < 1.0 && flat_site.1 < 50.0,
+            "over flat ground the steepest edge is {:.3} and the largest generated term {:.1} m",
+            flat_site.0,
+            flat_site.1
+        );
     }
 
     /// ★★★ **THE IMPACT MEETS SOMETHING** — the exact sentence docs/46 row 57 said was false.
