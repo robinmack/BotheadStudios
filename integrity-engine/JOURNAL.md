@@ -3,6 +3,40 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-10-24 — the deploy erased the gallery, and an empty publish can no longer do that
+
+**What happened.** Robin: *"Merge #156 and deploy."* Full gate green (682 passed, 40 skipped, `mod
+app` compiles), `./scripts/deploy.sh` from `main` = `182364c`, site live, six URLs answering 200. Then
+`/var/www/integrity/shots` held one file: a manifest reading `[]`. `deploy.sh` calls
+`publish-shots.sh`, which **started clean — deleting every PNG and MP4 on the live gallery — before
+it looked at its sources.** Both sources were empty: `/tmp/rigshot` does not survive a reboot (this
+box rebooted 2026-10-14) and `web/shots` does not exist here. So the publish step deleted the
+haystack still and movie and every older rig shot, wrote an empty manifest, printed `✓ published 0
+file(s)` and the deploy reported success.
+
+**Why it is the same bug twice.** Commit `103e7aa` (2026-08-09) is titled *"the gallery was being
+erased by the deploy that shipped it"*: `rsync --delete` over `/shots` was the first door, closed with
+`--exclude=/shots/`. The second door was the publish step the same deploy then calls. Both failures
+share a shape: **a step that reports success while describing the destruction it just did** — `0
+shots in 0 groups` was printed, and read as nothing to add rather than nothing left.
+
+**Fix.** `publish-shots.sh` builds its list first; when the list is empty it says so, names the count
+of files the gallery keeps, and exits without touching them. "Start clean" runs only once there is
+something to put in its place. Verified into scratch directories both ways: with empty sources a
+pre-existing shot is kept and the message names it; with one source shot the old one is replaced
+and the manifest lists the new one.
+
+**Recovery.** The haystack film is deterministic (seeded), so it is regenerated natively —
+`a_haystack_forms_on_earth` → `framevideo.sh` → `publish-shots.sh`, no deploy needed. The older
+August rig shots were session artefacts of the browser rigs; nothing on this box holds them, no
+backup covered `/var/www/integrity/shots`, and Cloudflare serves the manifest as DYNAMIC, so they are
+gone and are not regenerated blind.
+
+**Trap paid for.** A deploy that succeeds is not a deploy that preserved what it did not build. The
+shots were never in the repo, never in a backup, and existed in exactly one place; the check that
+would have caught this is a before-and-after count of that directory, which is now the first thing
+to read after any deploy.
+
 ## 2026-10-24 — the net loop gain: nothing in the step removes rotational energy
 
 **What.** The 2026-09-20 entry left one instruction: weigh the floor's `+1.2e-5` per contact against
