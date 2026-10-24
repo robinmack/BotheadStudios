@@ -3,6 +3,44 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-10-24 — the meadow ends at 2.32 m, and the web's eye never sees it
+
+**What.** Robin, from the live site: *"flora does not seem to extend realistically from my POV, it
+fills a small radius around me but does not lose resolution while appearing to be there like
+expected."* Measured natively at her pose rather than argued, and recorded as `docs/46` row 88 with
+the honest form specified and its gate named. (Earlier the same day: PR #153, row 53's second
+opening, merged to `main` on her word; `main` = `6053a11`.)
+
+**Why it is what she sees.** For one kind, the instance budget IS the radius. `flora::scatter` sizes
+each kind's reach so the disc holds exactly the budget in expectation, so the angular sort chooses
+among plants that are all inside that disc and decides nothing. At Galway's grassland (grass 0.8,
+crown 0.0113 m², 70.8 plants/m²) 1,200 plants is a disc of 2.32 m. Beyond its rim the ground draws
+its own flat albedo, which has no canopy term (row 35), so the two representations of the same grass
+disagree in brightness as well as in detail — a change of representation that moves the world, which
+`docs/47` names as the seam where resolution becomes a fudge.
+
+**Probe.** `Terra::flora_far_m` / `flora_cap_m` (where the drawn meadow ends, and how far the
+renderer thought it was worth going) and `native_render_tests::where_the_meadow_ends_in_the_picture`
+(GPU, `--ignored`): the frame with plants against the identical frame without, row by row, each row
+converted to the ground distance its ray meets. It prints the profile and asserts only that plants
+are seen; the gate that replaces that assertion is specified in row 88 and is written with the fix.
+
+**Measured.**
+- Eye 1.6 m, pitched 0.25 rad down, 640×480: 1,179 plants, farthest **2.32 m**, cap 16,003 m. The
+  plants change 82% of the row at 2.0 m, 61% at 2.5 m, 7.5% at 3.0 m, **0.0% from 3.5 m to the
+  horizon** (121 of 367 ground rows, all the nearest).
+- Plant-covered rows average `R114 G155 B81`; the bare ground beyond them `R183 G215 B152` — the
+  resolved grass is 38% darker in red than the same grass as albedo.
+- Eye 3 m (the web's placement), same pitch: the nearest ground row is at 3.6 m, beyond the farthest
+  plant — **no plant is in the frame at all** unless the eye pitches below −52°.
+- At the pixel limit (a tuft is a pixel at 187 m here, 622 m at 1600 rows) the plants within reach
+  number 7.8 million (29 million), so the honest far field cannot be instances: the number of drawn
+  things must be bounded by pixels.
+
+**Trap paid for.** A count and a cap both read healthy — 1,179 plants, 16 km — while the farthest
+plant stood 2.32 m away. The number that says where a meadow ends is the FARTHEST, and nothing
+reported it until now.
+
 ## 2026-10-21 — row 53's second opening: one function, two sets of arguments
 
 **What.** `docs/46` row 53 ("two answers to how high is the ground here") closed on 2026-08-12 with

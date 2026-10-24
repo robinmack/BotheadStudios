@@ -9,6 +9,11 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Where the drawn meadow ends is now a number** (`docs/46` row 88): `Terra::flora_far_m` /
+  `flora_cap_m`, and the native GPU probe `where_the_meadow_ends_in_the_picture`. Measured at Galway:
+  the plants end 2.32 m from the eye and are out of frame entirely from the web's 3 m placement. The
+  honest far field (a footprint ladder that converges, with row 35's canopy term) is specified, not
+  yet built.
 - ★★★ **A 2 m camera at Galway no longer stands 2.79 m under the ground it sees** (`docs/46` row 53,
   reopened and closed again). One rule now names a land-cover class's single material
   (`globe_mesh::share_order` / `dominant_constituent`; `Terra::ground_material_at`), and the ground mesh
