@@ -301,6 +301,11 @@ pub struct Built {
     /// The eye height the angular budget was spent at (m). The budget buys SUBTENDED ANGLE, so
     /// altitude decides WHICH plants win a slot, not merely how many.
     pub alt_m: f64,
+    /// ★ **The season the plants were coloured for** — `solar::senescence_fraction` at this latitude,
+    /// 0..1. An input to the answer like the others: a mesh built in June is not the answer in
+    /// December even if nobody has moved, and until this was in the key nothing invalidated it when
+    /// the epoch changed (docs/46 row 58).
+    pub turned: f64,
     /// How many plants this mesh holds.
     pub n: usize,
 }
@@ -318,7 +323,13 @@ impl Built {
         // changes — a rule that behaves the same at 4 km and at 1.5 m, which no absolute
         // threshold does.
         let alt_ratio = fresh.alt_m.max(1e-3) / self.alt_m.max(1e-3);
-        moved_m < 2.0 && ground_moved < 0.25 && (0.8..1.25).contains(&alt_ratio)
+        // SEASON: the senescent endmembers differ by ~30% in red across the whole 0..1, so a hundredth
+        // of the way through autumn is under a pixel level and not worth a rebuild.
+        let season_moved = (self.turned - fresh.turned).abs();
+        moved_m < 2.0
+            && ground_moved < 0.25
+            && (0.8..1.25).contains(&alt_ratio)
+            && season_moved < 0.01
     }
 }
 
@@ -332,8 +343,25 @@ mod cache_tests {
             lon,
             ground_m,
             alt_m,
+            turned: 0.0,
             n: 1200,
         }
+    }
+
+    /// **A change of season invalidates the mesh without anyone moving** (docs/46 row 58). The plants
+    /// are coloured for the season they were built in; the epoch is an input like the ground height.
+    #[test]
+    fn a_new_season_makes_the_mesh_stale() {
+        let june = at(53.27, -9.05, 390.0, 1.6);
+        let mut december = june;
+        december.turned = 1.0;
+        assert!(!june.still_current(&december));
+        let mut barely = june;
+        barely.turned = 0.005;
+        assert!(
+            june.still_current(&barely),
+            "a hundredth of an autumn is under a pixel level"
+        );
     }
 
     /// ★★ **THE BUG THIS EXISTS FOR** (2026-08-09). The elevation tiles stream in seconds after the

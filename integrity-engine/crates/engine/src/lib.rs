@@ -6248,6 +6248,10 @@ mod app {
         /// while the picture showed a disc of plants with a cliff at its rim (docs/46 row 88).
         flora_far_m: f64,
         flora_cap_m: f64,
+        /// Native-only negative control (`pin_plant_season`): hold the plants at this season instead
+        /// of the one the model derives, so a frame can be compared with itself at the same instant
+        /// with only the pigment changed (docs/46 row 58). Always `None` in the browser.
+        plant_season_pin: Option<f64>,
         segment_verts: Vec<Vertex>,
         /// What the segment's mesh currently HOLDS — the same cache-of-the-view rule the ground tiers use
         /// (`ground_cap::tier_is_current`), on the one mesh instead of a ladder of them. The LIFT term is
@@ -6643,6 +6647,7 @@ mod app {
                 flora_anchor: glam::DVec3::ZERO,
                 flora_far_m: 0.0,
                 flora_cap_m: 0.0,
+                plant_season_pin: None,
                 flora_upload: Default::default(),
                 flora_indices: Default::default(),
                 flora_verified: false,
@@ -8489,11 +8494,19 @@ mod app {
             // under us turned out to be, and how high the eye is. Keyed on position alone this cache
             // outlived a 36 m correction from the elevation tiles and an entire descent (`crate::terra::flora::Built`).
             let (lat, lon) = (self.fly.lat, self.fly.lon);
+            // ★★★ WHEN THIS SCENE IS SET, asked of the ONE senescence model (docs/46 row 58) — and
+            // part of the cache key, because a mesh built in June is not the answer in December even
+            // if nobody has moved. `plant_season_pin` is the native-only control that lets a test hold
+            // the pigment still while the instant stays the same; it never exists in the browser.
+            let turned = self.plant_season_pin.unwrap_or_else(|| {
+                crate::solar::senescence_fraction(lat, self.celestial_epoch_s())
+            });
             let fresh = crate::terra::flora::Built {
                 lat,
                 lon,
                 ground_m: self.ground_disp_at(lat, lon) / display_scale(),
                 alt_m: alt,
+                turned,
                 n: 0,
             };
             if self
@@ -8549,12 +8562,10 @@ mod app {
                 vertices: Vec::new(),
                 indices: Vec::new(),
             };
-            // ★★★ WHEN THIS SCENE IS SET, asked of the ONE senescence model (docs/46 row 58).
-            // `solar::senescence_fraction` derives the fraction of chlorophyll spent from the local
-            // day length against its own annual extremes — so the tropics barely turn and the far
-            // north turns early and hard, both for free. It has been built and tested since the
-            // phenology work and had no consumer at all until now.
-            let turned = crate::solar::senescence_fraction(lat, self.celestial_epoch_s());
+            // `turned` — how far through its autumn this latitude is — was asked above, where it is
+            // also part of the cache key. `solar::senescence_fraction` derives it from the local day
+            // length against its own annual extremes, so the tropics barely turn and the far north
+            // turns early and hard, both for free.
             let meshes: Vec<crate::mesher::Mesh> = self
                 .flora_kinds
                 .iter()
@@ -8674,6 +8685,20 @@ mod app {
         #[cfg(not(target_arch = "wasm32"))]
         pub fn set_draw_flora(&mut self, on: bool) {
             self.draw_flora = on;
+        }
+
+        /// ★★ **Hold the plants' season still** — native only, and it exists to be a NEGATIVE CONTROL
+        /// (docs/46 row 58, docs/72 queue item 3). Two frames at the SAME instant, one with the season
+        /// the model derives and one with the plants held at `turned`, differ only by the pigment; the
+        /// Sun, the sky and the ground are common-mode. That is the separation the June/December pair
+        /// could not make, because at 53 N the noon Sun itself moves 47° between those two dates.
+        ///
+        /// `None` hands the season back to the model. Native only, so it cannot become a scene verb
+        /// (docs/65) or a shipped way to paint a season.
+        #[cfg(not(target_arch = "wasm32"))]
+        pub fn pin_plant_season(&mut self, turned: Option<f64>) {
+            self.plant_season_pin = turned;
+            self.flora_at = None; // the mesh is a cache of an answer that just changed
         }
 
         /// ★★ **The frame this scene last drew, as RGBA bytes** — native only (docs/69 §3).
@@ -10359,6 +10384,211 @@ first undrawable member at {:?}",
             assert!(
                 far_in_picture_m > 0.0,
                 "the plants changed no row of the picture"
+            );
+        }
+    }
+
+    /// ★★★ **THE PLANTS TURN IN THE PICTURE, AND THE LIGHT DOES NOT** (docs/46 row 58, docs/72 queue
+    /// item 3).
+    ///
+    /// Row 58 wired the plants to the one senescence model and could not confirm it in a picture: the
+    /// June/December pair at Galway was dominated by the Sun's own elevation (December's frame +61%
+    /// brighter, hue 2.6% the WRONG way), because at 53 N the noon Sun moves 47° between the
+    /// solstices. The control that separates the two is a THIRD frame at the SAME instant with the
+    /// plants' season held at summer: Sun, sky and ground identical, pigment the only difference.
+    /// Flora pixels are measured specifically — the mask is the set of pixels the plants change when
+    /// they are drawn at all — rather than a ground band that is mostly ground.
+    ///
+    /// Two dates, so the control has its own control: in June the model says nothing has turned, and
+    /// the pin must then change nothing. If it did, the pin would be painting.
+    ///
+    /// `#[ignore]`: needs a GPU.
+    #[test]
+    #[ignore]
+    fn the_plants_turn_in_the_picture_and_the_light_does_not() {
+        const W: u32 = 640;
+        const H: u32 = 480;
+        // The solstices as `web/public/worlds/galway-{june,december}` pin them: fixtures verified by
+        // `orbit.rs`'s own tests (declination ±23.44°), not dates chosen here.
+        const JUNE: f64 = 1_718_916_660.0;
+        const DECEMBER: f64 = 1_734_772_800.0;
+        const LAT: f64 = 53.27;
+        const LON: f64 = -9.05;
+
+        struct Season {
+            turned: f64,
+            sun_deg: f64,
+            mask_px: usize,
+            /// Mean colour of the plant pixels with the season the model derives.
+            model: [f64; 3],
+            /// The same pixels with the plants held at summer, same instant.
+            summer: [f64; 3],
+            /// Pixels that are NOT plants and changed between those two frames — must be ~none.
+            outside_changed: usize,
+        }
+
+        let (json, lm, ev, lc) = shipped_earth();
+        let mut terra = pollster::block_on(app::Terra::headless(W, H)).expect("headless Terra");
+        terra
+            .load_world(
+                &json,
+                &lm.data,
+                lm.w as u32,
+                lm.h as u32,
+                &ev.data,
+                ev.w as u32,
+                ev.h as u32,
+                &lc.data,
+                lc.w as u32,
+                lc.h as u32,
+            )
+            .expect("the shipped Earth loads");
+        terra.set_alt_bounds(0.05, 8.0e10);
+
+        let measure = |terra: &mut app::Terra, epoch: f64| -> Season {
+            terra.set_epoch(epoch);
+            // Local noon on THAT date (the solver stays near the pinned epoch), so the Sun is up on
+            // both dates and each pair below shares one Sun exactly.
+            terra.set_epoch_sun_over_lon(LON);
+            terra.place_camera(LAT, LON, 1.6, 0.0, -0.25);
+            terra.pin_plant_season(None);
+            terra.set_draw_flora(true);
+            for _ in 0..4 {
+                terra.render().expect("a frame");
+            }
+            let model = terra.frame_pixels().expect("the frame is readable");
+            let turned = terra.senescence_at(LAT);
+            let sun_deg = terra.sun_elevation_deg(LAT, LON);
+            assert!(terra.flora_count() > 0, "no plants resolved");
+            terra.pin_plant_season(Some(0.0));
+            for _ in 0..3 {
+                terra.render().expect("a summer frame");
+            }
+            let summer = terra.frame_pixels().expect("the summer frame is readable");
+            terra.set_draw_flora(false);
+            for _ in 0..2 {
+                terra.render().expect("a control frame");
+            }
+            let bare = terra.frame_pixels().expect("the control frame is readable");
+            terra.set_draw_flora(true);
+            terra.pin_plant_season(None);
+
+            let mut mask_px = 0usize;
+            let mut outside_changed = 0usize;
+            let mut acc_model = [0.0f64; 3];
+            let mut acc_summer = [0.0f64; 3];
+            for p in 0..(W * H) as usize {
+                let i = p * 4;
+                let plant = (0..3)
+                    .map(|c| (model[i + c] as i32 - bare[i + c] as i32).abs())
+                    .max()
+                    .unwrap_or(0)
+                    > 8;
+                let moved = (0..3)
+                    .map(|c| (model[i + c] as i32 - summer[i + c] as i32).abs())
+                    .max()
+                    .unwrap_or(0);
+                if plant {
+                    mask_px += 1;
+                    for c in 0..3 {
+                        acc_model[c] += model[i + c] as f64;
+                        acc_summer[c] += summer[i + c] as f64;
+                    }
+                } else if moved > 2 {
+                    outside_changed += 1;
+                }
+            }
+            let n = mask_px.max(1) as f64;
+            Season {
+                turned,
+                sun_deg,
+                mask_px,
+                model: [acc_model[0] / n, acc_model[1] / n, acc_model[2] / n],
+                summer: [acc_summer[0] / n, acc_summer[1] / n, acc_summer[2] / n],
+                outside_changed,
+            }
+        };
+
+        let dec = measure(&mut terra, DECEMBER);
+        let jun = measure(&mut terra, JUNE);
+        for (name, s) in [("december", &dec), ("june", &jun)] {
+            println!(
+                "{name}: turned {:.3} · sun {:.1}° · {} plant px · model R{:.1} G{:.1} B{:.1} · held at \
+                 summer R{:.1} G{:.1} B{:.1} · ratio R×{:.3} G×{:.3} B×{:.3} · {} non-plant px moved",
+                s.turned,
+                s.sun_deg,
+                s.mask_px,
+                s.model[0],
+                s.model[1],
+                s.model[2],
+                s.summer[0],
+                s.summer[1],
+                s.summer[2],
+                s.model[0] / s.summer[0].max(1.0),
+                s.model[1] / s.summer[1].max(1.0),
+                s.model[2] / s.summer[2].max(1.0),
+                s.outside_changed
+            );
+        }
+
+        let px = (W * H) as usize;
+        assert!(
+            dec.sun_deg > 0.0 && jun.sun_deg > 0.0,
+            "the Sun must be up on both dates for a colour to mean anything"
+        );
+        assert!(
+            dec.mask_px > 2_000 && jun.mask_px > 2_000,
+            "too few plant pixels to measure ({} / {})",
+            dec.mask_px,
+            jun.mask_px
+        );
+        // The control is controlling for what it thinks: holding the PLANTS' season changed nothing
+        // that is not a plant.
+        assert!(
+            dec.outside_changed * 1000 < px && jun.outside_changed * 1000 < px,
+            "holding the plants' season moved {} / {} non-plant pixels — the pin reaches past the plants",
+            dec.outside_changed,
+            jun.outside_changed
+        );
+        // December: the model says Galway has turned, and the plant pixels show it — brighter in red
+        // and green than the same plants held at summer under the same Sun, and the hue toward yellow.
+        assert!(
+            dec.turned > 0.9,
+            "the model says Galway has not turned at the December solstice: {:.3}",
+            dec.turned
+        );
+        let (r, g, b) = (
+            dec.model[0] / dec.summer[0].max(1.0),
+            dec.model[1] / dec.summer[1].max(1.0),
+            dec.model[2] / dec.summer[2].max(1.0),
+        );
+        // The bound is DERIVED, not tuned to the first run. Grass's senescent endmember is 1.29 /
+        // 1.20 / 1.05 times its mature one in albedo (R / G / B); a plant pixel dilutes that with
+        // shading and the ground's share of the pixel, so what must survive is the ORDER — red rises
+        // most, green next, blue hardly at all — and a margin far above the noise of a mean over tens
+        // of thousands of pixels (the first measurement was ×1.102 / ×1.063 / ×0.995).
+        assert!(
+            r > 1.05 && g > 1.03,
+            "December's plants are not brighter in red and green than the same plants held at summer \
+             (R×{r:.3} G×{g:.3}) — the senescent spectrum is not reaching the picture"
+        );
+        assert!(
+            r > g && g > b && (b - 1.0).abs() < 0.03,
+            "the hue did not move toward yellow: R×{r:.3} G×{g:.3} B×{b:.3} (red must rise most, \
+             blue stay near 1)"
+        );
+        // June: the model says nothing has turned, so the pin must be a no-op. Otherwise the pin
+        // paints, and the December result above would be its own artefact.
+        assert!(
+            jun.turned < 0.05,
+            "the model says Galway has turned at the June solstice: {:.3}",
+            jun.turned
+        );
+        for c in 0..3 {
+            assert!(
+                (jun.model[c] - jun.summer[c]).abs() < 1.0,
+                "in June the pin changed channel {c} by {:.2} — the pin itself paints",
+                jun.model[c] - jun.summer[c]
             );
         }
     }

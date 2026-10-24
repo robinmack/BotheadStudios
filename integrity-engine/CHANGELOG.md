@@ -9,6 +9,11 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Row 58 is closed as a picture claim**: the plants' autumn reaches the picture, measured against
+  the same instant with the pigment held at summer (`Terra::pin_plant_season`, native only; at
+  Galway's December noon R ×1.102, G ×1.063, B ×0.995, 0 non-plant pixels moved; in June the pin
+  changes nothing). The flora mesh is keyed on the season too now, so a change of epoch rebuilds it
+  without the camera moving.
 - **Where the drawn meadow ends is now a number** (`docs/46` row 88): `Terra::flora_far_m` /
   `flora_cap_m`, and the native GPU probe `where_the_meadow_ends_in_the_picture`. Measured at Galway:
   the plants end 2.32 m from the eye and are out of frame entirely from the web's 3 m placement. The
