@@ -6243,6 +6243,11 @@ mod app {
         sky_light_for: Option<(f32, f32, f32, f32)>,
         /// Negative control for native tests (`set_draw_flora`); always true in the browser.
         draw_flora: bool,
+        /// Where the drawn meadow ENDS: how far the farthest resolved plant stands from the eye's ground
+        /// point (m), and the cap the renderer scanned out to (m). A count and a cap both read healthy
+        /// while the picture showed a disc of plants with a cliff at its rim (docs/46 row 88).
+        flora_far_m: f64,
+        flora_cap_m: f64,
         segment_verts: Vec<Vertex>,
         /// What the segment's mesh currently HOLDS — the same cache-of-the-view rule the ground tiers use
         /// (`ground_cap::tier_is_current`), on the one mesh instead of a ladder of them. The LIFT term is
@@ -6636,6 +6641,8 @@ mod app {
                 flora_gpu: None,
                 flora_at: None,
                 flora_anchor: glam::DVec3::ZERO,
+                flora_far_m: 0.0,
+                flora_cap_m: 0.0,
                 flora_upload: Default::default(),
                 flora_indices: Default::default(),
                 flora_verified: false,
@@ -8521,6 +8528,8 @@ mod app {
             );
             if sited.is_empty() {
                 self.flora_at = Some(fresh);
+                self.flora_far_m = 0.0;
+                self.flora_cap_m = radius_m;
                 return;
             }
             // One mesh for the lot: each plant's own assembly mesh, moved to where it stands. The
@@ -8632,6 +8641,7 @@ mod app {
             // ★ NEAREST is the number that decides whether any of this can be SEEN. A count and a
             // radius both looked healthy while every plant the budget bought stood kilometres away.
             let nearest = sited.iter().map(|s| s.dist_m).fold(f64::INFINITY, f64::min);
+            let farthest = sited.iter().map(|s| s.dist_m).fold(0.0f64, f64::max);
             log::info!(
                 "flora: {} plants resolved within {:.0} m at {:.0} m altitude ({} tris), nearest {:.1} m",
                 sited.len(),
@@ -8642,6 +8652,8 @@ mod app {
             );
             self.flora_gpu = Some(gpu);
             self.flora_anchor = anchor_m * ds;
+            self.flora_far_m = farthest;
+            self.flora_cap_m = radius_m;
             self.flora_at = Some(crate::terra::flora::Built {
                 n: sited.len(),
                 ..fresh
@@ -8685,6 +8697,19 @@ mod app {
         /// How many plants are standing right now — a read, for rigs and the HUD.
         pub fn flora_count(&self) -> u32 {
             self.flora_at.map_or(0, |b| b.n as u32)
+        }
+
+        /// **Where the drawn meadow ends**: how far the farthest resolved plant stands from the eye's
+        /// ground point (m). This is the number Robin's eye reads as "a small radius around me"
+        /// (docs/46 row 88) — a count reads healthy at any radius.
+        pub fn flora_far_m(&self) -> f64 {
+            self.flora_far_m
+        }
+
+        /// The cap the renderer scanned out to for plants (m): how far it thought the tallest kind was
+        /// worth resolving, which is not how far it managed to (docs/46 row 88).
+        pub fn flora_cap_m(&self) -> f64 {
+            self.flora_cap_m
         }
 
         /// **Build the ONE surface segment** (docs/63) — the collapse of globe + cap into a single mesh.
@@ -10178,6 +10203,164 @@ first undrawable member at {:?}",
             "the plants changed {:.1}% of the SKY — the control is not controlling for what it thinks",
             sky * 100.0
         );
+    }
+
+    /// ★★★ **WHERE DOES THE MEADOW END IN THE PICTURE?** (docs/46 row 88)
+    ///
+    /// Robin (2026-10-24): *"flora does not seem to extend realistically from my POV, it fills a small
+    /// radius around me but does not lose resolution while appearing to be there like expected."* This
+    /// measures that sentence natively, from her pose (the `galway-*` worlds: 53.27 N, 9.05 W, eye
+    /// 1.6 m, pitched 0.25 rad down, and again from the web's 3 m): the frame with the plants drawn
+    /// against the identical frame without them, ROW BY ROW, each row converted to the ground distance
+    /// its ray meets (`d = h / tan(depression)`, flat ground — the horizon from 1.6 m is 4.5 km away and
+    /// curvature is irrelevant inside 100 m). The share of a row the plants change is their footprint
+    /// in the picture at that distance.
+    ///
+    /// What is asserted today is only that the probe sees plants. The numbers it prints are the row's
+    /// evidence; the gate that replaces this assertion is written when the honest form of the far
+    /// field is decided (docs/46 row 88).
+    ///
+    /// `#[ignore]`: needs a GPU. `cargo test -- --ignored --nocapture the_meadow`.
+    #[test]
+    #[ignore]
+    fn where_the_meadow_ends_in_the_picture() {
+        const W: u32 = 640;
+        const H: u32 = 480;
+        let (json, lm, ev, lc) = shipped_earth();
+        let mut terra = pollster::block_on(app::Terra::headless(W, H)).expect("headless Terra");
+        terra
+            .load_world(
+                &json,
+                &lm.data,
+                lm.w as u32,
+                lm.h as u32,
+                &ev.data,
+                ev.w as u32,
+                ev.h as u32,
+                &lc.data,
+                lc.w as u32,
+                lc.h as u32,
+            )
+            .expect("the shipped Earth loads");
+        terra.set_alt_bounds(0.05, 8.0e10);
+        terra.set_epoch_sun_over_lon(-9.05); // daylight at Galway
+        let fov = crate::terra::fly_camera::DEFAULT_FOV_Y;
+        let fidelity = crate::render::Fidelity::of_view(fov, H as f64, 1200);
+        println!(
+            "meadow: one pixel is {:.2e} rad at {H} rows; a 0.35 m tuft is worth resolving to {:.0} m",
+            fidelity.angular_resolution,
+            fidelity.resolve_out_to(0.35)
+        );
+        for (alt, pitch) in [(1.6f64, -0.25f64), (3.0, -0.25)] {
+            terra.place_camera(53.27, -9.05, alt, 0.0, pitch);
+            terra.set_draw_flora(true);
+            for _ in 0..4 {
+                terra.render().expect("a frame");
+            }
+            let with_plants = terra.frame_pixels().expect("a frame is readable");
+            let (n, far_m, cap_m) = (
+                terra.flora_count(),
+                terra.flora_far_m(),
+                terra.flora_cap_m(),
+            );
+            terra.set_draw_flora(false);
+            for _ in 0..2 {
+                terra.render().expect("a control frame");
+            }
+            let without = terra.frame_pixels().expect("the control frame is readable");
+
+            // One row at a time: the ground distance its central ray meets, the share of its pixels
+            // the plants changed, and its mean colour with the plants drawn.
+            let half = (fov * 0.5).tan();
+            let mut rows: Vec<(f64, f64, [f64; 3])> = Vec::with_capacity(H as usize);
+            for y in 0..H {
+                let v = 1.0 - 2.0 * (y as f64 + 0.5) / H as f64; // +1 top, −1 bottom
+                let elev = pitch + (v * half).atan(); // the ray's elevation above horizontal
+                let dist = if elev < 0.0 {
+                    alt / (-elev).tan()
+                } else {
+                    f64::INFINITY
+                };
+                let mut changed = 0u32;
+                let mut rgb = [0.0f64; 3];
+                for x in 0..W {
+                    let i = ((y * W + x) * 4) as usize;
+                    let diff = (0..3)
+                        .map(|c| (with_plants[i + c] as i32 - without[i + c] as i32).abs())
+                        .max()
+                        .unwrap_or(0);
+                    if diff > 8 {
+                        changed += 1;
+                    }
+                    for (c, acc) in rgb.iter_mut().enumerate() {
+                        *acc += with_plants[i + c] as f64;
+                    }
+                }
+                let w = W as f64;
+                rows.push((
+                    dist,
+                    changed as f64 / w,
+                    [rgb[0] / w, rgb[1] / w, rgb[2] / w],
+                ));
+            }
+            let ground: Vec<&(f64, f64, [f64; 3])> =
+                rows.iter().filter(|r| r.0.is_finite()).collect();
+            let nearest_row_m = ground.iter().map(|r| r.0).fold(f64::INFINITY, f64::min);
+            let far_in_picture_m = ground
+                .iter()
+                .filter(|r| r.1 > 0.05)
+                .map(|r| r.0)
+                .fold(0.0, f64::max);
+            let rows_with_plants = ground.iter().filter(|r| r.1 > 0.05).count();
+            // The cliff: going outward, the largest fall in the plants' footprint across 2% of the frame.
+            let band = (H / 50).max(1) as usize;
+            let mut cliff = (0.0f64, 0.0f64, 0.0f64); // (drop, from_m, to_m)
+            let mut i = ground.len();
+            while i > band {
+                let near_band: f64 =
+                    ground[i - band..i].iter().map(|r| r.1).sum::<f64>() / band as f64;
+                let far_band: f64 = ground[i.saturating_sub(2 * band)..i - band]
+                    .iter()
+                    .map(|r| r.1)
+                    .sum::<f64>()
+                    / band as f64;
+                let drop = near_band - far_band;
+                if drop > cliff.0 {
+                    cliff = (drop, ground[i - 1].0, ground[i - band].0);
+                }
+                i -= band;
+            }
+            println!(
+                "meadow @ {alt} m: {n} plants, farthest {far_m:.2} m (cap {cap_m:.0} m) · frame's ground \
+                 rows span {nearest_row_m:.1} m → horizon ({} rows) · plants change >5% of a row out to \
+                 {far_in_picture_m:.2} m, {rows_with_plants} rows · steepest fall {:.0}% between {:.2} \
+                 and {:.2} m",
+                ground.len(),
+                cliff.0 * 100.0,
+                cliff.1,
+                cliff.2
+            );
+            for target in [2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 7.0, 10.0, 20.0, 50.0, 200.0] {
+                if let Some(r) = ground
+                    .iter()
+                    .min_by(|a, b| (a.0 - target).abs().total_cmp(&(b.0 - target).abs()))
+                {
+                    println!(
+                        "  {:7.2} m: plants change {:5.1}% of the row · mean R{:.0} G{:.0} B{:.0}",
+                        r.0,
+                        r.1 * 100.0,
+                        r.2[0],
+                        r.2[1],
+                        r.2[2]
+                    );
+                }
+            }
+            assert!(n > 0, "no plants resolved at Galway");
+            assert!(
+                far_in_picture_m > 0.0,
+                "the plants changed no row of the picture"
+            );
+        }
     }
 
     /// ★★★ **THE IMPACT MEETS SOMETHING** — the exact sentence docs/46 row 57 said was false.
