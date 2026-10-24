@@ -3,6 +3,48 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-10-24 — the net loop gain: nothing in the step removes rotational energy
+
+**What.** The 2026-09-20 entry left one instruction: weigh the floor's `+1.2e-5` per contact against
+what row 72's channel removes per contact, because *if the net is positive the heap cannot settle at
+any timestep*. Same probe (`spin_attribution_tests::which_term_puts_the_spin_in`), same seed, the
+window extended from 0.20 s to **0.40 s** — 12 members, 11,248,536 rod-steps, `--release`, the heap
+finite throughout (the blow-up is at 0.464 s). No physics changed.
+
+**Measured.** Rotational energy change by term over the window:
+- neighbour torque **`+4.4548e-4 J`** (89.6% of the change)
+- floor impulse **`+5.1858e-5 J`** (10.4%)
+- free precession `+1.1536e-7 J`
+
+All three positive. Row 72's channel, measured in the heap rather than on a lone blade, is the heap's
+largest source of spin — eight times the floor's — not the damper the row credits it as. A blade
+spinning alone on the floor does spin down (row 72's own measurement still stands); a blade in a heap
+is struck by its neighbours faster than any contact lets it down. So the net gain needs no
+subtraction: nothing is on the other side of the ledger. **Until the step contains a rotational sink, the
+heap cannot settle at any timestep.** That is a statement about the physics in the step, not about
+tuning, and it is now measured rather than inferred.
+
+The rest of the run agrees with the shorter one: floor loop gain `+1.082032e-5` per contact over
+3,601,415 contacts, predicting 1.452e6 contact steps to the 117.1 rad/s bound against a measured
+crossing at step 4,322,471 — identical to September's, so the run is deterministic; floor LINEAR
+`−7.0137e-3 J`, LIFT `+6.9964e-5 J`, NET `−6.8919e-3 J`; heap gain `+6.9796e-5 J` against the lift's
+`+6.9964e-5 J`, ratio 0.998; `E0 1.9758e-2 → 1.9828e-2 J`. `|ω|` reached 1,149 rad/s and stayed
+finite — 6.5× the explicit-precession stability bound of 177.2 rad/s — with precession still at
+`+1.2e-7 J`; the 0.06 s between this window and the blow-up is where precession finishes it.
+
+**The candidate sink, flagged as a hypothesis.** The spin is worst about the member's own length (row
+72). The member is a ROD — a cylinder, free to spin about its axis on a point contact. The blade it
+stands for is a lamina (row 64): a flat face on the floor cannot turn about its length without lifting
+an edge against gravity, and a flat face against a neighbour cannot be spun by a point load the way a
+cylinder can. The sink the step lacks may be the one the rod abstraction removed when it rounded the
+blade. The measurement that would test it: a rod with a flat-face contact (a restoring torque from the
+face's own width) against this same run. Not done; not claimed.
+
+**Recorded** in `docs/46` row 87. Row 72's status words are Robin's; this is the case for reopening it.
+
+**Verified.** One instrumented run, 423 s wall clock. The test fails by design on the position
+projection, as row 87 says it does.
+
 ## 2026-10-24 — the plants turn in the picture, and the light does not
 
 **What.** `docs/72` queue item 3 — row 58's missing control. The row had wired the plants to the one
