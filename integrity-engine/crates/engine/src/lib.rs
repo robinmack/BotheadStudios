@@ -10941,7 +10941,10 @@ first undrawable member at {:?}",
     fn the_ground_does_not_arrive_as_spikes_when_tiles_do() {
         const W: u32 = 640;
         const H: u32 = 480;
-        let cache = std::env::var("TILE_CACHE").unwrap_or_else(|_| "/tmp/rigshot/tiles".into());
+        // ★ NOT under `/tmp/rigshot`: that directory is `publish-shots.sh`'s source, and the deploy that
+        // shipped row 89's fix published 108 of these elevation tiles to the public gallery as "shots"
+        // until they were moved. Anything under `/tmp/rigshot` is a picture for the gallery.
+        let cache = std::env::var("TILE_CACHE").unwrap_or_else(|_| "/tmp/terrarium-tiles".into());
         std::fs::create_dir_all(&cache).expect("a tile cache directory");
         let fetch = |z: u32, x: u32, y: u32| -> Option<(Vec<u8>, u32)> {
             let path = std::path::PathBuf::from(&cache).join(format!("{z}-{x}-{y}.png"));

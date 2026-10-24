@@ -51,6 +51,14 @@ answer for each pose.
 **Not yet looked at in the browser.** The sentence came from Robin's screen; the numbers come from the
 segment's triangles. Deploying and descending is the picture this still owes.
 
+**Deployed** the same afternoon (`main` = `eb9a3ec`, full gate 685 passed / 42 skipped, six URLs 200,
+gallery counted 53 files before and after). One more trap on the way out: the tile probe cached its
+terrarium tiles under `/tmp/rigshot/tiles`, which is `publish-shots.sh`'s source, so the deploy that
+shipped the fix published 108 elevation tiles as gallery "shots" for the minutes until they were moved
+and the gallery republished (52 files, the haystack film). The cache now defaults to
+`/tmp/terrarium-tiles`. Anything under `/tmp/rigshot` is a picture for the public gallery; nothing else
+may live there.
+
 ## 2026-10-24 — the deploy erased the gallery, and an empty publish can no longer do that
 
 **What happened.** Robin: *"Merge #156 and deploy."* Full gate green (682 passed, 40 skipped, `mod
