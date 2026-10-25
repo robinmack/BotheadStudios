@@ -1271,7 +1271,10 @@ pub struct Arriving {
 /// What one part did with it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PartHit {
-    /// Index into `Assembly::parts`.
+    /// Index into [`Assembly::resolved_parts`] — the declared parts followed by every contained
+    /// member's, which is the list `meet` walks and the list `mesh_seasoned` reads damage by. It is
+    /// NOT an index into `parts` alone: for a container (a tuft of 32 blades) `parts` is empty and
+    /// a ledger sized by it was the index-out-of-bounds of docs/46 row 92.
     pub part: usize,
     /// Joules this part took out of the event.
     pub spent_j: f64,

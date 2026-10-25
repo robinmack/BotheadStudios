@@ -8618,7 +8618,13 @@ mod app {
                 if met.hits.is_empty() {
                     continue;
                 }
-                let mut integrity = vec![1.0; def.parts.len()];
+                // ★ Sized by the parts the hits NAME (docs/46 row 92). `meet` reports each hit against
+                // `resolved_parts()` — a tuft is a container of 32 blade assemblies, and that list is
+                // the one answer to what an assembly is made of (docs/71) — and `mesh_seasoned` reads
+                // this ledger by the same index. Sized by the DECLARED parts, as it was, a container's
+                // ledger had length zero and the first hit was an index out of bounds; the row-57 gate
+                // had been panicking since composition landed, unrun because it needs a GPU.
+                let mut integrity = vec![1.0; def.resolved_parts().len()];
                 for h in &met.hits {
                     integrity[h.part] = (1.0 - h.broken).clamp(0.0, 1.0);
                 }
