@@ -214,6 +214,11 @@ fn to_u8(v: f32) -> u8 {
 }
 
 /// Box-filter mip chain down to 1×1. `size` must be a power of two.
+///
+/// Each level rounds to NEAREST, so the 1×1 level is the unbiased mean of level 0 — `globe.wgsl`
+/// reads it as the material's mean albedo and divides the sampled grain by it (docs/46 row 90).
+/// Truncation (`sum / 4`) lost up to ¾ of a code per level, which over an eight-level chain is a
+/// ~2% dark bias in exactly the number that normalises the texture.
 fn build_mips(level0: Vec<u8>, size: usize) -> Vec<Vec<u8>> {
     let mut mips = vec![level0];
     let mut cur = size;
@@ -230,7 +235,7 @@ fn build_mips(level0: Vec<u8>, size: usize) -> Vec<Vec<u8>> {
                         let sy = y * 2 + dy;
                         sum += src[(sy * cur + sx) * 4 + c] as u32;
                     }
-                    dst[(y * next + x) * 4 + c] = (sum / 4) as u8;
+                    dst[(y * next + x) * 4 + c] = ((sum + 2) / 4) as u8;
                 }
             }
         }

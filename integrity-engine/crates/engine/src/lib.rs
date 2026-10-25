@@ -9165,19 +9165,14 @@ mod app {
                     } else {
                         {
                             // The appearance integral already averaged the MIXTURE over this
-                            // footprint. Hand it over as a ratio against the dominant material, for
-                            // the same reason the sampler does: the shader multiplies by that
-                            // material's own texture, and two albedos multiplied is an albedo squared.
-                            let base = mats[a.material].albedo;
-                            let r = |i: usize| {
-                                if base[i] > 1e-6 {
-                                    a.albedo[i] / base[i]
-                                } else {
-                                    1.0
-                                }
-                            };
+                            // footprint; that mean IS the vertex's colour. It was handed over as a
+                            // ratio against the dominant material, which the shader then multiplied
+                            // by the texture of the triangle's flat material — one footprint, two
+                            // bases, pink along every class boundary (docs/46 row 90). The texture
+                            // now contributes unit-mean grain only, so the integral's own answer goes
+                            // through untouched.
                             crate::terra::globe_mesh::SurfaceSample {
-                                albedo_ratio: [r(0), r(1), r(2)],
+                                albedo: a.albedo,
                                 offset: off,
                                 material: a.material as u32,
                                 rough: a.sigma_rad() as f32,
@@ -10717,11 +10712,20 @@ first undrawable member at {:?}",
             let mut acc_summer = [0.0f64; 3];
             for p in 0..(W * H) as usize {
                 let i = p * 4;
-                let plant = (0..3)
-                    .map(|c| (model[i + c] as i32 - bare[i + c] as i32).abs())
-                    .max()
-                    .unwrap_or(0)
-                    > 8;
+                // A plant pixel is one a plant touches in EITHER season. Built from the model's
+                // season alone, the mask kept only the pixels where that season's plant contrasts
+                // with the ground — and once the plants stopped being drawn as albedo squared
+                // (docs/46 row 90) an autumn plant over pale ground often does not, so the summer
+                // plant at those pixels "moved" outside the mask and the mean was taken over a
+                // biased subset. The union is the plant's footprint; the ratio is over all of it.
+                let touched = |frame: &[u8]| {
+                    (0..3)
+                        .map(|c| (frame[i + c] as i32 - bare[i + c] as i32).abs())
+                        .max()
+                        .unwrap_or(0)
+                        > 8
+                };
+                let plant = touched(&model) || touched(&summer);
                 let moved = (0..3)
                     .map(|c| (model[i + c] as i32 - summer[i + c] as i32).abs())
                     .max()
@@ -10801,19 +10805,25 @@ first undrawable member at {:?}",
             dec.model[2] / dec.summer[2].max(1.0),
         );
         // The bound is DERIVED, not tuned to the first run. Grass's senescent endmember is 1.29 /
-        // 1.20 / 1.05 times its mature one in albedo (R / G / B); a plant pixel dilutes that with
-        // shading and the ground's share of the pixel, so what must survive is the ORDER — red rises
-        // most, green next, blue hardly at all — and a margin far above the noise of a mean over tens
-        // of thousands of pixels (the first measurement was ×1.102 / ×1.063 / ×0.995).
+        // 1.20 / 1.05 times its mature one in albedo (R / G / B). The PICTURE sees less than that
+        // three times over: the pixel is sRGB-encoded (a linear ratio arrives as roughly its 1/2.2
+        // power: 1.12 / 1.09 / 1.02), the luminance tonemap compresses a brighter pixel harder than
+        // a darker one by the same factor in every channel (so a channel that rises only 5% in
+        // albedo can FALL in the encoding), and the ground's share of an edge pixel dilutes all
+        // three toward 1. What must survive is the ORDER — red rises most, green next, blue not at
+        // all — and red and green above 1 by a margin far above the noise of a mean over tens of
+        // thousands of pixels (~0.001). Measured ×1.102 / ×1.063 / ×0.995 while the plants were drawn
+        // as albedo squared (row 90: the texture multiplied the vertex colour), and ×1.057 / ×1.023 /
+        // ×0.959 once they were drawn as albedo — brighter pixels, deeper in the tonemap's knee.
         assert!(
-            r > 1.05 && g > 1.03,
+            r > 1.03 && g > 1.01,
             "December's plants are not brighter in red and green than the same plants held at summer \
              (R×{r:.3} G×{g:.3}) — the senescent spectrum is not reaching the picture"
         );
         assert!(
-            r > g && g > b && (b - 1.0).abs() < 0.03,
+            r > g && g > b && b < 1.01 && b > 0.90,
             "the hue did not move toward yellow: R×{r:.3} G×{g:.3} B×{b:.3} (red must rise most, \
-             blue stay near 1)"
+             blue not rise)"
         );
         // June: the model says nothing has turned, so the pin must be a no-op. Otherwise the pin
         // paints, and the December result above would be its own artefact.
@@ -10946,44 +10956,8 @@ first undrawable member at {:?}",
         // until they were moved. Anything under `/tmp/rigshot` is a picture for the gallery.
         let cache = std::env::var("TILE_CACHE").unwrap_or_else(|_| "/tmp/terrarium-tiles".into());
         std::fs::create_dir_all(&cache).expect("a tile cache directory");
-        let fetch = |z: u32, x: u32, y: u32| -> Option<(Vec<u8>, u32)> {
-            let path = std::path::PathBuf::from(&cache).join(format!("{z}-{x}-{y}.png"));
-            if !path.exists() {
-                let url = format!(
-                    "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
-                );
-                let st = std::process::Command::new("curl")
-                    .args(["-fsS", "--max-time", "30", "-o"])
-                    .arg(&path)
-                    .arg(&url)
-                    .status()
-                    .ok()?;
-                if !st.success() {
-                    let _ = std::fs::remove_file(&path);
-                    return None;
-                }
-            }
-            let file = std::fs::File::open(&path).ok()?;
-            let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
-            decoder.set_transformations(png::Transformations::EXPAND);
-            let mut reader = decoder.read_info().ok()?;
-            let mut buf = vec![0u8; reader.output_buffer_size()];
-            let info = reader.next_frame(&mut buf).ok()?;
-            if info.bit_depth != png::BitDepth::Eight || info.width != info.height {
-                return None;
-            }
-            buf.truncate(info.buffer_size());
-            Some((buf, info.width))
-        };
-        let wanted = |terra: &app::Terra| -> Vec<(u32, u32, u32)> {
-            let s = terra.tiles_wanted();
-            let nums: Vec<u32> = s
-                .split(|c: char| !c.is_ascii_digit())
-                .filter(|t| !t.is_empty())
-                .filter_map(|t| t.parse().ok())
-                .collect();
-            nums.chunks_exact(3).map(|c| (c[0], c[1], c[2])).collect()
-        };
+        let fetch = |z: u32, x: u32, y: u32| fetch_terrarium_tile(&cache, z, x, y);
+        let wanted = tiles_wanted_of;
 
         let (json, lm, ev, lc) = shipped_earth();
         let mut terra = pollster::block_on(app::Terra::headless(W, H)).expect("headless Terra");
@@ -11194,6 +11168,378 @@ first undrawable member at {:?}",
             flat_site.0,
             flat_site.1
         );
+    }
+
+    /// The terrarium tile the browser would fetch for `(z, x, y)` — the same AWS set, cached under
+    /// `cache` as `z-x-y.png` — decoded the way `Raster::decode_png` does: `(RGB(A) bytes, px)`.
+    /// `None` where the set has no tile or the file is not an 8-bit square PNG.
+    fn fetch_terrarium_tile(cache: &str, z: u32, x: u32, y: u32) -> Option<(Vec<u8>, u32)> {
+        let path = std::path::PathBuf::from(cache).join(format!("{z}-{x}-{y}.png"));
+        if !path.exists() {
+            let url =
+                format!("https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png");
+            let st = std::process::Command::new("curl")
+                .args(["-fsS", "--max-time", "30", "-o"])
+                .arg(&path)
+                .arg(&url)
+                .status()
+                .ok()?;
+            if !st.success() {
+                let _ = std::fs::remove_file(&path);
+                return None;
+            }
+        }
+        let file = std::fs::File::open(&path).ok()?;
+        let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
+        decoder.set_transformations(png::Transformations::EXPAND);
+        let mut reader = decoder.read_info().ok()?;
+        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf).ok()?;
+        if info.bit_depth != png::BitDepth::Eight || info.width != info.height {
+            return None;
+        }
+        buf.truncate(info.buffer_size());
+        Some((buf, info.width))
+    }
+
+    /// [`app::Terra::tiles_wanted`] parsed: `[(z, x, y), …]`, nearest first.
+    fn tiles_wanted_of(terra: &app::Terra) -> Vec<(u32, u32, u32)> {
+        let s = terra.tiles_wanted();
+        let nums: Vec<u32> = s
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|t| !t.is_empty())
+            .filter_map(|t| t.parse().ok())
+            .collect();
+        nums.chunks_exact(3).map(|c| (c[0], c[1], c[2])).collect()
+    }
+
+    /// Land every tile the view asks for, the way a browser that has finished loading has: render,
+    /// ask, fetch, and again until nothing is wanted. Bounded, because a tile the set does not have is
+    /// wanted forever. Returns `(rounds, tiles landed)`.
+    fn land_the_tiles(terra: &mut app::Terra, cache: &str) -> (usize, usize) {
+        let mut landed = 0usize;
+        for round in 0..6 {
+            for _ in 0..2 {
+                terra.render().expect("a frame");
+            }
+            let want = tiles_wanted_of(terra);
+            if want.is_empty() {
+                return (round, landed);
+            }
+            for (z, x, y) in want {
+                if let Some((data, px)) = fetch_terrarium_tile(cache, z, x, y) {
+                    terra.add_tile(z, x, y, &data, px);
+                    landed += 1;
+                }
+            }
+        }
+        (6, landed)
+    }
+
+    /// ★★★ **A DESCENT, PHOTOGRAPHED, WITH THE PLANTS MEASURED AT EVERY RUNG** (docs/46 row 90).
+    ///
+    /// Robin, 2026-10-24, from the live site: *"The entire system is expected to change scale not in
+    /// abrupt tiers, but in response to nearness and ability to render and perceive detail. If you take
+    /// a series of screenshots from 100 KM and continue to take them as you approach … you'll see what
+    /// I'm complaining about. Particularly Alt 7.0 km lat 54.34 degrees, lon 158.23 you'll see a weird
+    /// circular pattern with pink (?!), if you are looking directly at Earth you will see a circle of
+    /// dots (the trees as seen from space)."*
+    ///
+    /// This is that series, taken natively, and at every rung the frame with the plants drawn is set
+    /// against the identical frame without them (`set_draw_flora`, the negative control), so what the
+    /// plants did to the picture is MEASURED rather than judged: how many pixels they changed, how far
+    /// from their centre those pixels reach (the disc), how hard the disc's edge is (a radial profile
+    /// of the changed share, in bands), how many pixels each plant got, and what colour the changed
+    /// pixels are against the same pixels bare and against the ground just outside the disc. The
+    /// tiles the browser would have streamed are landed first, so the ground is the ground she saw.
+    ///
+    /// The frames are written beside the numbers because this is the series she asked for.
+    /// `LADDER_LAT` / `LADDER_LON` (default her pose), `LADDER_PITCH` (default −1.5 rad, straight
+    /// down), `LADDER_OUT` (default `/tmp/descent-ladder` — NOT under `/tmp/rigshot`, which is the
+    /// gallery's publish source), `TILE_CACHE`. Needs a GPU and the network. `#[ignore]`.
+    #[test]
+    #[ignore]
+    fn a_descent_is_photographed_and_the_plants_are_measured() {
+        use std::io::BufWriter;
+        let env_f = |k: &str, d: f64| {
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d)
+        };
+        let lat = env_f("LADDER_LAT", 54.34);
+        let lon = env_f("LADDER_LON", 158.23);
+        let pitch = env_f("LADDER_PITCH", -1.5);
+        let out = std::env::var("LADDER_OUT").unwrap_or_else(|_| "/tmp/descent-ladder".into());
+        std::fs::create_dir_all(&out).expect("frame directory");
+        let cache = std::env::var("TILE_CACHE").unwrap_or_else(|_| "/tmp/terrarium-tiles".into());
+        std::fs::create_dir_all(&cache).expect("a tile cache directory");
+        const W: u32 = 1024;
+        const H: u32 = 768;
+
+        let (json, lm, ev, lc) = shipped_earth();
+        let mut terra = pollster::block_on(app::Terra::headless(W, H)).expect("headless Terra");
+        terra
+            .load_world(
+                &json,
+                &lm.data,
+                lm.w as u32,
+                lm.h as u32,
+                &ev.data,
+                ev.w as u32,
+                ev.h as u32,
+                &lc.data,
+                lc.w as u32,
+                lc.h as u32,
+            )
+            .expect("the shipped Earth loads");
+        terra.set_alt_bounds(0.05, 8.0e10);
+        terra.set_epoch_sun_over_lon(lon); // local noon, today — the season the browser shows
+        let fov = crate::terra::fly_camera::DEFAULT_FOV_Y;
+        let fidelity = crate::render::Fidelity::of_view(fov, H as f64, 1200);
+        println!(
+            "ladder @ {lat}N {lon}E, pitch {pitch} rad, {W}x{H}: ground {} · autumn {:.3} · sun {:.1}° \
+             · one pixel {:.2e} rad",
+            terra.surface_material_at(lat, lon),
+            terra.senescence_at(lat),
+            terra.sun_elevation_deg(lat, lon),
+            fidelity.angular_resolution
+        );
+        println!(
+            "{:>9} {:>5} {:>6} {:>8} {:>8} {:>8} {:>7} {:>7} {:>7}  plants rgb | same px bare | ring \
+             outside | pink% green% | changed share by radial band (8 bands to 1.25·r95) | rmax",
+            "alt_m", "tiles", "plants", "far_m", "cap_m", "changed", "r95_px", "r95_m", "px/pl"
+        );
+        let alts = [
+            100e3, 50e3, 20e3, 10e3, 7e3, 5e3, 2e3, 1e3, 500.0, 200.0, 100.0, 50.0, 20.0, 5.0,
+        ];
+        let half = (fov * 0.5).tan();
+        let mut written = 0usize;
+        for alt in alts {
+            terra.place_camera(lat, lon, alt, 0.0, pitch);
+            let (_, tiles) = land_the_tiles(&mut terra, &cache);
+            terra.set_draw_flora(true);
+            for _ in 0..3 {
+                terra.render().expect("a frame");
+            }
+            let with = terra.frame_pixels().expect("a frame is readable");
+            let (n, far_m, cap_m) = (
+                terra.flora_count(),
+                terra.flora_far_m(),
+                terra.flora_cap_m(),
+            );
+            terra.set_draw_flora(false);
+            for _ in 0..2 {
+                terra.render().expect("a control frame");
+            }
+            let without = terra.frame_pixels().expect("the control frame is readable");
+
+            // What the plants changed, pixel by pixel.
+            let mut mask = vec![false; (W * H) as usize];
+            let mut changed: Vec<(u32, u32)> = Vec::new();
+            let (mut rgb_with, mut rgb_bare) = ([0.0f64; 3], [0.0f64; 3]);
+            let (mut pink, mut green) = (0usize, 0usize);
+            for y in 0..H {
+                for x in 0..W {
+                    let i = ((y * W + x) * 4) as usize;
+                    let diff = (0..3)
+                        .map(|c| (with[i + c] as i32 - without[i + c] as i32).abs())
+                        .max()
+                        .unwrap_or(0);
+                    if diff <= 8 {
+                        continue;
+                    }
+                    mask[(y * W + x) as usize] = true;
+                    changed.push((x, y));
+                    for c in 0..3 {
+                        rgb_with[c] += with[i + c] as f64;
+                        rgb_bare[c] += without[i + c] as f64;
+                    }
+                    let (r, g, b) = (with[i] as i32, with[i + 1] as i32, with[i + 2] as i32);
+                    if r > g && b > g {
+                        pink += 1; // red and blue both above green: the magenta family
+                    } else if g >= r && g >= b {
+                        green += 1;
+                    }
+                }
+            }
+            let m = changed.len().max(1) as f64;
+            let (cx, cy) = changed.iter().fold((0.0f64, 0.0f64), |a, &(x, y)| {
+                (a.0 + x as f64, a.1 + y as f64)
+            });
+            let (cx, cy) = (cx / m, cy / m);
+            let r_of = |x: u32, y: u32| ((x as f64 - cx).powi(2) + (y as f64 - cy).powi(2)).sqrt();
+            let mut radii: Vec<f64> = changed.iter().map(|&(x, y)| r_of(x, y)).collect();
+            radii.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let r95 = radii
+                .get(((radii.len() as f64) * 0.95) as usize)
+                .copied()
+                .unwrap_or(0.0);
+            let rmax = radii.last().copied().unwrap_or(0.0);
+            // Ground per pixel at the nadir: the frame's vertical extent on the ground over its rows.
+            // Only meaningful looking straight down; printed as such.
+            let m_per_px = 2.0 * alt * half / H as f64;
+            // The edge: the changed share in eight bands out to 1.25·r95, plus the band beyond.
+            let bands = 8usize;
+            let band_w = (r95 * 1.25 / bands as f64).max(1.0);
+            let (mut hit, mut tot) = (vec![0usize; bands + 1], vec![0usize; bands + 1]);
+            let (mut ring, mut nring) = ([0.0f64; 3], 0usize);
+            for y in 0..H {
+                for x in 0..W {
+                    let r = r_of(x, y);
+                    let b = (r / band_w) as usize;
+                    if b <= bands {
+                        tot[b] += 1;
+                        if mask[(y * W + x) as usize] {
+                            hit[b] += 1;
+                        }
+                    }
+                    if r > r95 && r < 1.5 * r95 && !mask[(y * W + x) as usize] {
+                        let i = ((y * W + x) * 4) as usize;
+                        for c in 0..3 {
+                            ring[c] += with[i + c] as f64;
+                        }
+                        nring += 1;
+                    }
+                }
+            }
+            let profile: Vec<String> = (0..=bands)
+                .map(|b| format!("{:.0}", 100.0 * hit[b] as f64 / tot[b].max(1) as f64))
+                .collect();
+            let nr = nring.max(1) as f64;
+            let px_per_plant = if n > 0 {
+                changed.len() as f64 / n as f64
+            } else {
+                0.0
+            };
+            println!(
+                "{alt:>9.0} {tiles:>5} {n:>6} {far_m:>8.0} {cap_m:>8.0} {:>8} {r95:>7.1} {:>7.0} \
+                 {px_per_plant:>7.2}  {:.0} {:.0} {:.0} | {:.0} {:.0} {:.0} | {:.0} {:.0} {:.0} | \
+                 {:.0}% {:.0}% | [{}] | {rmax:.0}",
+                changed.len(),
+                r95 * m_per_px,
+                rgb_with[0] / m,
+                rgb_with[1] / m,
+                rgb_with[2] / m,
+                rgb_bare[0] / m,
+                rgb_bare[1] / m,
+                rgb_bare[2] / m,
+                ring[0] / nr,
+                ring[1] / nr,
+                ring[2] / nr,
+                100.0 * pink as f64 / m,
+                100.0 * green as f64 / m,
+                profile.join(" "),
+            );
+            for (tag, px) in [("", &with), ("-noflora", &without)] {
+                let path = format!("{out}/ladder-{alt:07.0}m{tag}.png");
+                let file = std::fs::File::create(&path).expect("frame file");
+                let mut enc = png::Encoder::new(BufWriter::new(file), W, H);
+                enc.set_color(png::ColorType::Rgba);
+                enc.set_depth(png::BitDepth::Eight);
+                enc.write_header()
+                    .expect("png header")
+                    .write_image_data(px)
+                    .expect("png data");
+                written += 1;
+            }
+        }
+        println!("ladder: {written} frames -> {out}/ladder-<alt>m[-noflora].png");
+        assert_eq!(
+            written,
+            2 * alts.len(),
+            "every rung is photographed twice, with and without the plants"
+        );
+    }
+
+    /// ★★★ **ONE FOOTPRINT, ONE BASE — the ground's colour across a class boundary** (docs/46 row 90).
+    ///
+    /// Robin, 2026-10-24, from 7 km over Kamchatka: *"a weird circular pattern with pink (?!)"*. The
+    /// pink was not the trees. With the plants switched off, 5.1% of the 7 km frame (40,237 pixels,
+    /// mean R255 G215 B227) and 1.8% of the 20 km frame were pink, in wedges along one ring of the
+    /// ground mesh. Each vertex carried its footprint's mixture colour as a RATIO against its own
+    /// dominant material, and the fragment multiplied that ratio by the texture of the TRIANGLE's flat
+    /// material. Where a foliage-dominant vertex met a sand-textured triangle, the mixture had been
+    /// divided by foliage's albedo (blue 0.037) and was multiplied by sand's (blue 0.30): ×3.8 in
+    /// blue, ×2.8 in red, ×1.7 in green. Red saturated, blue followed, green did not — pink. One
+    /// footprint's colour, formed against one material and shown through another.
+    ///
+    /// The gate: at her pose, plants off, no pixel is in the magenta family (red ≥ 230 and blue ≥ 200
+    /// with green at least 25 below red) and the frame's mean is the pale sand-led mixture the class
+    /// says it is (R > G > B). Before the fix: 13,907 and 40,237 pixels. Needs a GPU and the network.
+    /// `#[ignore]`.
+    #[test]
+    #[ignore]
+    fn the_ground_wears_one_colour_across_a_class_boundary() {
+        const W: u32 = 1024;
+        const H: u32 = 768;
+        let (lat, lon) = (54.34f64, 158.23f64);
+        let cache = std::env::var("TILE_CACHE").unwrap_or_else(|_| "/tmp/terrarium-tiles".into());
+        std::fs::create_dir_all(&cache).expect("a tile cache directory");
+        let (json, lm, ev, lc) = shipped_earth();
+        let mut terra = pollster::block_on(app::Terra::headless(W, H)).expect("headless Terra");
+        terra
+            .load_world(
+                &json,
+                &lm.data,
+                lm.w as u32,
+                lm.h as u32,
+                &ev.data,
+                ev.w as u32,
+                ev.h as u32,
+                &lc.data,
+                lc.w as u32,
+                lc.h as u32,
+            )
+            .expect("the shipped Earth loads");
+        terra.set_alt_bounds(0.05, 8.0e10);
+        terra.set_epoch_sun_over_lon(lon);
+        terra.set_draw_flora(false);
+        for alt in [20_000.0f64, 7_000.0] {
+            terra.place_camera(lat, lon, alt, 0.0, -1.5);
+            land_the_tiles(&mut terra, &cache);
+            for _ in 0..3 {
+                terra.render().expect("a frame");
+            }
+            let px = terra.frame_pixels().expect("a frame is readable");
+            let (mut pink, mut black) = (0usize, 0usize);
+            let mut sum = [0u64; 3];
+            for p in px.chunks_exact(4) {
+                let (r, g, b) = (p[0] as i32, p[1] as i32, p[2] as i32);
+                if r >= 230 && b >= 200 && g <= r - 25 {
+                    pink += 1;
+                }
+                if r + g + b < 30 {
+                    black += 1;
+                }
+                sum[0] += r as u64;
+                sum[1] += g as u64;
+                sum[2] += b as u64;
+            }
+            let n = (W * H) as f64;
+            let mean = [sum[0] as f64 / n, sum[1] as f64 / n, sum[2] as f64 / n];
+            println!(
+                "boundary @ {alt:.0} m: {pink} magenta-family px ({:.2}%), mean R{:.0} G{:.0} B{:.0}, \
+                 {black} black px",
+                100.0 * pink as f64 / n,
+                mean[0],
+                mean[1],
+                mean[2]
+            );
+            assert!(
+                black < (W * H / 2) as usize,
+                "the frame is mostly black — the night side or no ground, not a colour measurement"
+            );
+            assert!(
+                mean[0] > mean[1] && mean[1] > mean[2],
+                "the open shrubland's sand-led mixture reads R > G > B; got {mean:?}"
+            );
+            assert_eq!(
+                pink, 0,
+                "at {alt:.0} m, {pink} pixels are the magenta family — a footprint's colour formed \
+                 against one material and shown through another's texture"
+            );
+        }
     }
 
     /// ★★★ **THE IMPACT MEETS SOMETHING** — the exact sentence docs/46 row 57 said was false.

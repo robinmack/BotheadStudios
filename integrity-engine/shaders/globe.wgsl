@@ -99,26 +99,30 @@ fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     let ndl = rough_diffuse(n, l, view, i.rough);
     // Reflected sunlight (albedo × illumination), same SUN_GAIN + Reinhard as the space band; black night side.
     let SUN_GAIN = u.atm.w; // atmosphere::SUN_GAIN — one exposure for every view of this world
-    // **The material's OWN texture, not a flat biome colour.** `i.col` is the vertex's material albedo —
-    // one number for all of granite, all of sand — and it is what this surface wore until now, which is
-    // why the ground read as a uniform wash from standing height however much relief was under it. The
-    // texture array was bound here the whole time and never sampled.
+    // **The material's OWN texture for the grain, the vertex for the colour.** The texture array was
+    // bound here and never sampled for most of this engine's life, so the ground read as a uniform wash
+    // from standing height however much relief was under it. Then it was sampled and the vertex colour
+    // was DISCARDED (the texture already carries the material's albedo; multiplying two albedos squares
+    // one) — and with it the mixture and the season went too: by mutation on 2026-08-04, every land
+    // vertex set to magenta changed nothing on screen (docs/46 row 41). Then the vertex carried a RATIO
+    // of the mixture over its own dominant material's flat albedo, and this multiplied it by the
+    // texture of the TRIANGLE's flat material.
     //
-    // The texture IS this material's albedo, so multiplying by a second albedo would square it. It used
-    // to REPLACE `i.col` for that reason — and that quietly threw the vertex colour away entirely.
-    //
-    // ★★ WHY THAT MATTERED, measured by mutation 2026-08-04: setting every land vertex to MAGENTA
-    // changed nothing on screen. The ground is a MIXTURE of materials (a woody savanna is 45% tree,
-    // 35% grass, 20% dirt) and it has a SEASON, and both were being computed per vertex and discarded
-    // — the shader drew one material's texture and nothing else. It also means a seasonal measurement
-    // taken from these frames was measuring the sun's elevation, not the leaves (docs/46 row 41).
-    //
-    // So `i.col` now arrives as a RATIO — the mixture's seasonal albedo divided by the dominant
-    // material's own flat albedo — and the texture supplies the DETAIL about that mean. At a uniform
-    // class the ratio is 1 and this is bit-identical to what it replaced; where the class is a mixture
-    // the grain is the dominant material's and the colour is everything standing there.
+    // ★★ ONE FOOTPRINT, ONE BASE (docs/46 row 90). `i.col` is interpolated across the triangle and
+    // `i.mat` is flat (the provoking vertex's), so wherever a triangle's vertices had different dominant
+    // materials that ratio was formed against one material and shown through another's texture. At a
+    // class boundary over Kamchatka a foliage-dominant vertex (blue albedo 0.037) on a sand-textured
+    // triangle (blue 0.30) drew the mixture ×3.8 in blue and ×2.8 in red: five percent of the frame
+    // from 7 km was pink. So `i.col` is now the footprint's integrated albedo ITSELF — interpolating
+    // absolute albedos is the integral's own linearity — and the texture contributes only its unit-mean
+    // GRAIN: the sample divided by that texture's own mean, which is its 1×1 mip. The grain pattern
+    // still switches at a triangle edge; that is sub-footprint detail, not colour, and no base is
+    // involved. At a uniform class this is the same picture as before to within the grain.
     let grain = surface_albedo_triplanar(i.wpos + u.emissive.xyz, n, i.mat, GLOBE_TEX_SCALE);
-    let albedo = grain * i.col * u.tint.rgb;
+    let levels = textureNumLevels(tex);
+    let mean = textureSampleLevel(tex, samp, vec2<f32>(0.5, 0.5), i.mat, f32(levels - 1u)).rgb;
+    let detail = grain / max(mean, vec3<f32>(1.0 / 255.0));
+    let albedo = detail * i.col * u.tint.rgb;
     var radiance = albedo * (ndl * SUN_GAIN);
     // ★★★ **AND THE SKY LIGHTS IT TOO** (docs/46 row 56). Every surface here received direct sunlight
     // and nothing else, which a horizontal ground hides and a vertical one exposes: a grass blade
