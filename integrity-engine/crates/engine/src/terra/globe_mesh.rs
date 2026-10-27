@@ -49,7 +49,7 @@ pub fn build_globe(res: usize, r_disp: f64, sample: impl Fn(DVec3) -> SurfaceSam
                 let p = dir * (r_disp + s.offset);
                 dirs[j * res + i] = dir;
                 pos[j * res + i] = Vec3::new(p.x as f32, p.y as f32, p.z as f32);
-                cols[j * res + i] = s.albedo_ratio;
+                cols[j * res + i] = s.albedo;
                 mats[j * res + i] = s.material;
                 roughs[j * res + i] = s.rough;
             }
@@ -165,15 +165,19 @@ mod tests {
 /// compile perfectly and put the ground in the wrong place.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SurfaceSample {
-    /// Albedo to show here. Below the appearance integral this is one material's flat colour; where
-    /// the integral runs it is the fraction-weighted MIXTURE over the patch this vertex stands for.
-    /// **How this footprint's colour relates to its dominant material's own albedo**, per channel.
+    /// **The footprint's integrated albedo**, per channel, in season: below the appearance integral one
+    /// material's flat colour; where the integral runs, the fraction-weighted MIXTURE over the patch this
+    /// vertex stands for.
     ///
-    /// NOT an albedo — it was one, and the shader threw it away because the texture already carries the
-    /// material's albedo and multiplying two of them squares it. It now carries the RATIO: the mixture's
-    /// seasonal colour over the dominant material's flat colour, so the texture supplies the detail and
-    /// this supplies what is actually standing there. Unity for a uniform, seasonless class.
-    pub albedo_ratio: [f32; 3],
+    /// ★ An ABSOLUTE colour, and it was not always (docs/46 row 90). It was once discarded by the shader
+    /// because the texture already carried the material's albedo and multiplying two albedos squares
+    /// one; it then became a RATIO against this vertex's dominant material — which the shader multiplied
+    /// by the texture of the TRIANGLE's flat material, so across a class boundary a footprint's colour
+    /// was formed against one material and shown through another's: pink wedges along a mesh ring from
+    /// 7 km. Now the vertex says what colour the ground is and the texture contributes only unit-mean
+    /// grain about its own mean (`globe.wgsl`). Interpolating absolute albedos across a triangle is the
+    /// integral's own linearity.
+    pub albedo: [f32; 3],
     /// Radial offset above the sea-level sphere, in DISPLAY units.
     pub offset: f64,
     /// The material whose texture layer the shader samples — the largest share where there is a mixture.
@@ -187,9 +191,9 @@ pub struct SurfaceSample {
 impl SurfaceSample {
     /// A sample with no measured sub-mesh residual — the shading it produces is exactly Lambert, as
     /// it was before the integral existed.
-    pub fn flat(albedo_ratio: [f32; 3], offset: f64, material: u32) -> SurfaceSample {
+    pub fn flat(albedo: [f32; 3], offset: f64, material: u32) -> SurfaceSample {
         SurfaceSample {
-            albedo_ratio,
+            albedo,
             offset,
             material,
             rough: 0.0,
@@ -437,34 +441,16 @@ impl<'a> SurfaceSampler<'a> {
                 ),
                 None => crate::materials::aggregate_albedo(mix, self.mats),
             };
-            // ★ The vertex carries a RATIO, not a colour: what this footprint's mixture-and-season
-            // albedo is, RELATIVE to the dominant material whose texture the shader will sample. The
-            // texture already carries that material's own albedo, so handing over a second absolute
-            // colour would square it — which is why the shader used to discard this value outright.
-            // A uniform class gives exactly 1.0 and changes nothing.
-            let base = self.mats[mi].albedo;
-            let ratio = [
-                if base[0] > 1e-6 {
-                    albedo[0] / base[0]
-                } else {
-                    1.0
-                },
-                if base[1] > 1e-6 {
-                    albedo[1] / base[1]
-                } else {
-                    1.0
-                },
-                if base[2] > 1e-6 {
-                    albedo[2] / base[2]
-                } else {
-                    1.0
-                },
-            ];
+            // ★ The vertex carries the footprint's COLOUR — the mixture-and-season albedo itself. It
+            // carried a ratio against the dominant material for a while, and the shader multiplied that
+            // ratio by the texture of whichever material the TRIANGLE was flat-shaded with, so the two
+            // disagreed at every class boundary (docs/46 row 90). The texture now supplies grain about
+            // its own mean and nothing else, so an absolute colour here is squared by nothing.
             // Land above sea level; below-sea-level land (Dead Sea etc.) clamps to the shore.
-            SurfaceSample::flat(ratio, e.max(0.0) * self.ds * self.exag, mi as u32)
+            SurfaceSample::flat(albedo, e.max(0.0) * self.ds * self.exag, mi as u32)
         } else {
-            // Open water is one material, so its ratio is unity.
-            SurfaceSample::flat([1.0, 1.0, 1.0], 0.0, self.water_idx as u32)
+            // Open water is one material: its own catalogued albedo.
+            SurfaceSample::flat(self.mats[self.water_idx].albedo, 0.0, self.water_idx as u32)
         }
     }
 }

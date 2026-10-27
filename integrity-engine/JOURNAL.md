@@ -3,6 +3,53 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-10-24 — a descent photographed: the pink was the ground shader, the dots were the budget, the fan was the mesh
+
+**What.** Robin, from the live site, with the spec in her own words: *"The entire system is expected to
+change scale not in abrupt tiers, but in response to nearness and ability to render and perceive
+detail"*, and at 7 km over 54.34 N 158.23 E *"a weird circular pattern with pink (?!) … a circle of dots
+(the trees as seen from space)."* A native probe took the series she asked for
+(`a_descent_is_photographed_and_the_plants_are_measured`: fourteen rungs from 100 km to 5 m, straight
+down, each frame with the plants against the identical frame without, the streamed tiles landed first)
+and separated three things that were one picture:
+
+- **the circle of dots** is the instance budget: 1,169 oaks in a 623 m disc at every rung from 20 km to
+  20 m, 0.37 px each at 20 km and 3 px at 7 km, a hard edge (the changed share is ~22% inside and zero
+  in the first band outside), nothing beyond — `docs/46` row 88 seen from above;
+- **the pink** is the ground shader, and it is there with the plants off: 5.1% of the 7 km frame. Each
+  vertex carried its footprint's mixture colour as a ratio against its own dominant material, and the
+  fragment multiplied it by the texture of the triangle's flat material. Across a class boundary a
+  foliage-dominant vertex on a sand-textured triangle showed the mixture ×3.8 in blue and ×2.8 in red.
+  **Row 90, fixed here:** the vertex carries the integrated albedo itself and the texture contributes
+  unit-mean grain (its sample over its own 1×1 mip, which `build_mips` now rounds to nearest so that
+  mean is unbiased). **Found by the fix:** the plants go through the same shader with an absolute
+  albedo in the vertex, so every resolved plant had been drawn as albedo SQUARED — row 88's "resolved
+  grass 38% darker than the same grass as albedo" was this, not canopy darkening (row 88 corrected;
+  the canopy term is absent on both sides, which is row 35's honest state). The phenology control's
+  mask is now the plant footprint from both seasons and its bounds are re-derived from the encoding;
+- **the fan and the wedges** are the appearance integral evaluated per segment vertex on a polar mesh
+  centred under the eye: colour interpolated across cells kilometres long, and the whole pattern moves
+  with the camera. **Row 91, open**, and the subject of `docs/73` — the renderer redesigned around the
+  footprint, a discussion draft built from her sentence *"everything must change based on POV of camera
+  in the renderer, all fed from model/assembly properties."*
+
+**Why.** Rows 88 and 91 fail one rule: the representation is decided by a count (the budget) or by a
+mesh cell (the vertex) instead of by the pixel's footprint. Row 90 is the one of the three with a
+single right answer and no modelling choice, so it is fixed in this entry; the other two are a design,
+and how the canopy term is evaluated is Robin's choice (docs/72).
+
+**Verified.** `the_ground_wears_one_colour_across_a_class_boundary` (GPU, network): 15,147 magenta-family
+pixels at 20 km before the fix; 0 at 20 km and 7 km after, frame mean R > G > B. Every other Terra
+picture gate re-run on the new shader: world-up, the sky, row 53's eye, the meadow, the grass at Galway,
+a frame with no browser, both spike probes green; the phenology control green with its footprint mask
+(December R×1.057 G×1.023 B×0.959 against the same plants held at summer; June ×1.000; 202 of 307,200
+non-plant pixels move, the sub-threshold margin of the plants' own silhouettes). The after-fix descent
+frames are beside the before ones at `/tmp/descent-ladder/kamchatka-after`. Not deployed; publishing
+the series is Robin's call. **Found failing and left for its own row:** `a_shot_breaks_the_grass_it_lands_in`
+panics on `main` already — a hit's part index names the RESOLVED parts (a tuft is 32 blade
+assemblies) while `impact_meets_the_plants` sizes its damage ledger by the declared parts, zero for a
+container.
+
 ## 2026-10-24 — the terrain arrived as spikes on the way down, and it was four seams deep
 
 **What.** Robin, from the live site: *"there is an odd point where terrain becomes a bunch of very

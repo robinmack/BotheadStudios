@@ -9,6 +9,18 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The ground wears one colour across a class boundary** (`docs/46` row 90): a surface vertex carries
+  its footprint's integrated albedo (`SurfaceSample::albedo`, every producer) and `globe.wgsl`
+  multiplies it by the material texture's unit-mean grain (the sample over its own 1×1 mip;
+  `build_mips` rounds to nearest). The pink wedges along a mesh ring from 7 km over Kamchatka (5.1% of
+  the frame) are gone. GPU gate `the_ground_wears_one_colour_across_a_class_boundary`. **The plants
+  were being drawn as albedo squared** through the same shader; they are now the albedo the model
+  states (row 88's "38% darker resolved grass" corrected — it was this, not canopy darkening). The
+  phenology control masks the plant footprint from both seasons; bounds re-derived from the encoding.
+- `a_descent_is_photographed_and_the_plants_are_measured`: the 100 km → 5 m series with the plants
+  measured at every rung (native, GPU, writes the frames). Opens row 91 — the appearance is baked per
+  vertex on a camera-centred mesh and the plants are a budget-sized disc at every altitude — and
+  `docs/73`, the renderer around the footprint (discussion draft).
 - **The terrain no longer arrives as spikes on the way down** (`docs/46` row 89): the tile fade follows
   the tiles actually held; the relief slope is each datum's own, blended; void terrarium tiles are
   unmeasured (the zoom stops above them) and the provider's one-pixel mosaic seam is repaired and
