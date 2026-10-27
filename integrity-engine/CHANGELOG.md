@@ -9,6 +9,10 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The impact's damage ledger is sized by the parts the hit names** (`docs/46` row 92):
+  `impact_meets_the_plants` sized it by the declared parts — zero for a container such as a tuft —
+  while `meet` indexes the resolved parts, so the row-57 gate had been panicking since composition
+  landed. Fixed; `PartHit::part` documents its index space.
 - **The ground wears one colour across a class boundary** (`docs/46` row 90): a surface vertex carries
   its footprint's integrated albedo (`SurfaceSample::albedo`, every producer) and `globe.wgsl`
   multiplies it by the material texture's unit-mean grain (the sample over its own 1×1 mip;

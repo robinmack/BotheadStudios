@@ -3,6 +3,22 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-10-24 — the impact's damage ledger is sized by the parts the hit names (row 92)
+
+**What.** `a_shot_breaks_the_grass_it_lands_in`, the native gate for row 57, panicked with `index out of
+bounds: the len is 0 but the index is 29` at the line that writes a hit into a plant's integrity ledger.
+`Assembly::meet` reports hits against the RESOLVED parts (a tuft is a container of 32 blade assemblies)
+and `mesh_seasoned` reads damage by the same index; only `Terra::impact_meets_the_plants` sized its
+ledger by the DECLARED parts, zero for a container. Fixed: the ledger is sized by `resolved_parts()`,
+and `PartHit::part` says what it indexes.
+
+**Why it was not caught.** The gate needs a GPU and is `#[ignore]`; nothing runs the ignored gates on a
+schedule, so it had been panicking since composition landed and was found only because every picture
+gate was re-run for row 90. Recorded in the row as an open debt beside row 82's orphaned tools.
+
+**Verified.** The gate runs to its own assertions: a round shot across Galway leaves 2,548 plants
+remembered as changed, 1,200 of them standing in the camera's own view when it fired. Fast suite green.
+
 ## 2026-10-24 — a descent photographed: the pink was the ground shader, the dots were the budget, the fan was the mesh
 
 **What.** Robin, from the live site, with the spec in her own words: *"The entire system is expected to
