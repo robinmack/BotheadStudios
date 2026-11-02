@@ -2436,11 +2436,48 @@ mod ground_material_tests {
              (docs/46 row 53)."
         );
         // And the model's ground height asks the one rule, by name — not a private re-derivation.
-        let model_asks = surface.matches("self.ground_material_at(lat, lon)").count();
+        // Since docs/46 row 93 the one rule is `Terra::surface_here` / `surface_at` (measured
+        // ground, the water's level, the land's relief keyed on the class's dominant material, and
+        // the surface the eye meets); `ground_material_at` is its material and nothing else. The
+        // camera's ground, the HUD's biome, the flora's siting, the mesh's vertex, its appearance
+        // probes and the eye's relief diagnostic all ask it.
+        let rule_asks = surface.matches("self.surface_here(").count()
+            + surface.matches("self.surface_at(").count();
         assert!(
-            model_asks >= 3,
-            "expected `ground_disp_at`, `ground_biome` and the grain shell (at least) to ask \
-             `ground_material_at`; found {model_asks} call(s)"
+            rule_asks >= 7,
+            "expected `ground_disp_at`, `ground_biome`, `ground_material_at`, the flora, the segment \
+             (vertex and probes) and `ground_relief_inputs_at_eye` (at least) to ask \
+             `surface_here`/`surface_at`; found {rule_asks} call(s)"
+        );
+        let material_is_the_rules = surface
+            .matches("self.surface_here(lat, lon, GROUND_DETAIL_FLOOR_M).material")
+            .count();
+        assert_eq!(
+            material_is_the_rules, 1,
+            "`ground_material_at` must be the surface rule's own material, found {material_is_the_rules} \
+             such reading(s)"
+        );
+        // The mask no longer decides where water is (row 93): no surface code asks it except the
+        // sampler's own bound on the coastal raster, and the pre-raster grain shell fallback.
+        let mask_asks = surface.matches("r.land_at(").count();
+        assert!(
+            mask_asks <= 3,
+            "{mask_asks} place(s) in lib.rs/terra ask the land mask whether a point is land; the \
+             water is where the water's level is above the ground (`terra::hydro`, docs/46 row 93), \
+             and the mask's one job is bounding the coastal raster (`SurfaceSampler::mask_sea_at`)"
+        );
+        // The three clamps as they were written, exactly: the sampler's and `ground_elev_m`'s two.
+        let clamps = surface.matches("e.max(0.0) * self.ds").count()
+            + surface
+                .matches("(e_raster + w * (e_tile - e_raster)).max(0.0)")
+                .count()
+            + surface
+                .matches("(e_raster.max(0.0), raster_step_m)")
+                .count();
+        assert_eq!(
+            clamps, 0,
+            "{clamps} place(s) clamp the measured ground to sea level; a sea floor is below the datum \
+             and the water that covers it is `terra::hydro`'s to place (docs/46 row 93)"
         );
     }
 }

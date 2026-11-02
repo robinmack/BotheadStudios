@@ -3,6 +3,59 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-11-02 — the water rests on the ground (row 93)
+
+**What.** Robin, from a shore on the live site: *"it appears water rises above terrain in places,
+which of course physics forbids"*, with the route — *"start in a coastal area, watch as we navigate
+toward water"* — and the rule for the fix: *"the render should come from the results of physics
+applied to the assemblies."* A native probe (`the_shore_is_approached_and_the_sea_is_measured`: the
+`yarr` page's Ireland gun site, looking seaward along the gun's bearing, moving out over the bay at
+3 m and climbing to 5 km, the shore's tiles landed first, every datum printed along the route and
+every edge of the drawn segment read for a water vertex standing above the land vertex beside it)
+found three answers to "is there water here", none of them physics:
+
+- the **ocean** was wherever the Natural Earth 1:110 m mask said, 19.5 km per texel — at the gun site
+  the mask says land, the raster +36.1 m and the zoom-15 tile **−20.0 m**: the gun stood in Galway Bay,
+  20 m deep, on a grass plain drawn at exactly 0 m, because
+- the measured ground was **clamped up to sea level** (`e.max(0.0)`, twice) under every mask-"land"
+  point, and
+- **inland water** — a water-dominant class on mask-land — took the elevation raster's bilinear height
+  per vertex with no relief while the land beside it carried signed relief, so the lake stood above
+  its own shore wherever the land dipped: 189 such edges from 50 m (worst 3.20 m, near Lough Corrib),
+  256 from 500 m (22.6 m), 452 from 5 km (82.9 m); 62 at Black Head from 3 m (0.97 m).
+
+**The rule** (`terra::hydro`, one sentence of physics): water at rest has a level surface and covers
+every point of the ground below it. `local_level` is the body's sea level, a declared enclosed basin's
+own level, or none; `surface(elev, level, relief)` is the water at its level wherever ground + relief
+is at or below it, else the ground. `Terra::surface_here` applies it once — measured ground UNCLAMPED
+(the raster bounded to the level where the mask says sea, which is the mask's one remaining job), the
+level, the land's relief keyed on the class's dominant material at the caller's band limit, the
+surface — and the camera's ground, the HUD's biome, the flora's siting, the segment's vertices, its
+appearance probes and the eye's relief diagnostic all ask it. The eleven basins below sea level that
+the ocean does not reach (Caspian, Dead Sea, Death Valley, the Dutch polders, …) are a declared IOU
+with sources; the honest computation is a flood fill of the measured elevation from the open ocean.
+
+**Verified.** The gate asserts zero sea-above-land edges at every pose and, along the transect, that
+a measured floor below the level is under the water: at Galway the gun site's surface is the sea at
+0 m over a floor at −20 m, no plant is sited on it, and 0 of 1,718 shore edges stand above the land
+(was 0, 0, 0 at 3 m but 189 / 256 / 452 from 50 m / 500 m / 5 km); at Black Head 0 of 572. New unit
+tests pin the rule (`terra::hydro::tests`), and `laws::ground_material_tests` now ratchets that the
+surface code asks `surface_here` and never clamps or asks the mask. Fast suite green; every picture
+gate re-run (see the row).
+
+**Named, not fixed.** Inland water is not levelled: the same probe still counts 167 / 236 / 346
+inland-above-land edges at Galway and 62 at Black Head, reported by the gate, not asserted. The
+shipped land cover is a DERIVED approximation that classes coastal hills as water (Black Head: class
+0 over measured land at +15.6 m; Spiddal: +1.2 m), so a level rule on it would flood the Burren.
+Lakes wait on measured land cover and a level datum. And the tile fade's hump — where the mask says
+land and the raster's coastal mean disagrees with the tile by 56 m, the blend crosses zero and
+raises a 38.9 m wall at the patch edge — is the raster's smear, row 89's family, for the bake to fix.
+
+**Scene data.** The `yarr` page's Ireland site moves from the bay to Kinvara (53.137 N 8.935 W: class
+10 grass, tile +11.2 m, Kinvara Bay 500 m off along the gun's bearing of 330°) — found by scanning the
+shipped rasters for grass-class land on Galway Bay and probing its tile. A gun on the water is the
+engine telling the truth about the scene's coordinates, not a bug in the engine.
+
 ## 2026-10-24 — the impact's damage ledger is sized by the parts the hit names (row 92)
 
 **What.** `a_shot_breaks_the_grass_it_lands_in`, the native gate for row 57, panicked with `index out of

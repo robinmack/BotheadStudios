@@ -7,6 +7,7 @@ pub mod flora; // what is growing here — a land-cover class resolved into plan
 pub mod fly_camera;
 pub mod globe_mesh;
 pub mod ground_cap;
+pub mod hydro; // the water rests on the ground: where a surface is water, and at what level
 pub mod raster;
 pub mod segment;
 pub mod tiles;

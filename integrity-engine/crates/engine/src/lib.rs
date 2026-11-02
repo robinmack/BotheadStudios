@@ -1823,6 +1823,7 @@ mod app {
                 biome_mix,
                 elev_range: def.elevation_range_m.unwrap_or([-11_000.0, 9_000.0]),
                 relief_exag: def.relief_exaggeration.unwrap_or(1.0),
+                sea_level_m: def.sea_level_m,
             };
             // Unit radius: the draw scales it to whichever radius this scene renders Earth at (real, or
             // the sub-scale SPH body during the impact), so one mesh serves both.
@@ -1859,6 +1860,7 @@ mod app {
                 surf.elevation.as_ref(),
                 surf.landcover.as_ref(),
                 surf.elev_range,
+                surf.sea_level_m,
                 exc,
             );
             log::info!(
@@ -5609,49 +5611,16 @@ mod app {
             &self,
         ) -> (bool, f64, (String, f64, f64, f64), (String, f64, f64)) {
             let (lat, lon) = (self.fly.lat, self.fly.lon);
-            let is_land = self
-                .landmask
-                .as_ref()
-                .map(|r| r.land_at(lat, lon))
-                .unwrap_or(false);
-            let (e, base_feature_m) = Self::ground_elev_m(
-                self.elevation.as_ref(),
-                &self.tiles,
-                self.elev_range[0],
-                self.elev_range[1],
-                self.raster_step_m(),
-                lat,
-                lon,
-            );
-            let water_idx = materials::index_of(&self.mats, "water");
-            // Exactly what `ground_disp_at` feeds — the same call, not a copy of its reasoning.
-            let sampler_material = self.ground_material_at(lat, lon);
+            // Exactly what `ground_disp_at` feeds — the same call (the one surface rule, docs/46
+            // row 93, at the model's floor), not a copy of its reasoning.
+            let s = self.surface_here(lat, lon, GROUND_DETAIL_FLOOR_M);
             let slope = self.local_slope_at(lat, lon);
-            let (s_coarse, s_fine, _) = self.ground_slopes_at(lat, lon);
-            let (measured_to_m, trust) =
-                Self::ground_datum(&self.tiles, self.raster_step_m(), lat, lon);
-            let relief = Self::ground_relief_m(
-                &self.mats,
-                &self.detail,
-                self.cap_octave_budget,
-                sampler_material,
-                water_idx,
-                self.planet_radius,
-                lat,
-                lon,
-                self.raster_step_m(),
-                s_coarse,
-                s_fine,
-                GROUND_DETAIL_FLOOR_M,
-                measured_to_m,
-                trust,
-            );
             let name = |i: usize| self.mats.get(i).map_or("?".to_string(), |m| m.id.clone());
             let (mi, ms, mb) = self.seg_relief_inputs;
             (
-                is_land,
-                e,
-                (name(sampler_material), slope, base_feature_m, relief),
+                !s.is_water,
+                s.elev_m,
+                (name(s.material), slope, s.base_feature_m, s.relief_m),
                 (name(mi), ms, mb),
             )
         }
@@ -5751,6 +5720,139 @@ mod app {
                 worst,
                 worst_low,
             )
+        }
+
+        /// **The shore, read from the triangles** (native only). Robin, 2026-11-02: *"it appears
+        /// water rises above terrain in places, which of course physics forbids."* This walks every
+        /// edge of the drawn segment and counts the places where a WATER vertex (the flat sea at
+        /// sea level) stands higher than the LAND vertex it is joined to — the measurement that
+        /// observation names — and, separately, how many land vertices the mesh puts BELOW the sea
+        /// plane at all, and how deep.
+        #[cfg(not(target_arch = "wasm32"))]
+        pub fn segment_shore(&self) -> ShoreProbe {
+            let mut p = ShoreProbe::default();
+            let Some(built) = self.segment_built else {
+                return p;
+            };
+            let n = self.segment_verts.len();
+            if n == 0 || self.seg_diag.len() != n {
+                return p;
+            }
+            let ds = display_scale();
+            let r_disp = self.planet_radius * ds;
+            let exag = self.relief_exag.max(1e-12);
+            let water_idx = materials::index_of(&self.mats, "water") as f64;
+            let res = crate::terra::segment::SegmentRes::new(TERRA_SEG_RINGS, TERRA_SEG_SPOKES);
+            let idx = crate::terra::segment::segment_indices(res);
+            let at = |i: u32| {
+                let v = &self.segment_verts[i as usize];
+                glam::DVec3::new(v.pos[0] as f64, v.pos[1] as f64, v.pos[2] as f64) + built.anchor
+            };
+            // Height of a vertex above the sea-level sphere, in metres, as drawn.
+            let height_m = |i: u32| (at(i).length() - r_disp) / ds / exag;
+            let is_water = |i: u32| self.seg_diag[i as usize][5] == water_idx;
+            for i in 0..n as u32 {
+                let h = height_m(i);
+                if is_water(i) {
+                    p.water_verts += 1;
+                } else {
+                    p.land_verts += 1;
+                    if h < 0.0 {
+                        p.land_below_sea += 1;
+                        if h < p.deepest_land_m {
+                            p.deepest_land_m = h;
+                            let (la, lo) = crate::geo::lat_lon_from_dir(at(i).normalize());
+                            p.deepest_at = [la, lo];
+                        }
+                    }
+                }
+            }
+            let sea_level_m = self.sea_level_m;
+            let mut edge = |a: u32, b: u32| {
+                if a as usize >= n || b as usize >= n || is_water(a) == is_water(b) {
+                    return;
+                }
+                p.shore_edges += 1;
+                let (w, l) = if is_water(a) { (a, b) } else { (b, a) };
+                let step = height_m(w) - height_m(l); // > 0: the water stands above the land beside it
+                if step <= 0.0 {
+                    return;
+                }
+                let (la, lo) = crate::geo::lat_lon_from_dir(at(l).normalize());
+                // Levelled water sits at its own `local_level`; inland water sits wherever the
+                // elevation raster put it.
+                let (wla, wlo) = crate::geo::lat_lon_from_dir(at(w).normalize());
+                let levelled = crate::terra::hydro::local_level(wla, wlo, sea_level_m)
+                    .is_some_and(|lvl| (height_m(w) - lvl).abs() < 1e-3);
+                if levelled {
+                    p.water_above_land += 1;
+                    if step > p.max_step_m {
+                        p.max_step_m = step;
+                        p.max_step_at = [la, lo];
+                        p.max_step_land_diag = self.seg_diag[l as usize];
+                    }
+                } else {
+                    p.inland_above_land += 1;
+                    if step > p.inland_max_step_m {
+                        p.inland_max_step_m = step;
+                        p.inland_max_step_at = [la, lo];
+                    }
+                }
+            };
+            for t in idx.chunks_exact(3) {
+                edge(t[0], t[1]);
+                edge(t[1], t[2]);
+                edge(t[2], t[0]);
+            }
+            p
+        }
+
+        /// **What each datum says along a line from a point** (native only): the land mask, the
+        /// shipped elevation raster, the streamed tile (if one covers the point) and what the MODEL
+        /// answers for the ground there — one row per `step_m` along `bearing_deg`, `n` rows. Each
+        /// row is `[lat, lon, mask_land (1/0), raster_m, tile_m (NaN if none), tile_weight,
+        /// surface_m, ground_m]`: the raw datums, then the model's own two answers — the surface
+        /// the eye meets (what the mesh draws and the camera stands on: the water at its level, or
+        /// the ground) and the measured ground beneath it, unclamped (a sea floor is negative).
+        #[cfg(not(target_arch = "wasm32"))]
+        pub fn shore_transect(
+            &self,
+            lat: f64,
+            lon: f64,
+            bearing_deg: f64,
+            step_m: f64,
+            n: usize,
+        ) -> Vec<[f64; 8]> {
+            let b = bearing_deg.to_radians();
+            (0..n)
+                .map(|k| {
+                    let d = k as f64 * step_m;
+                    let la = lat + (d * b.cos() / self.planet_radius).to_degrees();
+                    let lo = lon
+                        + (d * b.sin() / (self.planet_radius * lat.to_radians().cos()))
+                            .to_degrees();
+                    let mask = self
+                        .landmask
+                        .as_ref()
+                        .map(|r| r.land_at(la, lo))
+                        .unwrap_or(false);
+                    let raster = self.elevation.as_ref().map_or(f64::NAN, |r| {
+                        r.elevation_m_at(la, lo, self.elev_range[0], self.elev_range[1])
+                    });
+                    let (tile, w) = self.tiles.elevation_m_at(la, lo).unwrap_or((f64::NAN, 0.0));
+                    let s = self.surface_here(la, lo, GROUND_DETAIL_FLOOR_M);
+                    [
+                        la,
+                        lo,
+                        if mask { 1.0 } else { 0.0 },
+                        raster,
+                        tile,
+                        w,
+                        s.height_m,
+                        s.elev_m,
+                    ]
+                })
+                .collect()
         }
 
         pub fn set_emplaced_mesh(&mut self, mesh: &crate::mesher::Mesh) {
@@ -5876,6 +5978,8 @@ mod app {
         biome_mix: Vec<Vec<(usize, f32)>>,
         elev_range: [f64; 2],
         relief_exag: f64,
+        /// The ocean's level above the datum sphere (docs/46 row 93).
+        sea_level_m: f64,
     }
 
     fn write_space_uniform(
@@ -6198,6 +6302,55 @@ mod app {
     // ---------------------------------------------------------------------------------------------
     /// Default relief exaggeration if a world doesn't declare one (`surface.relief_exaggeration`). 1.0 = true
     /// scale. The globe mesh, ground cap, and camera floor all read the world's value so they stay one surface.
+    /// **The surface at a point, by the one rule** (docs/46 row 93; [`Terra::surface_here`]): the
+    /// measured ground, the relief the land generates below the datum, the water's level if any
+    /// rests here, and what the eye meets — the water at its level, or the ground.
+    #[derive(Clone, Copy, Debug)]
+    pub(crate) struct SurfaceHere {
+        /// Measured ground, metres above the datum sphere, UNCLAMPED (a sea floor is negative).
+        pub elev_m: f64,
+        /// The datum's feature size under the point: the raster step, or the tile's blend of it.
+        pub base_feature_m: f64,
+        /// Generated sub-datum relief, metres; 0 where water covers the point.
+        pub relief_m: f64,
+        /// The level of the water that would rest here, if any.
+        pub level_m: Option<f64>,
+        /// What the eye meets: the water's level, or ground + relief.
+        pub height_m: f64,
+        pub is_water: bool,
+        /// The material at the surface: water, or the class's dominant land constituent.
+        pub material: usize,
+    }
+
+    /// What [`Terra::segment_shore`] reads off the drawn triangles (native diagnostics only).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct ShoreProbe {
+        pub land_verts: usize,
+        pub water_verts: usize,
+        /// Land vertices drawn BELOW the sea-level sphere.
+        pub land_below_sea: usize,
+        pub deepest_land_m: f64,
+        pub deepest_at: [f64; 2],
+        /// Edges joining a water vertex to a land vertex.
+        pub shore_edges: usize,
+        /// Of those, the ones where a LEVELLED water end — the sea or a declared basin's lake, at
+        /// its `terra::hydro::local_level` — is HIGHER than the land end. The gate's number: zero
+        /// by construction once the water rests on the ground (docs/46 row 93).
+        pub water_above_land: usize,
+        pub max_step_m: f64,
+        pub max_step_at: [f64; 2],
+        /// The land end's `seg_diag` row at the worst step: [elev, relief, base, cell, slope, mat].
+        pub max_step_land_diag: [f64; 6],
+        /// The same, for INLAND water — a water-dominant land-cover class standing on ground
+        /// above the local level, whose surface is the elevation raster's and has no level datum.
+        /// Reported, not gated: it is the declared debt of row 93 (measured land cover and lake
+        /// levels), and the shipped derived land cover classes coastal hills as water.
+        pub inland_above_land: usize,
+        pub inland_max_step_m: f64,
+        pub inland_max_step_at: [f64; 2],
+    }
+
     const TERRA_RELIEF_EXAG: f64 = 1.0;
     /// Ground-cap grid resolution per side (Phase 5). The vertex buffer is rebuilt each frame; the index buffer
     /// (fixed topology) is built once.
@@ -6412,6 +6565,9 @@ mod app {
         /// from its neighbours' by more than the ground between them could carry, and this says which
         /// term put it there instead of leaving it to be argued.
         seg_diag: Vec<[f64; 6]>,
+        /// The body's ocean surface, metres above its datum sphere (docs/46 row 93; the body
+        /// definition's `sea_level_m`, 0 for Earth). The water rests on the ground up to it.
+        sea_level_m: f64,
         /// What the camera is riding, if anything (`camera_follow`).
         ride: Option<Ride>,
         /// Rig knobs for PRICING the ground ladder: how many tiers to build, and how many octaves of
@@ -6720,6 +6876,7 @@ mod app {
                 seg_relief_probe: (0.0, 0.0, 0.0, 0.0),
                 seg_relief_inputs: (usize::MAX, 0.0, 0.0),
                 seg_diag: Vec::new(),
+                sea_level_m: 0.0,
                 ride: None,
                 draw_matter: 2,
                 drawn_buf: Vec::new(),
@@ -6887,6 +7044,7 @@ mod app {
                     self.relief_exag = x.max(0.0);
                 }
                 self.biome_mix = s.biome_mixtures(&self.mats);
+                self.sea_level_m = s.sea_level_m;
             }
             // **When this scene is set** (docs/65: time is part of the setting). A world that names an
             // epoch gets it; one that does not runs on the wall clock. Robin: *"One earth assembly.
@@ -7618,18 +7776,18 @@ mod app {
         /// land ("grass", "sand", "snow", …) or "ocean" over water.
         pub fn ground_biome(&self) -> String {
             let (lat, lon) = (self.fly.lat, self.fly.lon);
-            let is_land = self
-                .landmask
-                .as_ref()
-                .map(|r| r.land_at(lat, lon))
-                .unwrap_or(false);
-            if !is_land {
+            // By the one surface rule (docs/46 row 93): the water's level above the ground makes
+            // this the ocean, whatever the mask or the land-cover class says.
+            let s = self.surface_here(lat, lon, GROUND_DETAIL_FLOOR_M);
+            if s.is_water {
                 return "ocean".to_string();
             }
             // The class's dominant constituent stands for it where ONE material is wanted — by the
             // one rule (`ground_material_at`), so the HUD names the material the ground is built from.
-            let mi = self.ground_material_at(lat, lon);
-            self.mats.get(mi).map(|m| m.id.clone()).unwrap_or_default()
+            self.mats
+                .get(s.material)
+                .map(|m| m.id.clone())
+                .unwrap_or_default()
         }
 
         pub fn resize(&mut self, width: u32, height: u32) {
@@ -8205,6 +8363,7 @@ mod app {
         /// and it now has a contact answer (`camera_shell_resolve`): the camera is matter, it rests
         /// against the surface and slides along it. Inflating the ground to fake a collision is exactly
         /// the clamp fudge Law V forbids — and it could only ever push the eye straight up.
+        #[allow(clippy::too_many_arguments)]
         fn ground_elev_m(
             elevation: Option<&crate::terra::raster::Raster>,
             tiles: &crate::terra::tiles::TileStore,
@@ -8213,8 +8372,23 @@ mod app {
             raster_step_m: f64,
             lat: f64,
             lon: f64,
+            mask_sea: bool,
+            sea_level_m: f64,
         ) -> (f64, f64) {
             let e_raster = elevation.map_or(0.0, |r| r.elevation_m_at(lat, lon, elev_lo, elev_hi));
+            // ★ **The mask's one remaining job** (docs/46 row 93). Where the 1:110 m mask says sea,
+            // the raster's texel there is a coastal mean of hills and sea floor (Galway Bay's mouth
+            // reads +34 m) and cannot be the surface — so the ground is bounded to the water's
+            // level. The mask no longer decides where water IS; the ground and the level do.
+            let e_raster = if mask_sea {
+                e_raster.min(sea_level_m)
+            } else {
+                e_raster
+            };
+            // ★ UNCLAMPED, both branches. `.max(0.0)` stood here and drew every sea floor a tile
+            // measured as a plain at exactly sea level, wearing the land-cover class (the Ireland gun
+            // site: tile −20 m, drawn as grass at 0 m, 2026-11-02). The water that covers a floor
+            // is `terra::hydro`'s to place; a shore in a declared dry basin is land below zero.
             match tiles.elevation_m_at(lat, lon) {
                 Some((e_tile, w)) => {
                     let base = match tiles.pixel_ground_m(lat) {
@@ -8223,9 +8397,9 @@ mod app {
                         }
                         _ => raster_step_m,
                     };
-                    ((e_raster + w * (e_tile - e_raster)).max(0.0), base)
+                    (e_raster + w * (e_tile - e_raster), base)
                 }
-                None => (e_raster.max(0.0), raster_step_m),
+                None => (e_raster, raster_step_m),
             }
         }
 
@@ -8426,6 +8600,7 @@ mod app {
                 display_scale(),
                 self.relief_exag,
             )
+            .with_sea_level(self.sea_level_m)
         }
 
         /// ★★ **WHICH ONE MATERIAL THE GROUND IS MADE OF HERE — THE ONE ANSWER** (docs/46 row 53,
@@ -8438,21 +8613,42 @@ mod app {
         /// ground. Nothing had diverged in the code — identical-looking code with one different
         /// method call, which is the case a grep cannot find and `laws::ground_material_tests` can.
         fn ground_material_at(&self, lat: f64, lon: f64) -> usize {
-            self.surface_sampler().material_at(lat, lon) as usize
+            self.surface_here(lat, lon, GROUND_DETAIL_FLOOR_M).material
         }
 
-        /// [`ground_elev_m`] for callers that hold a plain `&self`, in DISPLAY units above the
-        /// sea-level sphere (so relief exaggeration is applied, as the mesh applies it).
-        fn ground_disp_at(&self, lat: f64, lon: f64) -> f64 {
-            let is_land = self
-                .landmask
-                .as_ref()
-                .map(|r| r.land_at(lat, lon))
-                .unwrap_or(false);
-            if !is_land {
-                return 0.0; // the sea surface is at sea level, and it is flat
-            }
-            let (e, base_feature_m) = Self::ground_elev_m(
+        /// ★★★ **THE SURFACE AT A POINT, BY THE ONE RULE** (docs/46 row 93) — what the mesh draws,
+        /// what the camera stands on, where the flora grows and what the appearance integral sees,
+        /// all from this. Robin, 2026-11-02: *"it appears water rises above terrain in places, which
+        /// of course physics forbids"*; and *"the render should come from the results of physics
+        /// applied to the assemblies."* The physics is one sentence: water at rest has a level
+        /// surface and covers every point of the ground below it (`terra::hydro`).
+        ///
+        /// The sequence, in order, each term from the datum that owns it:
+        /// 1. the MEASURED ground — raster and streamed tile blended, unclamped (a sea floor is
+        ///    below the datum; it used to be `max(0)`-ed into a plain at sea level);
+        /// 2. the water's LEVEL here — the body's sea level, or a declared basin's own, or none;
+        /// 3. the land's generated sub-datum RELIEF, keyed on the class's dominant land material at
+        ///    `finest_m` (the model's floor for anything that stands; the mesh's cell for the mesh)
+        ///    — asked for only where the measured ground is above the level, since a sea floor's
+        ///    roughness under 20 m of water decides nothing the eye can see;
+        /// 4. the SURFACE: the water at its level wherever ground + relief is at or below it,
+        ///    else the ground. So no water vertex can stand above the land beside it, and the
+        ///    waterline is wherever the land's own relief dips below the water.
+        ///
+        /// ★ The material is the SAME one the relief is keyed on, by `share_order` (row 53): one
+        /// answer for the camera and the mesh even at a 50/50 tie.
+        fn surface_here(&self, lat: f64, lon: f64, finest_m: f64) -> SurfaceHere {
+            self.surface_at(lat, lon, Some(finest_m))
+        }
+
+        /// [`surface_here`] with the relief optional: `None` asks for the surface at the DATA's own
+        /// resolution — measured ground and the water's level only — which is what the appearance
+        /// integral's probes want, since they are spaced at the datum's feature size and the
+        /// generated relief lives below it. Same rule, one band limit fewer.
+        fn surface_at(&self, lat: f64, lon: f64, finest_m: Option<f64>) -> SurfaceHere {
+            let sampler = self.surface_sampler();
+            let mask_sea = sampler.mask_sea_at(lat, lon);
+            let (elev_m, base_feature_m) = Self::ground_elev_m(
                 self.elevation.as_ref(),
                 &self.tiles,
                 self.elev_range[0],
@@ -8460,38 +8656,57 @@ mod app {
                 self.raster_step_m(),
                 lat,
                 lon,
+                mask_sea,
+                self.sea_level_m,
             );
-            // ★ **PLUS THE GROUND'S OWN SUB-RASTER RELIEF** (row 53). Without this the mesh drew a
-            // surface nobody could stand on: measured +1.19 m at Galway's centre and 12.3 m worst over
-            // the patch. Asked at the MODEL's floor, so the answer is the same however finely the
-            // renderer chooses to draw it.
+            let level_m = crate::terra::hydro::local_level(lat, lon, self.sea_level_m);
             let water_idx = materials::index_of(&self.mats, "water");
-            // ★ The SAME material the mesh keys its relief on (`ground_material_at`), by the same
-            // rule. This read `mix.first()` until 2026-10-21, which at a wetland's 50/50 tie named
-            // WATER where the mesh named GRASS — relief 0 against +4.787 m, and a 2 m eye placed
-            // 2.79 m under the surface it was looking at (docs/46 row 53, second opening).
-            let sampler_material = self.ground_material_at(lat, lon);
-            let (measured_to_m, trust) =
-                Self::ground_datum(&self.tiles, self.raster_step_m(), lat, lon);
-            let _ = base_feature_m; // the datum's size is the appearance integral's input, not the ladder's
-            let (s_coarse, s_fine, _) = self.ground_slopes_at(lat, lon);
-            let relief = Self::ground_relief_m(
-                &self.mats,
-                &self.detail,
-                self.cap_octave_budget,
-                sampler_material,
-                water_idx,
-                self.planet_radius,
-                lat,
-                lon,
-                self.raster_step_m(),
-                s_coarse,
-                s_fine,
-                GROUND_DETAIL_FLOOR_M,
-                measured_to_m,
-                trust,
-            );
-            (e + relief) * display_scale() * self.relief_exag
+            let land_material = sampler.land_material_at(lat, lon) as usize;
+            let mut relief_m = 0.0;
+            let (height_m, is_water) = crate::terra::hydro::surface(elev_m, level_m, || {
+                let Some(finest_m) = finest_m else {
+                    return 0.0;
+                };
+                let (measured_to_m, trust) =
+                    Self::ground_datum(&self.tiles, self.raster_step_m(), lat, lon);
+                let (s_coarse, s_fine, _) = self.ground_slopes_at(lat, lon);
+                relief_m = Self::ground_relief_m(
+                    &self.mats,
+                    &self.detail,
+                    self.cap_octave_budget,
+                    land_material,
+                    water_idx,
+                    self.planet_radius,
+                    lat,
+                    lon,
+                    self.raster_step_m(),
+                    s_coarse,
+                    s_fine,
+                    finest_m,
+                    measured_to_m,
+                    trust,
+                );
+                relief_m
+            });
+            SurfaceHere {
+                elev_m,
+                base_feature_m,
+                relief_m: if is_water { 0.0 } else { relief_m },
+                level_m,
+                height_m,
+                is_water,
+                material: if is_water { water_idx } else { land_material },
+            }
+        }
+
+        /// [`surface_here`] for callers that want the height everything STANDS on, in DISPLAY units
+        /// above the datum sphere (so relief exaggeration is applied, as the mesh applies it) — the
+        /// water's surface over the sea, the ground with its relief on land. Asked at the MODEL's
+        /// floor, so the answer is the same however finely the renderer chooses to draw it.
+        fn ground_disp_at(&self, lat: f64, lon: f64) -> f64 {
+            self.surface_here(lat, lon, GROUND_DETAIL_FLOOR_M).height_m
+                * display_scale()
+                * self.relief_exag
         }
 
         /// **The camera is MATTER** — a tiny transparent shell obeying the SAME contact law as a grain
@@ -8740,6 +8955,13 @@ mod app {
                 &self.flora_kinds,
                 mats,
                 |la, lo| {
+                    // ★ Nothing grows under the water (docs/46 row 93): where the water's level is
+                    // above the ground the surface is the sea, whatever the land-cover class says
+                    // — the Ireland gun site's class is a wetland, and its tile measures 20 m of
+                    // sea over it.
+                    if self.surface_here(la, lo, GROUND_DETAIL_FLOOR_M).is_water {
+                        return Vec::new();
+                    }
                     let class = landcover.map_or(0, |r| r.biome_at(la, lo) as usize);
                     biome_mix.get(class).cloned().unwrap_or_default()
                 },
@@ -8969,15 +9191,8 @@ mod app {
                 TERRA_SEG_MARGIN,
             );
             let water_idx = materials::index_of(&self.mats, "water");
-            let elev_lo = self.elev_range[0];
-            let elev_hi = self.elev_range[1];
-            let tiles = &self.tiles;
-            let elevation = self.elevation.as_ref();
             let mats = &self.mats;
-            let detail = &self.detail;
             let planet_radius = self.planet_radius;
-            let octave_budget = self.cap_octave_budget;
-            let raster_step_m = self.raster_step_m();
             // ★ The slope the relief scales by is `local_slope_at`, PER VERTEX — the model's own
             // function at the model's own baseline, asked inside the sample closure below. Until
             // 2026-10-21 a block here sampled ONE slope at the camera and applied it to the whole
@@ -9018,9 +9233,8 @@ mod app {
                 // probe's copy is exactly where the tile's measured relief would silently go missing:
                 // a probe that read only the raster would report a smooth bilinear ramp and the
                 // integral would conclude, wrongly, that the ground is flat.
-                let ground_m = |lat: f64, lon: f64| -> (f64, f64) {
-                    Self::ground_elev_m(elevation, tiles, elev_lo, elev_hi, raster_step_m, lat, lon)
-                };
+                // (The ground is asked through `surface_at` below — one rule for measured ground,
+                // water level and relief, docs/46 row 93.)
                 let mut scratch = crate::terra::appearance::Moments::new();
                 // What this machine can afford this rebuild — measured, not declared. See
                 // `resolution::WorkBudget`: it settles lower on a slow device and higher on a fast
@@ -9050,20 +9264,11 @@ mod app {
                 let t_appearance = crate::clock::now_seconds();
                 let sample = |dir: glam::DVec3| -> crate::terra::globe_mesh::SurfaceSample {
                     let point = sampler.sample(dir);
-                    let mut off = point.offset;
-                    let mi = point.material as usize;
-                    // Measured beats generated, exactly as the cap does it — one surface, one rule.
                     let (lat, lon) = crate::geo::lat_lon_from_dir(dir);
-                    let (elev_m, base_feature_m) = ground_m(lat, lon);
-                    // The model's own slopes at THIS point — the same call `ground_disp_at` makes —
-                    // and their blend, which is what the probes record as "the slope".
+                    // The model's own slopes at THIS point, blended — what the probes record as
+                    // "the slope" (the surface rule asks for them again itself; same answer).
                     let (s_coarse, s_fine, w_slope) = self.ground_slopes_at(lat, lon);
                     let slope = s_coarse + w_slope * (s_fine - s_coarse);
-                    // And the finer datum under it, with its trust — the same call too.
-                    let (measured_to_m, trust) = Self::ground_datum(tiles, raster_step_m, lat, lon);
-                    if mi != water_idx {
-                        off = elev_m * ds * exag;
-                    }
                     // **The mesh's own cell here** — and on a polar segment that VARIES, finer toward the
                     // centre where the rings bunch. Differentiating the squared ring spacing gives
                     // `2·sqrt(a·cap)/rings` radians per ring at angular distance `a`, so the generated
@@ -9080,54 +9285,25 @@ mod app {
                     let cell_m = (2.0 * (a_ang * built.cap_angle).sqrt() / rings_f * planet_radius)
                         .max(inner_m)
                         .max(1e-3);
-                    // Ocean keeps its own displacement rule (sea level, flat); land gets the generated
-                    // sub-raster relief. Both then have their APPEARANCE integrated, because a coastal
-                    // cell really is part land and part sea, and point-sampling it as one or the other
-                    // is the jagged-coastline bug the integral exists to end.
-                    // ★★ **THE SAME FUNCTION THE MODEL ANSWERS WITH** (docs/46 row 53), band-limited
-                    // to this vertex's own cell. Not a second copy of the relief maths that happens to
-                    // agree: the mesh is a smoothed version of the one answer, and it converges to it
-                    // as the mesh refines. What used to be here computed the octaves, the material's
-                    // slope law and the amplitude itself, beside a `ground_disp_at` that did none of
-                    // it — which is how the drawn surface and the reachable one came to differ by
-                    // 12.3 m.
-                    let relief = Self::ground_relief_m(
-                        mats,
-                        detail,
-                        octave_budget,
-                        mi,
-                        water_idx,
-                        planet_radius,
-                        lat,
-                        lon,
-                        raster_step_m,
-                        s_coarse,
-                        s_fine,
-                        cell_m,
-                        measured_to_m,
-                        trust,
-                    );
-                    off += relief * ds * exag;
+                    // ★★★ **THE ONE SURFACE RULE, band-limited to this vertex's own cell** (docs/46
+                    // rows 53 and 93). Measured ground, the water's level, the land's generated
+                    // relief at `cell_m`, and the surface the eye meets — the SAME function the
+                    // camera shell and the flora ask at the model's floor, so the mesh is a smoothed
+                    // version of the one answer and converges to it as it refines. Water is where
+                    // the level is above the ground, not where a mask says; so a sea floor a tile
+                    // measures is under the sea, and no water vertex can stand above the land beside
+                    // it. Both then have their APPEARANCE integrated, because a coastal cell really
+                    // is part land and part sea, and point-sampling it as one or the other is the
+                    // jagged-coastline bug the integral exists to end.
+                    let s = self.surface_at(lat, lon, Some(cell_m));
+                    let (elev_m, base_feature_m, relief, mi) =
+                        (s.elev_m, s.base_feature_m, s.relief_m, s.material);
+                    let off = s.height_m * ds * exag;
                     if a_ang < relief_probe.get().0 {
                         // ★ The MODEL's answer at the same point — the same function at its own floor
                         // rather than this vertex's cell. The difference between the two is exactly the
                         // band limit the renderer chose, and nothing else (docs/46 row 53).
-                        let model = Self::ground_relief_m(
-                            mats,
-                            detail,
-                            octave_budget,
-                            mi,
-                            water_idx,
-                            planet_radius,
-                            lat,
-                            lon,
-                            raster_step_m,
-                            s_coarse,
-                            s_fine,
-                            GROUND_DETAIL_FLOOR_M,
-                            measured_to_m,
-                            trust,
-                        );
+                        let model = self.surface_here(lat, lon, GROUND_DETAIL_FLOOR_M).relief_m;
                         relief_probe.set((a_ang, elev_m, relief, model));
                         relief_probe_in.set((mi, slope, base_feature_m));
                     }
@@ -9157,8 +9333,25 @@ mod app {
                         base_feature_m,
                         probe_side,
                         mats,
-                        |la, lo| (ground_m(la, lo).0, sampler.material_at(la, lo) as usize),
+                        // The probes ask the same rule at the DATA's own resolution — measured
+                        // ground and the water's level, no generated relief, because the probes are
+                        // spaced at the datum's feature size and the relief lives below it.
+                        |la, lo| {
+                            let p = self.surface_at(la, lo, None);
+                            (p.height_m, p.material)
+                        },
                     );
+                    // The point's own colour, by the same rule: open water wears water's albedo
+                    // wherever the level is above the ground, whatever class the land cover names.
+                    let point = if s.is_water {
+                        crate::terra::globe_mesh::SurfaceSample::flat(
+                            mats[water_idx].albedo,
+                            off,
+                            water_idx as u32,
+                        )
+                    } else {
+                        point
+                    };
                     // An empty mixture means the footprint was finer than the data under it, so there
                     // was nothing to integrate and the point sample IS the answer — with `rough = 0`,
                     // which shades as exactly the Lambert it always did. Not a fallback for failure:
@@ -11455,6 +11648,181 @@ first undrawable member at {:?}",
             written,
             2 * alts.len(),
             "every rung is photographed twice, with and without the plants"
+        );
+    }
+
+    /// **A shore, approached from the land** — Robin's route, 2026-11-02: *"Start in a coastal
+    /// area, watch as we navigate toward water"*, after *"it appears water rises above terrain in
+    /// places, which of course physics forbids."* Starts at the Ireland gun site (the `yarr` page's
+    /// shore), looks seaward along the gun's bearing, and moves out over the bay at the eye's own
+    /// height; photographs each pose and reads the drawn triangles for the sea standing above the
+    /// land beside it. A transect of every datum along the same line is printed first, so the
+    /// picture can be read against the numbers that made it. Env: `SHORE_LAT/LON/BEARING/OUT`,
+    /// `TILE_CACHE`.
+    ///
+    /// **The gate** (docs/46 row 93): at every pose, no edge of the drawn segment joins a water
+    /// vertex to a land vertex that is LOWER than it — the sea never stands above the shore. Measured
+    /// before the fix at the Ireland gun site: 189 such edges from 50 m (3.20 m), 256 from 500 m
+    /// (22.6 m), 452 from 5 km (82.9 m); at Black Head 62 from 3 m (0.97 m). After: 0 at every pose.
+    /// And the model's two answers at the first point: the surface the eye meets, and the measured
+    /// ground beneath it — where a tile measures a sea floor, the ground is below the datum and the
+    /// surface is the water at its level (the gun site: −20 m under, 0 m surface; it used to be a
+    /// grass plain at exactly 0).
+    #[test]
+    #[ignore]
+    fn the_shore_is_approached_and_the_sea_is_measured() {
+        use std::io::BufWriter;
+        let env_f = |k: &str, d: f64| {
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d)
+        };
+        let lat = env_f("SHORE_LAT", 53.10);
+        let lon = env_f("SHORE_LON", -9.45);
+        let bearing = env_f("SHORE_BEARING", 200.0);
+        let out = std::env::var("SHORE_OUT").unwrap_or_else(|_| "/tmp/shore-ladder".into());
+        std::fs::create_dir_all(&out).expect("frame directory");
+        let cache = std::env::var("TILE_CACHE").unwrap_or_else(|_| "/tmp/terrarium-tiles".into());
+        std::fs::create_dir_all(&cache).expect("a tile cache directory");
+        const W: u32 = 1024;
+        const H: u32 = 768;
+        let r_earth = 6_371_000.0f64;
+        let along = |d_m: f64| -> (f64, f64) {
+            let b = bearing.to_radians();
+            (
+                lat + (d_m * b.cos() / r_earth).to_degrees(),
+                lon + (d_m * b.sin() / (r_earth * lat.to_radians().cos())).to_degrees(),
+            )
+        };
+
+        let (json, lm, ev, lc) = shipped_earth();
+        let mut terra = pollster::block_on(app::Terra::headless(W, H)).expect("headless Terra");
+        terra
+            .load_world(
+                &json,
+                &lm.data,
+                lm.w as u32,
+                lm.h as u32,
+                &ev.data,
+                ev.w as u32,
+                ev.h as u32,
+                &lc.data,
+                lc.w as u32,
+                lc.h as u32,
+            )
+            .expect("the shipped Earth loads");
+        terra.set_alt_bounds(0.05, 8.0e10);
+        terra.set_epoch_sun_over_lon(lon);
+        println!(
+            "shore @ {lat}N {lon}E, bearing {bearing}°, {W}x{H}: ground {} · sun {:.1}°",
+            terra.surface_material_at(lat, lon),
+            terra.sun_elevation_deg(lat, lon),
+        );
+
+        // Poses: the gun's own (3 m, looking seaward, a touch down), then out over the water at the
+        // same height; then the same shore from higher up, looking down the bearing.
+        let poses: Vec<(f64, f64, f64)> = [0.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0]
+            .iter()
+            .map(|&d| (d, 3.0, -0.1))
+            .chain([(0.0, 50.0, -0.6), (0.0, 500.0, -0.6), (0.0, 5000.0, -0.6)])
+            .collect();
+        let mut written = 0usize;
+        let mut worst_step = 0.0f64;
+        let mut worst_edges = 0usize;
+        println!(
+            "{:>7} {:>6} {:>5} | {:>6} {:>6} {:>8} {:>9} | {:>6} {:>8} {:>8} | {:>8} {:>8}  where (lat lon) · land diag [elev relief base cell slope mat]",
+            "dist_m", "alt_m", "tiles", "land", "water", "below", "deepest_m", "shore", "sea>l", "step_m", "inl>l", "inl_m"
+        );
+        for (k, &(d, alt, pitch)) in poses.iter().enumerate() {
+            let (la, lo) = along(d);
+            terra.place_camera(la, lo, alt, bearing.to_radians(), pitch);
+            let (_, tiles) = land_the_tiles(&mut terra, &cache);
+            terra.set_draw_flora(true);
+            for _ in 0..3 {
+                terra.render().expect("a frame");
+            }
+            let px = terra.frame_pixels().expect("a frame is readable");
+            let p = terra.segment_shore();
+            let d6 = p.max_step_land_diag;
+            println!(
+                "{d:>7.0} {alt:>6.0} {tiles:>5} | {:>6} {:>6} {:>8} {:>9.2} | {:>6} {:>8} {:>8.2} | {:>8} {:>8.2}  ({:.4} {:.4}) · [{:.1} {:.2} {:.0} {:.0} {:.3} {:.0}]",
+                p.land_verts,
+                p.water_verts,
+                p.land_below_sea,
+                p.deepest_land_m,
+                p.shore_edges,
+                p.water_above_land,
+                p.max_step_m,
+                p.inland_above_land,
+                p.inland_max_step_m,
+                p.inland_max_step_at[0],
+                p.inland_max_step_at[1],
+                d6[0],
+                d6[1],
+                d6[2],
+                d6[3],
+                d6[4],
+                d6[5],
+            );
+            worst_step = worst_step.max(p.max_step_m);
+            worst_edges += p.water_above_land;
+            if k == 0 {
+                // What every datum says along the route, once the shore's tiles are in.
+                println!(
+                    "transect along {bearing}° from the gun, 500 m steps: {:>8} {:>9} {:>4} {:>9} {:>9} {:>5} {:>9} {:>9}",
+                    "lat", "lon", "mask", "raster_m", "tile_m", "w", "surface_m", "ground_m"
+                );
+                let rows = terra.shore_transect(lat, lon, bearing, 500.0, 33);
+                for r in &rows {
+                    println!(
+                        "    {:>8.4} {:>9.4} {:>4} {:>9.1} {:>9.1} {:>5.2} {:>9.2} {:>9.2}",
+                        r[0],
+                        r[1],
+                        if r[2] > 0.5 { "land" } else { "sea" },
+                        r[3],
+                        r[4],
+                        r[5],
+                        r[6],
+                        r[7]
+                    );
+                }
+                // The water rests on the ground: wherever a datum measures the ground below the
+                // local water level, the surface is the water at that level — never the ground
+                // clamped up to it, and never the ground wearing a land class. (On land the surface
+                // is the measured ground plus its generated relief, which may dip below the
+                // measured value; the vertex-level gate below is what rules out water above land.)
+                for r in &rows {
+                    let (surface_m, ground_m) = (r[6], r[7]);
+                    if ground_m < 0.0 {
+                        assert!(
+                            (surface_m - 0.0).abs() < 1e-9,
+                            "at {:.4} {:.4} the ground is {ground_m:.2} m under sea level but the \
+                             surface is {surface_m:.2} m, not the sea",
+                            r[0],
+                            r[1]
+                        );
+                    }
+                }
+            }
+            let path = format!("{out}/shore-{d:05.0}m-alt{alt:04.0}m.png");
+            let file = std::fs::File::create(&path).expect("frame file");
+            let mut enc = png::Encoder::new(BufWriter::new(file), W, H);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.write_header()
+                .expect("png header")
+                .write_image_data(&px)
+                .expect("png data");
+            written += 1;
+        }
+        println!("shore: {written} frames -> {out}/shore-<dist>m-alt<alt>m.png");
+        assert_eq!(written, poses.len(), "every pose is photographed");
+        assert_eq!(
+            worst_edges, 0,
+            "{worst_edges} edge(s) of the drawn ground join a water vertex to a land vertex below it \
+             (worst step {worst_step:.2} m): the sea stands above the shore, which physics forbids \
+             (docs/46 row 93)"
         );
     }
 
