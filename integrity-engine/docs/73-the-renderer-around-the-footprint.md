@@ -88,7 +88,11 @@ design its result is a **pyramid** the renderer samples at the footprint each pi
   unit-mean detail factor (row 90);
 - the segment mesh carries position, normal and the measured relief only. Its topology stops deciding
   the colour of anything, so the fan cannot exist, and moving the camera moves the parallax and nothing
-  else.
+  else;
+- the surface it carries is the model's one rule (docs/46 row 93, `Terra::surface_here`): the measured
+  ground, unclamped, and the water resting on it at its level wherever the ground is below that level.
+  The renderer may choose how water looks — a flat opaque plane today, depth and transparency later —
+  and never where it is.
 
 ### 2b. The plants, as a change to the texture — and then as instances in the same places
 

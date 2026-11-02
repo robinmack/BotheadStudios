@@ -297,6 +297,9 @@ pub struct SurfaceSampler<'a> {
     /// season it is actually in. `None` means "no clock supplied": every material answers with its
     /// summer self, which is what a body with no orbit should do.
     epoch_s: Option<f64>,
+    /// The ocean's level above the datum sphere (docs/46 row 93); the water rests on the ground
+    /// up to it.
+    sea_level_m: f64,
 }
 
 impl<'a> SurfaceSampler<'a> {
@@ -340,7 +343,15 @@ impl<'a> SurfaceSampler<'a> {
             ds,
             exag,
             water_idx,
+            sea_level_m: 0.0,
         }
+    }
+
+    /// The level of this body's ocean, metres above its datum sphere (the body definition's
+    /// `sea_level_m`; 0 for Earth). Water rests on the ground up to it (docs/46 row 93).
+    pub fn with_sea_level(mut self, sea_level_m: f64) -> Self {
+        self.sea_level_m = sea_level_m;
+        self
     }
 
     /// The surface at a unit direction in the BODY frame (the raster's own frame): biome albedo,
@@ -368,25 +379,58 @@ impl<'a> SurfaceSampler<'a> {
     /// `dir → lat/lon → dir → lat/lon` — three trigonometric conversions where one suffices, half a
     /// million times per mesh rebuild. It cost about 110 ms of a 180 ms rebuild.
     pub fn material_at(&self, lat: f64, lon: f64) -> u32 {
-        let is_land = self
+        // ★ **Water is where the water's level is above the ground** (docs/46 row 93), not where a
+        // 19.5 km mask says so. With no streamed tile in reach this sampler's ground is the raster
+        // (bounded by the mask where the mask says sea, see `ground_elev_at`), and the rule is
+        // `terra::hydro::surface` — the same one Terra applies with its tiles and relief.
+        let e = self.ground_elev_at(lat, lon);
+        let level = crate::terra::hydro::local_level(lat, lon, self.sea_level_m);
+        if crate::terra::hydro::surface(e, level, || 0.0).1 {
+            return self.water_idx as u32;
+        }
+        self.land_material_at(lat, lon)
+    }
+
+    /// The material the land-cover class names here, ignoring any water resting on it — the
+    /// class's DOMINANT constituent, by `share_order`, the ONE rule (docs/46 row 53):
+    /// `Terra::ground_material_at` routes here, so what the camera stands on and what the mesh
+    /// draws name the same material even at a 50/50 tie. The full mixture is what `sample` spends
+    /// on colour.
+    pub fn land_material_at(&self, lat: f64, lon: f64) -> u32 {
+        let biome = self.landcover.map_or(1, |r| r.biome_at(lat, lon) as usize);
+        self.biome_mix
+            .get(biome)
+            .and_then(|m| dominant_constituent(m))
+            .unwrap_or(self.water_idx) as u32
+    }
+
+    /// Whether the land mask calls this point sea. The mask is a measured datum at the raster's own
+    /// resolution (Natural Earth 1:110 m), kept for one job: where it says sea, the elevation
+    /// raster's value there is a coastal texel's mean of hills and sea floor and cannot be the
+    /// surface, so the ground is bounded to the water's level (docs/46 row 93). It no longer
+    /// decides where water IS — the ground and the water's level do.
+    pub fn mask_sea_at(&self, lat: f64, lon: f64) -> bool {
+        !self
             .landmask
             .map(|r| r.land_at(lat, lon))
             .unwrap_or_else(|| {
                 crate::planet::earth_surface_material(crate::geo::dir_from_lat_lon(lat, lon))
                     == "granite"
-            });
-        if !is_land {
-            return self.water_idx as u32;
+            })
+    }
+
+    /// The measured ground from the shipped raster alone, metres above the datum sphere, UNCLAMPED
+    /// (a sea floor is below zero and the Dead Sea's shore is land below zero), with the mask's
+    /// bound applied where the mask says sea.
+    pub fn ground_elev_at(&self, lat: f64, lon: f64) -> f64 {
+        let e = self.elevation.map_or(0.0, |r| {
+            r.elevation_m_at(lat, lon, self.elev_range[0], self.elev_range[1])
+        });
+        if self.mask_sea_at(lat, lon) {
+            e.min(self.sea_level_m)
+        } else {
+            e
         }
-        let biome = self.landcover.map_or(1, |r| r.biome_at(lat, lon) as usize);
-        // The class's DOMINANT constituent — this answers "which material is here", and the caller
-        // wants one. The full mixture is what `sample` spends on colour. By `share_order`, the ONE
-        // rule (docs/46 row 53): `Terra::ground_material_at` routes here, so what the camera stands
-        // on and what the mesh draws name the same material even at a 50/50 tie.
-        self.biome_mix
-            .get(biome)
-            .and_then(|m| dominant_constituent(m))
-            .unwrap_or(self.water_idx) as u32
     }
 
     pub fn sample(&self, dir: DVec3) -> SurfaceSample {
@@ -405,13 +449,14 @@ impl<'a> SurfaceSampler<'a> {
     /// The surface as it was before anything struck it.
     fn sample_pristine(&self, dir: DVec3) -> SurfaceSample {
         let (lat, lon) = crate::geo::lat_lon_from_dir(dir);
-        // Fall back to the built-in coarse landmask only when a body ships no raster — never to
-        // "re-invent" a surface a scene made up.
-        let is_land = self
-            .landmask
-            .map(|r| r.land_at(lat, lon))
-            .unwrap_or_else(|| crate::planet::earth_surface_material(dir) == "granite");
-        if is_land {
+        // ★ **The water rests on the ground** (docs/46 row 93): the ground is the measured elevation,
+        // unclamped, and the surface is water wherever the water's level is above it. This sampler
+        // has no streamed tiles and generates no relief, so its ground is the raster's (bounded by the
+        // mask where the mask says sea); `terra::hydro::surface` is the one rule, shared with Terra.
+        let e = self.ground_elev_at(lat, lon);
+        let level = crate::terra::hydro::local_level(lat, lon, self.sea_level_m);
+        let (height_m, is_water) = crate::terra::hydro::surface(e, level, || 0.0);
+        if !is_water {
             let biome = self.landcover.map_or(1, |r| r.biome_at(lat, lon) as usize);
             let fallback = [(self.water_idx, 1.0f32)];
             let mix: &[(usize, f32)] = self
@@ -422,9 +467,7 @@ impl<'a> SurfaceSampler<'a> {
             // The class's dominant constituent still names the SurfaceSample's material, which is what
             // the appearance integral and the contact law key on. The COLOUR is the whole mixture.
             let mi = dominant_constituent(mix).unwrap_or(self.water_idx);
-            let e = self.elevation.map_or(0.0, |r| {
-                r.elevation_m_at(lat, lon, self.elev_range[0], self.elev_range[1])
-            });
+            let e = height_m;
             // ★★ **THE SEASON, ASKED HERE.** Robin: *"wire it up so Ireland actually turns."* The
             // engine holds the clock; the material answers what it looks like now. A material with no
             // senescent state — an evergreen, rock, sand, the sea — answers with its ordinary albedo
@@ -446,11 +489,17 @@ impl<'a> SurfaceSampler<'a> {
             // ratio by the texture of whichever material the TRIANGLE was flat-shaded with, so the two
             // disagreed at every class boundary (docs/46 row 90). The texture now supplies grain about
             // its own mean and nothing else, so an absolute colour here is squared by nothing.
-            // Land above sea level; below-sea-level land (Dead Sea etc.) clamps to the shore.
-            SurfaceSample::flat(albedo, e.max(0.0) * self.ds * self.exag, mi as u32)
+            // The ground where it is measured — a shore below sea level in a declared dry basin is
+            // drawn below sea level (`e.max(0.0)` stood here until row 93).
+            SurfaceSample::flat(albedo, e * self.ds * self.exag, mi as u32)
         } else {
-            // Open water is one material: its own catalogued albedo.
-            SurfaceSample::flat(self.mats[self.water_idx].albedo, 0.0, self.water_idx as u32)
+            // Open water is one material at its own level: its catalogued albedo, and the level
+            // (sea level, or a declared basin's) as the offset.
+            SurfaceSample::flat(
+                self.mats[self.water_idx].albedo,
+                height_m * self.ds * self.exag,
+                self.water_idx as u32,
+            )
         }
     }
 }
@@ -473,12 +522,15 @@ pub fn build_body_globe(
     elevation: Option<&crate::terra::raster::Raster>,
     landcover: Option<&crate::terra::raster::Raster>,
     elev_range: [f64; 2],
+    // The ocean's level above the datum sphere (docs/46 row 93): water rests on the ground up to it.
+    sea_level_m: f64,
     // What has been dug out of it (docs/46 row 54) — `Excavation::NONE` for a pristine body.
     excavation: crate::damage::Excavation,
 ) -> Mesh {
     let sampler = SurfaceSampler::new(
         mats, biome_mix, landmask, elevation, landcover, elev_range, ds, exag,
     )
+    .with_sea_level(sea_level_m)
     .excavated_by(excavation, r_disp);
     build_globe(res, r_disp, |dir| sampler.sample(dir))
 }
