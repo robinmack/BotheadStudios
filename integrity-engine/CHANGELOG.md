@@ -16,7 +16,8 @@ because **we are our own first customers** and pin exact engine versions in our 
   on it, and no water vertex stands above the land beside it. `Terra::surface_here` is the one rule
   for the camera's ground, the mesh, the flora and the appearance probes. Inland water still takes
   the raster's surface (named, open: it needs measured land cover and a level datum). The `yarr`
-  page's Ireland gun site, which its own tile puts 20 m under Galway Bay, moves to Kinvara.
+  page's Ireland gun site, which its own tile puts 20 m under Galway Bay, moves to the north shore
+  of Clew Bay (a first move to Kinvara fired into what the land mask calls land; corrected).
 - **The impact's damage ledger is sized by the parts the hit names** (`docs/46` row 92):
   `impact_meets_the_plants` sized it by the declared parts — zero for a container such as a tuft —
   while `meet` indexes the resolved parts, so the row-57 gate had been panicking since composition

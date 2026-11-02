@@ -51,10 +51,18 @@ Lakes wait on measured land cover and a level datum. And the tile fade's hump �
 land and the raster's coastal mean disagrees with the tile by 56 m, the blend crosses zero and
 raises a 38.9 m wall at the patch edge — is the raster's smear, row 89's family, for the bake to fix.
 
-**Scene data.** The `yarr` page's Ireland site moves from the bay to Kinvara (53.137 N 8.935 W: class
-10 grass, tile +11.2 m, Kinvara Bay 500 m off along the gun's bearing of 330°) — found by scanning the
-shipped rasters for grass-class land on Galway Bay and probing its tile. A gun on the water is the
-engine telling the truth about the scene's coordinates, not a bug in the engine.
+**Scene data.** The `yarr` page's Ireland site moves from the bay to the north shore of Clew Bay
+(53.868 N 9.829 W, bearing 205°: class 9 grass 0.6 + broadleaf 0.2 + dirt 0.2, tile +15.0 m at the gun
+and −4 m 500 m ahead, the 4.5 km splash 18 m deep). A gun on the water is the engine telling the truth
+about the scene's coordinates, not a bug in the engine. ★ The first move (to Kinvara, #163) was wrong
+and went red on `main` for one PR: `ballistics::tests::the_yarr_scenes_gun_puts_its_shot_in_the_sea`
+fires every site on the page and checks the splash against the 19.5 km land mask, which erases Galway
+Bay — so a site the tiles call a shore can still be a gun "aimed at land" by what the engine knows
+without tiles. The site was chosen after the fast suite had run and the suite was not re-run for a data
+change. The search that found Clew Bay asks both datums (mask and zoom-10 tiles) at the gun and at the
+4.5 km splash; four candidates were then probed with the shore gate, because the derived land cover's
+inland "water" stands 3.35 m above the grass 500 m from an otherwise good site at Easky — Clew Bay has
+no such edge at any low pose.
 
 ## 2026-10-24 — the impact's damage ledger is sized by the parts the hit names (row 92)
 
