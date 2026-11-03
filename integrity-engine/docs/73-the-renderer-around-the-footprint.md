@@ -256,7 +256,10 @@ state — which is exactly why §5 does the in-place steps first.
   (2026-11-02): the globe is 2048 × 1024 × 9 bytes with mips, ~25 MB on the device, and its CPU levels
   are held as f32 while it is built (~60 MB transient — encode level by level if the browser minds);
   the patch is 128² and negligible. The globe's build is ~0.8 s natively at load; in the browser it is
-  not yet measured and is the first thing to price.
+  not yet measured and is the first thing to price — `web/rig/appearance_cost.mjs` reads the engine's
+  own "appearance: … built in N ms" lines off the page's console (it could not run on 2026-11-02: the
+  workstation's NVIDIA driver and library versions had drifted apart, `nvidia-smi` reported
+  "Driver/library version mismatch", and the page stopped at "Requesting GPU device…").
 - **A bake is a cache**, and this engine has been bitten by caches the model could not correct
   (`flora::Built`). Every level must be keyed on everything that changes the answer: season, damage,
   the tiles held.
