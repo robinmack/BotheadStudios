@@ -3,6 +3,76 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-11-02 — the ground is coloured per pixel, not per vertex (docs/73 step 2)
+
+**What.** Robin chose the canopy term's evaluation (*"Go with A, start step 2"*: rendered and
+averaged, docs/73 §3) and step 2 of docs/73 is built: the ground's appearance is a per-pixel-footprint
+integral read from a world-anchored pyramid, and the segment mesh carries shape only. The fan she saw
+from 7 km over Kamchatka — the appearance integral evaluated per VERTEX of a polar mesh centred under
+the eye, its wedges and rings re-centring on the camera at every rebuild (docs/46 row 91) — is gone.
+
+**Measured first, with a gate that failed.** `the_picture_does_not_move_when_the_camera_does`: 7 km
+straight down at her pose, the eye moved 528 m (60 px) east, the mesh forced to re-centre (a small
+move alone never triggers the rebuild in which a mesh-locked picture shows itself), the second frame
+slid back by the move. Before: the slid frames differed by 2.10/255 per channel against a one-pixel
+floor of 0.10, and the frames are a starburst. The test's control is a third frame with the mesh KEPT,
+so the parallax and the air's angle are measured apart from the mesh.
+
+**The design, as built** (`terra::pyramid`, `globe.wgsl::fs_ground`). Two pyramids on one
+equirectangular grid whose texel edges lie on fixed meridians and parallels. The GLOBE: the shipped
+rasters' 2048 × 1024, one point per texel by the one surface rule (`surface_at` at the data's
+resolution — water where the level is above the raster's ground, otherwise the class's mixture in the
+season at that latitude), eleven levels by area-weighted combination, built once per scene day (0.8 s
+natively). The PATCH: a window over the ground the streamed tile patch covers, subdivided to about the
+tiles' pixel and capped at 128² texels, every texel `integrate_rect_on_sphere` over the measured ground
+inside it with the probe grid the budget allows (210–330 ms at a side of 4; the budget settles lower),
+rebuilt only when its window, the tiles held (`TileStore::generation`), the day or the probe grid
+change. A texel holds albedo (8-bit sRGB), the RMS slope angle, the mean gradient (half floats) and the
+dominant material. The fragment recovers its place on the body from its camera-relative position and
+the eye, its footprint from `dpdx`/`dpdy`, and reads the level whose texels are that size — the patch
+where it covers the point and is fine enough, the globe elsewhere; the globe magnified NEAREST, because
+a base texel is one categorical class. Every coarser level equals the integral asked directly over its
+footprint (`a_level_is_the_integral_of_the_level_below`); two windows a third of a texel apart share
+their texels (`the_texel_grid_is_anchored_to_the_world`).
+
+**The normal is part of the appearance.** With the colour world-anchored the slid frames still
+differed by 0.69 — the starburst was now in the SHADING, from mesh normals at the mesh's band limit.
+docs/63's variance is about the pyramid's own mean slope, so that mean is what shades the ground;
+`fs_ground` uses the mesh's normal only where the mesh is the finer statement (near the eye, where the
+generated relief lives in the geometry), blended over the octave in which the two band limits cross.
+
+**Verified.** After: 0.187/255 against a mesh-kept control of 0.086, and over the inner third of the
+frame 0.052 against 0.064 — the appearance carries nothing of the mesh. At 20 km: 0.140 against 0.135.
+`the_ground_wears_one_colour_across_a_class_boundary`: 0 magenta-family pixels at 20 km and 7 km.
+`the_patch_texel_is_the_integral_over_its_footprint`: 775 texels across the Clew Bay shore equal the
+integral asked directly over each one's footprint, to 0.00000 in colour and roughness. The pyramid's
+unit tests; `SpaceUniforms` and `AppearUniforms` pinned to their WGSL structs field for field (the
+surface uniform had no such pin before). All fourteen picture gates pass in one run (descent ladder,
+spikes, shore, eye on the ground, grass at Galway, sky, world up, plants turn, meadow, no browser, the
+shot breaks the grass, class boundary, camera move); the full suite 699 passed, 0 failed, 47 skipped,
+and the browser host compiles for wasm32.
+
+**Found by the fix (docs/46 row 94).** The integral took one material per probe — the class's
+DOMINANT — and coloured the footprint out of season; a point sample used the class's whole mixture in
+season. Open shrubland was sand-coloured (0.52, 0.44, 0.30) where the integral ran and the mixture's
+(0.263, 0.231, 0.142) where it did not, so the ground was twice as bright inside the streamed tiles as
+outside: a disc around the camera, seen in the gate's first frame. A probe now answers with a KIND of
+ground (the class), the mixture is the classes' mixtures, the colour is in season, and the integral
+and the point agree wherever they meet. Whether this disc was the circle Robin still saw after the
+pink went is not established; the instance disc (row 88) is the other candidate and still stands.
+
+**Named, not fixed.** The outer frame still changes by ~0.1/255 when the mesh re-centres: the mesh's
+band-limited SHAPE (760 m cells over 20 m data at 7 km, height steps of up to 207 m between joined
+vertices in frame) moves a pixel's ground point sideways along an oblique ray. The gate bounds it by
+the mesh's own steps; it is the geometry's residual and docs/63's band limit, for step 5. The globe's
+build cost in the browser is unmeasured. The far field now shows the land cover's own 19.5 km blocks
+from altitude where the mesh used to smear them — the data's resolution, honestly shown. With the
+starburst gone, the tile patch's fade (row 89) shows as a square of relief detail around the camera —
+the centre tile trusted, the outer ring fading to the raster — and at a few hundred metres faint rays
+remain under the eye where the mesh is the finer statement and its generated relief is band-limited
+ring by ring (row 53): both shape, neither appearance. The instance disc (row 91(b), row 88) is steps
+3 and 4.
+
 ## 2026-11-02 — the water rests on the ground (row 93)
 
 **What.** Robin, from a shore on the live site: *"it appears water rises above terrain in places,

@@ -9,6 +9,20 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The ground is coloured per pixel, not per vertex** (`docs/73` step 2, `docs/46` row 91(a)):
+  Terra's segment mesh now carries shape only. Its colour, roughness, grain layer and — where the
+  pyramid is the finer statement — its slope are read per fragment from a world-anchored appearance
+  pyramid (`terra::pyramid`): the globe, the shipped rasters' own grid with eleven levels; the
+  patch, a window over the streamed tiles' ground with every texel the appearance integral over the
+  measured ground inside it. The starburst of colour wedges that re-centred on the camera at every
+  mesh rebuild is gone (`the_picture_does_not_move_when_the_camera_does`: 2.10/255 → 0.19 against a
+  mesh-kept control of 0.09); from altitude the far field shows the land cover's own 19.5 km texels
+  rather than the mesh's smear of them. The appearance integral's mixture is now the land-cover
+  classes' mixtures in season rather than their dominant materials in summer, which had drawn the
+  ground twice as bright inside the streamed tiles as outside (`docs/46` row 94). The canopy term's
+  evaluation is decided: rendered and averaged (`docs/73` §3). New native-only diagnostics:
+  `Terra::{rebuild_surface, appearance_patch_at, appearance_integral_at, segment_height_step_m}`;
+  `Terra::appearance_cost` for the HUD.
 - **The water rests on the ground** (`docs/46` row 93): a surface is water wherever the water's
   level is above the measured ground — the body's sea level, or a declared enclosed basin's own
   (`terra::hydro`) — and the ground is never clamped up to sea level. The sea is no longer wherever

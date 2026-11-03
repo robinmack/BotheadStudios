@@ -164,6 +164,16 @@ The material response integrated over the footprint, and it needs TWO moments, n
 > faster than the mesh. Where the pixel is LARGER than the cell (from orbit) the GPU's own averaging
 > covers the rest; where it is smaller, the vertex value interpolates. (Robin's call, on the
 > measurements.)
+>
+> **RE-AMENDED 2026-11-02 — the footprint is the PIXEL's after all, and the carrier was the error**
+> (docs/73 step 2, docs/46 row 91). The 2026-08-02 measurement stands: adding vertices was never the
+> way to carry sub-cell detail. But "a per-vertex value cannot vary faster than the mesh" cuts both
+> ways — it also cannot stay still when the mesh moves, and a polar mesh centred under the eye moves
+> with the camera, so the integral's result re-centred on the camera at every rebuild (the fan Robin
+> saw from 7 km). The integral now fills world-anchored texels — a pyramid whose levels are the
+> integral over footprints of each size — and the fragment reads the level its own footprint names.
+> The GPU's "own averaging" this paragraph relied on from orbit never existed for a vertex colour; it
+> does for a mip chain built as the integral (`terra::pyramid`).
 
 - **Mean albedo** — below the material tile this is the texture's own mip chain (already there); above it,
   it is the MIXTURE of materials over the footprint, which does not exist today.

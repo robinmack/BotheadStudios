@@ -963,6 +963,364 @@ mod app {
     #[allow(dead_code)]
     const CRATER_UNIFORM_OFFSET: u64 = 208;
 
+    /// **What the ground shader needs to read the appearance pyramid** (docs/73 §2a) — the Rust
+    /// mirror of `Appear` in `globe.wgsl`, pinned to it field for field by
+    /// `appear_layout_tests::the_appearance_uniform_matches_its_shader`.
+    #[repr(C)]
+    #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+    struct AppearUniforms {
+        /// xyz = the eye from the body's centre, display units — so a fragment can recover its own
+        /// place on the body from its camera-relative position; w = metres per display unit.
+        eye: [f32; 4],
+        /// x = globe texels per degree of longitude, y = per degree of latitude, z = its level
+        /// count, w = the body's radius (m): what turns a texel into metres of ground.
+        globe: [f32; 4],
+        /// The patch window: x = its western edge (deg), y = its northern edge (deg), z = texels per
+        /// degree of longitude, w = per degree of latitude. (`window`, not `patch`: a reserved word
+        /// in WGSL.)
+        window: [f32; 4],
+        /// x = the patch's width (texels), y = its height, z = its level count, w = 1 while a patch
+        /// is held.
+        window2: [f32; 4],
+        /// x = the relief exaggeration the mesh is drawn with, so the pyramid's slope shades the
+        /// shape that is drawn; the rest spare.
+        scale: [f32; 4],
+    }
+
+    /// **One appearance pyramid on the device** (`terra::pyramid`): its look — sRGB albedo with the
+    /// RMS slope angle in alpha — its mean gradient, and its material index, every level a mip of
+    /// the same texture.
+    struct PyramidGpu {
+        look: wgpu::TextureView,
+        slope: wgpu::TextureView,
+        mat: wgpu::TextureView,
+        levels: u32,
+        /// The window it was built over; `None` for the placeholder bound before one exists.
+        window: Option<crate::terra::pyramid::Window>,
+    }
+
+    impl PyramidGpu {
+        /// Upload a pyramid: one texture per quantity, each level written as a mip.
+        fn upload(
+            device: &wgpu::Device,
+            queue: &wgpu::Queue,
+            label: &str,
+            p: &crate::terra::pyramid::Pyramid,
+        ) -> PyramidGpu {
+            let levels = p.levels.len() as u32;
+            let (w, h) = (p.levels[0].w, p.levels[0].h);
+            let mk = |suffix: &str, format: wgpu::TextureFormat| {
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(&format!("{label}-{suffix}")),
+                    size: wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: levels,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                })
+            };
+            let look = mk("look", wgpu::TextureFormat::Rgba8UnormSrgb);
+            let slope = mk("slope", wgpu::TextureFormat::Rg16Float);
+            let mat = mk("material", wgpu::TextureFormat::R8Uint);
+            for (l, level) in p.levels.iter().enumerate() {
+                let write = |tex: &wgpu::Texture, bytes: &[u8], bpp: u32| {
+                    queue.write_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: tex,
+                            mip_level: l as u32,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        bytes,
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(bpp * level.w),
+                            rows_per_image: Some(level.h),
+                        },
+                        wgpu::Extent3d {
+                            width: level.w,
+                            height: level.h,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                };
+                write(&look, &crate::terra::pyramid::encode_rgba_srgb(level), 4);
+                write(&slope, &crate::terra::pyramid::encode_slope(level), 4);
+                write(&mat, &crate::terra::pyramid::encode_material(level), 1);
+            }
+            PyramidGpu {
+                look: look.create_view(&Default::default()),
+                slope: slope.create_view(&Default::default()),
+                mat: mat.create_view(&Default::default()),
+                levels,
+                window: Some(p.window),
+            }
+        }
+
+        /// A single black, material-0 texel: what is bound before a pyramid exists, so the bind group
+        /// is complete from the first frame and a shader that reads it reads nothing rather than
+        /// something stale.
+        fn placeholder(device: &wgpu::Device, queue: &wgpu::Queue) -> PyramidGpu {
+            let window = crate::terra::pyramid::Window::globe(1, 1);
+            let p = crate::terra::pyramid::Pyramid::from_points(window, 1.0, |_, _| ([0.0; 3], 0));
+            PyramidGpu {
+                window: None,
+                ..Self::upload(device, queue, "appearance-none", &p)
+            }
+        }
+    }
+
+    /// **The appearance pyramids as the ground pipeline binds them** — bind group 1 of
+    /// `fs_ground` in `globe.wgsl`: the uniform that places the eye and the windows, the globe's and
+    /// the patch's textures, and the two samplers (the globe magnifies NEAREST because a base texel
+    /// is one categorical land-cover class; the patch filters).
+    struct AppearanceGpu {
+        layout: wgpu::BindGroupLayout,
+        samp_globe: wgpu::Sampler,
+        samp_patch: wgpu::Sampler,
+        uni: wgpu::Buffer,
+        globe: PyramidGpu,
+        patch: PyramidGpu,
+        bind: wgpu::BindGroup,
+    }
+
+    impl AppearanceGpu {
+        fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> AppearanceGpu {
+            let tex =
+                |binding: u32, sample_type: wgpu::TextureSampleType| wgpu::BindGroupLayoutEntry {
+                    binding,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                };
+            let sampler = |binding: u32| wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            };
+            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("appearance-bind-layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    tex(1, wgpu::TextureSampleType::Float { filterable: true }),
+                    tex(2, wgpu::TextureSampleType::Uint),
+                    tex(3, wgpu::TextureSampleType::Float { filterable: true }),
+                    tex(4, wgpu::TextureSampleType::Uint),
+                    sampler(5),
+                    sampler(6),
+                    tex(7, wgpu::TextureSampleType::Float { filterable: true }),
+                    tex(8, wgpu::TextureSampleType::Float { filterable: true }),
+                ],
+            });
+            let samp_globe = device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("appearance-globe-sampler"),
+                mag_filter: wgpu::FilterMode::Nearest,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::FilterMode::Linear,
+                address_mode_u: wgpu::AddressMode::Repeat,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                ..Default::default()
+            });
+            let samp_patch = device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("appearance-patch-sampler"),
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::FilterMode::Linear,
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                ..Default::default()
+            });
+            let uni = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("appearance-uniform"),
+                size: std::mem::size_of::<AppearUniforms>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let globe = PyramidGpu::placeholder(device, queue);
+            let patch = PyramidGpu::placeholder(device, queue);
+            let bind = Self::make_bind(
+                device,
+                &layout,
+                &uni,
+                &globe,
+                &patch,
+                &samp_globe,
+                &samp_patch,
+            );
+            AppearanceGpu {
+                layout,
+                samp_globe,
+                samp_patch,
+                uni,
+                globe,
+                patch,
+                bind,
+            }
+        }
+
+        fn make_bind(
+            device: &wgpu::Device,
+            layout: &wgpu::BindGroupLayout,
+            uni: &wgpu::Buffer,
+            globe: &PyramidGpu,
+            patch: &PyramidGpu,
+            samp_globe: &wgpu::Sampler,
+            samp_patch: &wgpu::Sampler,
+        ) -> wgpu::BindGroup {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("appearance-bind"),
+                layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uni.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&globe.look),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&globe.mat),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&patch.look),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(&patch.mat),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::Sampler(samp_globe),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::Sampler(samp_patch),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(&globe.slope),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: wgpu::BindingResource::TextureView(&patch.slope),
+                    },
+                ],
+            })
+        }
+
+        /// Rebuild the bind group after either pyramid was replaced.
+        fn rebind(&mut self, device: &wgpu::Device) {
+            self.bind = Self::make_bind(
+                device,
+                &self.layout,
+                &self.uni,
+                &self.globe,
+                &self.patch,
+                &self.samp_globe,
+                &self.samp_patch,
+            );
+        }
+    }
+
+    /// **The two uniforms `globe.wgsl` reads, pinned to the shader field for field** (docs/47's
+    /// rule, `wgsl_layout`). The surface uniform had no such pin for the whole of its life — its
+    /// offsets were held by two constants and a comment that said "appended at the END on
+    /// purpose" — and the appearance uniform is new. Field ORDER is the whole risk: the GPU
+    /// reinterprets the bytes with no error.
+    #[cfg(test)]
+    mod surface_uniform_layout_tests {
+        use super::{AppearUniforms, SpaceUniforms, SKYLIGHT_UNIFORM_OFFSET};
+        use crate::wgsl_layout::{offsets, wgsl_offsets, wgsl_typed};
+
+        const SHADER: &str = include_str!("../../../shaders/globe.wgsl");
+
+        #[test]
+        fn the_surface_uniform_matches_its_shader() {
+            let rust = offsets!(
+                SpaceUniforms,
+                view_proj,
+                model,
+                light_dir,
+                tint,
+                emissive,
+                atm,
+                glow,
+                crater,
+                crater2,
+                eye_air,
+                air2,
+                sky_ambient,
+                sky_grad_r,
+                sky_grad_g,
+                sky_grad_b,
+            );
+            let shader = wgsl_offsets(&wgsl_typed(SHADER, "U"));
+            assert_eq!(
+                rust.len(),
+                shader.len(),
+                "field counts differ: {rust:?} vs {shader:?}"
+            );
+            for ((rn, ro), (sn, so)) in rust.iter().zip(shader.iter()) {
+                // The crater's two retired slots are named for what they were on the shader side.
+                let same_name = rn == sn
+                    || (rn == "crater" && sn == "_was_crater")
+                    || (rn == "crater2" && sn == "_was_crater2");
+                assert!(
+                    same_name,
+                    "field order differs: Rust `{rn}` against WGSL `{sn}`"
+                );
+                assert_eq!(
+                    ro, so,
+                    "`{rn}` sits at byte {ro} in Rust and {so} in the shader"
+                );
+            }
+            assert_eq!(
+                rust.iter()
+                    .find(|(n, _)| n == "sky_ambient")
+                    .map(|(_, o)| *o as u64),
+                Some(SKYLIGHT_UNIFORM_OFFSET),
+                "the patched-in sky light offset names a different field"
+            );
+            assert_eq!(std::mem::size_of::<SpaceUniforms>(), 336);
+        }
+
+        #[test]
+        fn the_appearance_uniform_matches_its_shader() {
+            let rust = offsets!(AppearUniforms, eye, globe, window, window2, scale);
+            let shader = wgsl_offsets(&wgsl_typed(SHADER, "Appear"));
+            assert_eq!(
+                rust, shader,
+                "AppearUniforms has drifted from globe.wgsl's `Appear`"
+            );
+            assert_eq!(std::mem::size_of::<AppearUniforms>(), 80);
+        }
+    }
+
     /// How far (wall-clock seconds) the RENDER runs behind the PHYSICS (docs/13). Humans don't
     /// resolve detail below ~1/10 s, so the physics keeps a 100 ms head start: every collision in the
     /// next 100 ms is already fully resolved before the frame that shows it is drawn — the simulation
@@ -6212,6 +6570,86 @@ mod app {
         })
     }
 
+    /// **Terra's ground pipeline** (docs/73 §2a): the same shader module and vertex layout as the
+    /// globe pipeline, with `fs_ground` for the fragment — which reads the appearance pyramid bound at
+    /// group 1 instead of the vertex's colour — so a ground mesh that carries shape only is lit by
+    /// exactly the shading everything else gets.
+    fn build_ground_pipeline(
+        device: &wgpu::Device,
+        bind_layout: &wgpu::BindGroupLayout,
+        appear_layout: &wgpu::BindGroupLayout,
+        format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ground-shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("../../../shaders/tonemap.wgsl"),
+                    include_str!("../../../shaders/atmos.wgsl"),
+                    include_str!("../../../shaders/surface_normal.wgsl"),
+                    include_str!("../../../shaders/globe.wgsl")
+                )
+                .into(),
+            ),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ground-pipeline-layout"),
+            bind_group_layouts: &[bind_layout, appear_layout],
+            push_constant_ranges: &[],
+        });
+        const ATTRS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+            0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Uint32, 4 => Float32];
+        let vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Vertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &ATTRS,
+        };
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("ground-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[vertex_layout],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                // No culling, as the globe pipeline: the segment is convex and depth occludes it.
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_ground"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview: None,
+            cache: None,
+        })
+    }
+
     /// The instanced particle pipeline for the GPU SPH impact (docs/33 stage 4c.4). One camera-facing
     /// billboard quad per particle, generated in the vertex shader; the instance buffer is the `sph_step.wgsl`
     /// particle buffer itself (48-byte stride, pos at offset 0, provenance u32 at offset 44). No mesh, no
@@ -6320,6 +6758,9 @@ mod app {
         pub is_water: bool,
         /// The material at the surface: water, or the class's dominant land constituent.
         pub material: usize,
+        /// The land-cover class under the point (whatever rests on it) — the index of its declared
+        /// mixture, which is what a footprint's colour is integrated from (docs/73).
+        pub class: usize,
     }
 
     /// What [`Terra::segment_shore`] reads off the drawn triangles (native diagnostics only).
@@ -6402,6 +6843,15 @@ mod app {
     /// ~2.5 mm on the table. That bound is the reason this number is defensible rather than chosen:
     /// halving it changes the answer by less than the thing being placed.
     const GROUND_DETAIL_FLOOR_M: f64 = 0.01;
+
+    /// **How many texels the appearance PATCH may hold** (docs/73 §2a). A cost bound on the
+    /// renderer's side, like `Fidelity::instance_budget`: the patch's window is subdivided as finely
+    /// as the streamed tiles' pixels until it would exceed this, then coarsened by halves until it
+    /// fits (`pyramid::Window::covering`), so a budget coarsens the picture and never crops the
+    /// ground. The probe grid inside each texel is what `appearance_budget` sizes from the measured
+    /// build time; this bounds the number of texels that grid is run for. 128 × 128 texels over a
+    /// 3 × 3 patch of 256-pixel tiles is one texel per six tile pixels.
+    const APPEARANCE_PATCH_TEXELS: usize = 128 * 128;
 
     /// (fixed topology) is built once. **One resolution for every scene's SEGMENT** — Terra's descent and
     /// the space band's corridor build the same surface, by the same builder, at the same density
@@ -6584,6 +7034,28 @@ mod app {
         appearance_budget: crate::resolution::WorkBudget,
         /// Rig override for the above: non-zero pins the grid side so the stage can be priced.
         appearance_probes_pinned: usize,
+        /// ★★★ **THE GROUND'S APPEARANCE, PER PIXEL FOOTPRINT, ANCHORED TO THE WORLD** (docs/73
+        /// §2a, docs/46 row 91; `terra::pyramid`). The segment mesh carries shape only; its colour,
+        /// roughness and grain layer are read per fragment from these two pyramids — the globe (the
+        /// shipped rasters' own grid) and the patch (a window over the streamed tiles, every texel
+        /// the appearance integral over the measured ground inside it) — at the footprint each pixel
+        /// sees. Robin: *"Everything must change based on POV of camera in the renderer, all fed
+        /// from model/assembly properties."*
+        appearance: AppearanceGpu,
+        /// The pipeline that reads them: `globe.wgsl`'s `fs_ground`.
+        ground_pipeline: wgpu::RenderPipeline,
+        /// The kinds of ground the pyramids' probes answer with (`appearance::Kinds`): this world's
+        /// land-cover class mixtures, in class order, then open water as the last entry.
+        kinds: Vec<Vec<(usize, f32)>>,
+        /// The patch pyramid as built, kept natively so a test can ask a texel what it holds.
+        appearance_patch: Option<crate::terra::pyramid::Pyramid>,
+        /// What the patch was built FROM — window, tile generation, the day (season), probe side —
+        /// the cache key that names every input (the lesson of `flora::Built`, docs/46 row 52).
+        appearance_patch_key: Option<(crate::terra::pyramid::Window, u64, i64, usize)>,
+        /// The day the globe pyramid's season was taken for.
+        appearance_globe_key: Option<i64>,
+        /// Measured: the last patch build (ms, texels) and the last globe build (ms).
+        appearance_cost: (f64, usize, f64),
         /// Diagnostic: skip UPLOADING and DRAWING the engine's matter while still simulating it. The
         /// physics and the render path both scale with the same number, so measuring either one alone is
         /// impossible without a knob that moves one and not the other (the gpu-perf rule: price a stage,
@@ -6597,6 +7069,114 @@ mod app {
         /// every call, and the flight step was calling it every frame — rebuilding the planet, in full,
         /// to ask what gravity is.
         flight_env: crate::flight::PlanetAir,
+    }
+
+    /// Native diagnostics for the appearance pyramid (docs/73) — a plain impl, because their
+    /// answers are tuples `wasm_bindgen` cannot describe and a test is their only caller.
+    #[cfg(not(target_arch = "wasm32"))]
+    impl Terra {
+        /// **The mesh's own band limit in metres of height**: the largest and the mean change of
+        /// MEASURED elevation between two vertices joined by an edge of the drawn segment. A linear
+        /// mesh interpolates between its vertices, so this is how far its surface can stand from the
+        /// data between them — and, through an oblique view ray, how far sideways a pixel's ground
+        /// point can move when the mesh is re-centred (the camera-move gate's geometric residual).
+        pub fn segment_height_step_m(&self, within_m: f64) -> (f64, f64) {
+            let n = self.segment_verts.len();
+            let Some(built) = self.segment_built else {
+                return (0.0, 0.0);
+            };
+            if n == 0 || self.seg_diag.len() != n {
+                return (0.0, 0.0);
+            }
+            let res = crate::terra::segment::SegmentRes::new(TERRA_SEG_RINGS, TERRA_SEG_SPOKES);
+            let idx = crate::terra::segment::segment_indices(res);
+            // Only the ground within `within_m` of the segment's centre — the part in a frame — not
+            // the horizon, where the cells are kilometres and a mountain range sits in one step.
+            let near = |i: u32| {
+                let v = &self.segment_verts[i as usize];
+                let p = glam::DVec3::new(v.pos[0] as f64, v.pos[1] as f64, v.pos[2] as f64)
+                    + built.anchor;
+                p.normalize().angle_between(built.center) * self.planet_radius <= within_m
+            };
+            let (mut max, mut sum, mut count) = (0.0f64, 0.0f64, 0usize);
+            let mut edge = |a: u32, b: u32| {
+                if (a as usize) < n && (b as usize) < n && (near(a) || near(b)) {
+                    let d = (self.seg_diag[a as usize][0] - self.seg_diag[b as usize][0]).abs();
+                    max = max.max(d);
+                    sum += d;
+                    count += 1;
+                }
+            };
+            for t in idx.chunks_exact(3) {
+                edge(t[0], t[1]);
+                edge(t[1], t[2]);
+                edge(t[2], t[0]);
+            }
+            (max, sum / count.max(1) as f64)
+        }
+
+        /// **What the patch pyramid holds under a point** — its finest texel's albedo, RMS slope
+        /// angle (rad), material, and the texel's ground size `[east, north]` m. `None` where no
+        /// patch covers the point.
+        pub fn appearance_patch_at(
+            &self,
+            lat: f64,
+            lon: f64,
+        ) -> Option<([f32; 3], f32, u32, [f64; 2], (f64, f64))> {
+            let p = self.appearance_patch.as_ref()?;
+            let (x, y) = p.texel_at(0, lat, lon)?;
+            let l = &p.levels[0];
+            let i = l.idx(x, y);
+            Some((
+                l.albedo[i],
+                l.sigma_rad(i),
+                l.material[i] as u32,
+                p.window.texel_m(self.planet_radius, y),
+                p.window.centre(x, y),
+            ))
+        }
+
+        /// **The appearance integral asked DIRECTLY over a footprint here**, by the same probes the
+        /// patch is built from — the reference a patch texel must equal (docs/73 §5 step 2: "the
+        /// vertex integral kept as the reference it must equal"). Returns albedo, sigma (rad),
+        /// material.
+        pub fn appearance_integral_at(
+            &self,
+            lat: f64,
+            lon: f64,
+            size_m: [f64; 2],
+            max_side: usize,
+        ) -> ([f32; 3], f32, u32) {
+            let epoch = self.celestial_epoch_s();
+            let water_kind = self.water_kind();
+            let mut scratch = crate::terra::appearance::Moments::new();
+            let a = crate::terra::appearance::integrate_rect_on_sphere(
+                &mut scratch,
+                crate::geo::dir_from_lat_lon(lat, lon),
+                self.planet_radius,
+                size_m,
+                self.surface_at(lat, lon, None).base_feature_m,
+                max_side,
+                &self.mats,
+                &self.kinds,
+                crate::solar::senescence_fraction(lat, epoch),
+                |la, lo| {
+                    let s = self.surface_at(la, lo, None);
+                    let kind = if s.is_water {
+                        water_kind
+                    } else {
+                        self.kind_of_class(s.class)
+                    };
+                    (s.height_m, kind)
+                },
+            );
+            if a.mix.is_empty() {
+                let (albedo, m) = self.appearance_point(lat, lon, epoch);
+                (albedo, 0.0, m as u32)
+            } else {
+                (a.albedo, a.sigma_rad() as f32, a.material as u32)
+            }
+        }
     }
 
     #[wasm_bindgen]
@@ -6755,6 +7335,11 @@ mod app {
             );
             let globe_uni =
                 make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
+            // The ground's appearance (docs/73): the pyramids' bind group, with placeholders until a
+            // world loads, and the pipeline that reads them.
+            let appearance = AppearanceGpu::new(&device, &queue);
+            let ground_pipeline =
+                build_ground_pipeline(&device, &bind_layout, &appearance.layout, config.format);
             // The ground cap: same shader, alpha-blended for the cross-fade; a writable vertex buffer rebuilt each
             // frame, fixed index topology.
             // Same shader as the globe, alpha-blended for the cross-fade. (The merge had this calling
@@ -6871,6 +7456,13 @@ mod app {
                 // 2026-07-31: "one tier's rebuild, the floor for scheduling WHOLE tiers").
                 appearance_budget: crate::resolution::WorkBudget::new(4, 110.0),
                 appearance_probes_pinned: 0,
+                appearance,
+                ground_pipeline,
+                kinds: Vec::new(),
+                appearance_patch: None,
+                appearance_patch_key: None,
+                appearance_globe_key: None,
+                appearance_cost: (0.0, 0, 0.0),
                 cam_pose: None,
                 last_eye_m: None,
                 seg_relief_probe: (0.0, 0.0, 0.0, 0.0),
@@ -7046,6 +7638,13 @@ mod app {
                 self.biome_mix = s.biome_mixtures(&self.mats);
                 self.sea_level_m = s.sea_level_m;
             }
+            // The kinds of ground this world's pyramids integrate over: its classes' mixtures, then
+            // open water. A new world is a new appearance, so both pyramids are built afresh.
+            self.kinds =
+                Self::kinds_table(&self.biome_mix, materials::index_of(&self.mats, "water"));
+            self.appearance_globe_key = None;
+            self.appearance_patch_key = None;
+            self.appearance_patch = None;
             // **When this scene is set** (docs/65: time is part of the setting). A world that names an
             // epoch gets it; one that does not runs on the wall clock. Robin: *"One earth assembly.
             // Each scene can show different times, geological epochs, etc."*
@@ -7376,6 +7975,276 @@ mod app {
         pub fn set_appearance_probes(&mut self, side: u32) {
             self.appearance_probes_pinned = side as usize;
             self.segment_built = None;
+        }
+
+        /// **Re-centre the surface mesh on the next frame**, whatever the view cache says — a rig's
+        /// way of asking the question docs/73's camera-move gate asks: when the mesh is rebuilt about
+        /// a new eye, does the PICTURE move with it? The cache (`ground_cap::tier_is_current`) keeps a
+        /// mesh until the view has drifted a good fraction of its extent, so a small move alone never
+        /// triggers the rebuild in which a mesh-locked appearance would show itself.
+        #[cfg(not(target_arch = "wasm32"))]
+        pub fn rebuild_surface(&mut self) {
+            self.segment_built = None;
+        }
+
+        /// The kinds table for a world: its land-cover class mixtures in class order, then open
+        /// water as the last kind (`appearance::Kinds`).
+        fn kinds_table(
+            biome_mix: &[Vec<(usize, f32)>],
+            water_idx: usize,
+        ) -> Vec<Vec<(usize, f32)>> {
+            let mut kinds = biome_mix.to_vec();
+            kinds.push(vec![(water_idx, 1.0)]);
+            kinds
+        }
+
+        /// The kind that is open water — always the last entry of the table.
+        fn water_kind(&self) -> usize {
+            self.kinds.len().saturating_sub(1)
+        }
+
+        /// The kind a land-cover class integrates as: the class itself, or open water for a class
+        /// this world declares no mixture for — the same fallback `SurfaceSampler::sample_pristine`
+        /// colours such a point with, so the pyramid and a point sample cannot disagree about it.
+        fn kind_of_class(&self, class: usize) -> usize {
+            match self.biome_mix.get(class) {
+                Some(m) if !m.is_empty() => class,
+                _ => self.water_kind(),
+            }
+        }
+
+        /// The day the scene is drawn for — the key the pyramids' season is taken under. A season
+        /// moves by less than a code of the texture in a day.
+        fn epoch_day(&self) -> i64 {
+            (self.celestial_epoch_s() / 86_400.0).floor() as i64
+        }
+
+        /// **The colour and material of one POINT of ground, by the one surface rule, in season** —
+        /// what a pyramid texel holds where the texel is finer than the data under it (`surface_at`
+        /// at the data's resolution: measured ground, the water's level, the class's mixture).
+        fn appearance_point(&self, lat: f64, lon: f64, epoch_s: f64) -> ([f32; 3], u16) {
+            let s = self.surface_at(lat, lon, None);
+            let water_idx = materials::index_of(&self.mats, "water");
+            if s.is_water || self.kinds.is_empty() {
+                return (self.mats[water_idx].albedo, water_idx as u16);
+            }
+            let k = self.kind_of_class(s.class);
+            (
+                materials::aggregate_albedo_turned(
+                    &self.kinds[k],
+                    &self.mats,
+                    crate::solar::senescence_fraction(lat, epoch_s),
+                ),
+                s.material as u16,
+            )
+        }
+
+        /// **Keep the appearance pyramids current with their inputs** (docs/73 §2a). The globe is
+        /// keyed on the day (its season); the patch on its window — which follows the tile patch the
+        /// camera asked for — the tiles held, the day, and the probe grid the budget allows. Nothing
+        /// here is keyed on the camera: a texel's content is a fact about the ground.
+        fn refresh_appearance(&mut self) {
+            let day = self.epoch_day();
+            if self.appearance_globe_key != Some(day) {
+                self.build_appearance_globe(day);
+            }
+            let side = if self.appearance_probes_pinned > 0 {
+                self.appearance_probes_pinned
+            } else {
+                self.appearance_budget.side()
+            };
+            let window = self.patch_window();
+            let key = window.map(|w| (w, self.tiles.generation(), day, side));
+            if key != self.appearance_patch_key {
+                match window {
+                    Some(w) => self.build_appearance_patch(w, side),
+                    None => {
+                        self.appearance_patch = None;
+                        self.appearance.patch = PyramidGpu::placeholder(&self.device, &self.queue);
+                        self.appearance.rebind(&self.device);
+                    }
+                }
+                self.appearance_patch_key = key;
+            }
+        }
+
+        /// The patch pyramid's window: the ground the asked-for tile patch covers, on the land-cover
+        /// raster's grid subdivided to about the tiles' own pixel, within the texel budget. `None`
+        /// until a patch has been asked for.
+        fn patch_window(&self) -> Option<crate::terra::pyramid::Window> {
+            let (lat, _, z, _) = self.tiles.want()?;
+            let (lat_s, lat_n, lon_w, lon_e) = self.tiles.patch_bounds_deg()?;
+            let lc = self.landcover.as_ref()?;
+            let base = crate::terra::pyramid::BaseGrid {
+                w: lc.w as u32,
+                h: lc.h as u32,
+            };
+            let target_m = crate::terra::tiles::pixel_ground_m(z, lat, 256);
+            Some(crate::terra::pyramid::Window::covering(
+                base,
+                lat_s,
+                lat_n,
+                lon_w,
+                lon_e,
+                target_m,
+                self.planet_radius,
+                APPEARANCE_PATCH_TEXELS,
+            ))
+        }
+
+        /// **Build the globe pyramid**: the land-cover raster's own grid, one point per texel by the
+        /// one surface rule — water where the level is above the raster's ground, otherwise the
+        /// class's mixture in the season at that latitude — and every coarser level by combination.
+        /// The season and each class's colour in it are computed once per row, since both depend on
+        /// the latitude alone.
+        fn build_appearance_globe(&mut self, day: i64) {
+            let (w, h) = self
+                .landcover
+                .as_ref()
+                .map_or((2, 1), |r| (r.w as u32, r.h as u32));
+            let window = crate::terra::pyramid::Window::globe(w, h);
+            let t0 = crate::clock::now_seconds();
+            let epoch = self.celestial_epoch_s();
+            let water_idx = materials::index_of(&self.mats, "water");
+            let water_albedo = self.mats[water_idx].albedo;
+            let n_kinds = self.kinds.len();
+            // (the row's latitude, its season, each kind's colour in it)
+            let row = std::cell::RefCell::new((f64::NAN, 0.0f64, vec![None::<[f32; 3]>; n_kinds]));
+            let p = crate::terra::pyramid::Pyramid::from_points(
+                window,
+                self.planet_radius,
+                |lat, lon| {
+                    let s = self.surface_at(lat, lon, None);
+                    if s.is_water || n_kinds == 0 {
+                        return (water_albedo, water_idx as u16);
+                    }
+                    let k = self.kind_of_class(s.class);
+                    let mut r = row.borrow_mut();
+                    if r.0 != lat {
+                        r.0 = lat;
+                        r.1 = crate::solar::senescence_fraction(lat, epoch);
+                        r.2.iter_mut().for_each(|e| *e = None);
+                    }
+                    let turned = r.1;
+                    let albedo = match r.2[k] {
+                        Some(a) => a,
+                        None => {
+                            let a = materials::aggregate_albedo_turned(
+                                &self.kinds[k],
+                                &self.mats,
+                                turned,
+                            );
+                            r.2[k] = Some(a);
+                            a
+                        }
+                    };
+                    (albedo, s.material as u16)
+                },
+            );
+            let ms = (crate::clock::now_seconds() - t0) * 1000.0;
+            self.appearance.globe =
+                PyramidGpu::upload(&self.device, &self.queue, "appearance-globe", &p);
+            self.appearance.rebind(&self.device);
+            self.appearance_globe_key = Some(day);
+            self.appearance_cost.2 = ms;
+            log::info!(
+                "appearance: globe pyramid {w}x{h}, {} levels, built in {ms:.0} ms",
+                p.levels.len()
+            );
+        }
+
+        /// **Build the patch pyramid**: every texel of the window the appearance integral over the
+        /// measured ground inside it — the same probe the per-vertex integral used, `surface_at` at
+        /// the data's resolution — with the probe grid the budget allows; coarser levels by
+        /// combination. One build is one unit of the budget's work.
+        fn build_appearance_patch(&mut self, window: crate::terra::pyramid::Window, side: usize) {
+            let t0 = crate::clock::now_seconds();
+            let epoch = self.celestial_epoch_s();
+            let water_kind = self.water_kind();
+            let p = crate::terra::pyramid::Pyramid::integrated(
+                window,
+                self.planet_radius,
+                &self.mats,
+                &self.kinds,
+                side,
+                |la, lo| self.surface_at(la, lo, None).base_feature_m,
+                |la| crate::solar::senescence_fraction(la, epoch),
+                |la, lo| {
+                    let s = self.surface_at(la, lo, None);
+                    let kind = if s.is_water {
+                        water_kind
+                    } else {
+                        self.kind_of_class(s.class)
+                    };
+                    (s.height_m, kind)
+                },
+                |la, lo| self.appearance_point(la, lo, epoch),
+            );
+            let ms = (crate::clock::now_seconds() - t0) * 1000.0;
+            if self.appearance_probes_pinned == 0 {
+                self.appearance_budget.observe(side, ms);
+            }
+            self.appearance.patch =
+                PyramidGpu::upload(&self.device, &self.queue, "appearance-patch", &p);
+            self.appearance.rebind(&self.device);
+            let texels = p.levels[0].albedo.len();
+            self.appearance_cost = (ms, texels, self.appearance_cost.2);
+            log::info!(
+                "appearance: patch pyramid {}x{} ({} levels, sub {}, probe side {side}) built in \
+                 {ms:.0} ms",
+                window.w,
+                window.h,
+                p.levels.len(),
+                window.sub
+            );
+            self.appearance_patch = Some(p);
+        }
+
+        /// Hand the ground shader where the eye is and where the pyramids' windows lie.
+        fn write_appear_uniform(&self, eye: glam::DVec3) {
+            let g = &self.appearance.globe;
+            let p = &self.appearance.patch;
+            let u = AppearUniforms {
+                eye: [
+                    eye.x as f32,
+                    eye.y as f32,
+                    eye.z as f32,
+                    (1.0 / display_scale()) as f32,
+                ],
+                globe: g.window.map_or([0.0; 4], |w| {
+                    let d = w.deg_per_texel();
+                    [
+                        (1.0 / d[0]) as f32,
+                        (1.0 / d[1]) as f32,
+                        g.levels as f32,
+                        self.planet_radius as f32,
+                    ]
+                }),
+                window: p.window.map_or([0.0; 4], |w| {
+                    let d = w.deg_per_texel();
+                    [
+                        w.west_deg() as f32,
+                        w.north_deg() as f32,
+                        (1.0 / d[0]) as f32,
+                        (1.0 / d[1]) as f32,
+                    ]
+                }),
+                window2: p
+                    .window
+                    .map_or([0.0; 4], |w| [w.w as f32, w.h as f32, p.levels as f32, 1.0]),
+                scale: [self.relief_exag as f32, 0.0, 0.0, 0.0],
+            };
+            self.queue
+                .write_buffer(&self.appearance.uni, 0, bytemuck::bytes_of(&u));
+        }
+
+        /// Measured build costs: `[patch ms, patch texels, globe ms]` — for rigs and the HUD.
+        pub fn appearance_cost(&self) -> Vec<f64> {
+            vec![
+                self.appearance_cost.0,
+                self.appearance_cost.1 as f64,
+                self.appearance_cost.2,
+            ]
         }
 
         /// **The instant this scene's SKY is drawn for** (Unix seconds) — the one answer to "where are the
@@ -8016,6 +8885,10 @@ mod app {
 
             // **THE one surface** (docs/63): a segment whose extent is simply what is visible from here.
             if self.surface_loaded {
+                // Its appearance first (docs/73): the pyramids are keyed on their inputs — the
+                // tiles held, the patch asked for, the season, the probe budget — and rebuilt only
+                // when one of those moved. The mesh that follows carries shape alone.
+                self.refresh_appearance();
                 self.build_segment(&view, sun_light, anchor);
             }
 
@@ -8251,7 +9124,10 @@ mod app {
                     if let (Some(gpu), Some(uni)) =
                         (self.segment_gpu.as_ref(), self.segment_uni.as_ref())
                     {
-                        pass.set_pipeline(&self.globe_pipeline);
+                        // The ground's own pipeline (docs/73): the mesh carries shape, the
+                        // appearance pyramid at group 1 says what colour and how rough, per pixel.
+                        pass.set_pipeline(&self.ground_pipeline);
+                        pass.set_bind_group(1, &self.appearance.bind, &[]);
                         draw(&mut pass, uni, gpu);
                     }
                     // **The cannon**, standing where it was emplaced. Its geometry came from its
@@ -8661,6 +9537,7 @@ mod app {
             );
             let level_m = crate::terra::hydro::local_level(lat, lon, self.sea_level_m);
             let water_idx = materials::index_of(&self.mats, "water");
+            let class = sampler.class_at(lat, lon);
             let land_material = sampler.land_material_at(lat, lon) as usize;
             let mut relief_m = 0.0;
             let (height_m, is_water) = crate::terra::hydro::surface(elev_m, level_m, || {
@@ -8696,6 +9573,7 @@ mod app {
                 height_m,
                 is_water,
                 material: if is_water { water_idx } else { land_material },
+                class,
             }
         }
 
@@ -9190,8 +10068,6 @@ mod app {
                 self.planet_radius,
                 TERRA_SEG_MARGIN,
             );
-            let water_idx = materials::index_of(&self.mats, "water");
-            let mats = &self.mats;
             let planet_radius = self.planet_radius;
             // ★ The slope the relief scales by is `local_slope_at`, PER VERTEX — the model's own
             // function at the model's own baseline, asked inside the sample closure below. Until
@@ -9204,10 +10080,6 @@ mod app {
             // per-vertex slope both read `&self`, and the buffer is the one thing written while they
             // are alive.
             let mut verts = std::mem::take(&mut self.segment_verts);
-            let sampler = self
-                .surface_sampler()
-                // The clock the sky is drawn with, so the leaves and the light agree about the date.
-                .at_epoch(self.celestial_epoch_s());
             // A cache of the view, the same rule the tiers use: re-derive only when re-deriving would
             // change something. Anchored to the surface point under the camera, so the eye moving is
             // carried by the model matrix and touches no vertex.
@@ -9228,25 +10100,11 @@ mod app {
             if rebuild {
                 let rings_f = res.rings as f64;
                 // **ONE answer to "how high is the ground here, and how fine is the data that says
-                // so"** — used by the vertex's own displacement AND by the appearance integral's
-                // probe below. Two copies would be two answers to one question (Law II), and the
-                // probe's copy is exactly where the tile's measured relief would silently go missing:
-                // a probe that read only the raster would report a smooth bilinear ramp and the
-                // integral would conclude, wrongly, that the ground is flat.
-                // (The ground is asked through `surface_at` below — one rule for measured ground,
-                // water level and relief, docs/46 row 93.)
-                let mut scratch = crate::terra::appearance::Moments::new();
-                // What this machine can afford this rebuild — measured, not declared. See
-                // `resolution::WorkBudget`: it settles lower on a slow device and higher on a fast
-                // one, and stops growing once the grid reaches the data's own resolution.
-                let probe_side = if self.appearance_probes_pinned > 0 {
-                    self.appearance_probes_pinned
-                } else {
-                    self.appearance_budget.side()
-                };
-                // The finest grid the DATA under this segment could support, over the whole rebuild —
-                // the budget's convergence ceiling (see `WorkBudget::observe`).
-                let max_want = std::cell::Cell::new(1usize);
+                // so"** — the vertex's own displacement asks `surface_at` (one rule for measured
+                // ground, water level and relief, docs/46 row 93), and so do the appearance
+                // pyramid's probes (`build_appearance_patch`), which once ran here per vertex and
+                // now run per world-anchored texel (docs/73 §2a). Two copies would be two answers
+                // to one question (Law II).
                 // ★ **THE TWO ANSWERS TO "HOW HIGH IS THE GROUND HERE", MEASURED** (docs/46 rows 52,
                 // 53). The mesh displaces its vertices by measured elevation PLUS generated sub-raster
                 // relief; `ground_disp_at` — which places the flora AND resolves the camera shell —
@@ -9261,9 +10119,7 @@ mod app {
                 let relief_absmax = std::cell::Cell::new(0.0f64);
                 let seg_diag =
                     std::cell::RefCell::new(Vec::<[f64; 6]>::with_capacity(res.vertex_count()));
-                let t_appearance = crate::clock::now_seconds();
                 let sample = |dir: glam::DVec3| -> crate::terra::globe_mesh::SurfaceSample {
-                    let point = sampler.sample(dir);
                     let (lat, lon) = crate::geo::lat_lon_from_dir(dir);
                     // The model's own slopes at THIS point, blended — what the probes record as
                     // "the slope" (the surface rule asks for them again itself; same answer).
@@ -9316,67 +10172,25 @@ mod app {
                         slope,
                         mi as f64,
                     ]);
-                    // **THE APPEARANCE INTEGRAL** (docs/63). The mesh carries this cell's mean shape;
-                    // everything finer than the cell — the material MIXTURE and the slope SPREAD — is
-                    // integrated here and carried as colour and roughness. Without it those sixteen
-                    // thousand measured tile pixels per cell reach nothing.
-                    max_want.set(
-                        max_want
-                            .get()
-                            .max((cell_m / base_feature_m.max(1e-9)).floor().max(1.0) as usize),
-                    );
-                    let a = crate::terra::appearance::integrate_on_sphere(
-                        &mut scratch,
-                        dir,
-                        planet_radius,
-                        cell_m,
-                        base_feature_m,
-                        probe_side,
-                        mats,
-                        // The probes ask the same rule at the DATA's own resolution — measured
-                        // ground and the water's level, no generated relief, because the probes are
-                        // spaced at the datum's feature size and the relief lives below it.
-                        |la, lo| {
-                            let p = self.surface_at(la, lo, None);
-                            (p.height_m, p.material)
-                        },
-                    );
-                    // The point's own colour, by the same rule: open water wears water's albedo
-                    // wherever the level is above the ground, whatever class the land cover names.
-                    let point = if s.is_water {
-                        crate::terra::globe_mesh::SurfaceSample::flat(
-                            mats[water_idx].albedo,
-                            off,
-                            water_idx as u32,
-                        )
-                    } else {
-                        point
-                    };
-                    // An empty mixture means the footprint was finer than the data under it, so there
-                    // was nothing to integrate and the point sample IS the answer — with `rough = 0`,
-                    // which shades as exactly the Lambert it always did. Not a fallback for failure:
-                    // it is the correct result, arrived at without doing the work.
-                    if a.mix.is_empty() {
-                        crate::terra::globe_mesh::SurfaceSample {
-                            offset: off,
-                            ..point
-                        }
-                    } else {
-                        {
-                            // The appearance integral already averaged the MIXTURE over this
-                            // footprint; that mean IS the vertex's colour. It was handed over as a
-                            // ratio against the dominant material, which the shader then multiplied
-                            // by the texture of the triangle's flat material — one footprint, two
-                            // bases, pink along every class boundary (docs/46 row 90). The texture
-                            // now contributes unit-mean grain only, so the integral's own answer goes
-                            // through untouched.
-                            crate::terra::globe_mesh::SurfaceSample {
-                                albedo: a.albedo,
-                                offset: off,
-                                material: a.material as u32,
-                                rough: a.sigma_rad() as f32,
-                            }
-                        }
+                    // ★★★ **THE MESH CARRIES SHAPE ONLY** (docs/73 §2a, docs/46 row 91). The
+                    // appearance integral ran HERE, per vertex, over this cell — kilometres long at
+                    // altitude and shaped by a polar mesh centred under the eye — and its result was
+                    // interpolated along the spokes and rings: a starburst that re-centred on the
+                    // camera at every rebuild (measured, `the_picture_does_not_move_when_the_camera_
+                    // does`: 2.10/255 against a one-pixel floor of 0.10). The same integral now runs
+                    // over world-anchored texels (`terra::pyramid`, `build_appearance_patch`) and the
+                    // fragment reads it at its own footprint; a vertex says where the ground is and
+                    // which way it faces, and nothing of the mesh is in the colour to move with it.
+                    // The colour here is the identity the shader ignores; the material is the
+                    // point's own, kept for the diagnostics that read `seg_diag`; and the `rough`
+                    // slot carries THIS VERTEX'S CELL in metres — the mesh's own band limit here —
+                    // which `fs_ground` compares with the pyramid texel it reads to decide whose
+                    // slope is the finer statement of the ground's shape at this pixel.
+                    crate::terra::globe_mesh::SurfaceSample {
+                        albedo: [1.0; 3],
+                        offset: off,
+                        material: mi as u32,
+                        rough: cell_m as f32,
                     }
                 };
                 crate::terra::segment::fill_segment(
@@ -9417,15 +10231,6 @@ mod app {
                 let (probe_mat, probe_slope, probe_base) = relief_probe_in.get();
                 self.seg_relief_inputs = (probe_mat, probe_slope, probe_base);
                 self.seg_diag = seg_diag.into_inner();
-                // One rebuild is one unit of work: fold its real cost back into the budget. The side
-                // REALLY used is the smaller of what we allowed and what the data supports — passing
-                // the allowance alone would let a cheap, data-bound rebuild argue for a bigger budget.
-                if self.appearance_probes_pinned == 0 {
-                    self.appearance_budget.observe(
-                        probe_side.min(max_want.get()),
-                        (crate::clock::now_seconds() - t_appearance) * 1000.0,
-                    );
-                }
                 if let Some(gpu) = self.segment_gpu.as_ref() {
                     self.queue
                         .write_buffer(&gpu.vertex_buf, 0, bytemuck::cast_slice(&verts));
@@ -9494,6 +10299,9 @@ mod app {
                     glow_of(&crate::planet::body(&self.body_id)),
                 );
             }
+            // And where the eye is, for the ground shader to recover each fragment's place on the
+            // body and read the pyramid there (docs/73).
+            self.write_appear_uniform(view.eye);
             self.segment_verts = verts;
             // Taking a seat on a moving actor is a placement, not a walk to it.
             self.last_eye_m = None;
@@ -11914,6 +12722,385 @@ first undrawable member at {:?}",
                  against one material and shown through another's texture"
             );
         }
+    }
+
+    /// Mean absolute difference per channel between frame `a` and frame `b` slid `s` pixels to the
+    /// right (a ground point at column `x` of `a` is read at column `x − s` of `b`), over the rows
+    /// and columns both frames cover, clear of a margin. The one number the camera-move gate is about.
+    fn mean_abs_diff_slid(a: &[u8], b: &[u8], w: u32, h: u32, s: i32) -> f64 {
+        let (mut sum, mut n) = (0u64, 0u64);
+        let (mx, my) = (80i32, 40i32);
+        for y in my..(h as i32 - my) {
+            for x in mx..(w as i32 - mx) {
+                let xb = x - s;
+                if xb < 0 || xb >= w as i32 {
+                    continue;
+                }
+                let ia = ((y * w as i32 + x) * 4) as usize;
+                let ib = ((y * w as i32 + xb) * 4) as usize;
+                for c in 0..3 {
+                    sum += (a[ia + c] as i32 - b[ib + c] as i32).unsigned_abs() as u64;
+                }
+                n += 3;
+            }
+        }
+        sum as f64 / n.max(1) as f64
+    }
+
+    /// ★★★ **THE PICTURE DOES NOT MOVE WHEN THE CAMERA DOES** (docs/73 §4; docs/46 row 91).
+    ///
+    /// Robin's descent had a fan in it: the ground's colour was integrated per VERTEX of a polar mesh
+    /// centred on the look point, so the pattern of wedges and rings belonged to the mesh and
+    /// travelled with the camera — which docs/47 names as the fudge seam, a change of representation
+    /// that moves the world. This is the gate for that. Photograph the ground straight down; move the
+    /// eye due east by a known number of pixels' worth of ground; force the mesh to re-centre (a small
+    /// move alone would not — the view cache keeps the mesh until the view has drifted a good fraction
+    /// of its extent, which is exactly how a mesh-locked picture hides); photograph again; slide the
+    /// second frame back by the move. World-anchored content lines up to within a pixel. Anything
+    /// locked to the mesh does not.
+    ///
+    /// The bound is the frame's OWN one-pixel difference — the mean change between the first frame
+    /// and itself slid one pixel — so "lines up" means "nothing moved by more than a pixel", measured
+    /// on the same picture rather than a tolerance anyone chose. The slide's sign is measured, not
+    /// assumed: both directions are searched and the one that aligns is reported. Frames to
+    /// `CAMERA_MOVE_OUT` (default `/tmp/camera-move`). Needs a GPU and the network for the tiles.
+    /// `#[ignore]`.
+    #[test]
+    #[ignore]
+    fn the_picture_does_not_move_when_the_camera_does() {
+        const W: u32 = 1024;
+        const H: u32 = 768;
+        let env_f = |k: &str, d: f64| {
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d)
+        };
+        // Her pose: 7 km over Kamchatka, where a class boundary crosses the frame (docs/46 row 90).
+        let lat = env_f("CAMERA_MOVE_LAT", 54.34);
+        let lon = env_f("CAMERA_MOVE_LON", 158.23);
+        let alt = env_f("CAMERA_MOVE_ALT", 7_000.0);
+        let out = std::env::var("CAMERA_MOVE_OUT").unwrap_or_else(|_| "/tmp/camera-move".into());
+        std::fs::create_dir_all(&out).expect("frame directory");
+        let cache = std::env::var("TILE_CACHE").unwrap_or_else(|_| "/tmp/terrarium-tiles".into());
+        std::fs::create_dir_all(&cache).expect("a tile cache directory");
+        let (json, lm, ev, lc) = shipped_earth();
+        let mut terra = pollster::block_on(app::Terra::headless(W, H)).expect("headless Terra");
+        terra
+            .load_world(
+                &json,
+                &lm.data,
+                lm.w as u32,
+                lm.h as u32,
+                &ev.data,
+                ev.w as u32,
+                ev.h as u32,
+                &lc.data,
+                lc.w as u32,
+                lc.h as u32,
+            )
+            .expect("the shipped Earth loads");
+        terra.set_alt_bounds(0.05, 8.0e10);
+        terra.set_epoch_sun_over_lon(lon);
+        terra.set_draw_flora(false);
+        // Straight down. North is up the frame, so east is along a row.
+        let pitch = -std::f64::consts::FRAC_PI_2;
+        let fov = crate::terra::fly_camera::DEFAULT_FOV_Y;
+        // Ground per pixel at the nadir of a perpendicular view of a plane: exact, everywhere in the
+        // frame, up to the relief's own depth (a 100 m hill at 7 km is 1.4% — under a pixel here).
+        let m_per_px = 2.0 * alt * (fov * 0.5).tan() / H as f64;
+        let shift_px = 60i32;
+        let move_m = shift_px as f64 * m_per_px;
+        let radius_m = crate::planet::earth().radius();
+        let lon_b = lon + (move_m / (radius_m * lat.to_radians().cos())).to_degrees();
+        let mut frame = |terra: &mut app::Terra, la: f64, lo: f64, name: &str, recentre: bool| {
+            terra.place_camera(la, lo, alt, 0.0, pitch);
+            if recentre {
+                terra.rebuild_surface();
+            }
+            for _ in 0..3 {
+                terra.render().expect("a frame");
+            }
+            let px = terra.frame_pixels().expect("a frame is readable");
+            let f = std::fs::File::create(format!("{out}/{name}.png")).expect("a frame file");
+            let mut e = png::Encoder::new(std::io::BufWriter::new(f), W, H);
+            e.set_color(png::ColorType::Rgba);
+            e.set_depth(png::BitDepth::Eight);
+            e.write_header().unwrap().write_image_data(&px).unwrap();
+            px
+        };
+        // The tiles for BOTH poses first, so that landing one does not force the mesh to rebuild
+        // between the frames (a landed tile resets the surface cache, rightly). The move must stay
+        // inside the tile patch for the control below to be one: east if it can, west otherwise.
+        terra.place_camera(lat, lon, alt, 0.0, pitch);
+        land_the_tiles(&mut terra, &cache);
+        let tiles_a = terra.tile_count();
+        // What the first pose still wants after landing (a tile the set does not publish is wanted
+        // forever); a move stays in the patch while that list does not change.
+        let want_a = tiles_wanted_of(&terra);
+        // Probing a direction that leaves the patch EVICTS the tiles behind it (the camera moving
+        // is the store's eviction), so the first pose's patch is restored after every probe.
+        let mut stays = |terra: &mut app::Terra, lo: f64| -> bool {
+            terra.place_camera(lat, lo, alt, 0.0, pitch);
+            terra.render().expect("a frame");
+            let same = tiles_wanted_of(terra) == want_a;
+            terra.place_camera(lat, lon, alt, 0.0, pitch);
+            land_the_tiles(terra, &cache);
+            same
+        };
+        let lon_b = {
+            let dlon = (move_m / (radius_m * lat.to_radians().cos())).to_degrees();
+            if stays(&mut terra, lon + dlon) {
+                lon + dlon
+            } else {
+                assert!(
+                    stays(&mut terra, lon - dlon),
+                    "a {move_m:.0} m move either way leaves the tile patch; pick a smaller move"
+                );
+                lon - dlon
+            }
+        };
+        let a = frame(&mut terra, lat, lon, "a-before-the-move", true);
+        // ★ THE CONTROL: the eye moves, the mesh stays where it was built. Nothing about the surface
+        // is re-derived, so whatever differs between the slid frames here is what a camera move
+        // legitimately changes — parallax, the angle the air is seen through, resampling — and
+        // nothing of the mesh.
+        let b0 = frame(&mut terra, lat, lon_b, "b-moved-mesh-kept", false);
+        // THE MEASUREMENT: the same move, and the mesh re-centred on the new eye.
+        let b = frame(&mut terra, lat, lon_b, "b-moved-mesh-recentred", true);
+        let tiles_b = terra.tile_count();
+        let unshifted = mean_abs_diff_slid(&a, &b, W, H, 0);
+        // Both signs, a few pixels either side of the predicted slide.
+        let best_of = |x: &[u8]| {
+            let (mut best_s, mut best) = (0i32, f64::INFINITY);
+            for s in (-shift_px - 4..=-shift_px + 4).chain(shift_px - 4..=shift_px + 4) {
+                let d = mean_abs_diff_slid(&a, x, W, H, s);
+                if d < best {
+                    best = d;
+                    best_s = s;
+                }
+            }
+            (best_s, best)
+        };
+        let (s_control, control) = best_of(&b0);
+        let (best_s, aligned) = best_of(&b);
+        let one_pixel = mean_abs_diff_slid(&a, &a, W, H, 1);
+        println!(
+            "camera move @ {lat}N {lon}E, {alt:.0} m, {move_m:.1} m to {lon_b:.4}E = {shift_px} px \
+             (tiles {tiles_a} → {tiles_b}): unshifted {unshifted:.3}/255 · mesh kept {control:.3}/255 \
+             at a slide of {s_control} px · mesh re-centred {aligned:.3}/255 at {best_s} px · the \
+             frame's own one-pixel difference {one_pixel:.3}/255 · frames in {out}"
+        );
+        // Where the residual lives: the slid difference by distance from the frame's centre, for
+        // the control and for the measurement, and the measurement's as a picture (×8). A residual
+        // that belongs to the mesh grows with the view angle (its band-limited shape moves a
+        // pixel's ground point sideways only along an oblique ray) and with the mesh's cell.
+        let bands = 6usize;
+        let banded = |x: &[u8], s: i32, picture: Option<&str>| -> Vec<f64> {
+            let mut img = vec![0u8; (W * H * 4) as usize];
+            let (mut sum, mut n) = (vec![0u64; bands], vec![0u64; bands]);
+            let rmax = ((W as f64 / 2.0).powi(2) + (H as f64 / 2.0).powi(2)).sqrt();
+            for y in 0..H as i32 {
+                for xx in 0..W as i32 {
+                    let xb = xx - s;
+                    let i = ((y * W as i32 + xx) * 4) as usize;
+                    img[i + 3] = 255;
+                    if xb < 0 || xb >= W as i32 {
+                        continue;
+                    }
+                    let ib = ((y * W as i32 + xb) * 4) as usize;
+                    let mut d = 0u32;
+                    for c in 0..3 {
+                        let v = (a[i + c] as i32 - x[ib + c] as i32).unsigned_abs();
+                        img[i + c] = (v * 8).min(255) as u8;
+                        d += v;
+                    }
+                    let r = ((xx as f64 - W as f64 / 2.0).powi(2)
+                        + (y as f64 - H as f64 / 2.0).powi(2))
+                    .sqrt();
+                    let band = (((r / rmax) * bands as f64) as usize).min(bands - 1);
+                    sum[band] += d as u64;
+                    n[band] += 3;
+                }
+            }
+            if let Some(name) = picture {
+                let f = std::fs::File::create(format!("{out}/{name}.png")).expect("a diff file");
+                let mut e = png::Encoder::new(std::io::BufWriter::new(f), W, H);
+                e.set_color(png::ColorType::Rgba);
+                e.set_depth(png::BitDepth::Eight);
+                e.write_header().unwrap().write_image_data(&img).unwrap();
+            }
+            (0..bands)
+                .map(|k| sum[k] as f64 / n[k].max(1) as f64)
+                .collect()
+        };
+        let control_bands = banded(&b0, s_control, None);
+        let aligned_bands = banded(&b, best_s, Some("diff-recentred-x8"));
+        let row = |v: &[f64]| {
+            v.iter()
+                .map(|d| format!("{d:.3}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        println!(
+            "camera move: slid difference by radial band from the centre (/255) — mesh kept: {} · \
+             mesh re-centred: {}",
+            row(&control_bands),
+            row(&aligned_bands)
+        );
+        // The mesh's own band limit, and the sideways swim it licenses through an oblique ray: the
+        // largest height step between two joined vertices, times the tangent of the view angle at
+        // the frame's corner, in pixels of ground.
+        let half_diag = ((fov * 0.5).tan() * (1.0 + (W as f64 / H as f64).powi(2)).sqrt()).atan();
+        let (step_max_m, step_mean_m) = terra.segment_height_step_m(1.1 * alt * half_diag.tan());
+        let swim_px = step_max_m * half_diag.tan() / m_per_px;
+        let cost = terra.appearance_cost();
+        println!(
+            "camera move: mesh height step max {step_max_m:.1} m (mean {step_mean_m:.2} m) → up to \
+             {swim_px:.1} px of sideways swim at the frame's corner · appearance patch {:.0} ms for \
+             {} texels · globe {:.0} ms",
+            cost[0], cost[1], cost[2]
+        );
+        // The inner third of the frame: view angles under ~13°, where the mesh's shape can move a
+        // ground point by well under a pixel, so what is left is the appearance alone.
+        let inner = |v: &[f64]| (v[0] + v[1]) * 0.5;
+        let (control_inner, aligned_inner) = (inner(&control_bands), inner(&aligned_bands));
+        // The slide found is the move, give or take the relief's parallax (ground lower than the
+        // point under the camera is farther, so it slides fewer pixels): a check on the frame's
+        // scale and its east, not a measurement.
+        assert!(
+            (best_s.abs() - shift_px).abs() <= shift_px / 5,
+            "the ground slid {best_s} px for a {shift_px} px move — the frame's scale or its east is \
+             not what this test assumed"
+        );
+        // Re-centring the mesh may add no more than a pixel's worth to what the move itself
+        // changed, where the mesh's shape cannot move the picture: the control carries the parallax
+        // and the air, and the appearance must carry nothing of the mesh.
+        assert!(
+            aligned_inner <= control_inner + one_pixel,
+            "over the inner third of the frame, re-centring the mesh changed the slid-back picture \
+             by {aligned_inner:.3}/255 per channel against {control_inner:.3} for the same move with \
+             the mesh kept, more than the frame's own one-pixel difference of {one_pixel:.3}: \
+             something in the ground's appearance moved with the mesh (docs/46 row 91)"
+        );
+        // Over the whole frame the mesh's band-limited SHAPE is allowed exactly the swim its own
+        // height steps license through an oblique ray, and no more: a bound derived from the mesh
+        // that was drawn, not chosen.
+        assert!(
+            aligned <= control + (1.0 + swim_px) * one_pixel,
+            "re-centring the mesh changed the slid-back picture by {aligned:.3}/255 per channel \
+             against {control:.3} with the mesh kept — more than its own height steps ({step_max_m:.1} \
+             m, {swim_px:.1} px of swim at the corner) can account for (docs/46 row 91)"
+        );
+    }
+
+    /// ★★ **A PATCH TEXEL IS THE INTEGRAL OVER ITS OWN FOOTPRINT** — docs/73 §5 step 2's clause,
+    /// "with the vertex integral kept as the reference it must equal". The pyramid is built by the
+    /// same probes the per-vertex integral used (`Terra::surface_at` at the data's resolution), so
+    /// asking that integral directly over a texel's footprint, with a probe grid at least as fine,
+    /// must give the texel back: colour, roughness and material. Where the data is coarser than the
+    /// texel both must be the point sample. Over Galway with the shore's tiles landed, so the texels
+    /// hold sea, land and the mixtures between. `#[ignore]`: needs a GPU and the network.
+    #[test]
+    #[ignore]
+    fn the_patch_texel_is_the_integral_over_its_footprint() {
+        let (lat, lon) = (53.868f64, -9.829f64); // the yarr page's Clew Bay gun, a shore
+        let cache = std::env::var("TILE_CACHE").unwrap_or_else(|_| "/tmp/terrarium-tiles".into());
+        std::fs::create_dir_all(&cache).expect("a tile cache directory");
+        let (json, lm, ev, lc) = shipped_earth();
+        let mut terra = pollster::block_on(app::Terra::headless(320, 200)).expect("headless Terra");
+        terra
+            .load_world(
+                &json,
+                &lm.data,
+                lm.w as u32,
+                lm.h as u32,
+                &ev.data,
+                ev.w as u32,
+                ev.h as u32,
+                &lc.data,
+                lc.w as u32,
+                lc.h as u32,
+            )
+            .expect("the shipped Earth loads");
+        terra.set_alt_bounds(0.05, 8.0e10);
+        terra.set_epoch_sun_over_lon(lon);
+        terra.set_draw_flora(false);
+        // The budget must not have sub-sampled the texels this compares, or the comparison would be
+        // between two estimates: pin the probe grid to the data.
+        terra.set_appearance_probes(16);
+        terra.place_camera(lat, lon, 300.0, 0.0, -1.2);
+        land_the_tiles(&mut terra, &cache);
+        for _ in 0..3 {
+            terra.render().expect("a frame");
+        }
+        let water_idx = materials::index_of(&crate::materials::load(), "water") as u32;
+        let (mut checked, mut water, mut land, mut mixed) = (0usize, 0usize, 0usize, 0usize);
+        let (mut worst_albedo, mut worst_sigma) = (0.0f32, 0.0f32);
+        // A grid of points across the shore: 1.5 km each way in 100 m steps. Each point names the
+        // texel under it, and the integral is asked over THAT texel's footprint at its own centre.
+        let m_per_deg_lat = std::f64::consts::PI * crate::planet::earth().radius() / 180.0;
+        for j in -15..=15 {
+            for i in -15..=15 {
+                let la = lat + (j as f64 * 100.0) / m_per_deg_lat;
+                let lo = lon + (i as f64 * 100.0) / (m_per_deg_lat * lat.to_radians().cos());
+                let Some((albedo, sigma, material, size_m, (cla, clo))) =
+                    terra.appearance_patch_at(la, lo)
+                else {
+                    continue;
+                };
+                // The same probe grid the pyramid was pinned to (`set_appearance_probes(16)`): a
+                // finer grid would be a different estimate of the same footprint, and the
+                // texels here (90 × 153 m over 3–11 m tile pixels) are budget-bound on both sides.
+                let (d_albedo, d_sigma, d_material) =
+                    terra.appearance_integral_at(cla, clo, size_m, 16);
+                checked += 1;
+                if material == water_idx {
+                    water += 1;
+                } else {
+                    land += 1;
+                }
+                // A texel on the shore holds both: its colour is neither pure water nor pure land.
+                let w = crate::materials::load()[water_idx as usize].albedo;
+                if material == water_idx && (albedo[1] - w[1]).abs() > 1e-3 {
+                    mixed += 1;
+                }
+                for c in 0..3 {
+                    worst_albedo = worst_albedo.max((albedo[c] - d_albedo[c]).abs());
+                }
+                if (sigma - d_sigma).abs() > worst_sigma {
+                    println!(
+                        "  texel at ({cla:.5}, {clo:.5}) {size_m:?} m: pyramid {albedo:?} σ {sigma:.4} \
+                         m{material} · direct {d_albedo:?} σ {d_sigma:.4} m{d_material}"
+                    );
+                }
+                worst_sigma = worst_sigma.max((sigma - d_sigma).abs());
+                assert_eq!(
+                    material, d_material,
+                    "texel at ({cla:.5}, {clo:.5}) names material {material}, the integral {d_material}"
+                );
+            }
+        }
+        println!(
+            "patch texels over Clew Bay: {checked} points, {water} water-led ({mixed} of them mixed \
+             with land), {land} land-led · worst albedo difference {worst_albedo:.5} · worst sigma \
+             difference {worst_sigma:.5} rad"
+        );
+        assert!(checked > 0, "the patch covers the gun site");
+        assert!(
+            water > 0 && land > 0,
+            "a shore holds both sea and land: {water} water, {land} land"
+        );
+        // The same probes on the same grid: equal to the texture's own precision, not to a
+        // tolerance anyone chose (f32 accumulation over at most 17² probes).
+        assert!(
+            worst_albedo < 1.0e-3,
+            "a patch texel's colour differs from the integral over its footprint by {worst_albedo}"
+        );
+        assert!(
+            worst_sigma < 1.0e-3,
+            "a patch texel's roughness differs from the integral over its footprint by {worst_sigma}"
+        );
     }
 
     /// ★★★ **THE IMPACT MEETS SOMETHING** — the exact sentence docs/46 row 57 said was false.

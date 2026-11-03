@@ -397,11 +397,18 @@ impl<'a> SurfaceSampler<'a> {
     /// draws name the same material even at a 50/50 tie. The full mixture is what `sample` spends
     /// on colour.
     pub fn land_material_at(&self, lat: f64, lon: f64) -> u32 {
-        let biome = self.landcover.map_or(1, |r| r.biome_at(lat, lon) as usize);
+        let biome = self.class_at(lat, lon);
         self.biome_mix
             .get(biome)
             .and_then(|m| dominant_constituent(m))
             .unwrap_or(self.water_idx) as u32
+    }
+
+    /// The land-cover CLASS here — the index into the world's declared class mixtures, nearest
+    /// texel (a class is categorical, so there is nothing to interpolate). Class 1 where no land
+    /// cover is loaded, which is what `land_material_at` always assumed.
+    pub fn class_at(&self, lat: f64, lon: f64) -> usize {
+        self.landcover.map_or(1, |r| r.biome_at(lat, lon) as usize)
     }
 
     /// Whether the land mask calls this point sea. The mask is a measured datum at the raster's own
