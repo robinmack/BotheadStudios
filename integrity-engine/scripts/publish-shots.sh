@@ -8,6 +8,15 @@
 # So this copies PNGs and writes a manifest. It touches nothing else — no wasm build, no vite build, no
 # HTML. `gallery.html` itself deploys once with the site and then just reads whatever manifest is there.
 #
+# ★★ THE GALLERY IS ADDITIVE (Robin, 2026-11-07: *"we should not be removing items from the gallery with
+# deployments"*). A publish ADDS what the sources hold and REFRESHES a shot that already exists under the
+# same name; it never removes a shot because the sources no longer mention it. `/tmp/rigshot` does not
+# survive a reboot and holds only the rigs that happened to run last, so "replace the gallery with the
+# sources" meant every deploy re-decided what the gallery was from whatever `/tmp` held that day — and on
+# 2026-10-24 that was nothing, and the gallery was erased. The live directory is the ONLY copy of most of
+# what it shows. To remove a shot deliberately: `rm` it from `$DEST` and re-run this script for the manifest.
+# The one thing that still removes is the size bound below, oldest first, and it names what it dropped.
+#
 #   scripts/publish-shots.sh            # publish to the live site (needs the deploy dir writable)
 #   DEST=web/public/shots scripts/publish-shots.sh   # publish locally, for `npx vite`
 #
@@ -19,7 +28,8 @@ DEST="${DEST:-/var/www/integrity/shots}"
 SOURCES=("${RIGSHOT_DIR:-/tmp/rigshot}" "web/shots")
 # ★ A BOUND, and it is REPORTED rather than silent (AGENTS.md: no silent caps). Rig runs accumulate —
 # 155 MB and 400 PNGs on this box after one session — and a public gallery that ships all of it is
-# slow to load and mostly stale. Newest first, and the run says what it left behind.
+# slow to load and mostly stale. The bound applies to the GALLERY after the publish (what it had plus
+# what arrived), newest first by mtime, and the run names every shot it dropped.
 KEEP="${SHOTS_KEEP:-160}"
 
 mkdir -p "$DEST"
@@ -52,21 +62,21 @@ if [ "$total" -eq 0 ]; then
   rm -f "$tmp_list"
   exit 0
 fi
-# Start clean so a deleted shot actually disappears rather than lingering forever — now that there
-# is something to put in its place.
-find "$DEST" -maxdepth 1 \( -name '*.png' -o -name '*.mp4' \) -delete 2>/dev/null || true
+# Copy in, newest first. A shot that already exists under the same name is refreshed (cp overwrites);
+# a shot that exists only in the gallery is left exactly where it is. Nothing here deletes.
 n=0
 n_png=0
 n_vid=0
+n_new=0
 while IFS=$'\t' read -r _mt f; do
   [ -n "$f" ] || continue
-  [ "$n" -ge "$KEEP" ] && break
   base="$(basename "$f")"
   parent="$(basename "$(dirname "$f")")"
   case "$parent" in
     rigshot|shots) name="$base" ;;
     *) name="${parent}-${base}" ;;
   esac
+  [ -e "$DEST/$name" ] || n_new=$((n_new + 1))
   cp -p "$f" "$DEST/$name"
   n=$((n + 1))
   case "$name" in
@@ -74,10 +84,16 @@ while IFS=$'\t' read -r _mt f; do
     *) n_png=$((n_png + 1)) ;;
   esac
 done < <(sort -rn "$tmp_list")
-if [ "$total" -gt "$n" ]; then
-  echo "  (kept the $n newest of $total; SHOTS_KEEP=$KEEP)"
-fi
 rm -f "$tmp_list"
+
+# The bound, applied to the whole gallery and said out loud, by name.
+dropped=0
+while IFS=$'\t' read -r _mt f; do
+  [ -n "$f" ] || continue
+  echo "  dropped (older than the $KEEP newest; SHOTS_KEEP=$KEEP): $(basename "$f")"
+  rm -f "$f"
+  dropped=$((dropped + 1))
+done < <(find "$DEST" -maxdepth 1 \( -name '*.png' -o -name '*.mp4' \) -printf '%T@\t%p\n' | sort -rn | tail -n +"$((KEEP + 1))")
 
 # The manifest: name, url, mtime, and a GROUP taken from the filename's stem before the first digit or
 # dash-number, so `flora-3m` / `flora-120m` land together and `season-maine-oct` with its siblings.
@@ -122,5 +138,6 @@ PY
 # Say what was actually published. It read "$n PNGs" unconditionally, which quietly called a movie a
 # PNG the moment this script learned to carry both — a small lie, but the gallery exists so a human can
 # check what is there, and a count that misdescribes its own contents is the wrong habit to keep.
-echo "✓ published $n file(s) ($n_png PNG, $n_vid MP4) → $DEST"
+kept=$(find "$DEST" -maxdepth 1 \( -name '*.png' -o -name '*.mp4' \) | wc -l)
+echo "✓ published $n file(s) ($n_png PNG, $n_vid MP4; $n_new new, $((n - n_new)) refreshed, $dropped dropped) → $DEST now holds $kept"
 echo "  gallery: https://integrity.bothead.net/gallery.html  (or /gallery.html on the dev server)"
