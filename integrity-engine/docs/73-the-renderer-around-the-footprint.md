@@ -181,12 +181,15 @@ closed form to be measured against (A) later, kept only if it agrees within the 
      (2048 × 1024), one point per texel by the one surface rule (`Terra::surface_at` at the data's
      resolution: water where the level is above the raster's ground, otherwise the class's mixture in
      the season at that latitude), eleven levels to two texels for the planet, built once per day of
-     scene time (~0.8 s natively at load; the browser's cost is still to be measured). The **patch** is
+     scene time (~0.8 s natively at load; **1.12 s on the live site's release wasm**, measured 2026-11-07;
+     4.7 s in a `--dev` wasm). The **patch** is
      a window over the ground the streamed tile patch covers, on the same grid subdivided to about
      the tiles' pixel and capped at 128² texels (`Window::covering` coarsens by halves to fit — a
      budget coarsens the picture, never crops it), every texel `integrate_rect_on_sphere` over the
      measured ground inside it with the probe grid `appearance_budget` allows (one build is one unit
-     of the budget's work: 210–330 ms at a side of 4 on the 5060 Ti, so the budget settles lower),
+     of the budget's work: 210–330 ms at a side of 4 on the 5060 Ti, so the budget settles lower —
+     measured 2026-11-07 on the live site it settles at 1 and the build does not get cheaper, because
+     the cost is per texel, not per probe, and a one-cell texel has zero roughness: docs/46 row 95),
      its coarsest level the globe's finest; rebuilt only when its window, the tiles held, the day or
      the probe grid change (`TileStore::generation`). Each texel holds albedo (8-bit sRGB, filtered in
      linear light), the RMS slope angle (alpha), the mean gradient (half floats) and the dominant
@@ -255,11 +258,15 @@ state — which is exactly why §5 does the in-place steps first.
   camera like the tiles do, bounded the same way (the camera moving is the eviction). As built
   (2026-11-02): the globe is 2048 × 1024 × 9 bytes with mips, ~25 MB on the device, and its CPU levels
   are held as f32 while it is built (~60 MB transient — encode level by level if the browser minds);
-  the patch is 128² and negligible. The globe's build is ~0.8 s natively at load; in the browser it is
-  not yet measured and is the first thing to price — `web/rig/appearance_cost.mjs` reads the engine's
-  own "appearance: … built in N ms" lines off the page's console (it could not run on 2026-11-02: the
-  workstation's NVIDIA driver and library versions had drifted apart, `nvidia-smi` reported
-  "Driver/library version mismatch", and the page stopped at "Requesting GPU device…").
+  the patch is 128² and negligible. **Priced 2026-11-07 on the live site** (release wasm, `340b471`,
+  5060 Ti) with `web/rig/appearance_cost.mjs` reading the engine's own "appearance: … built in N ms"
+  lines: the globe builds in **1.12 s** (0.8 s natively; 4.7 s in a `--dev` wasm, so price the release
+  build or price nothing), once per day of scene time, on the main thread. The patch is **0.27–0.47 s
+  per build and is rebuilt on every tile arrival** — nine builds in the first 3.6 s at the start pose,
+  4.5 s of build in the first 22 s — and the probe budget walked to a side of 1 without the cost
+  moving, which is docs/46 row 95: the cost is per texel, the budget coarsens the probes, and a
+  one-cell texel carries no roughness. The thing to budget is the texel count, and the thing to avoid
+  is re-integrating the whole window for one tile.
 - **A bake is a cache**, and this engine has been bitten by caches the model could not correct
   (`flora::Built`). Every level must be keyed on everything that changes the answer: season, damage,
   the tiles held.
