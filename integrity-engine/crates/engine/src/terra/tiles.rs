@@ -293,6 +293,27 @@ impl Tile {
     }
 }
 
+impl TileId {
+    /// This tile's ground, `(lat_s, lat_n, lon_w, lon_e)` degrees — the inverse of [`tile_coords`]
+    /// at the tile's corners.
+    pub fn bounds_deg(&self) -> (f64, f64, f64, f64) {
+        let n = (1u64 << self.z) as f64;
+        let lon = |x: f64| x / n * 360.0 - 180.0;
+        let lat = |y: f64| {
+            (std::f64::consts::PI * (1.0 - 2.0 * y / n))
+                .sinh()
+                .atan()
+                .to_degrees()
+        };
+        (
+            lat(self.y as f64 + 1.0),
+            lat(self.y as f64),
+            lon(self.x as f64),
+            lon(self.x as f64 + 1.0),
+        )
+    }
+}
+
 /// The tiles currently held, and the patch they are being held for.
 #[derive(Default)]
 pub struct TileStore {
@@ -302,6 +323,11 @@ pub struct TileStore {
     want: Option<(f64, f64, u32, i32)>, // lat, lon, zoom, radius
     /// Tiles that arrived entirely void — where the data stops, remembered so the zoom stops there too.
     known_void: std::collections::HashSet<TileId>,
+    /// **Counts every change to what this store holds or is asked for** — the key a cache built
+    /// from the tiles (the appearance patch, docs/73) compares against, so that a tile arriving
+    /// after the camera stopped moving still reaches the picture (the lesson of `flora::Built`,
+    /// docs/46 row 52: a cache keyed on anything but its inputs lies).
+    generation: u64,
 }
 
 impl TileStore {
@@ -312,13 +338,55 @@ impl TileStore {
         self.tiles.is_empty()
     }
 
+    /// The generation: changes whenever a tile lands, is dropped, or the patch asked for moves.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The patch last asked for: `(lat, lon, zoom, radius)`.
+    pub fn want(&self) -> Option<(f64, f64, u32, i32)> {
+        self.want
+    }
+
+    /// The ground the asked-for patch covers, `(lat_s, lat_n, lon_w, lon_e)` degrees — the union of
+    /// its tiles' bounds, with the longitudes unwrapped about the patch's centre so a patch over the
+    /// dateline is one span (`lon_e` may exceed 180).
+    pub fn patch_bounds_deg(&self) -> Option<(f64, f64, f64, f64)> {
+        let (lat, lon, z, r) = self.want?;
+        let mut b: Option<(f64, f64, f64, f64)> = None;
+        for id in tiles_around(lat, lon, z, r) {
+            let (s, n, mut w, mut e) = id.bounds_deg();
+            // Unwrap about the centre: a tile's west edge more than half a turn from the centre is
+            // the same tile a turn over.
+            while w - lon > 180.0 {
+                w -= 360.0;
+                e -= 360.0;
+            }
+            while w - lon < -180.0 {
+                w += 360.0;
+                e += 360.0;
+            }
+            b = Some(match b {
+                None => (s, n, w, e),
+                Some((bs, bn, bw, be)) => (bs.min(s), bn.max(n), bw.min(w), be.max(e)),
+            });
+        }
+        b
+    }
+
     /// Declare the patch the observer needs. Tiles outside it are dropped, which is what bounds the store
     /// without an eviction policy needing to be invented: the camera moving IS the eviction.
     pub fn want_patch(&mut self, lat: f64, lon: f64, z: u32, radius: i32) {
+        let before = self.tiles.len();
         self.want = Some((lat, lon, z, radius));
+        // The generation follows the TILES: a centre moving within its tile changes nothing held,
+        // and a consumer that cares which tiles the patch names reads them through `want()`.
         let keep: std::collections::HashSet<TileId> =
             tiles_around(lat, lon, z, radius).into_iter().collect();
         self.tiles.retain(|id, _| keep.contains(id));
+        if self.tiles.len() != before {
+            self.generation += 1;
+        }
     }
 
     /// The tiles the current patch needs that are not held yet, nearest first.
@@ -345,6 +413,7 @@ impl TileStore {
             self.known_void.insert(tile.id);
         }
         self.tiles.insert(tile.id, tile);
+        self.generation += 1;
     }
 
     /// ★ **The deepest zoom at which the data has measured THIS ground**, no deeper than `z`. The set

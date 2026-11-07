@@ -209,6 +209,14 @@ not exist and rebuild them; they are real, tested, and partly wired.
     fetches them. A bounded 3×3 patch follows the camera, and the camera moving IS the eviction policy.
   - `terra/ground_cap.rs` is what SURVIVED the collapse: the cache rule (`CapTierBuild`,
     `tier_is_current`) and the raster hand-off. It no longer builds anything.
+  - ★ **`terra/pyramid.rs` — the ground's appearance per pixel footprint, anchored to the world
+    (docs/73 §2a, docs/46 row 91).** `Window` (a rectangle of a base equirectangular grid subdivided
+    by a power of two, texel edges on fixed meridians and parallels), `Pyramid::{from_points,
+    integrated}` (the finest level a point or the appearance integral per texel, every coarser level
+    the area-weighted law-of-total-variance combination of the four below), `encode_*` for the
+    device. Terra builds two — the GLOBE over the shipped rasters' grid and the PATCH over the
+    streamed tiles — and `globe.wgsl::fs_ground` reads them at the footprint each pixel's derivatives
+    give. The segment mesh carries shape only.
 
 ## 4. The unification map — laws shared, solvers/containers forked
 

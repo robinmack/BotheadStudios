@@ -32,7 +32,9 @@ pub(crate) fn wgsl_typed(src: &str, name: &str) -> Vec<(String, &'static str)> {
             let (field, ty) = chunk.split_once(':')?;
             let field = field.trim();
             let t = ty.trim();
-            let ty = if t.starts_with("vec4") {
+            let ty = if t.starts_with("mat4x4") {
+                "mat4x4"
+            } else if t.starts_with("vec4") {
                 "vec4"
             } else if t.starts_with("vec3") {
                 "vec3"
@@ -51,6 +53,8 @@ pub(crate) fn wgsl_offsets(fields: &[(String, &'static str)]) -> Vec<(String, us
     let mut out = Vec::new();
     for (name, ty) in fields {
         let (size, align) = match *ty {
+            // A column-major 4×4 of f32: four vec4 columns, so 64 bytes at vec4 alignment.
+            "mat4x4" => (64, 16),
             "vec4" => (16, 16),
             "vec3" => (12, 16),
             _ => (4, 4),

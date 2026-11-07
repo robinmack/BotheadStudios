@@ -88,7 +88,10 @@ design its result is a **pyramid** the renderer samples at the footprint each pi
   unit-mean detail factor (row 90);
 - the segment mesh carries position, normal and the measured relief only. Its topology stops deciding
   the colour of anything, so the fan cannot exist, and moving the camera moves the parallax and nothing
-  else;
+  else. (Built, 2026-11-02: the normal too is the pyramid's wherever the pyramid's texel is finer
+  than the mesh's cell — the variance is about the pyramid's mean, so the mean is what shades — and
+  "the parallax and nothing else" holds up to the mesh's own band limit in SHAPE, which still moves a
+  ground point sideways along an oblique ray when the mesh re-centres; see §5 step 2.)
 - the surface it carries is the model's one rule (docs/46 row 93, `Terra::surface_here`): the measured
   ground, unclamped, and the water resting on it at its level wherever the ground is below that level.
   The renderer may choose how water looks — a flat opaque plane today, depth and transparency later —
@@ -152,6 +155,9 @@ A recommendation, not a decision: start with (A), because its convergence to the
 invariant this whole design rests on and (A) has it for free; measure (B) against it; keep (B) as the
 far-field closed form only if the two agree within the gate. Either way the ledger records the seam.
 
+**DECIDED 2026-11-02 — Robin: (A).** *"Go with A, start step 2."* (B) stays what §3 says it is: a
+closed form to be measured against (A) later, kept only if it agrees within the gate.
+
 ## 4. Gates — written with the work, derived from measurements, never tuned
 
 - **Footprint profile** (row 88's gate): along a descent the per-row share of pixels the plants change
@@ -169,8 +175,64 @@ far-field closed form only if the two agree within the gate. Either way the ledg
 ## 5. Order of work, each step measurable alone (docs/68 §8's rule: never extract to fix a bug)
 
 1. ✅ **Row 90.** The vertex carries the integrated albedo; the texture supplies unit-mean grain.
-2. **The ground's appearance pyramid, sampled per pixel**, with the vertex integral kept as the
-   reference it must equal. Gate: the fan is gone; the camera-move test; refinement invariance.
+2. ✅ **The ground's appearance pyramid, sampled per pixel** (2026-11-02; docs/46 row 91(a), row 94;
+   `terra::pyramid`, `globe.wgsl::fs_ground`). What was built, and what was measured:
+   - Two world-anchored equirectangular pyramids. The **globe** is the shipped rasters' own grid
+     (2048 × 1024), one point per texel by the one surface rule (`Terra::surface_at` at the data's
+     resolution: water where the level is above the raster's ground, otherwise the class's mixture in
+     the season at that latitude), eleven levels to two texels for the planet, built once per day of
+     scene time (~0.8 s natively at load; the browser's cost is still to be measured). The **patch** is
+     a window over the ground the streamed tile patch covers, on the same grid subdivided to about
+     the tiles' pixel and capped at 128² texels (`Window::covering` coarsens by halves to fit — a
+     budget coarsens the picture, never crops it), every texel `integrate_rect_on_sphere` over the
+     measured ground inside it with the probe grid `appearance_budget` allows (one build is one unit
+     of the budget's work: 210–330 ms at a side of 4 on the 5060 Ti, so the budget settles lower),
+     its coarsest level the globe's finest; rebuilt only when its window, the tiles held, the day or
+     the probe grid change (`TileStore::generation`). Each texel holds albedo (8-bit sRGB, filtered in
+     linear light), the RMS slope angle (alpha), the mean gradient (half floats) and the dominant
+     material (an integer texture, unfiltered).
+   - The fragment recovers its place on the body from its camera-relative position and the eye, its
+     footprint from `dpdx`/`dpdy` — the same quantity `Fidelity` derives, per pixel and free — and
+     reads the level whose texels are that size: the patch where it covers the point and is fine
+     enough to be asked, the globe elsewhere. The globe magnifies NEAREST, because a base texel is one
+     categorical land-cover class and a ramp between two classes would be a gradient the data does
+     not contain; so from altitude the far field now shows the data's own 19.5 km blocks where the
+     mesh used to smear them along its spokes. The patch filters.
+   - **The normal is part of the appearance.** docs/63's variance is about the pyramid's own mean
+     slope, so that mean is what the ground is shaded with. The mesh's normal is a second, mesh-locked
+     statement of the same slope at the mesh's band limit — finest under the eye, kilometres at the
+     rim — and shading by it alone left the starburst in the SHADING after the colour had gone
+     (measured: 0.69/255 against a floor of 0.04). The ground mesh now carries position and its cell
+     size; `fs_ground` shades with whichever of the two slopes is the finer statement at that pixel,
+     blended over the octave in which the band limits cross.
+   - **Refinement invariance**: `a_level_is_the_integral_of_the_level_below` (every coarser texel
+     equals the integral asked directly over its footprint, in colour, mixture, mean gradient and
+     variance), `the_texel_grid_is_anchored_to_the_world`, `below_the_data_a_texel_is_its_point_sample`;
+     and on the real Earth, `the_patch_texel_is_the_integral_over_its_footprint` (775 texels across
+     the Clew Bay shore equal the integral asked directly over each one's footprint, to 0.00000 in
+     colour and roughness — "the vertex integral kept as the reference it must equal").
+   - **Also visible now, and named**: the tile patch's fade (docs/46 row 89) shows as a square of
+     relief detail — the centre tile fully trusted, the outer ring fading to the raster — where the
+     starburst used to hide it; and at a few hundred metres faint rays remain under the eye, where
+     the mesh is the finer statement and its generated relief is band-limited ring by ring (docs/46
+     row 53's band limit, shape not appearance).
+   - **The camera-move gate** (`the_picture_does_not_move_when_the_camera_does`, 7 km nadir at her
+     pose, the eye moved 528 m = 60 px east, the mesh forced to re-centre, the second frame slid back,
+     and a CONTROL frame with the mesh kept so the parallax and the air are measured apart): before
+     2.10/255 per channel against a one-pixel floor of 0.10; after 0.187 against a control of 0.086,
+     and 0.052 against 0.064 over the inner third of the frame. **The fan is gone.** What remains in
+     the outer frame is the mesh's band-limited SHAPE: 760 m cells over 20 m data, height steps of up
+     to 207 m between joined vertices in frame, moving a pixel's ground point sideways along an
+     oblique ray. The gate bounds that by the mesh's own steps (derived, not chosen) and the inner
+     third strictly. It is the geometry's residual, not the appearance's, and it belongs to docs/63's
+     band limit and to step 5 — named, not fixed.
+   - **Found by the fix, docs/46 row 94**: the integral coloured a footprint from its probes'
+     DOMINANT materials out of season while a point sample used the class's mixture in season, so the
+     ground was twice as bright inside the tiles as outside — a disc around the camera. A probe now
+     answers with a kind of ground (the class), the mixture is the classes' mixtures, and the colour
+     is in season; the integral and the point agree wherever they meet.
+   - **The descent ladder** (`a_descent_is_photographed_and_the_plants_are_measured`) re-run, frames
+     in `/tmp/descent-ladder/kamchatka-pyramid` beside the 2026-10-24 ones.
 3. **The canopy term into the pyramid** (the choice in §3), with the lattice-derived arrangement.
    Gate: colour continuity at the disc's edge — which stops being an edge.
 4. **Pixel-bounded instancing with the rungs**, the truncation moved out of `scatter`. Gate: the
@@ -190,7 +252,14 @@ state — which is exactly why §5 does the in-place steps first.
 ## 7. Risks, beyond docs/68 §7
 
 - **Texture memory for the pyramid in WASM.** The coarse levels are global; the fine ones follow the
-  camera like the tiles do, bounded the same way (the camera moving is the eviction).
+  camera like the tiles do, bounded the same way (the camera moving is the eviction). As built
+  (2026-11-02): the globe is 2048 × 1024 × 9 bytes with mips, ~25 MB on the device, and its CPU levels
+  are held as f32 while it is built (~60 MB transient — encode level by level if the browser minds);
+  the patch is 128² and negligible. The globe's build is ~0.8 s natively at load; in the browser it is
+  not yet measured and is the first thing to price — `web/rig/appearance_cost.mjs` reads the engine's
+  own "appearance: … built in N ms" lines off the page's console (it could not run on 2026-11-02: the
+  workstation's NVIDIA driver and library versions had drifted apart, `nvidia-smi` reported
+  "Driver/library version mismatch", and the page stopped at "Requesting GPU device…").
 - **A bake is a cache**, and this engine has been bitten by caches the model could not correct
   (`flora::Built`). Every level must be keyed on everything that changes the answer: season, damage,
   the tiles held.

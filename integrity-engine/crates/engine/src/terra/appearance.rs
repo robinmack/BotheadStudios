@@ -138,11 +138,19 @@ impl Appearance {
         // E[Var(within)] + Var(E[within]), the second term measured against the mean just formed.
         let mut var = 0.0f64;
         let mut mix: Vec<(usize, f32)> = Vec::new();
+        // ★ The colour is the area-weighted mean of the parts' colours — the integral's own
+        // linearity, and exact. Re-deriving it from the combined mixture would be the same number
+        // only while every part shares one season; a footprint spanning a latitude band does not,
+        // and the children already answered for their own.
+        let mut albedo = [0.0f32; 3];
         for p in parts {
             let w = p.area_weight.max(0.0) / total;
             let d0 = p.mean_slope[0] - mean[0];
             let d1 = p.mean_slope[1] - mean[1];
             var += w * (p.slope_variance.max(0.0) + d0 * d0 + d1 * d1);
+            for c in 0..3 {
+                albedo[c] += p.albedo[c] * w as f32;
+            }
             for &(mi, f) in &p.mix {
                 let f = f * w as f32;
                 match mix.iter_mut().find(|(m, _)| *m == mi) {
@@ -151,7 +159,9 @@ impl Appearance {
                 }
             }
         }
-        Appearance::finish(mix, mean, var, total, materials)
+        let mut out = Appearance::finish(mix, mean, var, total, materials, 0.0);
+        out.albedo = albedo;
+        out
     }
 
     /// A patch with nothing in it: black, flat, weightless. Never a NaN.
@@ -167,13 +177,17 @@ impl Appearance {
     }
 
     /// Normalise a mixture and derive the colour and the dominant layer from it. One place, so the
-    /// integrator and the combiner cannot disagree about what a mixture means.
+    /// integrator and the combiner cannot disagree about what a mixture means. `turned` is the
+    /// fraction of the footprint's deciduous matter that has gone over to its autumn state
+    /// (`solar::senescence_fraction`), so the colour is the mixture's colour IN SEASON — the same
+    /// answer `SurfaceSampler` gives a point.
     fn finish(
         mut mix: Vec<(usize, f32)>,
         mean_slope: [f64; 2],
         slope_variance: f64,
         area_weight: f64,
         materials: &[Material],
+        turned: f64,
     ) -> Appearance {
         let sum: f32 = mix.iter().map(|&(_, f)| f.max(0.0)).sum();
         if sum > 0.0 {
@@ -187,7 +201,7 @@ impl Appearance {
         // texture layer, the relief layer and the ground the camera stands on cannot disagree on a
         // tie (docs/46 row 53, second opening).
         mix.sort_by(crate::terra::globe_mesh::share_order);
-        let albedo = crate::materials::aggregate_albedo(&mix, materials);
+        let albedo = crate::materials::aggregate_albedo_turned(&mix, materials, turned);
         let material = crate::terra::globe_mesh::dominant_constituent(&mix).unwrap_or(0);
         Appearance {
             mix,
@@ -200,15 +214,37 @@ impl Appearance {
     }
 }
 
+/// **What the ground is made of, by KIND** — the table a probe's answer indexes.
+///
+/// A probe reports one kind per sample; a kind is a mixture of materials. For the shipped Earth the
+/// kinds are the land-cover classes (each a declared mixture: open shrubland is foliage 0.25, sand
+/// 0.40, dirt 0.35) plus open water, so a footprint entirely inside one class integrates to that
+/// class's MIXTURE, not to whichever constituent happens to lead it.
+///
+/// ★ That is a correction. The integral's first form took a single material per probe — the class's
+/// dominant constituent — so a footprint of open shrubland came out as sand and the colour depended
+/// on whether the integral ran at all: inside the streamed tiles (where it did) the ground wore the
+/// dominant material's summer colour, outside them (a point sample) the class mixture in season, and
+/// the boundary between the two was a visible disc around the camera (docs/46 row 91's measured
+/// frames, 2026-11-02). One kind per probe, one mixture per kind, and the two regimes agree.
+pub type Kinds = [Vec<(usize, f32)>];
+
+/// The kinds table in which every material is its own kind — what the material-indexed callers and
+/// the synthetic tests mean by a probe answering with a material.
+pub fn pure_kinds(n_materials: usize) -> Vec<Vec<(usize, f32)>> {
+    (0..n_materials).map(|m| vec![(m, 1.0f32)]).collect()
+}
+
 /// **A streaming accumulator for one footprint.** Kept separate from [`Appearance`] because it holds
-/// the running sums, and because reusing one across thousands of vertices is what keeps a per-vertex
-/// integral from allocating per vertex.
+/// the running sums, and because reusing one across thousands of footprints is what keeps the
+/// integral from allocating per footprint.
 #[derive(Default)]
 pub struct Moments {
     n: f64,
     sum: [f64; 2],
     sum_sq: [f64; 2],
-    mix: Vec<(usize, f32)>,
+    /// Sample counts per KIND (see [`Kinds`]); expanded to a material mixture at `finish`.
+    kinds: Vec<(usize, f64)>,
 }
 
 impl Moments {
@@ -221,28 +257,36 @@ impl Moments {
         self.n = 0.0;
         self.sum = [0.0; 2];
         self.sum_sq = [0.0; 2];
-        self.mix.clear();
+        self.kinds.clear();
     }
 
-    /// Add one sub-sample: the gradient there, and the material occupying it.
-    pub fn add(&mut self, grad: [f64; 2], material: usize) {
+    /// Add one sub-sample: the gradient there, and the kind of ground occupying it.
+    pub fn add(&mut self, grad: [f64; 2], kind: usize) {
         self.n += 1.0;
         for k in 0..2 {
             self.sum[k] += grad[k];
             self.sum_sq[k] += grad[k] * grad[k];
         }
-        match self.mix.iter_mut().find(|(m, _)| *m == material) {
+        match self.kinds.iter_mut().find(|(m, _)| *m == kind) {
             Some((_, f)) => *f += 1.0,
-            None => self.mix.push((material, 1.0)),
+            None => self.kinds.push((kind, 1.0)),
         }
     }
 
-    /// Close the footprint. `area_weight` is what this footprint is worth to a later [`Appearance::combine`].
+    /// Close the footprint. `area_weight` is what this footprint is worth to a later
+    /// [`Appearance::combine`]; `kinds` expands each sampled kind to its material mixture; `turned`
+    /// is the footprint's season.
     ///
     /// The variance is the population variance about the sample mean, floored at zero — with one
     /// sample it is exactly zero, which is the honest answer (a single probe has seen no variation),
     /// not an undefined one.
-    pub fn finish(&self, area_weight: f64, materials: &[Material]) -> Appearance {
+    pub fn finish(
+        &self,
+        area_weight: f64,
+        materials: &[Material],
+        kinds: &Kinds,
+        turned: f64,
+    ) -> Appearance {
         if self.n <= 0.0 {
             return Appearance::null();
         }
@@ -250,7 +294,28 @@ impl Moments {
         let var = (0..2)
             .map(|k| (self.sum_sq[k] / self.n - mean[k] * mean[k]).max(0.0))
             .sum::<f64>();
-        Appearance::finish(self.mix.clone(), mean, var, area_weight, materials)
+        // Kind counts → material fractions: each kind's share of the samples, spread over that
+        // kind's own constituents. A kind the table does not know contributes nothing, which keeps
+        // a bad index from inventing a material.
+        let mut mix: Vec<(usize, f32)> = Vec::new();
+        for &(kind, count) in &self.kinds {
+            let Some(parts) = kinds.get(kind) else {
+                continue;
+            };
+            let share = (count / self.n) as f32;
+            let total: f32 = parts.iter().map(|&(_, f)| f.max(0.0)).sum();
+            if total <= 0.0 {
+                continue;
+            }
+            for &(mi, f) in parts {
+                let f = share * f.max(0.0) / total;
+                match mix.iter_mut().find(|(m, _)| *m == mi) {
+                    Some((_, acc)) => *acc += f,
+                    None => mix.push((mi, f)),
+                }
+            }
+        }
+        Appearance::finish(mix, mean, var, area_weight, materials, turned)
     }
 }
 
@@ -258,7 +323,8 @@ impl Moments {
 ///
 /// `probe(u, v)` answers what the surface IS at an offset `(u, v)` metres from the footprint's centre,
 /// in the footprint's own tangent frame: `(height in metres, material index)`. Everything physical
-/// comes from the caller's probe — this function only takes moments of it.
+/// comes from the caller's probe — this function only takes moments of it. The material-indexed form
+/// of [`integrate_rect`]: every material its own kind, no season.
 ///
 /// `size_m` is the footprint's side; `step_m` the spacing at which it is sampled, which should be **the
 /// resolution of the DATA underneath, never finer**. Sampling below the data's own resolution only
@@ -277,40 +343,73 @@ pub fn integrate_footprint(
     scratch: &mut Moments,
     probe: impl Fn(f64, f64) -> (f64, usize),
 ) -> Appearance {
+    let kinds = pure_kinds(materials.len());
+    integrate_rect(
+        [size_m, size_m],
+        step_m,
+        max_side,
+        materials,
+        &kinds,
+        0.0,
+        scratch,
+        probe,
+    )
+}
+
+/// **Integrate the appearance of a rectangular footprint** — `size_m = [east, north]` metres — whose
+/// probes answer with a KIND of ground ([`Kinds`]), in a stated season.
+///
+/// The rectangle is what a texel of an equirectangular pyramid stands for: its east–west side shrinks
+/// with the cosine of the latitude while its north–south side does not, and a square integral over
+/// either side would sample ground outside the texel or miss ground inside it. Each axis gets its own
+/// probe count from the same rule — the data's step, capped by the budget — so the grid is as fine as
+/// the data on both axes and no finer.
+#[allow(clippy::too_many_arguments)]
+pub fn integrate_rect(
+    size_m: [f64; 2],
+    step_m: f64,
+    max_side: usize,
+    materials: &[Material],
+    kinds: &Kinds,
+    turned: f64,
+    scratch: &mut Moments,
+    probe: impl Fn(f64, f64) -> (f64, usize),
+) -> Appearance {
     scratch.clear();
-    if !(size_m > 0.0) || !(step_m > 0.0) || max_side == 0 {
+    if !(size_m[0] > 0.0) || !(size_m[1] > 0.0) || !(step_m > 0.0) || max_side == 0 {
         return Appearance::null();
     }
-    // How many gradient cells the data supports across this footprint, capped by the budget. At least
-    // one: a footprint smaller than one data step still has a defined appearance (that of its single
-    // sample), it simply has no measurable variance.
-    let want = (size_m / step_m).floor() as usize;
-    let n = want.clamp(1, max_side);
+    // How many gradient cells the data supports across this footprint on each axis, capped by the
+    // budget. At least one: a footprint smaller than one data step still has a defined appearance
+    // (that of its single sample), it simply has no measurable variance.
+    let cells = |size: f64| ((size / step_m).floor() as usize).clamp(1, max_side);
+    let (nu, nv) = (cells(size_m[0]), cells(size_m[1]));
     // The realised spacing. When the budget binds this is COARSER than the data, which sub-samples the
     // surface rather than cropping it; when the data is coarser than the footprint it is `step_m`.
-    let d = size_m / n as f64;
-    let half = size_m * 0.5;
-    // Probe grid: (n+1)² heights, so every cell has a forward neighbour on both axes.
-    let mut heights = vec![0.0f64; (n + 1) * (n + 1)];
-    let mut mats = vec![0usize; (n + 1) * (n + 1)];
-    for j in 0..=n {
-        for i in 0..=n {
-            let u = -half + i as f64 * d;
-            let v = -half + j as f64 * d;
-            let (h, m) = probe(u, v);
-            heights[j * (n + 1) + i] = h;
-            mats[j * (n + 1) + i] = m;
+    let (du, dv) = (size_m[0] / nu as f64, size_m[1] / nv as f64);
+    let (hu, hv) = (size_m[0] * 0.5, size_m[1] * 0.5);
+    // Probe grid: (nu+1)·(nv+1) heights, so every cell has a forward neighbour on both axes.
+    let row = nu + 1;
+    let mut heights = vec![0.0f64; row * (nv + 1)];
+    let mut kind = vec![0usize; row * (nv + 1)];
+    for j in 0..=nv {
+        for i in 0..=nu {
+            let u = -hu + i as f64 * du;
+            let v = -hv + j as f64 * dv;
+            let (h, k) = probe(u, v);
+            heights[j * row + i] = h;
+            kind[j * row + i] = k;
         }
     }
-    for j in 0..n {
-        for i in 0..n {
-            let h00 = heights[j * (n + 1) + i];
-            let h10 = heights[j * (n + 1) + i + 1];
-            let h01 = heights[(j + 1) * (n + 1) + i];
-            scratch.add([(h10 - h00) / d, (h01 - h00) / d], mats[j * (n + 1) + i]);
+    for j in 0..nv {
+        for i in 0..nu {
+            let h00 = heights[j * row + i];
+            let h10 = heights[j * row + i + 1];
+            let h01 = heights[(j + 1) * row + i];
+            scratch.add([(h10 - h00) / du, (h01 - h00) / dv], kind[j * row + i]);
         }
     }
-    scratch.finish(size_m * size_m, materials)
+    scratch.finish(size_m[0] * size_m[1], materials, kinds, turned)
 }
 
 /// **The appearance of the patch of SPHERE a vertex stands for.**
@@ -336,6 +435,38 @@ pub fn integrate_on_sphere(
     materials: &[Material],
     probe: impl Fn(f64, f64) -> (f64, usize),
 ) -> Appearance {
+    let kinds = pure_kinds(materials.len());
+    integrate_rect_on_sphere(
+        scratch,
+        dir,
+        radius_m,
+        [cell_m, cell_m],
+        step_m,
+        max_side,
+        materials,
+        &kinds,
+        0.0,
+        probe,
+    )
+}
+
+/// **The appearance of a rectangle of SPHERE** — `size_m = [east, north]` metres about `dir` — whose
+/// probes answer with a kind of ground, in a season. [`integrate_rect`] bound to a body with the
+/// geographic frame: `u` runs east and `v` north, which is what makes the rectangle a texel of an
+/// equirectangular grid rather than a square turned some way or other.
+#[allow(clippy::too_many_arguments)]
+pub fn integrate_rect_on_sphere(
+    scratch: &mut Moments,
+    dir: glam::DVec3,
+    radius_m: f64,
+    size_m: [f64; 2],
+    step_m: f64,
+    max_side: usize,
+    materials: &[Material],
+    kinds: &Kinds,
+    turned: f64,
+    probe: impl Fn(f64, f64) -> (f64, usize),
+) -> Appearance {
     if !(radius_m > 0.0) {
         return Appearance::null();
     }
@@ -351,22 +482,32 @@ pub fn integrate_on_sphere(
     // cover only ~3.7 km of a ~71 km segment and every vertex outside them was clamped to a 1x1 grid
     // ALREADY. The cost was never the probes; it was paying per-vertex for an integral that could not
     // have anything to say.
-    if cell_m <= step_m {
+    if size_m[0].max(size_m[1]) <= step_m {
         return Appearance::null();
     }
     let up = dir.normalize_or(glam::DVec3::Y);
-    // A tangent frame. Any frame will do — the moments are rotation-invariant in the tangent plane —
-    // so this only has to be well defined, including over the poles where `Y` is degenerate.
-    let east = up
-        .cross(glam::DVec3::Y)
+    // The GEOGRAPHIC frame: east is the direction longitude increases (`Y × up`, see
+    // `geo::dir_from_lat_lon`), north is `up × east`. Over a pole, where east is undefined, any
+    // perpendicular will do — the rectangle there is a degenerate strip of the grid anyway.
+    let east = glam::DVec3::Y
+        .cross(up)
         .try_normalize()
-        .unwrap_or_else(|| up.cross(glam::DVec3::X).normalize());
-    let north = east.cross(up).normalize();
-    integrate_footprint(cell_m, step_m, max_side, materials, scratch, |u, v| {
-        let d = (up + east * (u / radius_m) + north * (v / radius_m)).normalize();
-        let (lat, lon) = crate::geo::lat_lon_from_dir(d);
-        probe(lat, lon)
-    })
+        .unwrap_or_else(|| glam::DVec3::X.cross(up).normalize());
+    let north = up.cross(east).normalize();
+    integrate_rect(
+        size_m,
+        step_m,
+        max_side,
+        materials,
+        kinds,
+        turned,
+        scratch,
+        |u, v| {
+            let d = (up + east * (u / radius_m) + north * (v / radius_m)).normalize();
+            let (lat, lon) = crate::geo::lat_lon_from_dir(d);
+            probe(lat, lon)
+        },
+    )
 }
 
 #[cfg(test)]
