@@ -994,9 +994,29 @@ mod app {
         look: wgpu::TextureView,
         slope: wgpu::TextureView,
         mat: wgpu::TextureView,
+        /// The textures behind the views, kept so a slice of a build can be written into them.
+        look_tex: wgpu::Texture,
+        slope_tex: wgpu::Texture,
+        mat_tex: wgpu::Texture,
         levels: u32,
         /// The window it was built over; `None` for the placeholder bound before one exists.
         window: Option<crate::terra::pyramid::Window>,
+    }
+
+    /// The patch build in progress (`pyramid::Build`): when it opened and what it has cost so far,
+    /// for the completion log and the per-frame gate.
+    #[derive(Clone, Copy, Debug, Default)]
+    struct PatchBuildStats {
+        opened_s: f64,
+        frames: u32,
+        ms: f64,
+        texels: usize,
+        last_slice_ms: f64,
+        last_slice_texels: usize,
+        /// What a slice spends AFTER its deadline — re-coarsening the ancestors of the texels it
+        /// wrote and uploading the regions changed — smoothed over frames, so the next slice stops
+        /// sampling that much earlier and the frame's whole share stays inside the slice.
+        tail_ms: f64,
     }
 
     impl PyramidGpu {
@@ -1058,9 +1078,58 @@ mod app {
                 look: look.create_view(&Default::default()),
                 slope: slope.create_view(&Default::default()),
                 mat: mat.create_view(&Default::default()),
+                look_tex: look,
+                slope_tex: slope,
+                mat_tex: mat,
                 levels,
                 window: Some(p.window),
             }
+        }
+
+        /// **Write one rect of one level into the textures already on the device** — a slice of a
+        /// build arriving (`pyramid::Build::take_touched`). The texture keeps its size; only these
+        /// texels change.
+        fn write_rect(
+            &self,
+            queue: &wgpu::Queue,
+            level: u32,
+            r: crate::terra::pyramid::Rect,
+            data: &crate::terra::pyramid::Level,
+        ) {
+            if r.is_empty() || level >= self.levels {
+                return;
+            }
+            let write = |tex: &wgpu::Texture, bytes: &[u8], bpp: u32| {
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: tex,
+                        mip_level: level,
+                        origin: wgpu::Origin3d {
+                            x: r.x,
+                            y: r.y,
+                            z: 0,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    bytes,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(bpp * r.w),
+                        rows_per_image: Some(r.h),
+                    },
+                    wgpu::Extent3d {
+                        width: r.w,
+                        height: r.h,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            };
+            use crate::terra::pyramid::{
+                encode_material_rect, encode_rgba_srgb_rect, encode_slope_rect,
+            };
+            write(&self.look_tex, &encode_rgba_srgb_rect(data, r), 4);
+            write(&self.slope_tex, &encode_slope_rect(data, r), 4);
+            write(&self.mat_tex, &encode_material_rect(data, r), 1);
         }
 
         /// A single black, material-0 texel: what is bound before a pyramid exists, so the bind group
@@ -6844,14 +6913,24 @@ mod app {
     /// halving it changes the answer by less than the thing being placed.
     const GROUND_DETAIL_FLOOR_M: f64 = 0.01;
 
-    /// **How many texels the appearance PATCH may hold** (docs/73 §2a). A cost bound on the
-    /// renderer's side, like `Fidelity::instance_budget`: the patch's window is subdivided as finely
-    /// as the streamed tiles' pixels until it would exceed this, then coarsened by halves until it
-    /// fits (`pyramid::Window::covering`), so a budget coarsens the picture and never crops the
-    /// ground. The probe grid inside each texel is what `appearance_budget` sizes from the measured
-    /// build time; this bounds the number of texels that grid is run for. 128 × 128 texels over a
-    /// 3 × 3 patch of 256-pixel tiles is one texel per six tile pixels.
-    const APPEARANCE_PATCH_TEXELS: usize = 128 * 128;
+    /// **How many texels the appearance PATCH may hold** (docs/73 §2a) — a CEILING on memory, not
+    /// a dial. The patch's window is subdivided until its texel is no coarser than the streamed
+    /// tiles' pixel (`pyramid::Window::covering`), which over a 3 × 3 patch of 256-pixel tiles is
+    /// roughly 590k texels divided by the cosine of the latitude, up to four times that from the
+    /// power-of-two rounding; only past this many does the window coarsen by halves — a budget that
+    /// coarsens the picture, never crops the ground. The build's cost is one surface query per texel
+    /// and is paid in per-frame slices (`APPEARANCE_SLICE_MS`), so this bounds memory (nine bytes a
+    /// texel on the device, with mips) and nothing else. docs/46 row 95 is why it is no longer 128².
+    const APPEARANCE_PATCH_TEXELS: usize = 2048 * 1024;
+
+    /// **How much of one frame the patch build may take**, milliseconds. The build is one surface
+    /// query per texel at the data's step — there is no cheaper correct answer and no probe grid to
+    /// shrink (docs/46 row 95) — so the only honest variable is TIME: a slower machine pays the same
+    /// texels over more frames and sees the same picture later, never a coarser one. Robin's rule,
+    /// kept: *"naturally degrading on slower systems, built-in future-proofing for future
+    /// platforms"* — the degradation is latency. Three milliseconds is a fifth of a 60 Hz frame; a
+    /// rig sets 0 for unbounded (`set_appearance_slice_ms`).
+    const APPEARANCE_SLICE_MS: f64 = 3.0;
 
     /// (fixed topology) is built once. **One resolution for every scene's SEGMENT** — Terra's descent and
     /// the space band's corridor build the same surface, by the same builder, at the same density
@@ -7024,16 +7103,9 @@ mod app {
         /// generated relief each vertex may sum. Both cost frame time and both buy detail, and the only way
         /// to know the exchange rate is to move one at a time (gpu-perf §5).
         cap_octave_budget: f64,
-        /// **How many sub-samples the appearance integral may take per mesh cell, on THIS machine**
-        /// (docs/63, `resolution::WorkBudget`). Robin's rule: *"budget for textels/etc in engine should
-        /// scale based on compute/GPU capability … naturally degrading on slower systems, built-in
-        /// future-proofing for future platforms."* So it is measured from the time a rebuild actually
-        /// took rather than read off a table of device names, and it stops growing on its own once the
-        /// grid is as fine as the elevation data underneath it — at which point the integral is complete
-        /// and more samples re-read the same numbers.
-        appearance_budget: crate::resolution::WorkBudget,
-        /// Rig override for the above: non-zero pins the grid side so the stage can be priced.
-        appearance_probes_pinned: usize,
+        /// How long one frame may spend building the appearance patch, ms (`APPEARANCE_SLICE_MS`;
+        /// 0 is unbounded, for rigs that want the patch complete before they read it).
+        appearance_slice_ms: f64,
         /// ★★★ **THE GROUND'S APPEARANCE, PER PIXEL FOOTPRINT, ANCHORED TO THE WORLD** (docs/73
         /// §2a, docs/46 row 91; `terra::pyramid`). The segment mesh carries shape only; its colour,
         /// roughness and grain layer are read per fragment from these two pyramids — the globe (the
@@ -7047,11 +7119,17 @@ mod app {
         /// The kinds of ground the pyramids' probes answer with (`appearance::Kinds`): this world's
         /// land-cover class mixtures, in class order, then open water as the last entry.
         kinds: Vec<Vec<(usize, f32)>>,
-        /// The patch pyramid as built, kept natively so a test can ask a texel what it holds.
-        appearance_patch: Option<crate::terra::pyramid::Pyramid>,
-        /// What the patch was built FROM — window, tile generation, the day (season), probe side —
-        /// the cache key that names every input (the lesson of `flora::Built`, docs/46 row 52).
-        appearance_patch_key: Option<(crate::terra::pyramid::Window, u64, i64, usize)>,
+        /// **The patch pyramid, under construction or complete** (`pyramid::Build`): its texels are
+        /// built a slice per frame as tiles land, and it is kept natively so a test can ask a texel
+        /// what it holds.
+        appearance_build: Option<crate::terra::pyramid::Build>,
+        /// What the patch is built OVER — its window and the day (season): the key whose change
+        /// opens a new build (the lesson of `flora::Built`, docs/46 row 52). The tiles are not in
+        /// the key: a tile landing adds work to the build in hand rather than replacing it.
+        appearance_build_key: Option<(crate::terra::pyramid::Window, i64)>,
+        /// The tiles whose ground the build in hand has integrated or queued.
+        appearance_tiles_built: std::collections::HashSet<crate::terra::tiles::TileId>,
+        appearance_build_stats: PatchBuildStats,
         /// The day the globe pyramid's season was taken for.
         appearance_globe_key: Option<i64>,
         /// Measured: the last patch build (ms, texels) and the last globe build (ms).
@@ -7123,17 +7201,72 @@ mod app {
             lat: f64,
             lon: f64,
         ) -> Option<([f32; 3], f32, u32, [f64; 2], (f64, f64))> {
-            let p = self.appearance_patch.as_ref()?;
-            let (x, y) = p.texel_at(0, lat, lon)?;
-            let l = &p.levels[0];
-            let i = l.idx(x, y);
+            self.appearance_patch_level_at(0, lat, lon)
+        }
+
+        /// [`appearance_patch_at`](Self::appearance_patch_at) at level `l` of the pyramid: the
+        /// texel `2^l` data steps across that covers the point, with ITS size and centre.
+        pub fn appearance_patch_level_at(
+            &self,
+            l: u32,
+            lat: f64,
+            lon: f64,
+        ) -> Option<([f32; 3], f32, u32, [f64; 2], (f64, f64))> {
+            let p = &self.appearance_build.as_ref()?.pyramid;
+            if l >= p.window.levels() {
+                return None;
+            }
+            let (x, y) = p.texel_at(l, lat, lon)?;
+            let lev = &p.levels[l as usize];
+            let win = p.level_window(l);
+            let i = lev.idx(x, y);
             Some((
-                l.albedo[i],
-                l.sigma_rad(i),
-                l.material[i] as u32,
-                p.window.texel_m(self.planet_radius, y),
-                p.window.centre(x, y),
+                lev.albedo[i],
+                lev.sigma_rad(i),
+                lev.material[i] as u32,
+                win.texel_m(self.planet_radius, y),
+                win.centre(x, y),
             ))
+        }
+
+        /// Whether the patch still has texels to build.
+        pub fn appearance_pending(&self) -> bool {
+            self.appearance_build.as_ref().is_some_and(|b| b.pending())
+        }
+
+        /// How long the last frame spent on the patch build, ms, and how many texels it built.
+        pub fn appearance_last_slice(&self) -> (f64, usize) {
+            let st = &self.appearance_build_stats;
+            (st.last_slice_ms, st.last_slice_texels)
+        }
+
+        /// The patch's shape: `(w, h, levels, finest texel's north–south side in m at the window's
+        /// middle row)`.
+        pub fn appearance_patch_shape(&self) -> Option<(u32, u32, u32, f64)> {
+            let w = self.appearance_build.as_ref()?.pyramid.window;
+            Some((
+                w.w,
+                w.h,
+                w.levels(),
+                w.texel_m(self.planet_radius, w.h / 2)[1],
+            ))
+        }
+
+        /// The ground size of one held tile pixel under the camera, m.
+        pub fn tile_pixel_m(&self) -> Option<f64> {
+            self.tiles.pixel_ground_m(self.fly.lat)
+        }
+
+        /// **Finish the patch build now**, however long it takes — what a rig calls so that it reads
+        /// a complete patch (the browser never does; its frames each take a slice).
+        pub fn finish_appearance(&mut self) {
+            if !self.surface_loaded {
+                return;
+            }
+            self.refresh_appearance();
+            while self.appearance_pending() {
+                self.advance_appearance_patch(0.0);
+            }
         }
 
         /// **The appearance integral asked DIRECTLY over a footprint here**, by the same probes the
@@ -7442,25 +7575,14 @@ mod app {
                 matter,
                 flight_env,
                 cap_octave_budget: TERRA_OCTAVE_BUDGET,
-                // Start where a mid-range machine plausibly lands and let the FIRST rebuild correct
-                // it — the starting value is a seed for the loop, not a claim about the hardware. One
-                // rebuild may cost ~1.5 vsync frames: rebuilds are rare (nine in a 500 km descent) and
-                // already the largest single cost in the frame they land on.
-                // ★ The target is what a MESH REBUILD may cost, because that is what is measured —
-                // the integral is not separable from the build it runs inside without timing half a
-                // million probes individually. So the baseline mesh cost is the floor: on a machine
-                // where building the mesh ALONE exceeds this, the integral correctly collapses to its
-                // minimum, which is the graceful degradation that was asked for. Measured on a
-                // 5060 Ti: baseline rebuild 61-79 ms, so ~110 ms leaves real headroom to spend and
-                // still bounds the hitch. Lowering the BASELINE is separate open work (JOURNAL
-                // 2026-07-31: "one tier's rebuild, the floor for scheduling WHOLE tiers").
-                appearance_budget: crate::resolution::WorkBudget::new(4, 110.0),
-                appearance_probes_pinned: 0,
+                appearance_slice_ms: APPEARANCE_SLICE_MS,
                 appearance,
                 ground_pipeline,
                 kinds: Vec::new(),
-                appearance_patch: None,
-                appearance_patch_key: None,
+                appearance_build: None,
+                appearance_build_key: None,
+                appearance_tiles_built: std::collections::HashSet::new(),
+                appearance_build_stats: PatchBuildStats::default(),
                 appearance_globe_key: None,
                 appearance_cost: (0.0, 0, 0.0),
                 cam_pose: None,
@@ -7643,8 +7765,9 @@ mod app {
             self.kinds =
                 Self::kinds_table(&self.biome_mix, materials::index_of(&self.mats, "water"));
             self.appearance_globe_key = None;
-            self.appearance_patch_key = None;
-            self.appearance_patch = None;
+            self.appearance_build_key = None;
+            self.appearance_build = None;
+            self.appearance_tiles_built.clear();
             // **When this scene is set** (docs/65: time is part of the setting). A world that names an
             // epoch gets it; one that does not runs on the wall clock. Robin: *"One earth assembly.
             // Each scene can show different times, geological epochs, etc."*
@@ -7963,18 +8086,10 @@ mod app {
             self.segment_built = None;
         }
 
-        /// **Pin the appearance integral's sample grid, for PRICING it** (docs/63, docs/46 row 29).
-        ///
-        /// Normally `resolution::WorkBudget` sets this from measured time. A rig needs it PINNED
-        /// instead, because the way to find out what a stage costs is to move one thing and re-time —
-        /// not to delete the stage and re-time the whole build, which prices the deletion rather than
-        /// the stage (the gpu-perf rule). `0` hands control back to the budget.
-        ///
-        /// Cost should go as the grid AREA. If it does not, the cost is not in the probes and the
-        /// optimisation aimed at the probes would be aimed at the wrong thing.
-        pub fn set_appearance_probes(&mut self, side: u32) {
-            self.appearance_probes_pinned = side as usize;
-            self.segment_built = None;
+        /// **How much of a frame the appearance patch may take to build**, ms; `0` is unbounded,
+        /// which a rig uses to read a complete patch. The default is `APPEARANCE_SLICE_MS`.
+        pub fn set_appearance_slice_ms(&mut self, ms: f64) {
+            self.appearance_slice_ms = if ms.is_finite() { ms.max(0.0) } else { 0.0 };
         }
 
         /// **Re-centre the surface mesh on the next frame**, whatever the view cache says — a rig's
@@ -8020,11 +8135,23 @@ mod app {
         }
 
         /// **The colour and material of one POINT of ground, by the one surface rule, in season** —
-        /// what a pyramid texel holds where the texel is finer than the data under it (`surface_at`
-        /// at the data's resolution: measured ground, the water's level, the class's mixture).
+        /// what a pyramid texel holds at the data's resolution (`surface_at`: measured ground, the
+        /// water's level, the class's mixture).
         fn appearance_point(&self, lat: f64, lon: f64, epoch_s: f64) -> ([f32; 3], u16) {
             let s = self.surface_at(lat, lon, None);
             let water_idx = materials::index_of(&self.mats, "water");
+            self.appearance_of(&s, lat, epoch_s, water_idx)
+        }
+
+        /// [`appearance_point`](Self::appearance_point) for a surface already queried — so a builder
+        /// that needs the height too asks the surface once.
+        fn appearance_of(
+            &self,
+            s: &SurfaceHere,
+            lat: f64,
+            epoch_s: f64,
+            water_idx: usize,
+        ) -> ([f32; 3], u16) {
             if s.is_water || self.kinds.is_empty() {
                 return (self.mats[water_idx].albedo, water_idx as u16);
             }
@@ -8041,36 +8168,228 @@ mod app {
 
         /// **Keep the appearance pyramids current with their inputs** (docs/73 §2a). The globe is
         /// keyed on the day (its season); the patch on its window — which follows the tile patch the
-        /// camera asked for — the tiles held, the day, and the probe grid the budget allows. Nothing
-        /// here is keyed on the camera: a texel's content is a fact about the ground.
+        /// camera asked for — and the day. A tile landing is not a new patch: it is a rect of work
+        /// for the patch in hand, done a slice per frame (docs/46 row 95). Nothing here is keyed on
+        /// the camera: a texel's content is a fact about the ground.
         fn refresh_appearance(&mut self) {
             let day = self.epoch_day();
             if self.appearance_globe_key != Some(day) {
                 self.build_appearance_globe(day);
             }
-            let side = if self.appearance_probes_pinned > 0 {
-                self.appearance_probes_pinned
-            } else {
-                self.appearance_budget.side()
-            };
             let window = self.patch_window();
-            let key = window.map(|w| (w, self.tiles.generation(), day, side));
-            if key != self.appearance_patch_key {
+            let key = window.map(|w| (w, day));
+            if key != self.appearance_build_key {
                 match window {
-                    Some(w) => self.build_appearance_patch(w, side),
+                    Some(w) => self.open_appearance_patch(w, day),
                     None => {
-                        self.appearance_patch = None;
+                        self.appearance_build = None;
+                        self.appearance_tiles_built.clear();
                         self.appearance.patch = PyramidGpu::placeholder(&self.device, &self.queue);
                         self.appearance.rebind(&self.device);
                     }
                 }
-                self.appearance_patch_key = key;
+                self.appearance_build_key = key;
+            }
+            if self.appearance_build.is_some() {
+                self.queue_landed_tiles();
+                self.advance_appearance_patch(self.appearance_slice_ms);
             }
         }
 
+        /// **Open a patch build over a window**: every texel shows the globe's point sample until it
+        /// is built; the texels shared with the build before — the same ground on the same
+        /// world-anchored grid, in the same season — are adopted, and the tiles wholly inside that
+        /// shared ground stay built. The device texture is the window's size from here on; slices
+        /// write into it.
+        fn open_appearance_patch(&mut self, window: crate::terra::pyramid::Window, day: i64) {
+            let epoch = self.celestial_epoch_s();
+            let same_day = self.appearance_build_key.is_some_and(|(_, d)| d == day);
+            let old = self.appearance_build.take().map(|b| b.pyramid);
+            let mut build =
+                crate::terra::pyramid::Build::new(window, self.planet_radius, |la, lo| {
+                    self.appearance_point(la, lo, epoch)
+                });
+            let shared = match (&old, same_day) {
+                (Some(p), true) => build.adopt(p),
+                _ => None,
+            };
+            let keep: std::collections::HashSet<crate::terra::tiles::TileId> = match shared {
+                Some(r) => self
+                    .appearance_tiles_built
+                    .iter()
+                    .copied()
+                    .filter(|id| {
+                        let (s, n, w, e) = id.bounds_deg();
+                        window.rect_covering_deg(s, n, w, e).is_some_and(|t| {
+                            t.x >= r.x
+                                && t.y >= r.y
+                                && t.x + t.w <= r.x + r.w
+                                && t.y + t.h <= r.y + r.h
+                        })
+                    })
+                    .collect(),
+                None => std::collections::HashSet::new(),
+            };
+            self.appearance_tiles_built = keep;
+            self.appearance.patch = PyramidGpu::upload(
+                &self.device,
+                &self.queue,
+                "appearance-patch",
+                &build.pyramid,
+            );
+            self.appearance.rebind(&self.device);
+            build.take_touched(); // uploaded whole just now
+            self.appearance_build = Some(build);
+            self.appearance_build_stats = PatchBuildStats {
+                opened_s: crate::clock::now_seconds(),
+                ..Default::default()
+            };
+        }
+
+        /// **Every tile held that the build has not integrated becomes a rect of work**, nearest the
+        /// camera first. The rect is widened by one texel west and one south: the texel west of a
+        /// tile's edge differences its height against the tile's first column, and the row south of
+        /// it against the tile's last row, so those neighbours are rebuilt with the tile.
+        fn queue_landed_tiles(&mut self) {
+            let Some(build) = self.appearance_build.as_mut() else {
+                return;
+            };
+            let window = build.pyramid.window;
+            for id in self.tiles.held_nearest_first() {
+                if self.appearance_tiles_built.contains(&id) {
+                    continue;
+                }
+                let (s, n, w, e) = id.bounds_deg();
+                if let Some(r) = window.rect_covering_deg(s, n, w, e) {
+                    let x = r.x.saturating_sub(1);
+                    build.enqueue(crate::terra::pyramid::Rect {
+                        x,
+                        y: r.y,
+                        w: r.w + (r.x - x),
+                        h: r.h + 1,
+                    });
+                }
+                self.appearance_tiles_built.insert(id);
+            }
+        }
+
+        /// **One slice of the patch build**: texels by the one surface rule until `slice_ms` has
+        /// passed (0: until nothing is left), the ancestors of every texel touched re-coarsened, the
+        /// regions changed written to the device. Logged when the window completes, with its price.
+        fn advance_appearance_patch(&mut self, slice_ms: f64) {
+            let Some(mut build) = self.appearance_build.take() else {
+                return;
+            };
+            let t0 = crate::clock::now_seconds();
+            let was_pending = build.pending();
+            let mut stopped_at = f64::NAN;
+            let done = if was_pending {
+                // Stop sampling early by what the last slices spent after their deadline, so the
+                // whole share — samples, re-coarsening, upload — fits the slice (measured 2026-11-07:
+                // without the reserve every 3 ms slice took 3.8–4.8 ms).
+                let reserve_s = self.appearance_build_stats.tail_ms.min(slice_ms * 0.5) / 1000.0;
+                let deadline = if slice_ms > 0.0 {
+                    t0 + slice_ms / 1000.0 - reserve_s
+                } else {
+                    f64::INFINITY
+                };
+                let epoch = self.celestial_epoch_s();
+                let water_idx = materials::index_of(&self.mats, "water");
+                // Each kind's colour in season, per row: the season is the latitude's, and a row of
+                // texels shares one (the globe build's economy).
+                let n_kinds = self.kinds.len();
+                let row =
+                    std::cell::RefCell::new((f64::NAN, vec![None::<[f32; 3]>; n_kinds.max(1)]));
+                build.advance(
+                    |la, lo| {
+                        let s = self.surface_at(la, lo, None);
+                        let (albedo, material) = if s.is_water || n_kinds == 0 {
+                            (self.mats[water_idx].albedo, water_idx as u16)
+                        } else {
+                            let k = self.kind_of_class(s.class);
+                            let mut r = row.borrow_mut();
+                            if r.0 != la {
+                                r.0 = la;
+                                r.1.iter_mut().for_each(|e| *e = None);
+                            }
+                            let albedo = match r.1[k] {
+                                Some(a) => a,
+                                None => {
+                                    let a = self.appearance_of(&s, la, epoch, water_idx).0;
+                                    r.1[k] = Some(a);
+                                    a
+                                }
+                            };
+                            (albedo, s.material as u16)
+                        };
+                        crate::terra::pyramid::Sample {
+                            height_m: s.height_m,
+                            albedo,
+                            material,
+                        }
+                    },
+                    || {
+                        let now = crate::clock::now_seconds();
+                        if now >= deadline {
+                            stopped_at = now;
+                            true
+                        } else {
+                            false
+                        }
+                    },
+                )
+            } else {
+                0
+            };
+            for (l, r) in build.take_touched() {
+                self.appearance.patch.write_rect(
+                    &self.queue,
+                    l,
+                    r,
+                    &build.pyramid.levels[l as usize],
+                );
+            }
+            let end = crate::clock::now_seconds();
+            let ms = (end - t0) * 1000.0;
+            let st = &mut self.appearance_build_stats;
+            st.last_slice_ms = ms;
+            st.last_slice_texels = done;
+            if stopped_at.is_finite() {
+                let tail = (end - stopped_at) * 1000.0;
+                st.tail_ms = if st.tail_ms > 0.0 {
+                    0.5 * st.tail_ms + 0.5 * tail
+                } else {
+                    tail
+                };
+            }
+            if was_pending {
+                st.frames += 1;
+                st.ms += ms;
+                st.texels += done;
+                if !build.pending() {
+                    let w = build.pyramid.window;
+                    self.appearance_cost = (st.ms, st.texels, self.appearance_cost.2);
+                    log::info!(
+                        "appearance: patch pyramid {}x{} ({} levels, sub {}) built in {:.0} ms over {} \
+                         frames · {} texels · {:.2} µs/texel · {:.1} s after it opened",
+                        w.w,
+                        w.h,
+                        w.levels(),
+                        w.sub,
+                        st.ms,
+                        st.frames,
+                        st.texels,
+                        st.ms * 1000.0 / st.texels.max(1) as f64,
+                        crate::clock::now_seconds() - st.opened_s
+                    );
+                }
+            }
+            self.appearance_build = Some(build);
+        }
+
         /// The patch pyramid's window: the ground the asked-for tile patch covers, on the land-cover
-        /// raster's grid subdivided to about the tiles' own pixel, within the texel budget. `None`
-        /// until a patch has been asked for.
+        /// raster's grid subdivided to the tiles' own pixel, under the texel ceiling. `None` until a
+        /// patch has been asked for.
         fn patch_window(&self) -> Option<crate::terra::pyramid::Window> {
             let (lat, _, z, _) = self.tiles.want()?;
             let (lat_s, lat_n, lon_w, lon_e) = self.tiles.patch_bounds_deg()?;
@@ -8153,53 +8472,6 @@ mod app {
             );
         }
 
-        /// **Build the patch pyramid**: every texel of the window the appearance integral over the
-        /// measured ground inside it — the same probe the per-vertex integral used, `surface_at` at
-        /// the data's resolution — with the probe grid the budget allows; coarser levels by
-        /// combination. One build is one unit of the budget's work.
-        fn build_appearance_patch(&mut self, window: crate::terra::pyramid::Window, side: usize) {
-            let t0 = crate::clock::now_seconds();
-            let epoch = self.celestial_epoch_s();
-            let water_kind = self.water_kind();
-            let p = crate::terra::pyramid::Pyramid::integrated(
-                window,
-                self.planet_radius,
-                &self.mats,
-                &self.kinds,
-                side,
-                |la, lo| self.surface_at(la, lo, None).base_feature_m,
-                |la| crate::solar::senescence_fraction(la, epoch),
-                |la, lo| {
-                    let s = self.surface_at(la, lo, None);
-                    let kind = if s.is_water {
-                        water_kind
-                    } else {
-                        self.kind_of_class(s.class)
-                    };
-                    (s.height_m, kind)
-                },
-                |la, lo| self.appearance_point(la, lo, epoch),
-            );
-            let ms = (crate::clock::now_seconds() - t0) * 1000.0;
-            if self.appearance_probes_pinned == 0 {
-                self.appearance_budget.observe(side, ms);
-            }
-            self.appearance.patch =
-                PyramidGpu::upload(&self.device, &self.queue, "appearance-patch", &p);
-            self.appearance.rebind(&self.device);
-            let texels = p.levels[0].albedo.len();
-            self.appearance_cost = (ms, texels, self.appearance_cost.2);
-            log::info!(
-                "appearance: patch pyramid {}x{} ({} levels, sub {}, probe side {side}) built in \
-                 {ms:.0} ms",
-                window.w,
-                window.h,
-                p.levels.len(),
-                window.sub
-            );
-            self.appearance_patch = Some(p);
-        }
-
         /// Hand the ground shader where the eye is and where the pyramids' windows lie.
         fn write_appear_uniform(&self, eye: glam::DVec3) {
             let g = &self.appearance.globe;
@@ -8238,7 +8510,8 @@ mod app {
                 .write_buffer(&self.appearance.uni, 0, bytemuck::bytes_of(&u));
         }
 
-        /// Measured build costs: `[patch ms, patch texels, globe ms]` — for rigs and the HUD.
+        /// Measured build costs: `[patch ms (summed over its slices), patch texels built, globe ms]`
+        /// for the last patch window completed — for rigs and the HUD.
         pub fn appearance_cost(&self) -> Vec<f64> {
             vec![
                 self.appearance_cost.0,
@@ -12224,6 +12497,16 @@ first undrawable member at {:?}",
     /// ask, fetch, and again until nothing is wanted. Bounded, because a tile the set does not have is
     /// wanted forever. Returns `(rounds, tiles landed)`.
     fn land_the_tiles(terra: &mut app::Terra, cache: &str) -> (usize, usize) {
+        let (rounds, landed) = land_the_tiles_unfinished(terra, cache);
+        // A browser that has finished loading has also finished the appearance patch its tiles
+        // feed (a slice per frame, docs/46 row 95); a gate reads the complete patch.
+        terra.finish_appearance();
+        (rounds, landed)
+    }
+
+    /// [`land_the_tiles`] without finishing the appearance patch — for the gate that watches the
+    /// patch arrive in slices.
+    fn land_the_tiles_unfinished(terra: &mut app::Terra, cache: &str) -> (usize, usize) {
         let mut landed = 0usize;
         for round in 0..6 {
             for _ in 0..2 {
@@ -12818,6 +13101,9 @@ first undrawable member at {:?}",
             if recentre {
                 terra.rebuild_surface();
             }
+            // The patch for this pose, complete, before the frames that are measured.
+            terra.render().expect("a frame");
+            terra.finish_appearance();
             for _ in 0..3 {
                 terra.render().expect("a frame");
             }
@@ -12995,12 +13281,16 @@ first undrawable member at {:?}",
     }
 
     /// ★★ **A PATCH TEXEL IS THE INTEGRAL OVER ITS OWN FOOTPRINT** — docs/73 §5 step 2's clause,
-    /// "with the vertex integral kept as the reference it must equal". The pyramid is built by the
-    /// same probes the per-vertex integral used (`Terra::surface_at` at the data's resolution), so
-    /// asking that integral directly over a texel's footprint, with a probe grid at least as fine,
-    /// must give the texel back: colour, roughness and material. Where the data is coarser than the
-    /// texel both must be the point sample. Over Galway with the shore's tiles landed, so the texels
-    /// hold sea, land and the mixtures between. `#[ignore]`: needs a GPU and the network.
+    /// "with the vertex integral kept as the reference it must equal". The finest texel is at the
+    /// data's step, so it IS the point sample the direct integral collapses to there — the same
+    /// function, equal exactly. A coarser texel is the exact combination of the texels under it
+    /// (`pyramid::coarsen`, the law of total variance), and the direct integral over the same
+    /// footprint, probed at the data's step, agrees with it up to the half-texel offset between the
+    /// two lattices (the pyramid differences texel centres, the integral differences cell corners):
+    /// printed, and bounded loosely, because that offset is real and a tight number would be a
+    /// tolerance someone chose. Asserted tightly: the point equality at level 0, that the coarser
+    /// levels carry a roughness over Clew Bay's relief at all (docs/46 row 95: the probe budget had
+    /// left every texel at zero), and the shore's mixture. `#[ignore]`: needs a GPU and the network.
     #[test]
     #[ignore]
     fn the_patch_texel_is_the_integral_over_its_footprint() {
@@ -13026,17 +13316,31 @@ first undrawable member at {:?}",
         terra.set_alt_bounds(0.05, 8.0e10);
         terra.set_epoch_sun_over_lon(lon);
         terra.set_draw_flora(false);
-        // The budget must not have sub-sampled the texels this compares, or the comparison would be
-        // between two estimates: pin the probe grid to the data.
-        terra.set_appearance_probes(16);
         terra.place_camera(lat, lon, 300.0, 0.0, -1.2);
         land_the_tiles(&mut terra, &cache);
         for _ in 0..3 {
             terra.render().expect("a frame");
         }
+        assert!(
+            !terra.appearance_pending(),
+            "the patch is complete before it is read"
+        );
+        let (pw, ph, levels, texel_m) = terra.appearance_patch_shape().expect("a patch");
+        let px_m = terra.tile_pixel_m().expect("tiles held");
+        println!(
+            "patch over Clew Bay: {pw}x{ph} texels, {levels} levels, finest texel {texel_m:.1} m \
+             against a {px_m:.1} m tile pixel"
+        );
+        assert!(
+            texel_m <= px_m * 1.0001,
+            "the finest texel ({texel_m:.1} m) is coarser than the data ({px_m:.1} m)"
+        );
         let water_idx = materials::index_of(&crate::materials::load(), "water") as u32;
         let (mut checked, mut water, mut land, mut mixed) = (0usize, 0usize, 0usize, 0usize);
-        let (mut worst_albedo, mut worst_sigma) = (0.0f32, 0.0f32);
+        let mut worst_albedo = 0.0f32;
+        let (mut l2_checked, mut l2_rough) = (0usize, 0usize);
+        let (mut l2_worst_albedo, mut l2_worst_log_sigma) = (0.0f32, 0.0f64);
+        let mut l2_mixed = 0usize;
         // A grid of points across the shore: 1.5 km each way in 100 m steps. Each point names the
         // texel under it, and the integral is asked over THAT texel's footprint at its own centre.
         let m_per_deg_lat = std::f64::consts::PI * crate::planet::earth().radius() / 180.0;
@@ -13049,9 +13353,6 @@ first undrawable member at {:?}",
                 else {
                     continue;
                 };
-                // The same probe grid the pyramid was pinned to (`set_appearance_probes(16)`): a
-                // finer grid would be a different estimate of the same footprint, and the
-                // texels here (90 × 153 m over 3–11 m tile pixels) are budget-bound on both sides.
                 let (d_albedo, d_sigma, d_material) =
                     terra.appearance_integral_at(cla, clo, size_m, 16);
                 checked += 1;
@@ -13060,46 +13361,211 @@ first undrawable member at {:?}",
                 } else {
                     land += 1;
                 }
-                // A texel on the shore holds both: its colour is neither pure water nor pure land.
-                let w = crate::materials::load()[water_idx as usize].albedo;
-                if material == water_idx && (albedo[1] - w[1]).abs() > 1e-3 {
-                    mixed += 1;
-                }
                 for c in 0..3 {
                     worst_albedo = worst_albedo.max((albedo[c] - d_albedo[c]).abs());
                 }
-                if (sigma - d_sigma).abs() > worst_sigma {
-                    println!(
-                        "  texel at ({cla:.5}, {clo:.5}) {size_m:?} m: pyramid {albedo:?} σ {sigma:.4} \
-                         m{material} · direct {d_albedo:?} σ {d_sigma:.4} m{d_material}"
-                    );
-                }
-                worst_sigma = worst_sigma.max((sigma - d_sigma).abs());
                 assert_eq!(
                     material, d_material,
                     "texel at ({cla:.5}, {clo:.5}) names material {material}, the integral {d_material}"
                 );
+                assert_eq!(
+                    sigma, 0.0,
+                    "at the data's step a texel is one point: no variance"
+                );
+                assert_eq!(d_sigma, 0.0, "and the direct integral says the same there");
+                // Four data steps across: the combination against the direct integral.
+                if let Some((a2, s2, m2, size2, (c2la, c2lo))) =
+                    terra.appearance_patch_level_at(2, la, lo)
+                {
+                    let (da2, ds2, _) = terra.appearance_integral_at(c2la, c2lo, size2, 16);
+                    l2_checked += 1;
+                    if s2 > 0.0 {
+                        l2_rough += 1;
+                    }
+                    let w = crate::materials::load()[water_idx as usize].albedo;
+                    if m2 == water_idx && (a2[1] - w[1]).abs() > 1e-3 {
+                        l2_mixed += 1;
+                    }
+                    for c in 0..3 {
+                        l2_worst_albedo = l2_worst_albedo.max((a2[c] - da2[c]).abs());
+                    }
+                    if s2 > 0.02 && ds2 > 0.02 {
+                        l2_worst_log_sigma =
+                            l2_worst_log_sigma.max((s2 as f64 / ds2 as f64).ln().abs());
+                    }
+                }
             }
         }
+        mixed += l2_mixed;
         println!(
-            "patch texels over Clew Bay: {checked} points, {water} water-led ({mixed} of them mixed \
-             with land), {land} land-led · worst albedo difference {worst_albedo:.5} · worst sigma \
-             difference {worst_sigma:.5} rad"
+            "patch texels over Clew Bay: {checked} points, {water} water-led, {land} land-led · \
+             level 0 vs the point sample: worst albedo difference {worst_albedo:.2e} · level 2 \
+             ({l2_checked} texels, {l2_rough} with a roughness, {l2_mixed} water-led texels mixed \
+             with land) vs the direct integral at the data's step: worst albedo difference \
+             {l2_worst_albedo:.4}, worst sigma ratio e^{l2_worst_log_sigma:.3}"
         );
         assert!(checked > 0, "the patch covers the gun site");
         assert!(
             water > 0 && land > 0,
             "a shore holds both sea and land: {water} water, {land} land"
         );
-        // The same probes on the same grid: equal to the texture's own precision, not to a
-        // tolerance anyone chose (f32 accumulation over at most 17² probes).
+        // `mixed` is printed, not asserted: at 2.4 m texels a 100 m sampling grid rarely lands on
+        // the few shore texels that hold both, and a count of zero says so about the grid.
+        let _ = mixed;
+        // The same function at the same point: equal, not close.
         assert!(
-            worst_albedo < 1.0e-3,
-            "a patch texel's colour differs from the integral over its footprint by {worst_albedo}"
+            worst_albedo < 1.0e-6,
+            "a finest texel's colour differs from its point sample by {worst_albedo}"
         );
         assert!(
-            worst_sigma < 1.0e-3,
-            "a patch texel's roughness differs from the integral over its footprint by {worst_sigma}"
+            l2_rough * 2 >= l2_checked,
+            "at four data steps across, {l2_rough} of {l2_checked} texels carry a roughness — the \
+             relief of Clew Bay is not in the pyramid (docs/46 row 95)"
+        );
+        // The two lattices differ by half a texel; a shore texel can differ by a sliver of water.
+        assert!(
+            l2_worst_albedo < 0.08,
+            "a level-2 texel's colour differs from the integral over its footprint by {l2_worst_albedo}"
+        );
+        assert!(
+            l2_worst_log_sigma < std::f64::consts::LN_2,
+            "a level-2 texel's roughness differs from the integral's by a factor e^{l2_worst_log_sigma:.3}"
+        );
+    }
+
+    /// ★★ **THE PATCH ARRIVES IN SLICES, AND NO FRAME PAYS MORE THAN ONE** (docs/46 row 95). The
+    /// patch over 7 km of Kamchatka is built with the engine's own per-frame slice, frame after
+    /// frame, every frame's share measured; then the same patch is built unbounded in a second
+    /// engine and the two are compared texel for texel at every level. Asserted: no frame spent more
+    /// than the slice plus the bounded overrun (one chunk of samples past the deadline, and the
+    /// clock's resolution); the build took many frames; the sliced patch equals the unbounded one
+    /// exactly; the finest texel is no coarser than the tiles' pixel. Printed: the window, frames,
+    /// texels and µs per texel — the price docs/73 §7 carries. `#[ignore]`: needs a GPU and the tiles.
+    #[test]
+    #[ignore]
+    fn the_patch_arrives_in_slices_and_no_frame_pays_more_than_one() {
+        let (lat, lon, alt) = (54.34f64, 158.23f64, 7000.0f64);
+        let cache = std::env::var("TILE_CACHE").unwrap_or_else(|_| "/tmp/terrarium-tiles".into());
+        std::fs::create_dir_all(&cache).expect("a tile cache directory");
+        let slice_ms = 3.0;
+        let open = |slice: f64| {
+            let (json, lm, ev, lc) = shipped_earth();
+            let mut terra =
+                pollster::block_on(app::Terra::headless(320, 200)).expect("headless Terra");
+            terra
+                .load_world(
+                    &json,
+                    &lm.data,
+                    lm.w as u32,
+                    lm.h as u32,
+                    &ev.data,
+                    ev.w as u32,
+                    ev.h as u32,
+                    &lc.data,
+                    lc.w as u32,
+                    lc.h as u32,
+                )
+                .expect("the shipped Earth loads");
+            terra.set_alt_bounds(0.05, 8.0e10);
+            terra.set_epoch_sun_over_lon(lon);
+            terra.set_draw_flora(false);
+            terra.set_appearance_slice_ms(slice);
+            terra.place_camera(lat, lon, alt, 0.0, -1.5);
+            terra
+        };
+        let mut sliced = open(slice_ms);
+        land_the_tiles_unfinished(&mut sliced, &cache);
+        let (mut frames, mut max_slice, mut sum_slice) = (0u32, 0.0f64, 0.0f64);
+        let mut slices: Vec<(f64, usize)> = Vec::new();
+        while sliced.appearance_pending() {
+            sliced.render().expect("a frame");
+            let (ms, n) = sliced.appearance_last_slice();
+            frames += 1;
+            max_slice = max_slice.max(ms);
+            sum_slice += ms;
+            slices.push((ms, n));
+            assert!(frames < 200_000, "the patch never finishes");
+        }
+        let shown: Vec<String> = slices
+            .iter()
+            .take(12)
+            .map(|(ms, n)| format!("{ms:.1}ms/{n}"))
+            .collect();
+        let worst = slices
+            .iter()
+            .cloned()
+            .fold((0.0f64, 0usize), |a, b| if b.0 > a.0 { b } else { a });
+        println!(
+            "patch slices (ms/texels): first {} · worst {:.1} ms building {} texels",
+            shown.join(" "),
+            worst.0,
+            worst.1
+        );
+        let cost = sliced.appearance_cost();
+        let us_per_texel = cost[0] * 1000.0 / cost[1].max(1.0);
+        let (w, h, levels, texel_m) = sliced.appearance_patch_shape().expect("a patch");
+        let px_m = sliced.tile_pixel_m().expect("tiles held");
+        println!(
+            "patch in slices @ 7 km over Kamchatka: {w}x{h} texels, {levels} levels, finest texel \
+             {texel_m:.1} m against a {px_m:.1} m tile pixel · {} texels built over {frames} frames · \
+             {sum_slice:.0} ms of build, {us_per_texel:.2} µs/texel · largest frame share \
+             {max_slice:.2} ms against a {slice_ms:.1} ms slice",
+            cost[1]
+        );
+        // What a slice may overrun by: one chunk of samples past the deadline (the deadline is
+        // looked at every chunk), and the clock's own resolution.
+        let overrun_ms =
+            1.0 + 2.0 * crate::terra::pyramid::BUILD_CHUNK as f64 * us_per_texel / 1000.0;
+        assert!(
+            max_slice <= slice_ms + overrun_ms,
+            "a frame spent {max_slice:.2} ms on the patch; the slice is {slice_ms} ms and the \
+             overrun bound {overrun_ms:.2} ms"
+        );
+        assert!(
+            frames > 3,
+            "the build took {frames} frames — it was not sliced"
+        );
+        assert!(
+            texel_m <= px_m * 1.0001,
+            "the finest texel ({texel_m:.1} m) is coarser than the data ({px_m:.1} m)"
+        );
+        // Unbounded, in a second engine: the same patch, texel for texel, at every level.
+        let mut whole = open(0.0);
+        land_the_tiles(&mut whole, &cache);
+        for _ in 0..3 {
+            whole.render().expect("a frame");
+        }
+        assert!(!whole.appearance_pending());
+        assert_eq!(
+            whole.appearance_patch_shape(),
+            Some((w, h, levels, texel_m))
+        );
+        let m_per_deg_lat = std::f64::consts::PI * crate::planet::earth().radius() / 180.0;
+        let mut compared = 0usize;
+        for l in 0..levels {
+            for j in -12..=12 {
+                for i in -12..=12 {
+                    let la = lat + (j as f64 * 400.0) / m_per_deg_lat;
+                    let lo = lon + (i as f64 * 400.0) / (m_per_deg_lat * lat.to_radians().cos());
+                    let a = sliced.appearance_patch_level_at(l, la, lo);
+                    let b = whole.appearance_patch_level_at(l, la, lo);
+                    assert_eq!(
+                        a.is_some(),
+                        b.is_some(),
+                        "level {l} covers ({la}, {lo}) in one build only"
+                    );
+                    if let (Some(a), Some(b)) = (a, b) {
+                        assert_eq!(a.0, b.0, "level {l} albedo at ({la:.4}, {lo:.4})");
+                        assert_eq!(a.1, b.1, "level {l} sigma at ({la:.4}, {lo:.4})");
+                        assert_eq!(a.2, b.2, "level {l} material at ({la:.4}, {lo:.4})");
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        assert!(compared > 100, "compared {compared} texel reads");
+        println!(
+            "sliced and unbounded builds agree at {compared} texel reads over {levels} levels"
         );
     }
 

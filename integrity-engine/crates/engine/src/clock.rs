@@ -56,9 +56,10 @@ impl StepClock {
 
 /// **Wall-clock seconds, on either target — the engine's one answer to "what time is it now".**
 ///
-/// Public because measuring how long work took is a second, legitimate caller (see
-/// `resolution::WorkBudget`), and a module that needed a clock and could not reach this one would
-/// write its own — which is how two clocks that disagree get into a codebase (Law II).
+/// Public because measuring how long work took is a second, legitimate caller (the appearance
+/// patch's per-frame slice, `Terra::advance_appearance_patch`), and a module that needed a clock and
+/// could not reach this one would write its own — which is how two clocks that disagree get into a
+/// codebase (Law II).
 ///
 /// Resolution is a millisecond on wasm (`Date::now`). That is ample for differences of tens of
 /// milliseconds; anything needing finer would want `performance.now` and should say so here rather
