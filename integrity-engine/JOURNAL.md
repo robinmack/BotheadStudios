@@ -3,6 +3,26 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-11-07 — the gallery keeps what it has
+
+**What.** Robin: *"we should not be removing items from the gallery with deployments."* `publish-shots.sh`
+is now additive: a publish adds what the sources hold, refreshes a shot that already exists under the
+same name, and never removes a shot because the sources no longer mention it. The only removal left is
+the size bound (`SHOTS_KEEP`, default 160), applied to the whole gallery newest-first, and it names every
+shot it drops. A deliberate removal is an `rm` in the live directory followed by a re-run for the manifest.
+
+**Why.** The 2026-10-24 entry below closed the EMPTY-sources door. The other door was still open: with
+anything at all under `/tmp/rigshot`, the script "started clean" and the gallery became whatever the
+last rig had happened to leave in `/tmp` — a directory that does not survive a reboot. The live
+directory is the only copy of most of what it shows, so every deploy was re-deciding the gallery's
+contents from the wrong place. Today's republish had to stage the live haystack files as a source to
+avoid losing them while adding the descent ladder (28), the shore ladder (9), the camera-move frames (4)
+and the row-95 evidence frames (9); 52 files before, 102 after, every haystack file still present.
+
+**Verified.** Against a scratch gallery: a shot only the gallery holds survives a publish; a same-named
+shot is refreshed; `SHOTS_KEEP=3` drops the two oldest and names them; empty sources leave everything
+untouched. The live run printed its before/after counts and the manifest serves 102 rows.
+
 ## 2026-11-07 — the patch arrives in slices, at the data's step (docs/46 row 95)
 
 **What.** Step 2 deployed (`340b471`), the appearance pyramids were priced on the live site, and the
