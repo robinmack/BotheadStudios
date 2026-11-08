@@ -332,10 +332,12 @@ texture that was already being drawn there"* — stops being a property the runt
 have and becomes **the rule the file is built by**. Any node can be recomputed from its children and
 must reproduce itself, which is the strongest form the invariant can take: structural, not asserted.
 
-It also retires the sampling budget for the elevation half. `resolution::WorkBudget` exists because the
-runtime integral SUB-SAMPLES a footprint it cannot afford to read completely. A node read from the
-quadtree is the COMPLETE integral over that patch, computed once, exactly. The budget stays for whatever
-is still derived live; the measured surface stops needing it.
+It also retires the sampling budget for the elevation half — and since 2026-11-07 that budget is gone
+altogether. `resolution::WorkBudget` existed because the runtime integral SUB-SAMPLED a footprint it
+could not afford to read completely; docs/46 row 95 found it coarsening probes that were not the cost,
+and the appearance patch now reads every data cell under it once, at the data's own step, in per-frame
+slices (`terra::pyramid::Build`). A node read from the quadtree is the COMPLETE integral over that
+patch, computed once, exactly — the same rule, stored instead of rebuilt.
 
 ### ★ Every body reserves a SURF slot, and SURF must never speak of "biomes"
 

@@ -389,6 +389,18 @@ impl TileStore {
         }
     }
 
+    /// The tiles held that measure ground (not void), nearest the patch's centre first — the order
+    /// the appearance patch integrates them in (docs/46 row 95).
+    pub fn held_nearest_first(&self) -> Vec<TileId> {
+        match self.want {
+            None => Vec::new(),
+            Some((lat, lon, z, r)) => tiles_around(lat, lon, z, r)
+                .into_iter()
+                .filter(|id| self.tiles.get(id).is_some_and(|t| !t.void))
+                .collect(),
+        }
+    }
+
     /// The tiles the current patch needs that are not held yet, nearest first.
     pub fn missing(&self) -> Vec<TileId> {
         match self.want {

@@ -22,6 +22,46 @@ and the row-95 evidence frames (9); 52 files before, 102 after, every haystack f
 **Verified.** Against a scratch gallery: a shot only the gallery holds survives a publish; a same-named
 shot is refreshed; `SHOTS_KEEP=3` drops the two oldest and names them; empty sources leave everything
 untouched. The live run printed its before/after counts and the manifest serves 102 rows.
+## 2026-11-07 — the patch arrives in slices, at the data's step (docs/46 row 95)
+
+**What.** Step 2 deployed (`340b471`), the appearance pyramids were priced on the live site, and the
+price showed a defect: over nine rebuilds of one window the patch's probe budget walked its grid from
+4 to 1 while the build took 302 → 471 ms. The cost was per texel, not per probe, so the budget was
+coarsening the wrong thing, could never grow back, and settled where a texel is one gradient cell with
+zero variance — the roughness channel empty wherever the budget governed (docs/46 row 95). Robin:
+*"Make it so."* The budget is gone. The patch's finest texel is now at the tiles' own pixel, one
+surface query each with its gradient the difference to its neighbours, every coarser level the exact
+combination; it is built a 3 ms slice per frame as tiles land (`terra::pyramid::Build`), the ancestors
+of every texel re-coarsened and the regions changed uploaded as sub-rects before the slice ends; a
+window that moves adopts what it shares with the one before; an unbuilt texel shows what the globe
+shows. Resolution follows the data; latency, not blur, is what a slower machine pays.
+
+**Measured first, with gates that failed.** The first run of
+`the_patch_arrives_in_slices_and_no_frame_pays_more_than_one` produced a 1024² window of 19 m texels
+against a 5.6 m pixel: a window had been aligned to whole 19.5 km base texels, so a 4.3 km tile patch
+cost a 19.5 km window and the texel ceiling coarsened it 3.4× below the data. Windows now align to
+their own coarsest texel (`PATCH_LEVELS` = 8) — the second run gave 1536 × 1024 texels of 4.8 m. The
+same gate then found every 3 ms slice taking 3.8–4.8 ms: the re-coarsening and upload after the
+deadline; the deadline is now brought forward by what the last slices spent after it, and the worst
+frame share is 3.77 ms.
+
+**Verified.** Natively on the 5060 Ti: Kamchatka 7 km, 1,387,276 texels over 505 frames at
+1.14 µs/texel, the sliced patch bit-identical to one built unbounded at 1,056 texel reads over 8
+levels; Clew Bay 300 m, 2.4 m texels against 2.8 m pixels, the finest texel equal to its point sample
+to 1.2e-7, 395 of 525 level-2 texels carrying a roughness where there had been none, level-2 colour
+equal to the direct integral at the data's step. All 16 GPU picture gates pass; the suite is 700/0.
+In the browser (release wasm, local vite): the globe 1.11 s; the same Kamchatka patch 1,387,276
+texels over 1,169 frames at 2.72 µs/texel, 3.77 s of work at ~3 ms a frame, complete 7.0 s after the
+window opened; the start pose's 564k-texel window 1.3 s over 357 frames. The frames at 7 km and 500 m
+over Kamchatka match the native control: class blocks, the relief square, the instance disc, no fan,
+and the ground under the eye now carries the tiles' own texture.
+
+**Seen, not attributed.** Two things the finer texture now shows, seen in the native descent frames and the browser alike, NOT attributed by a control: (1) from 7 km straight down, the tile-patch square is divided by its diagonals into four wedges shaded differently — consistent with the tile→raster fade's own shape (a weight falling across the outermost tile in a max-norm has creases along the diagonals, and the slope of that ramp is now resolved at 4.8 m where the slope channel used to be empty); (2) at 500 m over flat sand, a staircase of diagonal ridges — consistent with the elevation data's vertical quantum (metre steps across 2.8 m pixels, a 20° facet each) shaded at the data's own step. Both are shapes the surface rule already had; the picture is now fine enough to show them. The remedies are not in the pyramid: the fade is docs/46 row 89's declared stand-in, and a gradient on quantised data wants a footprint the quantum supports — Robin's calls.
+
+**Named, not fixed.** The handoff to the globe is at the patch's coarsest texel now (128 finest
+texels), the same seam as before, nearer; the CPU copy of a 1.4M-texel patch is ~36 MB in the browser;
+the globe's 1.1 s build still blocks the first frame once; the texel grid is isotropic in degrees, so
+east–west texels are finer than the data by 1/cos(lat).
 
 ## 2026-11-02 — the ground is coloured per pixel, not per vertex (docs/73 step 2)
 
