@@ -22,6 +22,7 @@ and the row-95 evidence frames (9); 52 files before, 102 after, every haystack f
 **Verified.** Against a scratch gallery: a shot only the gallery holds survives a publish; a same-named
 shot is refreshed; `SHOTS_KEEP=3` drops the two oldest and names them; empty sources leave everything
 untouched. The live run printed its before/after counts and the manifest serves 102 rows.
+
 ## 2026-11-07 — the patch arrives in slices, at the data's step (docs/46 row 95)
 
 **What.** Step 2 deployed (`340b471`), the appearance pyramids were priced on the live site, and the
