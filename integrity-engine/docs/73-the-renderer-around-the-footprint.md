@@ -183,15 +183,13 @@ closed form to be measured against (A) later, kept only if it agrees within the 
      the season at that latitude), eleven levels to two texels for the planet, built once per day of
      scene time (~0.8 s natively at load; **1.12 s on the live site's release wasm**, measured 2026-11-07;
      4.7 s in a `--dev` wasm). The **patch** is
-     a window over the ground the streamed tile patch covers, on the same grid subdivided to about
-     the tiles' pixel and capped at 128² texels (`Window::covering` coarsens by halves to fit — a
-     budget coarsens the picture, never crops it), every texel `integrate_rect_on_sphere` over the
-     measured ground inside it with the probe grid `appearance_budget` allows (one build is one unit
-     of the budget's work: 210–330 ms at a side of 4 on the 5060 Ti, so the budget settles lower —
-     measured 2026-11-07 on the live site it settles at 1 and the build does not get cheaper, because
-     the cost is per texel, not per probe, and a one-cell texel has zero roughness: docs/46 row 95),
-     its coarsest level the globe's finest; rebuilt only when its window, the tiles held, the day or
-     the probe grid change (`TileStore::generation`). Each texel holds albedo (8-bit sRGB, filtered in
+     a window over the ground the streamed tile patch covers, on the same grid subdivided to the
+     tiles' own pixel (`Window::covering`, under a 2M-texel memory ceiling; the window aligned to
+     its own coarsest texel, `PATCH_LEVELS` = 8, not to the base grid), every finest texel ONE
+     surface query with its gradient the difference to its neighbours, every coarser level the exact
+     combination, built a 3 ms slice per frame as tiles land and adopted across window moves
+     (`pyramid::Build`; docs/46 row 95 — as first built it was 128² texels, each the integral under a
+     probe budget, and the budget coarsened the probes to one cell without the cost moving). Each texel holds albedo (8-bit sRGB, filtered in
      linear light), the RMS slope angle (alpha), the mean gradient (half floats) and the dominant
      material (an integer texture, unfiltered).
    - The fragment recovers its place on the body from its camera-relative position and the eye, its
@@ -261,12 +259,17 @@ state — which is exactly why §5 does the in-place steps first.
   the patch is 128² and negligible. **Priced 2026-11-07 on the live site** (release wasm, `340b471`,
   5060 Ti) with `web/rig/appearance_cost.mjs` reading the engine's own "appearance: … built in N ms"
   lines: the globe builds in **1.12 s** (0.8 s natively; 4.7 s in a `--dev` wasm, so price the release
-  build or price nothing), once per day of scene time, on the main thread. The patch is **0.27–0.47 s
-  per build and is rebuilt on every tile arrival** — nine builds in the first 3.6 s at the start pose,
-  4.5 s of build in the first 22 s — and the probe budget walked to a side of 1 without the cost
-  moving, which is docs/46 row 95: the cost is per texel, the budget coarsens the probes, and a
-  one-cell texel carries no roughness. The thing to budget is the texel count, and the thing to avoid
-  is re-integrating the whole window for one tile.
+  build or price nothing), once per day of scene time, on the main thread. The patch, as first built
+  (128² texels, each an integral under a probe budget, the window re-integrated whole on every tile
+  arrival), was **0.27–0.47 s per build and rebuilt nine times in 3.6 s** while the budget walked to a
+  side of 1 without the cost moving — docs/46 row 95. As built now (`pyramid::Build`) the patch is at
+  the data's step and arrives in 3 ms slices: natively 1.39M texels of 4.8 m over 7 km of Kamchatka in
+  505 frames at 1.14 µs/texel, no frame's share over 3.8 ms; in the browser (release wasm, local, 2026-11-07) the globe is 1.11 s and the same patch is
+  1,387,276 texels over 1,169 frames at 2.72 µs/texel, 3.77 s of work at ~3 ms a frame, complete
+  7.0 s after the window opened at the rig's frame rate (at 60 Hz, ~19 s to the last and farthest
+  tile; the nearest is first). The remaining costs are
+  memory — ~26 bytes a texel on the CPU for the moments (f32) and nine on the device, 36 MB + 12 MB
+  for 1.4M texels — and the globe's one-off build.
 - **A bake is a cache**, and this engine has been bitten by caches the model could not correct
   (`flora::Built`). Every level must be keyed on everything that changes the answer: season, damage,
   the tiles held.
