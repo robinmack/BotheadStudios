@@ -1311,6 +1311,9 @@ pub(crate) const SCENE_API_DEBT: &[&str] = &[
     "tile_count",
     "time_scale_value",
     "trail_mass_kg",
+    // The watcher's own account of where it stands — pose, sky, what is drawn, what the stream
+    // held — for the numbered screenshot's record (docs/29): a read, general to every world.
+    "view_state_json",
     "world_name",
     "zoom_alt",
 ];

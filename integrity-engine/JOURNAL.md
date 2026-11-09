@@ -3,6 +3,65 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-11-08 — the two shapes: a cliff ring to the raster, and the source's metre terraces (rows 96, 97)
+
+**What.** Robin: *"Two shapes: please go ahead."* The patch at the data's step (row 95) had made two
+shapes visible; both are taken apart with the engine's own readbacks and closed. **The hourglass at
+7 km** was the tile patch's fade to the 19.5 km raster: the raster's texel says 552 m where the tiles
+say 232 m, so the outer tiles were a skirt of slope 0.34 around ground of 0.04, and the fade's
+`smoothstep(min(distances))` creased it along each corner tile's diagonal (the drawn slope jumped
+0.49 there against 0.014 elsewhere). The tiles are now a stack of rings — 3×3 patches every four zooms
+down to zoom 4 — each fading to the ring beneath; the fade's distance is a smooth minimum. After: the
+finest ring fades into 231.5 m, the ramp term is 0.0019, the jump 0.010 against 0.0045 (docs/46 row 97).
+**The ridges at 500 m** were the elevation source's whole-metre terraces: the engine's own heights ran
+flat at exactly 240.00 m for eight texels and 241.00 m for thirty. The quantum is now measured from each
+tile and the surface is the smoothest within ±½ quantum of the data — the mean over the box that spans
+one quantum of rise, clamped to the band, reaching into the neighbours, re-smoothed a band per frame as
+they land. After: no tread–riser–tread step remains along 640 texels where the data show three, and the
+surface is within 0.500 m of the measurement everywhere (row 96). Both frames before and after are staged
+for the gallery under `two-shapes`. **Still in the 7 km frame, before and after, and not attributed:** a
+straight north–south colour seam about 2 km west of the eye, the ground west of it a shade darker — present
+in the "before" frame too, so not these rows' doing; a class or texel boundary of the land cover is the
+first thing to check.
+
+**Three things the picture gates then found, once the rings existed.** The row 89 spike gate went red at
+the Alps — slope 8.6 at 1 km with every tile held — and the readback said why: the measured term was
+the same at both ends of the edge and the GENERATED term flipped by 4.65 m over half a metre. The relief
+law was fed the blend's one "feature size", which the rings slide geometrically across a fade, and its
+resolved-or-not threshold slid with it (row 89's trap in a new coat: a ladder that moves with the blend).
+It now takes the stack of datums and erases each rung by `Π(1 − wᵢ)` over the rings that resolve it
+(8.6 → 1.13, a real 45° face). The same gate then named terra's start at 50 km — 20.5 m over 3.7 m with
+half the tiles: a one-pixel step at every INNER seam of a ring, because each tile's bilinear clamped at
+its own edge; invisible at 5 m pixels, 20 m tall at the coarsest ring's 9 km. The ring is now sampled
+across tile edges (5.59 → 0.037). And the Clew Bay texel gate found a texel naming grass over an integral
+of water: the appearance patch integrated only the finest ring's tiles and forgot a texel only when its
+OWN tile changed. Every ring is integrated now, a coarser tile's rect less what the finer ring covers in
+full, and a change to any tile forgets the appearance over it and the finer tiles above it — not the coarser
+beneath, whose texels under it are its own to build; forgetting those too rebuilt the whole window at every
+landing (41 M texels for 5.5 M) and turned the slices gate red before this was written. Two more from that
+gate: a band smoothed again now rebuilds the appearance under exactly that band, and only when its surface
+moved (a coarse ring over hills comes back identical); and the patch build sampled a rect's NORTH row whole
+with no look at the clock — 1,537 samples for a window-wide ring's rect, 3 ms past the deadline — so it is
+now chunked against the deadline like every texel and resumes across slices. After: 9.7 M texels over 6,107
+frames, worst frame 3.93 ms on a 3 ms slice (bound 4.96), from 41.3 M over 24,331 frames and 5.32 ms.
+
+**Also.** Robin: *"a Screenshot button … a number for the shot, the client's view, and the coordinates,
+heading, attitude, etc so we can confidently reproduce what the user is seeing."* The Send Shot button is
+now 📷 Screenshot: numbered, saved with a record — the engine's `view_state_json()` plus build, page and
+viewport — on the dev server, or downloaded as two files on the public site; `restore_view_json` and
+`web/rig/reproduce_shot.mjs` stand the engine in front of it again; `scripts/shot-receiver.py` is the
+receiver for the live host, not wired (docs/29).
+
+**Verified.** 17 tile unit tests; the two new picture gates `the_patch_has_no_skirt_and_no_crease` and
+`the_terraces_are_smoothed_within_the_quantum`; the suite; `mod app` for wasm32; the 19 picture gates run
+serially (see the PR for the run). **One gate fails, and not from this branch:**
+`a_haystack_forms_on_earth_and_is_recorded` stops at `pile.rs`'s floor-impulse bound (|J| 0.00488 N·s,
+Δv 31.6 m/s on a blade) — bit-identically on this branch and on `main` 9327e11 in a transient worktree,
+with no pile input touched here. It is row 86/87's open heap, and it was not in the 16-gate list the
+earlier runs called complete; it is now, and it is red until the pile has a rotational sink. Traps met again: a region edit between two markers swallowed six functions (restored
+from `git show`); a timing test (`texture::generation_is_fast_enough…`) fails under a parallel load and
+passes alone.
+
 ## 2026-11-07 — the gallery keeps what it has
 
 **What.** Robin: *"we should not be removing items from the gallery with deployments."* `publish-shots.sh`

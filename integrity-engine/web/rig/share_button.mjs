@@ -1,4 +1,4 @@
-// Every scene must have a working "Send Shot": the button exists, clicking it posts the frame, and a
+// Every scene must have a working "📷 Screenshot" (née "Send Shot"): the button exists, clicking it posts the frame, and a
 // PNG lands in shots/. Asserts the SAVED FILE, not just that the click did not throw — a capture taken
 // outside the presented frame silently yields a blank or empty image.
 import { launch, PORT, VIEWPORT } from './_launch.mjs';
@@ -10,7 +10,10 @@ const newest = () => { try { const f = readdirSync(SHOTS).filter(x=>x.endsWith('
 
 const b = await launch();
 let fail = 0;
-for (const page of ['ground.html', 'terra.html', 'birth.html', 'orbit.html', 'twomoons.html']) {
+// The Ground scene was deleted 2026-08-03 (docs/46 row 37); `ground.html` sat in this list for three
+// months and read FAIL on every run, which taught everyone to ignore the one line that matters.
+const PAGES = ['terra.html', 'birth.html', 'orbit.html', 'twomoons.html'];
+for (const page of PAGES) {
   const p = await b.newPage({ viewport: VIEWPORT });
   const errs = []; p.on('pageerror', e => errs.push(e.message));
   await p.goto(`http://127.0.0.1:${PORT}/${page}`, { waitUntil: 'load' });
@@ -18,7 +21,7 @@ for (const page of ['ground.html', 'terra.html', 'birth.html', 'orbit.html', 'tw
   // consecutive runs — these pages boot at very different speeds (star catalogue, 437k-triangle globe,
   // GPU pipeline creation), so a sleep measures the rig rather than the page.
   await p.locator('#share-view').waitFor({ state: 'attached', timeout: 45000 }).catch(() => {});
-  const btn = p.locator('#share-view, button:has-text("Send Shot")').first();
+  const btn = p.locator('#share-view, button:has-text("Screenshot"), button:has-text("Send Shot")').first();
   const has = await btn.count() > 0;
   const before = count();
   if (has) { await btn.click(); await p.waitForTimeout(2500); }
@@ -30,5 +33,5 @@ for (const page of ['ground.html', 'terra.html', 'birth.html', 'orbit.html', 'tw
               `${f ? `(${f.s} B)` : ''} ${ok ? 'OK' : 'FAIL'}${errs.length ? ' errs=' + errs.length : ''}`);
   await p.close();
 }
-console.log(`\nscenes failing: ${fail}/5`);
+console.log(`\nscenes failing: ${fail}/${PAGES.length}`);
 await b.close();

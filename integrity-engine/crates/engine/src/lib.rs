@@ -6923,6 +6923,41 @@ mod app {
     /// texel on the device, with mips) and nothing else. docs/46 row 95 is why it is no longer 128².
     const APPEARANCE_PATCH_TEXELS: usize = 2048 * 1024;
 
+    /// `a` less `b`: the up-to-four rects of `a` outside `b`, each non-empty. Texel-grid
+    /// arithmetic for the appearance build, which integrates a coarser ring's tile only where
+    /// the finer ring does not answer.
+    fn rect_minus(
+        a: crate::terra::pyramid::Rect,
+        b: crate::terra::pyramid::Rect,
+    ) -> Vec<crate::terra::pyramid::Rect> {
+        use crate::terra::pyramid::Rect;
+        let (ax1, ay1) = (a.x + a.w, a.y + a.h);
+        let (bx1, by1) = (b.x + b.w, b.y + b.h);
+        let ix0 = a.x.max(b.x);
+        let iy0 = a.y.max(b.y);
+        let ix1 = ax1.min(bx1);
+        let iy1 = ay1.min(by1);
+        if ix0 >= ix1 || iy0 >= iy1 {
+            return vec![a]; // disjoint
+        }
+        let mut out = Vec::new();
+        let mut push = |x: u32, y: u32, x1: u32, y1: u32| {
+            if x1 > x && y1 > y {
+                out.push(Rect {
+                    x,
+                    y,
+                    w: x1 - x,
+                    h: y1 - y,
+                });
+            }
+        };
+        push(a.x, a.y, ax1, iy0); // above
+        push(a.x, iy1, ax1, ay1); // below
+        push(a.x, iy0, ix0, iy1); // left
+        push(ix1, iy0, ax1, iy1); // right
+        out
+    }
+
     /// **How much of one frame the patch build may take**, milliseconds. The build is one surface
     /// query per texel at the data's step — there is no cheaper correct answer and no probe grid to
     /// shrink (docs/46 row 95) — so the only honest variable is TIME: a slower machine pays the same
@@ -6930,6 +6965,9 @@ mod app {
     /// kept: *"naturally degrading on slower systems, built-in future-proofing for future
     /// platforms"* — the degradation is latency. Three milliseconds is a fifth of a 60 Hz frame; a
     /// rig sets 0 for unbounded (`set_appearance_slice_ms`).
+    /// The per-frame share of terrace smoothing (docs/46 row 96), ms — bands of held tiles
+    /// re-smoothed with a landed neighbour as context, one frame's worth at a time.
+    pub const TILE_SMOOTHING_SLICE_MS: f64 = 2.0;
     const APPEARANCE_SLICE_MS: f64 = 3.0;
 
     /// (fixed topology) is built once. **One resolution for every scene's SEGMENT** — Terra's descent and
@@ -7130,6 +7168,8 @@ mod app {
         /// The tiles whose ground the build in hand has integrated or queued.
         appearance_tiles_built: std::collections::HashSet<crate::terra::tiles::TileId>,
         appearance_build_stats: PatchBuildStats,
+        /// Frames of terrace smoothing since the mesh last followed it (`advance_tile_smoothing`).
+        frames_since_tile_rebuild: u32,
         /// The day the globe pyramid's season was taken for.
         appearance_globe_key: Option<i64>,
         /// Measured: the last patch build (ms, texels) and the last globe build (ms).
@@ -7229,6 +7269,68 @@ mod app {
             ))
         }
 
+        /// [`appearance_patch_level_at`](Self::appearance_patch_level_at)'s slope: the texel's
+        /// mean gradient `(east, north)` as a tangent, its RMS slope angle (radians) and its size
+        /// in metres — what the fragment shader shades with (native diagnostics).
+        pub fn appearance_patch_slope_at(
+            &self,
+            l: u32,
+            lat: f64,
+            lon: f64,
+        ) -> Option<([f32; 2], f32, [f64; 2])> {
+            let p = &self.appearance_build.as_ref()?.pyramid;
+            if l >= p.window.levels() {
+                return None;
+            }
+            let (x, y) = p.texel_at(l, lat, lon)?;
+            let lev = &p.levels[l as usize];
+            let i = lev.idx(x, y);
+            Some((
+                lev.mean_slope[i],
+                lev.sigma_rad(i),
+                p.level_window(l).texel_m(self.planet_radius, y),
+            ))
+        }
+
+        /// **The two data under a point, before they are blended**: what the finest ring fades
+        /// INTO here (the rings beneath it down to the shipped raster, `TileStore::blend_beneath_finest`),
+        /// and — where a tile of the finest ring covers the point — that tile's elevation and the
+        /// weight the fade gives it. Native diagnostics, for taking a drawn slope apart into the
+        /// datum's own gradient and the fade's.
+        pub fn ground_parts_at(&self, lat: f64, lon: f64) -> (f64, Option<(f64, f64)>) {
+            let (lo, hi) = (self.elev_range[0], self.elev_range[1]);
+            let raster = self
+                .elevation
+                .as_ref()
+                .map_or(0.0, |r| r.elevation_m_at(lat, lon, lo, hi));
+            let (beneath, _, _) =
+                self.tiles
+                    .blend_beneath_finest(lat, lon, raster, self.raster_step_m().max(1e-3));
+            let finest = self.tiles.ring_zooms().first().copied();
+            (
+                beneath,
+                finest.and_then(|z| self.tiles.elevation_at_zoom(z, lat, lon)),
+            )
+        }
+
+        /// The vertical quantum measured on the finest ring's tile under a point (docs/46 row 96),
+        /// `None` where no tile covers it; 0 where the tile shows no terraces. Native diagnostics.
+        pub fn tile_quantum_m_at(&self, lat: f64, lon: f64) -> Option<f64> {
+            let z = *self.tiles.ring_zooms().first()?;
+            self.tiles.quantum_at_zoom(z, lat, lon)
+        }
+
+        /// The finest ring's elevation under a point AS MEASURED — the decoded bytes, before the
+        /// terraces were smoothed — and the surface's height there. Native diagnostics, for the
+        /// gate that holds the surface within half a quantum of its data.
+        pub fn measured_and_surface_m_at(&self, lat: f64, lon: f64) -> Option<(f64, f64)> {
+            let z = *self.tiles.ring_zooms().first()?;
+            let measured = self.tiles.measured_at_zoom(z, lat, lon)?;
+            let (beneath, fine) = self.ground_parts_at(lat, lon);
+            let (e, w) = fine?;
+            Some((measured, beneath + w * (e - beneath)))
+        }
+
         /// Whether the patch still has texels to build.
         pub fn appearance_pending(&self) -> bool {
             self.appearance_build.as_ref().is_some_and(|b| b.pending())
@@ -7260,6 +7362,16 @@ mod app {
         /// **Finish the patch build now**, however long it takes — what a rig calls so that it reads
         /// a complete patch (the browser never does; its frames each take a slice).
         pub fn finish_appearance(&mut self) {
+            // The tiles' queued smoothing first, so the patch is built from the finished surface.
+            self.tiles.finish_smoothing();
+            let resmoothed = self.tiles.take_resmoothed();
+            if !resmoothed.is_empty() {
+                for band in resmoothed {
+                    self.rebuild_appearance_under(band);
+                }
+                self.segment_built = None;
+                self.render().expect("a frame after the tiles settled");
+            }
             if !self.surface_loaded {
                 return;
             }
@@ -7583,6 +7695,7 @@ mod app {
                 appearance_build_key: None,
                 appearance_tiles_built: std::collections::HashSet::new(),
                 appearance_build_stats: PatchBuildStats::default(),
+                frames_since_tile_rebuild: 0,
                 appearance_globe_key: None,
                 appearance_cost: (0.0, 0, 0.0),
                 cam_pose: None,
@@ -8250,6 +8363,10 @@ mod app {
         /// camera first. The rect is widened by one texel west and one south: the texel west of a
         /// tile's edge differences its height against the tile's first column, and the row south of
         /// it against the tile's last row, so those neighbours are rebuilt with the tile.
+        ///
+        /// ★ Every ring (docs/46 row 97): the ground the finest ring does not reach is drawn from
+        /// the ring beneath, so its appearance is integrated from it too — a coarser tile's rect,
+        /// less the ground the finer ring covers in full, where that ring's own tiles answer.
         fn queue_landed_tiles(&mut self) {
             let Some(build) = self.appearance_build.as_mut() else {
                 return;
@@ -8262,15 +8379,77 @@ mod app {
                 let (s, n, w, e) = id.bounds_deg();
                 if let Some(r) = window.rect_covering_deg(s, n, w, e) {
                     let x = r.x.saturating_sub(1);
-                    build.enqueue(crate::terra::pyramid::Rect {
+                    let whole = crate::terra::pyramid::Rect {
                         x,
                         y: r.y,
                         w: r.w + (r.x - x),
                         h: r.h + 1,
-                    });
+                    };
+                    let finer = self
+                        .tiles
+                        .ring_above(id.z)
+                        .and_then(|fz| self.tiles.ring_union_held(fz))
+                        .and_then(|(fs, fn_, fw, fe)| window.rect_covering_deg(fs, fn_, fw, fe));
+                    match finer {
+                        Some(f) => {
+                            for piece in rect_minus(whole, f) {
+                                build.enqueue(piece);
+                            }
+                        }
+                        None => build.enqueue(whole),
+                    }
                 }
                 self.appearance_tiles_built.insert(id);
             }
+        }
+
+        /// **Forget the appearance built over the ground `id` changes** — the tile itself and the
+        /// finer tiles above it, whose fade bands blend into it — so `queue_landed_tiles` builds
+        /// them again from the surface as it now is. Keyed on the tile's ground, not its id: a
+        /// ring's change is felt by the rings over the same ground (docs/46 row 97).
+        ///
+        /// ★ Not the coarser tiles beneath it. Their texels under this tile are this tile's to
+        /// build, and it is queued for that; forgetting them too made every landing of one of 27
+        /// tiles rebuild the whole window from the coarsest ring up — 41 M texels for 5.5 M, and
+        /// the slices gate red (2026-11-08).
+        /// **Build the appearance over one band of a tile again** — the texels under the pixels
+        /// whose surface moved, and only those; the texels are world-anchored, so this is the
+        /// same ground whichever ring's tile is asked about. A tile the build has not integrated
+        /// yet needs nothing: its whole rect is queued from the moved surface when it is.
+        fn rebuild_appearance_under(
+            &mut self,
+            (id, x, y, w, h): (crate::terra::tiles::TileId, usize, usize, usize, usize),
+        ) {
+            if !self.appearance_tiles_built.contains(&id) {
+                return;
+            }
+            let Some(px) = self.tiles.get(&id).map(|t| t.px) else {
+                return;
+            };
+            let Some(build) = self.appearance_build.as_mut() else {
+                return;
+            };
+            let (s, n, lw, le) = id.bounds_deg_of_px(x, y, w, h, px);
+            if let Some(r) = build.pyramid.window.rect_covering_deg(s, n, lw, le) {
+                let x0 = r.x.saturating_sub(1);
+                build.enqueue(crate::terra::pyramid::Rect {
+                    x: x0,
+                    y: r.y,
+                    w: r.w + (r.x - x0),
+                    h: r.h + 1,
+                });
+            }
+        }
+
+        fn forget_appearance_over(&mut self, id: crate::terra::tiles::TileId) {
+            let (s, n, w, e) = id.bounds_deg();
+            self.appearance_tiles_built.retain(|b| {
+                if b.z < id.z {
+                    return true;
+                }
+                let (bs, bn, bw, be) = b.bounds_deg();
+                !(bs < n && bn > s && bw < e && be > w)
+            });
         }
 
         /// **One slice of the patch build**: texels by the one surface rule until `slice_ms` has
@@ -8341,7 +8520,21 @@ mod app {
             } else {
                 0
             };
-            for (l, r) in build.take_touched() {
+            let t_sampled = crate::clock::now_seconds();
+            let touched = build.take_touched();
+            // A native diagnostic: `PATCH_SLICE_TRACE=1` prints every slice that overran by more
+            // than a millisecond, with where its time went. Free when off.
+            static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            let trace = *TRACE.get_or_init(|| std::env::var_os("PATCH_SLICE_TRACE").is_some());
+            let touched_summary: Vec<String> = if trace {
+                touched
+                    .iter()
+                    .map(|(l, r)| format!("L{l}:{}x{}@{},{}", r.w, r.h, r.x, r.y))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            for (l, r) in touched {
                 self.appearance.patch.write_rect(
                     &self.queue,
                     l,
@@ -8351,6 +8544,18 @@ mod app {
             }
             let end = crate::clock::now_seconds();
             let ms = (end - t0) * 1000.0;
+            if trace && ms > slice_ms + 1.0 {
+                println!(
+                    "slice {ms:.2} ms: {done} texels, sampled until +{:.2} ms (deadline +{:.2}, stopped                      +{:.2}), coarsen {:.2} ms, upload {:.2} ms · touched {}",
+                    (t_sampled - t0) * 1000.0,
+                    (slice_ms / 1000.0 - self.appearance_build_stats.tail_ms.min(slice_ms * 0.5) / 1000.0)
+                        * 1000.0,
+                    if stopped_at.is_finite() { (stopped_at - t0) * 1000.0 } else { f64::NAN },
+                    if stopped_at.is_finite() { (t_sampled - stopped_at) * 1000.0 } else { f64::NAN },
+                    (end - t_sampled) * 1000.0,
+                    touched_summary.join(" ")
+                );
+            }
             let st = &mut self.appearance_build_stats;
             st.last_slice_ms = ms;
             st.last_slice_texels = done;
@@ -8666,7 +8871,7 @@ mod app {
                 return;
             }
             let before = self.tiles.len();
-            self.tiles.insert(crate::terra::tiles::Tile::new(
+            let queued = self.tiles.insert(crate::terra::tiles::Tile::new(
                 crate::terra::tiles::TileId { z, x, y },
                 px,
                 chans,
@@ -8675,9 +8880,37 @@ mod app {
             // New measured ground is exactly the kind of change the tier cache CANNOT see: it is keyed on
             // where the camera is, and the camera did not move. Without this the tiles would arrive and
             // the mesh would keep drawing the surface it was built from — the same failure `set_cap_ladder`
-            // has to guard against, and it would look like the streaming did nothing.
+            // has to guard against, and it would look like the streaming did nothing. A terraced
+            // tile's surface is smoothed on the frames that follow (docs/46 row 96), and the mesh
+            // is rebuilt then, from the smoothed surface, rather than twice.
             if self.tiles.len() != before {
+                self.forget_appearance_over(crate::terra::tiles::TileId { z, x, y });
+                if !queued {
+                    self.segment_built = None;
+                }
+            }
+        }
+
+        /// **One band of terrace smoothing a frame** (docs/46 row 96): a held tile's band facing
+        /// a neighbour that landed is smoothed again with that neighbour as context; the patch
+        /// texels built from its old surface are queued for rebuilding, and the mesh is rebuilt
+        /// once the queue drains rather than once per band.
+        fn advance_tile_smoothing(&mut self) {
+            let (did, left) = self
+                .tiles
+                .advance_smoothing(TILE_SMOOTHING_SLICE_MS / 1000.0);
+            if !did {
+                return;
+            }
+            for band in self.tiles.take_resmoothed() {
+                self.rebuild_appearance_under(band);
+            }
+            self.frames_since_tile_rebuild += 1;
+            // The mesh follows the smoothed surface: when the queue drains, and every so often
+            // while a stream keeps it full, so a descent is not drawn from raw tiles for seconds.
+            if left == 0 || self.frames_since_tile_rebuild >= 15 {
                 self.segment_built = None;
+                self.frames_since_tile_rebuild = 0;
             }
         }
 
@@ -8912,6 +9145,92 @@ mod app {
         }
         pub fn longitude(&self) -> f64 {
             self.fly.lon
+        }
+
+        /// ★ **Everything needed to reproduce what the viewer is seeing**, as JSON (Robin,
+        /// 2026-11-08: a screenshot that carries the pose, so a picture a user sends can be stood
+        /// in front of again). The fly camera's pose, the sky's instant and whether it is pinned,
+        /// what is drawn, and what the stream held at that moment — the inputs, not the picture. [`restore_view_json`](Self::restore_view_json) takes it back.
+        pub fn view_state_json(&self) -> String {
+            let esc = |s: String| s.replace('\\', "\\\\").replace('"', "\\\"");
+            let zooms: Vec<String> = self
+                .tiles
+                .ring_zooms()
+                .iter()
+                .map(|z| z.to_string())
+                .collect();
+            format!(
+                concat!(
+                    "{{\"lat\":{:.7},\"lon\":{:.7},\"alt_m\":{:.4},\"yaw\":{:.6},\"pitch\":{:.6},",
+                    "\"epoch_s\":{:.3},\"epoch_pinned\":{},\"draw_flora\":{},",
+                    "\"sun_elevation_deg\":{:.3},\"tiles_held\":{},\"tile_zooms\":[{}],",
+                    "\"following\":{},\"world\":\"{}\",\"standing_on\":\"{}\"}}"
+                ),
+                self.fly.lat,
+                self.fly.lon,
+                self.fly.alt_m,
+                self.fly.yaw,
+                self.fly.pitch,
+                self.celestial_epoch_s(),
+                self.epoch_s.is_some(),
+                self.draw_flora,
+                self.sun_elevation_deg(self.fly.lat, self.fly.lon),
+                self.tiles.len(),
+                zooms.join(","),
+                self.camera_is_following(),
+                esc(self.world_name()),
+                esc(self.ground_biome()),
+            )
+        }
+
+        /// **Stand where a screenshot was taken**: the pose, the sky's instant and what is drawn,
+        /// from [`view_state_json`](Self::view_state_json)'s output. Keys that
+        /// are missing are left as they are. Returns how many were applied.
+        pub fn restore_view_json(&mut self, json: &str) -> u32 {
+            let num = |key: &str| -> Option<f64> {
+                let k = format!("\"{key}\":");
+                let i = json.find(&k)? + k.len();
+                let rest = &json[i..];
+                let end = rest
+                    .find(|c: char| c == ',' || c == '}')
+                    .unwrap_or(rest.len());
+                rest[..end].trim().parse::<f64>().ok()
+            };
+            let flag = |key: &str| -> Option<bool> {
+                let k = format!("\"{key}\":");
+                let i = json.find(&k)? + k.len();
+                let rest = json[i..].trim_start();
+                if rest.starts_with("true") {
+                    Some(true)
+                } else if rest.starts_with("false") {
+                    Some(false)
+                } else {
+                    None
+                }
+            };
+            let mut applied = 0;
+            if let (Some(lat), Some(lon), Some(alt)) = (num("lat"), num("lon"), num("alt_m")) {
+                let yaw = num("yaw").unwrap_or(self.fly.yaw);
+                let pitch = num("pitch").unwrap_or(self.fly.pitch);
+                self.place_camera(lat, lon, alt, yaw, pitch);
+                applied += 1;
+            }
+            if flag("epoch_pinned") == Some(true) {
+                if let Some(e) = num("epoch_s") {
+                    self.set_epoch(e);
+                    applied += 1;
+                }
+            } else if let Some(e) = num("epoch_s") {
+                // The sky was on the wall clock when the shot was taken; pin it to that instant so
+                // the reproduction has the same light, and say so by returning it applied.
+                self.set_epoch(e);
+                applied += 1;
+            }
+            if let Some(f) = flag("draw_flora") {
+                self.draw_flora = f;
+                applied += 1;
+            }
+            applied
         }
 
         /// docs/43 Phase 6 — the surface type directly under the camera (for the HUD): the biome material id on
@@ -9158,7 +9477,9 @@ mod app {
 
             // **THE one surface** (docs/63): a segment whose extent is simply what is visible from here.
             if self.surface_loaded {
-                // Its appearance first (docs/73): the pyramids are keyed on their inputs — the
+                // The tiles' own housekeeping first: a band of terrace smoothing, if one waits.
+                self.advance_tile_smoothing();
+                // Its appearance next (docs/73): the pyramids are keyed on their inputs — the
                 // tiles held, the patch asked for, the season, the probe budget — and rebuilt only
                 // when one of those moved. The mesh that follows carries shape alone.
                 self.refresh_appearance();
@@ -9538,18 +9859,10 @@ mod app {
             // measured as a plain at exactly sea level, wearing the land-cover class (the Ireland gun
             // site: tile −20 m, drawn as grass at 0 m, 2026-11-02). The water that covers a floor
             // is `terra::hydro`'s to place; a shore in a declared dry basin is land below zero.
-            match tiles.elevation_m_at(lat, lon) {
-                Some((e_tile, w)) => {
-                    let base = match tiles.pixel_ground_m(lat) {
-                        Some(px_m) if px_m > 0.0 && raster_step_m > 0.0 => {
-                            raster_step_m * (px_m / raster_step_m).powf(w)
-                        }
-                        _ => raster_step_m,
-                    };
-                    (e_raster + w * (e_tile - e_raster), base)
-                }
-                None => (e_raster, raster_step_m),
-            }
+            // Down the whole stack of rings (docs/46 row 97): each ring fades to the one beneath
+            // it, and only the coarsest to the raster.
+            let (h, _, base) = tiles.blend(lat, lon, e_raster, raster_step_m.max(1e-3));
+            (h, base)
         }
 
         /// The pixel size of the shipped elevation raster on the ground, metres — the coarsest datum.
@@ -9600,12 +9913,12 @@ mod app {
             slope_coarse: f64,
             slope_fine: f64,
             finest_m: f64,
-            // ★ The finer datum under this point and how far it is believed here (`ground_datum`):
-            // the octaves it resolves are generated only as far as it is NOT believed. The ladder's
-            // wavelengths come from `base_feature_m` — the coarsest datum, the raster — and never
-            // move with the blend (docs/46 row 89; `surface_detail::micro_relief_blended_m`).
-            measured_to_m: f64,
-            trust: f64,
+            // ★ The finer datums under this point and how far each is believed here
+            // (`ground_datum`): the octaves a datum resolves are generated only as far as it is
+            // NOT believed. The ladder's wavelengths come from `base_feature_m` — the coarsest
+            // datum, the raster — and never move with the blend (docs/46 rows 89, 97;
+            // `surface_detail::micro_relief_stacked_m`).
+            datums: &[(f64, f64)],
         ) -> f64 {
             if material_idx == water_idx || finest_m <= 0.0 || base_feature_m <= 0.0 {
                 return 0.0; // the sea is flat, and there is nothing finer than nothing
@@ -9628,7 +9941,7 @@ mod app {
             let frac_fine = (slope_fine / mu).clamp(0.0, 1.0);
             let px = lon.to_radians() * planet_radius * lat.to_radians().cos();
             let pz = lat.to_radians() * planet_radius;
-            crate::surface_detail::micro_relief_blended_m(
+            crate::surface_detail::micro_relief_stacked_m(
                 px,
                 pz,
                 base_feature_m,
@@ -9637,29 +9950,26 @@ mod app {
                 h_crit,
                 frac_coarse,
                 frac_fine,
-                measured_to_m,
-                trust,
+                datums,
             )
         }
 
-        /// **The finer datum under a point, and how far it is believed there**: `(pixel_m, trust)`,
-        /// the streamed tile's pixel and the store's fade weight where a tile covers the point, and
-        /// `(raster_step_m, 0)` where none does. The relief law's inputs beside the raster's step
-        /// (docs/46 row 89): the ladder is the raster's, and this says which of its rungs the tile has
-        /// already measured.
+        /// **The finer datums under a point, and how far each is believed there**: `(pixel_m,
+        /// trust)` per ring that covers the point, finest first, and nothing where none does. The
+        /// relief law's inputs beside the raster's step (docs/46 rows 89, 97): the ladder is the
+        /// raster's, and this says which of its rungs the rings have already measured.
+        ///
+        /// ★ A STACK, not one blended feature size. The first ring version returned the blend's
+        /// feature size — a geometric slide from the finest pixel to the ring beneath across the
+        /// fade — and the law's resolved-or-not threshold slid with it: a 38 m rung switched from
+        /// "measured, erased" to "generated in full" between two mesh vertices half a metre apart,
+        /// a 4.65 m step in the generated term (Alps, 1 km, slope 8.6; 2026-11-08).
         fn ground_datum(
             tiles: &crate::terra::tiles::TileStore,
-            raster_step_m: f64,
             lat: f64,
             lon: f64,
-        ) -> (f64, f64) {
-            match tiles.elevation_m_at(lat, lon) {
-                Some((_, w)) if w > 0.0 => (
-                    tiles.pixel_ground_m(lat).unwrap_or(raster_step_m).max(1e-3),
-                    w,
-                ),
-                _ => (raster_step_m, 0.0),
-            }
+        ) -> ([(f64, f64); crate::terra::tiles::MAX_RINGS], usize) {
+            tiles.datums(lat, lon)
         }
 
         /// **How steep the ground is at a point**, as a gradient magnitude — the input the relief law
@@ -9717,20 +10027,22 @@ mod app {
                 )
             };
             let s_raster = grad(&raster, step).unwrap_or(0.0);
-            match self.tiles.elevation_m_at(lat, lon) {
-                Some((_, w)) if w > 0.0 => {
-                    let px = self.tiles.pixel_ground_m(lat).unwrap_or(step).max(1.0);
-                    let tile = |la: f64, lo_: f64| -> Option<f64> {
-                        self.tiles.elevation_m_at(la, lo_).map(|(e, _)| e.max(0.0))
-                    };
-                    match grad(&tile, px) {
-                        Some(s_tile) => (s_raster, s_tile, w),
-                        // The tile does not cover all four samples: its slope is unknown here, and the
-                        // raster's is the only honest answer.
-                        None => (s_raster, s_raster, 0.0),
-                    }
+            // The measured stack's own surface (docs/46 row 97), differentiated over the feature
+            // size of the datum trusted here — never the raster: a sample the stack does not
+            // measure makes the slope unknown, and the raster's is the only honest answer.
+            let (_, trust, base) = self.tiles.blend(lat, lon, 0.0, step);
+            if trust > 0.0 {
+                let px = base.max(1.0);
+                let tile = |la: f64, lo_: f64| -> Option<f64> {
+                    let (h, t, _) = self.tiles.blend(la, lo_, 0.0, step);
+                    (t > 0.0).then_some(h.max(0.0))
+                };
+                match grad(&tile, px) {
+                    Some(s_tile) => (s_raster, s_tile, trust),
+                    None => (s_raster, s_raster, 0.0),
                 }
-                _ => (s_raster, s_raster, 0.0),
+            } else {
+                (s_raster, s_raster, 0.0)
             }
         }
 
@@ -9817,8 +10129,8 @@ mod app {
                 let Some(finest_m) = finest_m else {
                     return 0.0;
                 };
-                let (measured_to_m, trust) =
-                    Self::ground_datum(&self.tiles, self.raster_step_m(), lat, lon);
+                let (datums, n_datums) = Self::ground_datum(&self.tiles, lat, lon);
+                let datums = &datums[..n_datums];
                 let (s_coarse, s_fine, _) = self.ground_slopes_at(lat, lon);
                 relief_m = Self::ground_relief_m(
                     &self.mats,
@@ -9833,8 +10145,7 @@ mod app {
                     s_coarse,
                     s_fine,
                     finest_m,
-                    measured_to_m,
-                    trust,
+                    datums,
                 );
                 relief_m
             });
@@ -13430,6 +13741,363 @@ first undrawable member at {:?}",
         assert!(
             l2_worst_log_sigma < std::f64::consts::LN_2,
             "a level-2 texel's roughness differs from the integral's by a factor e^{l2_worst_log_sigma:.3}"
+        );
+    }
+
+    /// Open the shipped Earth over Kamchatka at `alt`, sun commanded over the site, flora off,
+    /// the patch built whole — the pose of docs/46 rows 90–97's pictures.
+    fn kamchatka_at(alt: f64, w: u32, h: u32) -> app::Terra {
+        let (lat, lon) = (54.34f64, 158.23f64);
+        let (json, lm, ev, lc) = shipped_earth();
+        let mut terra = pollster::block_on(app::Terra::headless(w, h)).expect("headless Terra");
+        terra
+            .load_world(
+                &json,
+                &lm.data,
+                lm.w as u32,
+                lm.h as u32,
+                &ev.data,
+                ev.w as u32,
+                ev.h as u32,
+                &lc.data,
+                lc.w as u32,
+                lc.h as u32,
+            )
+            .expect("the shipped Earth loads");
+        terra.set_alt_bounds(0.05, 8.0e10);
+        terra.set_epoch_sun_over_lon(lon);
+        terra.set_draw_flora(false);
+        terra.set_appearance_slice_ms(0.0);
+        terra.place_camera(lat, lon, alt, 0.0, -1.5);
+        terra
+    }
+
+    /// Save a frame under `$OUT` if it is set — the gates measure; the frames are for eyes.
+    fn save_frame_if_asked(t: &app::Terra, w: u32, h: u32, name: &str) {
+        let Ok(out) = std::env::var("OUT") else {
+            return;
+        };
+        std::fs::create_dir_all(&out).expect("an output directory");
+        let px = t.frame_pixels().expect("a frame");
+        let path = format!("{out}/{name}.png");
+        let file = std::fs::File::create(&path).expect("frame file");
+        let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header()
+            .expect("png header")
+            .write_image_data(&px)
+            .expect("png data");
+        println!("frame -> {path}");
+    }
+
+    /// ★★ **THE PATCH HAS NO SKIRT AND NO CREASE** (docs/46 row 97). From 7 km over Kamchatka the
+    /// finest tiles' outer ring used to fade to the 19.5 km raster — 552 m where the tiles say
+    /// 232 m — as a skirt of slope 0.34 around ground whose own gradient is 0.04, with a crease
+    /// along each corner tile's diagonal (an hourglass in the picture). The drawn slope of every
+    /// texel across the north-west corner tile's anti-diagonal is taken apart with the engine's
+    /// own readbacks into the data's blended gradient and the fade's ramp term. Asserted: what the
+    /// finest ring fades into is measured ground within 50 m of it, not the raster; the ramp term
+    /// is nowhere steeper than the ground's own gradient; and the slope changes across the
+    /// diagonal by no more than five typical steps. `#[ignore]`: needs a GPU and the tiles.
+    #[test]
+    #[ignore]
+    fn the_patch_has_no_skirt_and_no_crease() {
+        let (lat, lon) = (54.34f64, 158.23f64);
+        let cache = std::env::var("TILE_CACHE").unwrap_or_else(|_| "/tmp/terrarium-tiles".into());
+        std::fs::create_dir_all(&cache).expect("a tile cache directory");
+        const W: u32 = 1024;
+        const H: u32 = 768;
+        let mut t = kamchatka_at(7000.0, W, H);
+        land_the_tiles(&mut t, &cache);
+        for _ in 0..3 {
+            t.render().expect("a frame");
+        }
+        save_frame_if_asked(&t, W, H, "skirt-7km");
+        let m_per_deg_lat = std::f64::consts::PI * crate::planet::earth().radius() / 180.0;
+        let m_per_deg_lon = m_per_deg_lat * lat.to_radians().cos();
+        let (w, h, levels, texel_m) = t.appearance_patch_shape().expect("a patch");
+        let px_m = t.tile_pixel_m().expect("tiles held");
+        let z = (0..=crate::terra::tiles::MAX_ZOOM)
+            .find(|&z| (crate::terra::tiles::pixel_ground_m(z, lat, 256) - px_m).abs() < 1e-6)
+            .expect("the held zoom");
+        println!(
+            "patch {w}x{h}, {levels} levels, texel {texel_m:.2} m; tiles z{z} px {px_m:.2} m, \
+             {} tiles held across the rings",
+            t.tile_count()
+        );
+        let (fx, fy) = crate::terra::tiles::tile_coords(lat, lon, z);
+        let (tx, ty) = (fx.floor() as i64, fy.floor() as i64);
+        let (lat_s, lat_n, lon_w, lon_e) = crate::terra::tiles::TileId {
+            z,
+            x: (tx - 1) as u32,
+            y: (ty - 1) as u32,
+        }
+        .bounds_deg();
+        let parts = |la: f64, lo: f64| -> (f64, f64, f64) {
+            let (beneath, fine) = t.ground_parts_at(la, lo);
+            match fine {
+                Some((e, w)) => (beneath, e, w),
+                None => (beneath, beneath, 0.0),
+            }
+        };
+        let mut ramp_max = 0.0f64;
+        let mut blend_max = 0.0f64;
+        let mut jumps: Vec<(f64, f64)> = Vec::new();
+        let mut prev: Option<[f32; 2]> = None;
+        let n = 60;
+        for k in 1..n {
+            let u = k as f64 / n as f64;
+            let la = lat_s + u * (lat_n - lat_s);
+            let lo = lon_w + u * (lon_e - lon_w);
+            let Some((stored, _, size)) = t.appearance_patch_slope_at(0, la, lo) else {
+                continue;
+            };
+            let (dlat, dlon) = (size[1] / m_per_deg_lat, size[0] / m_per_deg_lon);
+            let (b0, e0, w0) = parts(la, lo);
+            let (be, ee, we) = parts(la, lo + dlon);
+            let (bn, en, wn) = parts(la + dlat, lo);
+            let blend = [
+                (w0 * (ee - e0) + (1.0 - w0) * (be - b0)) / size[0],
+                (w0 * (en - e0) + (1.0 - w0) * (bn - b0)) / size[1],
+            ];
+            let ramp = [
+                (e0 - b0) * (we - w0) / size[0],
+                (e0 - b0) * (wn - w0) / size[1],
+            ];
+            ramp_max = ramp_max.max(ramp[0].hypot(ramp[1]));
+            blend_max = blend_max.max(blend[0].hypot(blend[1]));
+            if let Some(p) = prev {
+                jumps.push((
+                    u,
+                    ((stored[0] - p[0]) as f64).hypot((stored[1] - p[1]) as f64),
+                ));
+            }
+            prev = Some(stored);
+        }
+        let at_diagonal = jumps
+            .iter()
+            .filter(|(u, _)| (u - 0.5).abs() < 1.0 / n as f64)
+            .map(|(_, j)| *j)
+            .fold(0.0, f64::max);
+        let mut others: Vec<f64> = jumps
+            .iter()
+            .filter(|(u, _)| (u - 0.5).abs() >= 2.0 / n as f64)
+            .map(|(_, j)| *j)
+            .collect();
+        others.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = others.get(others.len() / 2).copied().unwrap_or(0.0);
+        let (b_c, e_c, w_c) = parts(0.5 * (lat_s + lat_n), 0.5 * (lon_w + lon_e));
+        println!(
+            "NW corner tile centre: the tile says {e_c:.1} m, what it fades into says {b_c:.1} m \
+             (w {w_c:.3}); along the anti-diagonal the fade's ramp term reaches {ramp_max:.4} and \
+             the data's own blended gradient {blend_max:.4}; the slope jump across the diagonal is \
+             {at_diagonal:.4} against a median step of {median:.5} elsewhere"
+        );
+        assert!(
+            (e_c - b_c).abs() < 50.0,
+            "the finest ring fades into ground {:.0} m away from it — the raster, not a ring",
+            (e_c - b_c).abs()
+        );
+        assert!(
+            ramp_max < blend_max,
+            "the skirt ({ramp_max:.4}) is steeper than the ground inside it ({blend_max:.4})"
+        );
+        assert!(
+            at_diagonal <= 5.0 * median.max(1e-4),
+            "a crease: the slope jumps {at_diagonal:.4} across the diagonal against {median:.5} elsewhere"
+        );
+    }
+
+    /// ★★ **THE TERRACES ARE SMOOTHED, WITHIN HALF A QUANTUM OF THE DATA** (docs/46 row 96). From
+    /// 500 m over the same sand the engine's own surface ran flat at exactly 240.00 m for eight
+    /// texels and 241.00 m for thirty, with one-metre risers between — the source's whole-metre
+    /// quantum, drawn as contour terraces. Asserted: the tile's quantum is measured as 1 m (if the
+    /// provider changes its data, this says so first); the data along 640 texels of transects
+    /// through the camera show the signature — a tread, a riser, a tread a metre up — and the
+    /// surface shows none of it; and over a 400 m square the surface
+    /// never leaves the band of ±½ quantum about the measurement. `#[ignore]`: GPU and tiles.
+    #[test]
+    #[ignore]
+    fn the_terraces_are_smoothed_within_the_quantum() {
+        let (lat, lon) = (54.34f64, 158.23f64);
+        let cache = std::env::var("TILE_CACHE").unwrap_or_else(|_| "/tmp/terrarium-tiles".into());
+        std::fs::create_dir_all(&cache).expect("a tile cache directory");
+        const W: u32 = 1024;
+        const H: u32 = 768;
+        let mut t = kamchatka_at(500.0, W, H);
+        land_the_tiles(&mut t, &cache);
+        for _ in 0..3 {
+            t.render().expect("a frame");
+        }
+        save_frame_if_asked(&t, W, H, "terraces-500m");
+        let m_per_deg_lat = std::f64::consts::PI * crate::planet::earth().radius() / 180.0;
+        let m_per_deg_lon = m_per_deg_lat * lat.to_radians().cos();
+        let (_, _, _, texel_m) = t.appearance_patch_shape().expect("a patch");
+        let q = t
+            .tile_quantum_m_at(lat, lon)
+            .expect("a tile under the camera");
+        println!("the tile's measured quantum here: {q} m; texel {texel_m:.2} m");
+        assert_eq!(
+            q, 1.0,
+            "the data here were whole metres when this gate was written"
+        );
+        // The terrace signature along four transects: a tread (three or more texels within a
+        // centimetre), a riser, and another tread about one quantum higher or lower within a few
+        // texels. Flat ground alone is not a terrace; flat ground a metre above flat ground is.
+        let mut terraces = 0usize;
+        let mut terraces_in_data = 0usize;
+        let mut treads = 0usize;
+        for (di, dj) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+            let mut heights: Vec<(f64, f64)> = Vec::new(); // (measured, surface)
+            for k in 0..160 {
+                let la = lat + (k as f64 * dj * texel_m) / m_per_deg_lat;
+                let lo = lon + (k as f64 * di * texel_m) / m_per_deg_lon;
+                if let Some(ms) = t.measured_and_surface_m_at(la, lo) {
+                    heights.push(ms);
+                }
+            }
+            let count = |pick: &dyn Fn(&(f64, f64)) -> f64| -> (usize, usize) {
+                // Treads as (start, end, height).
+                let mut treads_here: Vec<(usize, usize, f64)> = Vec::new();
+                let mut start = 0usize;
+                for i in 1..=heights.len() {
+                    let ends = i == heights.len()
+                        || (pick(&heights[i]) - pick(&heights[i - 1])).abs() >= 0.01;
+                    if ends {
+                        if i - start >= 3 {
+                            let mean = heights[start..i].iter().map(pick).sum::<f64>()
+                                / (i - start) as f64;
+                            treads_here.push((start, i, mean));
+                        }
+                        start = i;
+                    }
+                }
+                let steps = treads_here
+                    .windows(2)
+                    .filter(|p| {
+                        let rise = (p[1].2 - p[0].2).abs();
+                        (0.6 * q..=1.4 * q).contains(&rise) && p[1].0 - p[0].1 <= 15
+                    })
+                    .count();
+                (treads_here.len(), steps)
+            };
+            let (tr, st) = count(&|ms| ms.1);
+            let (_, st_data) = count(&|ms| ms.0);
+            treads += tr;
+            terraces += st;
+            terraces_in_data += st_data;
+        }
+        // The band, over a 400 m square.
+        let mut worst = 0.0f64;
+        let mut checked = 0usize;
+        let steps = (400.0 / texel_m) as i64;
+        for j in (-steps / 2..steps / 2).step_by(3) {
+            for i in (-steps / 2..steps / 2).step_by(3) {
+                let la = lat + (j as f64 * texel_m) / m_per_deg_lat;
+                let lo = lon + (i as f64 * texel_m) / m_per_deg_lon;
+                if let Some((measured, h)) = t.measured_and_surface_m_at(la, lo) {
+                    worst = worst.max((h - measured).abs());
+                    checked += 1;
+                }
+            }
+        }
+        let mut mags: Vec<f64> = Vec::new();
+        for j in -steps / 2..steps / 2 {
+            for i in -steps / 2..steps / 2 {
+                let la = lat + (j as f64 * texel_m) / m_per_deg_lat;
+                let lo = lon + (i as f64 * texel_m) / m_per_deg_lon;
+                if let Some((g, _, _)) = t.appearance_patch_slope_at(0, la, lo) {
+                    mags.push((g[0] as f64).hypot(g[1] as f64));
+                }
+            }
+        }
+        mags.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let pct = |f: f64| mags[((mags.len() - 1) as f64 * f) as usize];
+        println!(
+            "terraces along 640 texels: {terraces_in_data} tread-riser-tread step(s) of ~{q} m in \
+             the measurement, {terraces} in the surface ({treads} flat run(s) of ≥3 texels remain); \
+             surface within {worst:.3} m of the measurement over {checked} points (band ±{:.2}); \
+             level-0 |slope| p50 {:.4} p90 {:.4}",
+            0.5 * q,
+            pct(0.5),
+            pct(0.9)
+        );
+        assert!(
+            terraces_in_data >= 2,
+            "the data here showed {terraces_in_data} terrace step(s): this gate's site has changed"
+        );
+        assert_eq!(
+            terraces, 0,
+            "{terraces} terrace step(s) remain in the surface"
+        );
+        assert!(
+            worst <= 0.5 * q + 1e-3,
+            "the surface left the band: {worst:.3} m from the measurement against ±{:.2}",
+            0.5 * q
+        );
+    }
+
+    /// What the smoothing costs, on the real tiles: one tile alone, and the nine of a patch with
+    /// each other as context. Printed, not asserted. `#[ignore]`: needs the tiles.
+    #[test]
+    #[ignore]
+    fn price_the_terrace_smoothing() {
+        let cache = std::env::var("TILE_CACHE").unwrap_or_else(|_| "/tmp/terrarium-tiles".into());
+        let (lat, lon, z) = (54.34f64, 158.23f64, 15u32);
+        let ids = crate::terra::tiles::tiles_around(lat, lon, z, 1);
+        let mut decoded = Vec::new();
+        for id in &ids {
+            let (data, px) = fetch_terrarium_tile(&cache, id.z, id.x, id.y).expect("a tile");
+            decoded.push((*id, data, px));
+        }
+        let t0 = std::time::Instant::now();
+        let first =
+            crate::terra::tiles::Tile::new(decoded[0].0, decoded[0].2, 3, decoded[0].1.clone());
+        let alone = t0.elapsed();
+        // The phases, on the same tile.
+        let w = first.px as usize;
+        let tq = std::time::Instant::now();
+        let heights = first.decoded();
+        let decode_ms = tq.elapsed().as_secs_f64() * 1e3;
+        let tq = std::time::Instant::now();
+        let q = crate::terra::tiles::terrace_quantum_m(&heights, w);
+        let quantum_ms = tq.elapsed().as_secs_f64() * 1e3;
+        let tq = std::time::Instant::now();
+        let _ = crate::terra::tiles::smoothest_within_the_band(
+            &heights,
+            w,
+            w,
+            0,
+            0,
+            w,
+            w,
+            q.unwrap_or(1.0),
+        );
+        let smooth_ms = tq.elapsed().as_secs_f64() * 1e3;
+        println!("phases: decode {decode_ms:.2} ms, quantum {quantum_ms:.2} ms, smooth {smooth_ms:.2} ms");
+        let mut store = crate::terra::tiles::TileStore::default();
+        store.want_patch(lat, lon, z, 1);
+        let t1 = std::time::Instant::now();
+        for (id, data, px) in &decoded {
+            let chans = data.len() / (*px as usize * *px as usize);
+            store.insert(crate::terra::tiles::Tile::new(
+                *id,
+                *px,
+                chans,
+                data.clone(),
+            ));
+        }
+        let nine = t1.elapsed();
+        println!(
+            "terrace smoothing: one {}² tile decoded and smoothed alone in {:.2} ms (quantum {} m); \
+             nine tiles inserted, each re-smoothed as its neighbours landed, in {:.1} ms total \
+             ({:.2} ms per tile)",
+            first.px,
+            alone.as_secs_f64() * 1e3,
+            first.quantum_m,
+            nine.as_secs_f64() * 1e3,
+            nine.as_secs_f64() * 1e3 / 9.0
         );
     }
 

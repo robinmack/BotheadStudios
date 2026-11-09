@@ -60,3 +60,24 @@ curl -s https://integrity.bothead.net/ | grep -o '<title>[^<]*</title>'
 - WebGPU requires a secure context; Cloudflare provides the TLS, so the public site works on any
   WebGPU-capable browser. For on-device LAN testing without deploying, use `scripts/dev-lan.sh` (HTTPS
   dev server on `:5173`).
+
+## The screenshot receiver (not wired to the live site)
+
+The 📷 **Screenshot** button (`web/src/share-view.ts`) numbers a shot and saves the frame with a record
+of what reproduces it — the engine's `view_state_json()` (pose, the sky's instant, what is drawn, what
+the stream held) plus the build, page and viewport. On the dev server the vite middleware (`vite.config.ts`,
+`shotSink`) receives it at `/__shot` and writes `shots/shot-<n>.png` + `shots/shot-<n>.json`. On the public
+site there is no receiver, so the button downloads the same two files for the user to send.
+
+`scripts/shot-receiver.py` is the same receiver for a deployed host: loopback only, numbered, 32 MB cap,
+answers `{"n": N}`. Wiring it is a host change and Robin's call (docs/72): run it as a user service with
+`SHOT_DEST` outside the web root, add to the nginx server block
+
+    location = /__shot {
+        client_max_body_size 32m;
+        limit_except POST { deny all; }
+        proxy_pass http://127.0.0.1:8781;
+    }
+
+and let `hasShotReceiver()` answer true for the public host. `web/rig/reproduce_shot.mjs shot-<n>.json`
+stands the engine in front of any record, dev or downloaded.

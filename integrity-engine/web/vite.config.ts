@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { defineConfig, type Plugin } from "vite";
 import basicSsl from "@vitejs/plugin-basic-ssl";
@@ -26,16 +26,31 @@ function shotSink(): Plugin {
         req.on("end", () => {
           try {
             const body = Buffer.concat(chunks).toString("utf8");
-            const b64 = body.replace(/^data:image\/\w+;base64,/, "");
-            const buf = Buffer.from(b64, "base64");
             // OUTSIDE web/ (the Vite-watched root) so saving a screenshot can never trigger a reload.
             const dir = resolve(root, "..", "shots");
             mkdirSync(dir, { recursive: true });
-            const file = resolve(dir, `shot-${Date.now()}.png`);
+            // ★ NUMBERED (Robin, 2026-11-08): a shot is "#17", not a timestamp nobody can quote.
+            // The counter is a file beside the shots, so the numbers survive a restart.
+            const counter = resolve(dir, ".next");
+            const n = existsSync(counter) ? Number(readFileSync(counter, "utf8")) || 1 : 1;
+            writeFileSync(counter, String(n + 1));
+            const isJson = (req.headers["content-type"] || "").includes("application/json");
+            const record = isJson ? (JSON.parse(body) as { png: string } & Record<string, unknown>) : null;
+            const dataUrl = record ? record.png : body;
+            const b64 = dataUrl.replace(/^data:image\/\w+;base64,/, "");
+            const buf = Buffer.from(b64, "base64");
+            const file = resolve(dir, `shot-${n}.png`);
             writeFileSync(file, buf);
-            server.config.logger.info(`[client] 📷 screenshot saved: ${file} (${buf.length} bytes)`);
-            res.statusCode = 204;
-            res.end();
+            if (record) {
+              const { png: _png, ...rest } = record;
+              writeFileSync(resolve(dir, `shot-${n}.json`), JSON.stringify({ n, ...rest }, null, 1));
+            }
+            server.config.logger.info(
+              `[client] 📷 shot #${n} saved: ${file} (${buf.length} bytes${record ? ", with its record" : ""})`,
+            );
+            res.statusCode = 200;
+            res.setHeader("content-type", "application/json");
+            res.end(JSON.stringify({ n }));
           } catch (e) {
             server.config.logger.error(`[client] screenshot save failed: ${String(e)}`);
             res.statusCode = 500;

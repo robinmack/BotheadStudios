@@ -181,17 +181,41 @@ pub fn micro_relief_blended_m(
     octaves: f64,
     mu: f64,
     h_crit_m: f64,
-    // ★ TWO slope fractions, one per scale. Relief and slope correlate because the same erosion
-    // produced both — AT THE SAME SCALE. The raster's gradient over 19.5 km says how rough the
-    // kilometre rungs are; a tile's gradient over 5 m says how rough the metre rungs are, and says
-    // nothing about kilometres. Scaling the coarse rungs by a tile's slope put 200 m bumps on flat
-    // Sahara the moment a tile arrived (measured 2026-10-24: slope 0.17 at 4.8 m pixels, +204 m at
-    // a 9.8 km rung). So the rungs the finer datum resolves take the coarse fraction, and the rungs
-    // below its pixel take the fine one.
     slope_fraction_coarse: f64,
     slope_fraction_fine: f64,
     measured_to_m: f64,
     trust: f64,
+) -> f64 {
+    micro_relief_stacked_m(
+        x_m,
+        z_m,
+        base_feature_m,
+        octaves,
+        mu,
+        h_crit_m,
+        slope_fraction_coarse,
+        slope_fraction_fine,
+        &[(measured_to_m, trust)],
+    )
+}
+
+/// [`micro_relief_blended_m`] over a STACK of finer datums, `(pixel_m, trust)` each (docs/46
+/// row 97): a rung is resolved by every datum whose pixel is at most half its wavelength, and
+/// it is generated only as far as none of those is believed here — `Π(1 − trustᵢ)`. The slope
+/// fraction it takes moves the same way: the fine one where nothing resolving it is believed,
+/// the coarse one where something is, so neither the amplitude nor its scaling steps where a
+/// ring's weight reaches zero. With one datum this is exactly the two-argument law.
+#[allow(clippy::too_many_arguments)]
+pub fn micro_relief_stacked_m(
+    x_m: f64,
+    z_m: f64,
+    base_feature_m: f64,
+    octaves: f64,
+    mu: f64,
+    h_crit_m: f64,
+    slope_fraction_coarse: f64,
+    slope_fraction_fine: f64,
+    datums: &[(f64, f64)],
 ) -> f64 {
     if octaves <= 0.0 || base_feature_m <= 0.0 {
         return 0.0;
@@ -199,26 +223,25 @@ pub fn micro_relief_blended_m(
     if slope_fraction_coarse <= 0.0 && slope_fraction_fine <= 0.0 {
         return 0.0;
     }
-    let trust = if measured_to_m > 0.0 {
-        trust.clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
     let whole = octaves.floor() as u32;
     let frac = octaves - whole as f64;
     let mut relief = 0.0;
     for i in 0..=whole.min(24) {
         // Strictly sub-raster: the first generated octave is half the measured feature.
         let wavelength = base_feature_m / (1u64 << (i + 1)) as f64;
-        // The finer datum resolves this wavelength (two of its pixels, Nyquist): generate it only as
-        // far as the datum is not believed here, and scale it by the slope measured at ITS scale.
-        let resolved = wavelength >= 2.0 * measured_to_m;
-        let (unmeasured, slope_fraction) = if resolved {
-            (1.0 - trust, slope_fraction_coarse)
-        } else {
-            (1.0, slope_fraction_fine)
-        };
-        let amp = relief_amplitude_m(wavelength, mu, h_crit_m) * slope_fraction.clamp(0.0, 1.0);
+        // How far this rung is already measured: by every datum that resolves it (two of its
+        // pixels, Nyquist), each believed as far as its weight says.
+        let mut unmeasured = 1.0;
+        for &(pixel_m, trust) in datums {
+            if pixel_m > 0.0 && wavelength >= 2.0 * pixel_m {
+                unmeasured *= 1.0 - trust.clamp(0.0, 1.0);
+            }
+        }
+        let believed = 1.0 - unmeasured;
+        let slope_fraction = slope_fraction_fine.clamp(0.0, 1.0)
+            + believed
+                * (slope_fraction_coarse.clamp(0.0, 1.0) - slope_fraction_fine.clamp(0.0, 1.0));
+        let amp = relief_amplitude_m(wavelength, mu, h_crit_m) * slope_fraction;
         // Centred on zero: this is roughness, not a change of elevation. The measured raster stays the
         // truth about height.
         let n = crate::world::value_noise(x_m as f32, z_m as f32, (1.0 / wavelength) as f32) as f64
