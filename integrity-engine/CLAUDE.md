@@ -202,13 +202,17 @@ computation it defers** (Law V) — recorded in `docs/46`'s ledger, not a quiet 
 
 ## Hard rules (do not violate)
 
-0. **Every scene has a "Send Shot" button, and no longer has to remember to.** Use
+0. **Every scene has a "📷 Screenshot" button, and no longer has to remember to.** Use
    `web/src/share-view.ts` — do NOT write a second capture path. A scene calls `createShareView(canvas, …)`
    and hands the button to the HUD (`hud.add("actions", share.button)`), then calls `share.afterPresent()`
    **immediately after it presents** (a WebGPU canvas is only
    readable while its drawing buffer is current; capture anywhere else silently yields a blank image).
-   The frame is POSTed to `/__shot` and written to `shots/shot-<ts>.png`, which is how a picture gets
-   from a scene to whoever is reading the repo. `web/rig/share_button.mjs` asserts the button exists AND
+   The frame is POSTed to `/__shot` and written as `shots/shot-<n>.png` with `shots/shot-<n>.json`
+   beside it — the NUMBER the user quotes and the RECORD that reproduces the view (the engine's
+   `view_state_json()`: pose, the sky's instant, what is drawn, what the stream held; plus build, page,
+   viewport). On the public site, with no receiver, the button downloads the same two files.
+   `web/rig/reproduce_shot.mjs shot-<n>.json` stands the engine in front of it again. That is how a
+   picture gets from a scene to whoever is reading the repo, and back. `web/rig/share_button.mjs` asserts the button exists AND
    that a real PNG lands, on every scene; `web/rig/hud_layer.mjs` asserts it is in the HUD's own layer,
    which is what makes "every scene" structural rather than remembered. **The space band used to build a
    LOOK-ALIKE with its own `mkBtn` and leave `share.button` unused** — a second implementation of the one

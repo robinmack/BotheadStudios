@@ -636,6 +636,9 @@ pub struct Build {
     /// Heights along the row NORTH of the current one, over the front rect's columns and one more to
     /// the east (`w + 1` entries), so a texel's north difference does not re-sample the ground.
     north: Vec<f64>,
+    /// How many of `north`'s entries are sampled for the front rect — the north row is sampled in
+    /// chunks against the same deadline as the texels, and resumes where it stopped.
+    north_filled: usize,
     /// Heights along the current row so far, same layout; becomes `north` when the row completes.
     cur: Vec<f64>,
     /// Level-0 texels written since the ancestors were last re-coarsened.
@@ -689,6 +692,7 @@ impl Build {
             row: 0,
             col: 0,
             north: Vec::new(),
+            north_filled: 0,
             cur: Vec::new(),
             dirty: Rect {
                 x: 0,
@@ -789,17 +793,30 @@ impl Build {
         let mut samples = 0usize;
         'rects: while let Some(rect) = self.queue.front().copied() {
             let width = rect.w as usize;
-            if self.row == 0 && self.col == 0 && self.north.len() != width + 1 {
-                // A fresh rect: the row north of it, so the first row has a north neighbour.
+            if self.row == 0 && self.col == 0 && self.north_filled < width + 1 {
+                // ★ Against the deadline, like every other sample. This row was sampled whole, with
+                // no look at the clock: for a tile's rect, 300 samples; for a rect the width of the
+                // window — a coarser ring's, docs/46 row 97 — 1,537, three milliseconds past
+                // whatever the slice had left (measured 2026-11-08: a 4.6 ms frame on a 3 ms slice,
+                // the deadline at +2.2 and sampling stopped at +4.1).
+                if self.north_filled == 0 {
+                    self.north = vec![0.0; width + 1];
+                }
                 let y = rect.y as i64 - 1;
-                self.north = (0..=width)
-                    .map(|k| {
-                        let (la, lo) = window.centre_i(rect.x as i64 + k as i64, y);
-                        sample(la, lo).height_m
-                    })
-                    .collect();
+                while self.north_filled < width + 1 {
+                    if samples >= BUILD_CHUNK {
+                        samples = 0;
+                        if stop() {
+                            break 'rects;
+                        }
+                    }
+                    let k = self.north_filled;
+                    let (la, lo) = window.centre_i(rect.x as i64 + k as i64, y);
+                    self.north[k] = sample(la, lo).height_m;
+                    samples += 1;
+                    self.north_filled += 1;
+                }
                 self.cur = vec![0.0; width + 1];
-                samples += width + 1;
             }
             while self.row < rect.h {
                 let y = rect.y + self.row;
@@ -849,6 +866,7 @@ impl Build {
             self.row = 0;
             self.col = 0;
             self.north.clear();
+            self.north_filled = 0;
         }
         self.recoarsen();
         done
@@ -1639,6 +1657,54 @@ mod tests {
     /// ★ **The patch is the same patch however many slices built it.** Rects in any order, a
     /// deadline every few texels, the ancestors re-coarsened after every slice: the levels that
     /// result are bit-identical to one unbounded build, so a slow machine sees the same picture
+    /// ★ The north row of a rect is sampled against the deadline like every texel, and resumes.
+    /// It was sampled whole with no look at the clock — 1,537 samples for a window-wide rect, three
+    /// milliseconds past whatever the slice had left (docs/46 row 97, 2026-11-08).
+    #[test]
+    fn the_north_row_of_a_wide_rect_is_sampled_against_the_deadline_too() {
+        let mats = mats();
+        let kinds = kinds(&mats);
+        let w = data_step_window(-106.05, -105.95);
+        assert!(
+            w.w as usize + 1 > 2 * BUILD_CHUNK,
+            "a rect wider than two chunks: {}",
+            w.w
+        );
+        let calls = std::cell::Cell::new(0usize);
+        let inner = sample_of(&kinds, &mats);
+        let counted = |la: f64, lo: f64| {
+            calls.set(calls.get() + 1);
+            inner(la, lo)
+        };
+        let mut b = Build::new(w, R, point_of(&kinds, &mats));
+        b.enqueue(whole(&w));
+        let built = b.advance(&counted, || true);
+        assert_eq!(built, 0, "stopped inside the north row, before any texel");
+        assert!(
+            calls.get() <= BUILD_CHUNK + 1,
+            "{} samples before the first look at the clock",
+            calls.get()
+        );
+        // It resumes where it stopped, a chunk a call, and finishes the same patch.
+        let mut whole_build = Build::new(w, R, point_of(&kinds, &mats));
+        whole_build.enqueue(whole(&w));
+        whole_build.advance(sample_of(&kinds, &mats), || false);
+        let mut slices = 0usize;
+        while b.pending() {
+            b.advance(&counted, || true);
+            slices += 1;
+            assert!(slices < 1_000_000, "the build never finishes");
+        }
+        assert_eq!(
+            b.pyramid.levels[0].albedo,
+            whole_build.pyramid.levels[0].albedo
+        );
+        assert_eq!(
+            b.pyramid.levels[0].material,
+            whole_build.pyramid.levels[0].material
+        );
+    }
+
     /// later, never a different picture (Law VIII's convergence clause, the one docs/46 row 95 broke).
     #[test]
     fn a_patch_built_in_slices_is_the_patch_built_at_once() {

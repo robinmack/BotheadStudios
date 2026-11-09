@@ -242,6 +242,9 @@ async function main(): Promise<void> {
     // Share view — the same module every scene uses.
     const share = createShareView(canvas, {
       onStatus: (m, bad) => setStatus(m, bad),
+      // The engine's own account of what is being looked at — pose, sky, clock, stream — so the
+      // shot can be reproduced (`web/rig/reproduce_shot.mjs`).
+      state: () => JSON.parse(terra.view_state_json()) as unknown,
     });
     hud.add("actions", share.button);
     // **The meteor-swarm button.** The whole of the scene's contribution to the event: it declares the

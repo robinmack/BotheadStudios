@@ -270,6 +270,13 @@ state — which is exactly why §5 does the in-place steps first.
   tile; the nearest is first). The remaining costs are
   memory — ~26 bytes a texel on the CPU for the moments (f32) and nine on the device, 36 MB + 12 MB
   for 1.4M texels — and the globe's one-off build.
+- **Two shapes the finer texel made visible, and what they were** (2026-11-08). Shading the ground
+  at the data's step showed two things that were always there: the tile patch's fade to the 19.5 km
+  raster — a skirt of slope 0.34 around ground of 0.04, creased along the corner tiles' diagonals
+  (an hourglass from 7 km) — and the elevation source's whole-metre terraces (a staircase of chevron
+  ridges from 500 m). Neither remedy is in the pyramid: the tiles are now a stack of rings, each
+  fading to the one beneath (docs/46 row 97), and a tile's surface is the smoothest within ±½ of its
+  measured quantum (row 96). Both gates read the engine's own texels and data, not pixels.
 - **A bake is a cache**, and this engine has been bitten by caches the model could not correct
   (`flora::Built`). Every level must be keyed on everything that changes the answer: season, damage,
   the tiles held.
