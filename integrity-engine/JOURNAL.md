@@ -3,6 +3,38 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-11-23 — the patch builds each texel once (row 98)
+
+**What.** The release of 2026-11-17 (`311e4f0`, rows 96–97) took 50 s to finish the appearance patch
+over 7 km of Kamchatka in the browser where the release before took 6.5 s. Robin chose a fix on a
+branch over a rollback. The cause was counted, not guessed: a trace of texels queued per source on
+the slices gate showed the 1,572,864-texel window integrated **9,725,120 texels (6.18×)** — the
+coarser rings queued across ground the finer ring would answer (it is subtracted only once HELD, and
+tiles arrive coarsest first), and every terrace-smoothing band building its ground again, a coarse
+ring's band being the width of the window. The build now waits for the tile stream to settle
+(`TileStore::settled`: every tile asked for answered, measured or void, and no smoothing queued) and
+then integrates each texel once. So that the wait has an end, the host answers a tile the provider
+does not have with one void pixel.
+
+**Why.** A texel is an integral of the surface; integrating a surface that is still changing is work
+that is thrown away. And the lesson in the gate: every frame stayed inside its 3 ms slice the whole
+time, so a bound on the frame's share was green through a sixfold regression in total work. docs/73
+step 3 adds work per texel, so the multiplier had to go before it.
+
+**Verified.** The gate's new bound (total ≤ 1.10× the window) was red at 6.18 before the change and
+is 1.01 after: 1,582,348 texels over 1,116 frames, sliced == unbounded at 1,056 reads × 8 levels.
+Suite 711 passed / 0 failed / 51 skipped + `mod app` for wasm32; the 19 picture gates (all but the
+haystack, which fails on main at `pile.rs` for rows 86/87's reasons) pass serially. Browser, release
+wasm, local build of the branch against the live site, same rig, same minute: **1,582,348 texels /
+2,052 frames / complete 13.9 s after opening** against **7,766,418 / 9,981 / 54.2 s**; a second pair
+14.4 s against 55.4 s. The sunlit 7 km frames (the sun commanded over the longitude — the first pair
+was taken at night and showed nothing) differ in 12 of 506,000 pixels by more than 8/255.
+**Not back to 6.5 s:** the window is integrated whole now (row 97), a texel costs 4.5 µs in the
+browser against 3.2 before the rings, and the build waits for the last tile to be smoothed. The
+per-texel price is not yet priced by stage. **Declared:** a fetch that neither succeeds nor fails
+holds the patch at the globe's point sample (no host timeout). The north–south colour seam ~2 km
+west of the eye is in both frames, still unattributed.
+
 ## 2026-11-08 — the two shapes: a cliff ring to the raster, and the source's metre terraces (rows 96, 97)
 
 **What.** Robin: *"Two shapes: please go ahead."* The patch at the data's step (row 95) had made two

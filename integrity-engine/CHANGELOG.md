@@ -9,6 +9,11 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The appearance patch is built once, after the tiles have landed** (`docs/46` row 98): the
+  patch waits for every tile it asked for to be answered and smoothed, then integrates each texel
+  once. Over 7 km of Kamchatka in the browser: 7.8 M texels and 54 s to a finished patch → 1.58 M
+  and 14 s, the same picture. Hosts: answer a tile the provider does not have with
+  `add_tile(z, x, y, [0,0,0], 1)` — one void pixel — or the patch waits for it.
 - **The ground is coloured per pixel, not per vertex** (`docs/73` step 2, `docs/46` row 91(a)):
   Terra's segment mesh now carries shape only. Its colour, roughness, grain layer and — where the
   pyramid is the finer statement — its slope are read per fragment from a world-anchored appearance

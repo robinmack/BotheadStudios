@@ -830,6 +830,14 @@ impl TileStore {
         out
     }
 
+    /// **Whether the stream has settled**: every tile the patch asked for has been answered —
+    /// held, measured or void — and no smoothing waits. Until then the surface under the patch
+    /// is still changing (a tile to land moves its neighbours' fades and bands, and answers where
+    /// the ring beneath answers now), so anything integrated from it is integrated again.
+    pub fn settled(&self) -> bool {
+        self.pending_smoothing.is_empty() && self.missing().is_empty()
+    }
+
     /// Returns whether the tile's own smoothing was queued (its surface is its raw heights until
     /// the next frame's [`advance_smoothing`](Self::advance_smoothing) reaches it).
     pub fn insert(&mut self, tile: Tile) -> bool {
@@ -1049,7 +1057,8 @@ impl TileStore {
     /// tiles cover, in place of the global raster's 19.5 km.
     pub fn pixel_ground_m(&self, lat: f64) -> Option<f64> {
         let (_, _, z, _) = self.want?;
-        let px = self.tiles.values().next()?.px;
+        // A measured tile's: an absent tile is answered with one void pixel (docs/46 row 98).
+        let px = self.tiles.values().find(|t| !t.void)?.px;
         Some(pixel_ground_m(z, lat, px))
     }
 
@@ -1237,7 +1246,7 @@ impl TileStore {
         let px = self
             .tiles
             .values()
-            .find(|t| t.id.z == z)
+            .find(|t| t.id.z == z && !t.void)
             .map_or(256, |t| t.px);
         pixel_ground_m(z, lat, px)
     }
@@ -1576,6 +1585,29 @@ mod tests {
             data.extend_from_slice(&[r, g, 0]);
         }
         Tile::new(id, px, 3, data)
+    }
+
+    /// **The stream settles when every tile asked for is answered and smoothed** — and a void
+    /// is an answer (the appearance patch waits on this, docs/46 row 98).
+    #[test]
+    fn the_stream_settles_when_every_tile_is_answered_and_smoothed() {
+        let mut store = TileStore::default();
+        assert!(store.settled(), "nothing asked for, nothing awaited");
+        let (lat, lon, z, r) = (46.5, 10.0, 14, 1);
+        store.want_patch(lat, lon, z, r);
+        assert!(!store.settled(), "tiles are wanted and none has landed");
+        let mut wanted = store.missing();
+        let last = wanted.pop().expect("a patch wants tiles");
+        for id in wanted {
+            store.insert(flat_tile(id, 1000.0));
+        }
+        store.finish_smoothing();
+        assert!(!store.settled(), "one tile is still unanswered");
+        // The host's answer for a tile the provider does not have: one void pixel.
+        store.insert(Tile::new(last, 1, 3, vec![0u8; 3]));
+        store.finish_smoothing();
+        assert!(store.missing().is_empty());
+        assert!(store.settled(), "a void is an answer");
     }
 
     /// ★ **A VOID TILE IS NOT GROUND AT SEA LEVEL** (docs/46 row 89). The set answers past its local
