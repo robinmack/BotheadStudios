@@ -277,6 +277,13 @@ state — which is exactly why §5 does the in-place steps first.
   ridges from 500 m). Neither remedy is in the pyramid: the tiles are now a stack of rings, each
   fading to the one beneath (docs/46 row 97), and a tile's surface is the smoothest within ±½ of its
   measured quantum (row 96). Both gates read the engine's own texels and data, not pixels.
+- **A per-frame bound does not see work done twice** (2026-11-23, docs/46 row 98). With every ring
+  integrated and each tile queued as it landed, the 1.57 M-texel Kamchatka window was integrated 6.2
+  times over — 7.8 M texels and 54 s in the browser, every frame inside its slice. The build now waits
+  for the tile stream to settle (every tile answered, and smoothed) and integrates each texel once:
+  1.58 M texels, complete ~14 s after the window opens in the browser. The slices gate bounds the
+  TOTAL as well as the frame's share. Step 3 adds work per texel, so this multiplier had to go first;
+  the remaining per-texel price (4.5 µs in the browser, 3.2 before the rings) is not yet priced by stage.
 - **A bake is a cache**, and this engine has been bitten by caches the model could not correct
   (`flora::Built`). Every level must be keyed on everything that changes the answer: season, damage,
   the tiles held.

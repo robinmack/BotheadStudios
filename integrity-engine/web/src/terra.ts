@@ -146,6 +146,9 @@ async function main(): Promise<void> {
             terra.add_tile(z, x, y, new Uint8Array(img.data.buffer.slice(0)), bmp.width);
           } catch {
             tileFailed.add(key); // no data here at this zoom; the generator covers it
+            // ANSWER the engine all the same (docs/46 row 98): one void pixel, the provider's own
+            // encoding of "no measurement". The appearance patch waits for every tile it asked for.
+            terra.add_tile(z, x, y, new Uint8Array([0, 0, 0, 255]), 1);
           } finally {
             tileInFlight.delete(key);
           }

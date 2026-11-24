@@ -7331,9 +7331,18 @@ mod app {
             Some((measured, beneath + w * (e - beneath)))
         }
 
-        /// Whether the patch still has texels to build.
+        /// Whether the patch still has texels to build — queued, or owed: tiles held that it has
+        /// not integrated because the stream has not settled yet (docs/46 row 98).
         pub fn appearance_pending(&self) -> bool {
-            self.appearance_build.as_ref().is_some_and(|b| b.pending())
+            self.appearance_build.as_ref().is_some_and(|b| {
+                b.pending()
+                    || !self.tiles.settled()
+                    || self
+                        .tiles
+                        .held_nearest_first()
+                        .iter()
+                        .any(|id| !self.appearance_tiles_built.contains(id))
+            })
         }
 
         /// How long the last frame spent on the patch build, ms, and how many texels it built.
@@ -7376,7 +7385,9 @@ mod app {
                 return;
             }
             self.refresh_appearance();
-            while self.appearance_pending() {
+            // A rig's stream has ended when it asks for this: what was not answered will not be.
+            self.queue_landed_tiles(true);
+            while self.appearance_build.as_ref().is_some_and(|b| b.pending()) {
                 self.advance_appearance_patch(0.0);
             }
         }
@@ -8304,7 +8315,7 @@ mod app {
                 self.appearance_build_key = key;
             }
             if self.appearance_build.is_some() {
-                self.queue_landed_tiles();
+                self.queue_landed_tiles(false);
                 self.advance_appearance_patch(self.appearance_slice_ms);
             }
         }
@@ -8367,7 +8378,19 @@ mod app {
         /// ★ Every ring (docs/46 row 97): the ground the finest ring does not reach is drawn from
         /// the ring beneath, so its appearance is integrated from it too — a coarser tile's rect,
         /// less the ground the finer ring covers in full, where that ring's own tiles answer.
-        fn queue_landed_tiles(&mut self) {
+        ///
+        /// ★ **Only once the stream has settled** (docs/46 row 98), unless `now`. A texel is an
+        /// integral of the surface, and while tiles are still landing the surface under the whole
+        /// patch is still changing: a coarse ring answers where the finer ring will, a landing
+        /// moves its neighbours' fades, and every smoothing band moves the ground again. Queued
+        /// as each tile landed, this 1.57 M-texel window was integrated 6.2 times over (9.7 M
+        /// texels natively, 7.3 M and 50 s in the browser; 2026-11-17). So the build waits for
+        /// `TileStore::settled` — every tile asked for answered, measured or void, and smoothed —
+        /// and then integrates each texel once. `now` is a rig saying no more answers are coming.
+        fn queue_landed_tiles(&mut self, now: bool) {
+            if !now && !self.tiles.settled() {
+                return;
+            }
             let Some(build) = self.appearance_build.as_mut() else {
                 return;
             };
@@ -8861,6 +8884,11 @@ mod app {
         /// Hand back a decoded tile — `data` is interleaved RGB(A), `px` square, terrarium-encoded, which
         /// is what the browser produces from the PNG by the same route it decodes the world's rasters.
         /// A tile the camera has already moved past is dropped rather than stored.
+        ///
+        /// ★ **Every tile asked for is answered** (docs/46 row 98): where the provider has none
+        /// (a 404, a failed fetch) the host hands back ONE VOID PIXEL — `[0,0,0]`, `px = 1` — which
+        /// is the provider's own encoding of "no measurement". The appearance patch waits for the
+        /// stream to settle before it integrates, and an unanswered tile is a wait without end.
         pub fn add_tile(&mut self, z: u32, x: u32, y: u32, data: &[u8], px: u32) {
             let chans = if px > 0 {
                 (data.len() / (px as usize * px as usize)).max(1)
@@ -12828,9 +12856,14 @@ first undrawable member at {:?}",
                 return (round, landed);
             }
             for (z, x, y) in want {
-                if let Some((data, px)) = fetch_terrarium_tile(cache, z, x, y) {
-                    terra.add_tile(z, x, y, &data, px);
-                    landed += 1;
+                match fetch_terrarium_tile(cache, z, x, y) {
+                    Some((data, px)) => {
+                        terra.add_tile(z, x, y, &data, px);
+                        landed += 1;
+                    }
+                    // The host's answer for a tile the provider does not have: one void pixel,
+                    // so the engine stops waiting for it (docs/46 row 98).
+                    None => terra.add_tile(z, x, y, &[0, 0, 0], 1),
                 }
             }
         }
@@ -14192,6 +14225,26 @@ first undrawable member at {:?}",
         assert!(
             frames > 3,
             "the build took {frames} frames — it was not sliced"
+        );
+        // ★ THE TOTAL, not only the frame's share (2026-11-23). A per-frame bound is blind to
+        // work done twice: the release of 2026-11-17 kept every frame inside its slice and
+        // built 7.3 M texels for this 1.57 M-texel window in the browser (50 s to a finished
+        // patch against 6.5 s before), because a coarse ring was integrated across the window
+        // before the finer ring that answers there had landed, and every smoothing band built
+        // its ground again. A texel is built once, when what it is built from has stopped
+        // changing; the allowance is the one-texel rim a tile's rect shares with its neighbour
+        // to the west and to the south.
+        let window_texels = w as f64 * h as f64;
+        println!(
+            "texels built / texels in the window: {:.2} ({} / {window_texels})",
+            cost[1] / window_texels,
+            cost[1]
+        );
+        assert!(
+            cost[1] <= 1.10 * window_texels,
+            "the build integrated {} texels for a window of {window_texels} — ground was built \
+             more than once",
+            cost[1]
         );
         assert!(
             texel_m <= px_m * 1.0001,
